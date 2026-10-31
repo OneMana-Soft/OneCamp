@@ -10,11 +10,14 @@ import (
 	"github.com/google/uuid"
 )
 
-// A rule's notice about a task is titled, and opens, only for a reader who
-// may open the task now; a rule's own notice only for the person it acts as.
+// A rule's notice about a task is titled, by its key and name, and opens,
+// only for a reader who may open the task now; a rule's own notice only for
+// the person it acts as.
 func TestRuleNoticesNameOnlyWhatTheirReaderMayOpen(t *testing.T) {
-	oldA, oldD, oldN, oldG := noticeAccount, noticeDecideAll, noticeTaskNames, getRule
-	t.Cleanup(func() { noticeAccount, noticeDecideAll, noticeTaskNames, getRule = oldA, oldD, oldN, oldG })
+	oldA, oldD, oldN, oldK, oldG := noticeAccount, noticeDecideAll, noticeTaskNames, noticeNamed, getRule
+	t.Cleanup(func() {
+		noticeAccount, noticeDecideAll, noticeTaskNames, noticeNamed, getRule = oldA, oldD, oldN, oldK, oldG
+	})
 	open, closed := uuid.NewString(), uuid.NewString()
 	noticeAccount = func(context.Context, uuid.UUID) (*userModel.User, error) { return &userModel.User{}, nil }
 	noticeDecideAll = func(_ context.Context, _ accessBusiness.Subject, res []accessBusiness.Resource) (map[accessBusiness.Resource]accessBusiness.Decision, error) {
@@ -35,8 +38,15 @@ func TestRuleNoticesNameOnlyWhatTheirReaderMayOpen(t *testing.T) {
 		}
 		return out, nil
 	}
+	noticeNamed = func(_ context.Context, names map[string]string) map[string]string {
+		out := map[string]string{}
+		for id, name := range names {
+			out[id] = "Q4-7 " + name
+		}
+		return out
+	}
 	readable, titles, err := taskNotices(context.Background(), uuid.NewString(), []string{open, closed})
-	if err != nil || !readable[open] || readable[closed] || titles[open] != "Fix SSO" || titles[closed] != "" {
+	if err != nil || !readable[open] || readable[closed] || titles[open] != "Q4-7 Fix SSO" || titles[closed] != "" {
 		t.Fatalf("readable %v titles %v err %v", readable, titles, err)
 	}
 

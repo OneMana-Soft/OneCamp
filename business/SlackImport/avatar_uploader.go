@@ -6,7 +6,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -104,11 +103,11 @@ func uploadSlackAvatar(ctx context.Context, importId uuid.UUID,
 	bucketName := helpers.UserUploadBucket()
 	attachmentUUID := uuid.New()
 
-	// Match UploadUserFile's key shape exactly so GetFileURLByObjectName
-	// (which prepends "userFileUpload/" to attachments.obj_key) presigns
-	// the correct path.
+	// Match UploadUserFile's key shape exactly, stored under the one name
+	// every reader asks for (attachmentBusiness.ObjectName of
+	// attachments.obj_key), so GetFileURLByObjectName presigns the right path.
 	objKey := fmt.Sprintf("%s/%s_%s", ownerUUID, attachmentUUID, fileName)
-	fullObjName := path.Join("userFileUpload", objKey)
+	fullObjName := attachmentBusiness.ObjectName(objKey)
 
 	uploadInfo, scanResult, err := attachmentBusiness.SafeUploadToMinio(ctx, body,
 		attachmentBusiness.SafeUploadOptions{

@@ -82,13 +82,34 @@ func TestAnAuditRowNamesAnOpenDocAndHowManyItWasSharedWith(t *testing.T) {
 	doc.IsPrivate = &no
 	summary, meta := auditRow(resourceEventBusiness.Event{Kind: resourceEventBusiness.DocShared, ResourceKind: "doc", ResourceUUID: docID,
 		Subjects: []string{readID, talkID}, Data: map[string]string{"level": "edit", "title": "Launch notes"}}, doc)
-	if summary != "Shared ‘Launch notes’ with 2 people (edit)" || meta["people"] != readID+","+talkID || meta["title"] != "Launch notes" {
+	if summary != "Shared ‘Launch notes’ with 2 people who can edit" || meta["people"] != readID+","+talkID || meta["title"] != "Launch notes" {
 		t.Errorf("%q %v", summary, meta)
 	}
 	_, meta = auditRow(resourceEventBusiness.Event{Kind: resourceEventBusiness.DocRenamed, ResourceKind: "doc", ResourceUUID: docID,
 		Data: map[string]string{"title": "Secret plan"}}, privateDoc())
 	if meta["title"] != nil {
 		t.Error("a private page's title went into the log's metadata")
+	}
+}
+
+// A share's row says what the people it reached can do, in words, not the
+// level's code (DESIGN-BUILD-8, 23 Oct 2026).
+func TestAShareRowSaysWhatItsPeopleCanDo(t *testing.T) {
+	for _, c := range []struct {
+		level  string
+		people []string
+		want   string
+	}{
+		{"view", []string{readID}, "Shared a private page with 1 person who can view"},
+		{"comment", []string{readID, talkID}, "Shared a private page with 2 people who can comment"},
+		{"full", []string{readID}, "Shared a private page with 1 person who has full access"},
+		{"full", []string{readID, talkID}, "Shared a private page with 2 people who have full access"},
+	} {
+		summary, _ := auditRow(resourceEventBusiness.Event{Kind: resourceEventBusiness.DocShared, ResourceKind: "doc", ResourceUUID: docID,
+			Subjects: c.people, Data: map[string]string{"level": c.level}}, privateDoc())
+		if summary != c.want {
+			t.Errorf("%s with %d: %q, want %q", c.level, len(c.people), summary, c.want)
+		}
 	}
 }
 
@@ -196,6 +217,27 @@ func TestTheInboxNamesOnlyWhatItsReaderCanOpen(t *testing.T) {
 		if n := items[0].Notice; n.CanOpen || n.Title != "" {
 			t.Errorf("someone who can't open the doc sees %+v", n)
 		}
+	}
+}
+
+// A proposal's events reach open tabs with its id, its status and who made
+// it, never its text, so an open doc shows a suggestion made elsewhere at once.
+func TestProposalEventsReachOpenTabsWithIdsOnly(t *testing.T) {
+	for _, k := range []resourceEventBusiness.Kind{resourceEventBusiness.DocProposalCreated, resourceEventBusiness.DocProposalAccepted,
+		resourceEventBusiness.DocProposalDeclined, resourceEventBusiness.DocProposalWithdrawn} {
+		e := resourceEventBusiness.Event{Kind: k, ResourceKind: "doc", ResourceUUID: docID,
+			Data: map[string]string{"proposal_id": "p1", "status": "open", "author_kind": "person", "quote": "never", "hunks": "never"}}
+		if !isMeta(e) {
+			t.Errorf("%s doesn't reach open tabs", k)
+		}
+		m := docMeta(e)
+		if m.Kind != string(k) || m.Data["proposal_id"] != "p1" || m.Data["status"] != "open" || m.Data["author_kind"] != "person" || len(m.Data) != 3 {
+			t.Errorf("%s meta %+v", k, m.Data)
+		}
+	}
+	// A proposal on anything but a doc isn't a doc's meta event.
+	if isMeta(resourceEventBusiness.Event{Kind: resourceEventBusiness.DocProposalCreated, ResourceKind: "table"}) {
+		t.Error("a table's proposal reached a doc's topic")
 	}
 }
 

@@ -51,9 +51,9 @@ func RegisterCodeExecutors() {
 // so it says nothing of what other projects link.
 var ErrRepoNotLinked = errors.New("This repository isn't linked to your workspace.")
 
-// errRepoUnchecked answers when who may read a repository couldn't be checked.
-// The cause is logged: a store's error text is no answer for a reader, or for
-// the model a tool's error goes back to.
+// errRepoUnchecked answers when a repository's links couldn't be read. The
+// cause is logged: a store's error text is no answer for a reader, or for the
+// model a tool's error goes back to.
 var errRepoUnchecked = errors.New("Who may read this repository couldn't be checked just now. Try again.")
 
 // projectsLinking are the projects that link a repository: a seam for tests.
@@ -82,26 +82,41 @@ func onLinkedRepos(tool ai.ToolExecutor) ai.ToolExecutor {
 // someone in one of those projects. In a run someone else asked for, they must
 // be in one too (askerView), as everything a run answers is narrowed to them.
 func CodeRepoAllowed(ctx context.Context, userUUID, owner, repo string) error {
-	unchecked := func(err error) error {
-		helpers.LogErrorWithContext(ctx, "business/AI CodeRepoAllowed %s/%s for %s: %+v", owner, repo, userUUID, err)
-		return errRepoUnchecked
-	}
 	linking, err := projectsLinking(ctx, owner, repo)
 	if err != nil {
-		return unchecked(err)
+		helpers.LogErrorWithContext(ctx, "business/AI CodeRepoAllowed %s/%s: %+v", owner, repo, err)
+		return errRepoUnchecked
 	}
-	reader, err := viewOf(ctx, userUUID)
+	// A view's refusal is already worded for a person (an asker who was
+	// deactivated is told so), so it is answered as it is.
+	readsFor, err := RepoReader(ctx, userUUID)
 	if err != nil {
-		return unchecked(err)
+		return err
 	}
-	asker, err := askerView(ctx)
-	if err != nil {
-		return unchecked(err)
-	}
-	if !inAnyProject(reader, linking) || (asker != nil && !inAnyProject(asker, linking)) {
+	if !readsFor(linking) {
 		return ErrRepoNotLinked
 	}
 	return nil
+}
+
+// RepoReader decides, for userUUID, whether a repository the given projects
+// link is read for them: they are in one of the projects, and so is the run's
+// asker when someone else asked. Both views are read here, once, so a caller
+// judging many repositories reads them once. CodeRepoAllowed judges with it,
+// and an agent run's prompt names only the repositories it allows
+// (business/AIAgent).
+func RepoReader(ctx context.Context, userUUID string) (func(projects []uuid.UUID) bool, error) {
+	reader, err := viewOf(ctx, userUUID)
+	if err != nil {
+		return nil, err
+	}
+	asker, err := askerView(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return func(projects []uuid.UUID) bool {
+		return inAnyProject(reader, projects) && (asker == nil || inAnyProject(asker, projects))
+	}, nil
 }
 
 // inAnyProject is whether a person's view holds one of projects.

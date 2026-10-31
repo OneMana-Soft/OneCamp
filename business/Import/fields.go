@@ -148,7 +148,9 @@ func (pf *projectFields) findOrMake(ctx context.Context, d importProvider.Source
 	if id, _ := importModels.LookupWorkspaceMapping(ctx, pf.job.Provider, pf.job.SourceWorkspaceName, importModels.EntityField, key); id != uuid.Nil {
 		f, err := pf.mapped(ctx, id)
 		if f != nil {
-			pf.record(ctx, key, d, f, false)
+			if err := pf.record(ctx, key, d, f, false); err != nil {
+				return nil, err
+			}
 		} else if err == nil {
 			pf.warn(ctx, "FIELD_SKIPPED", d.SourceID, "deleted", fmt.Sprintf(
 				"The field %q was deleted in OneCamp after an earlier import, so it wasn't made again.%s", d.Name, asText))
@@ -168,7 +170,9 @@ func (pf *projectFields) findOrMake(ctx context.Context, d importProvider.Source
 			return nil, err
 		}
 		if !taken {
-			pf.record(ctx, key, d, f, false)
+			if err := pf.record(ctx, key, d, f, false); err != nil {
+				return nil, err
+			}
 			return f, nil
 		}
 	}
@@ -178,7 +182,9 @@ func (pf *projectFields) findOrMake(ctx context.Context, d importProvider.Source
 		return nil, err
 	}
 	// Recorded as this import's, so a rollback can take it away again.
-	pf.record(ctx, key, d, f, true)
+	if err := pf.record(ctx, key, d, f, true); err != nil {
+		return nil, err
+	}
 	if dropped > 0 {
 		pf.warn(ctx, "FIELD_OPTIONS_CAPPED", d.SourceID, "", fmt.Sprintf(
 			"%q has %d more options than a field can have (%d), so values naming them weren't kept as a field.%s", d.Name, dropped, taskField.MaxOptions, asText))
@@ -197,11 +203,10 @@ func (pf *projectFields) mapped(ctx context.Context, id uuid.UUID) (*taskFieldMo
 }
 
 // record maps a source field to its OneCamp field for this import and for
-// later imports of the same workspace.
-func (pf *projectFields) record(ctx context.Context, key string, d importProvider.SourceField, f *taskFieldModel.Field, made bool) {
-	_ = importModels.UpsertIdMappingWithOwnership(ctx, pf.job.Id, importModels.EntityField, key, f.ID, nil,
+// later imports of the same workspace, in one statement.
+func (pf *projectFields) record(ctx context.Context, key string, d importProvider.SourceField, f *taskFieldModel.Field, made bool) error {
+	return importModels.RecordMapping(ctx, pf.job.Id, pf.job.Provider, pf.job.SourceWorkspaceName, importModels.EntityField, key, f.ID, nil,
 		mustMarshal(map[string]any{"name": d.Name, "project_source_id": pf.projectSrc}), made)
-	_ = importModels.UpsertWorkspaceMapping(ctx, pf.job.Provider, pf.job.SourceWorkspaceName, importModels.EntityField, key, f.ID, pf.job.Id)
 }
 
 // givenToAnother reports whether this import already mapped a field to a
@@ -552,8 +557,14 @@ func optionID(f *taskFieldModel.Field, label string) string {
 // warn tells the person running the import, once an import for each project,
 // source field, code and detail (the problem a value had).
 func (pf *projectFields) warn(ctx context.Context, code, sourceField, detail, message string) {
+	warnOnce(ctx, pf.job.Id, pf.chunk, importModels.EntityField, sourceField, code, message, pf.projectSrc, detail)
+}
+
+// warnOnce tells the person running the import, once an import for each
+// code, source id and key.
+func warnOnce(ctx context.Context, job uuid.UUID, chunk *uuid.UUID, entity, sourceID, code, message string, key ...string) {
 	now := time.Now().Unix()
-	entry, loaded := warnedFor.LoadOrStore(pf.job.Id, &jobWarnings{})
+	entry, loaded := warnedFor.LoadOrStore(job, &jobWarnings{})
 	seen := entry.(*jobWarnings)
 	seen.last.Store(now)
 	if !loaded {
@@ -565,8 +576,8 @@ func (pf *projectFields) warn(ctx context.Context, code, sourceField, detail, me
 			return true
 		})
 	}
-	if _, dup := seen.keys.LoadOrStore(strings.Join([]string{code, pf.projectSrc, sourceField, detail}, "\x1f"), true); dup {
+	if _, dup := seen.keys.LoadOrStore(strings.Join(append([]string{code, sourceID}, key...), "\x1f"), true); dup {
 		return
 	}
-	importModels.LogImportError(ctx, pf.job.Id, pf.chunk, importModels.EntityField, sourceField, importModels.SeverityWarning, code, message, nil)
+	importModels.LogImportError(ctx, job, chunk, entity, sourceID, importModels.SeverityWarning, code, message, nil)
 }

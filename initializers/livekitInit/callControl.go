@@ -39,6 +39,26 @@ func (s *LiveKitServiceStruct) MuteTrack(ctx context.Context, room, identity, tr
 	return err
 }
 
+// SetPublishSources changes what someone already in a call may publish
+// (some of CallPublishSources), as a token minted now would grant it. The
+// call server unpublishes a live track whose source is taken away.
+func (s *LiveKitServiceStruct) SetPublishSources(ctx context.Context, room, identity string, sources []string) error {
+	_, err := s.LiveKitClient.UpdateParticipant(ctx, &livekit.UpdateParticipantRequest{
+		Room: room, Identity: identity, Permission: callGrant(room, false, sources).ToPermission(),
+	})
+	if err != nil && isRoomNotFoundErr(err) {
+		return nil
+	}
+	return err
+}
+
+// PublishesOnly is whether someone in a call may already publish just
+// sources, as SetPublishSources would leave them. Pure.
+func PublishesOnly(p *livekit.ParticipantInfo, sources []string) bool {
+	// The room plays no part in a permission.
+	return p != nil && callGrant("", false, sources).MatchesPermission(p.Permission)
+}
+
 // SetAttributes sets some of a participant's attributes, which everyone in the
 // room sees; the others stay as they are. Only the server can: tokens never
 // grant a participant the right to change their own.

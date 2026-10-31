@@ -1371,7 +1371,7 @@ func GetDgraphUserBoardCards(ctx context.Context, txn *dgo.Txn, userDgraphUID st
 	if err != nil {
 		return nil, err
 	}
-	query := tr.Fill(fmt.Sprintf(`query Cards($userDgraphUID: string){
+	query := tr.Fill(fmt.Sprintf(`query Cards($userDgraphUID: string){`+dgraphStruct.ReaderProjectsVar(taskread.ReaderOf(ctx))+`
 				cards(func: uid(%s)) {%s
 				}
 			}`, strings.Join(uids, ", "), userTaskCardFields))
@@ -1395,7 +1395,7 @@ func GetDgraphUserTaskList(ctx context.Context, userUUID string, userDgraphUID s
 	order := dgraphquery.TotalOrder(sortQuery, "task_uuid")
 
 	query := func(page dgraphquery.Page) string {
-		return tr.Fill(fmt.Sprintf(`query UserInfo($id: string, $userDgraphUID: string){
+		return tr.Fill(fmt.Sprintf(`query UserInfo($id: string, $userDgraphUID: string){`+dgraphStruct.ReaderProjectsVar(taskread.ReaderOf(ctx))+`
 				# Tasks of archived projects are not the user's work any more.
 				var(func: eq(user_uuid, $id)) {
 					user_projects @filter(`+dgraphquery.Deleted("project_deleted_at")+`) { archivedProjects as uid }

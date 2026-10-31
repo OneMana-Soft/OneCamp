@@ -92,11 +92,11 @@ const (
 	// A conversation became the person's, or stopped being theirs
 	// (MqttConversationAccess): a DM or group chat started or joined, a
 	// channel made, joined or added to; removed from a channel, or left it.
-	// Taken off a project, or off a team with its projects, the same way: the
-	// settings name a project's topic as they do a conversation's. Sent on the
-	// person's own activity topic, the one topic a client holds from the
-	// start: an open app fetches its topics again and subscribes to the new
-	// conversation's, or lets the old one go, without reconnecting.
+	// A project made or added to, taken off one, or a team taken off with its
+	// projects, the same way: the settings name a project's topic as they do a
+	// conversation's. Sent on the person's own activity topic, the one topic a
+	// client holds from the start: an open app fetches its topics again and
+	// subscribes to the new one, or lets the old one go, without reconnecting.
 	MESSAGE_CONVERSATION_ACCESS
 	// The desktop app should raise a native notification (MqttDesktopNotice):
 	// sent on the recipient's own activity topic by business/Notification's
@@ -121,15 +121,16 @@ const (
 // changed (MqttProjectStatuses), on its project's topic: open boards and
 // pickers read them again (design/projects-vs-asana-jira/BOARD_COLUMNS_PLAN.md).
 // Numbered outright, past MESSAGE_PIN (41, chat) and MESSAGE_CALL_STATE (42,
-// calls) at the end of the sequence above. The app has the same number
-// (services/mqttService.ts).
+// calls) at the end of the sequence above. The app has the same number, as
+// MqttMessageType.Project_Statuses (webMessageTypes_test.go reads it).
 const MESSAGE_PROJECT_STATUSES = 43
 
 // Message types numbered by hand, outside the sequence above: the integrator
 // gives each package its number as branches add them in parallel (43 project
-// statuses, 44 an invitation accepted, 45 a task's timer, 46 read moved), so
-// two branches never take the same one, and a type keeps its number whichever
-// lands first. The web app's enum names them all.
+// statuses, 44 an invitation accepted, 45 a task's timer, 46 read moved, 47 a
+// person's preference), so two branches never take the same one, and a type
+// keeps its number whichever lands first. The web app numbers each one it
+// hears the same (webMessageTypes_test.go).
 const (
 	// An invitation was accepted (MqttInvitationAccepted), on the admin
 	// broadcast topic: the admin's members and invitations lists show the
@@ -139,6 +140,9 @@ const (
 	// {kind, id, unread, first_unread}, so every tab and device they have open
 	// moves its line and its counts at once (business/ReadState).
 	MESSAGE_READ_MOVED = 46
+	// A person changed one of their preferences ({key, value}, business/
+	// Preferences), on their own activity topic only: their other devices follow.
+	MESSAGE_PREFERENCE = 47
 )
 
 // MqttInvitationAccepted is who accepted their invitation.
@@ -236,7 +240,20 @@ type MqttCallState struct {
 	Locked        bool               `json:"locked"`
 	Recording     MqttCallSwitch     `json:"recording"`
 	Transcription MqttCallTranscript `json:"transcription"`
+	// Post is the call's post, and ChatHeld whether the people running the
+	// call hold its thread's replies (calls meet-12): an open reply box asks
+	// again whether it may write.
+	Post     string `json:"post,omitempty"`
+	ChatHeld bool   `json:"chat_held,omitempty"`
+	// Members are the user uuids of every member in a meeting's call. A
+	// meeting belongs to no conversation, so its state goes to each of them
+	// on their own topic. Never sent.
+	Members []string `json:"-"`
 }
+
+// CALL_RESOURCE_MEETING is MqttCallState's ResourceKind for an instant
+// meeting's call (business/CallState's KindMeeting).
+const CALL_RESOURCE_MEETING = "meeting"
 
 // MqttCallPerson is someone in a call, for the faces outside it.
 type MqttCallPerson struct {
@@ -351,12 +368,24 @@ type MqttDocCommentReaction struct {
 // MqttTaskDates is a task's new dates, sent to its project's members. An
 // unset date is "". By is who changed them. Every app applies it, the
 // mover's included: their other tabs need it too.
+//
+// A move that pushes a chain along (DG10) sends one per project: the fields
+// above carry the first of its tasks there, and Tasks every one of them (the
+// first included). An app that reads only the fields above shows the first.
 type MqttTaskDates struct {
-	TaskUuid    string `json:"task_uuid"`
-	ProjectUuid string `json:"project_uuid"`
-	StartDate   string `json:"task_start_date"`
-	DueDate     string `json:"task_due_date"`
-	By          string `json:"by"`
+	TaskUuid    string         `json:"task_uuid"`
+	ProjectUuid string         `json:"project_uuid"`
+	StartDate   string         `json:"task_start_date"`
+	DueDate     string         `json:"task_due_date"`
+	By          string         `json:"by"`
+	Tasks       []MqttTaskDate `json:"tasks,omitempty"`
+}
+
+// MqttTaskDate is one task's dates in a MqttTaskDates' Tasks.
+type MqttTaskDate struct {
+	TaskUuid  string `json:"task_uuid"`
+	StartDate string `json:"task_start_date"`
+	DueDate   string `json:"task_due_date"`
 }
 
 // MqttTaskChanged says which task changed: its name, status or assignee, or

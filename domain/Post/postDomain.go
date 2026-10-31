@@ -644,6 +644,7 @@ func GetDgraphPostByUUID(ctx context.Context, postUUID string, userDraphUid stri
 				postInfo(func: eq(post_uuid, $id)) {
 					uid
 					post_uuid
+					post_kind
 					post_text
 					post_created_at
 					post_updated_at
@@ -915,42 +916,6 @@ func BulkRestorePostsInDgraph(ctx context.Context, postUUIDs []string) error {
 			helpers.LogErrorWithContext(ctx, "domain/BulkRestorePostsInDgraph failed for batch %d-%d: %v", start, end, err)
 			return err
 		}
-	}
-	return nil
-}
-
-// AddAttachmentToPostInDgraph appends a single DgraphAttachment to a
-// post's MediaObj edge. Used by the Slack-import retrofit pass after a
-// historical attachment is downloaded and persisted to MinIO+Postgres.
-//
-// Idempotency: the upsert query matches by post_uuid; running this
-// twice with the same attachment uuid is a Dgraph-level no-op because
-// BulkAddAttachmentsToDgraph (called separately) is the canonical
-// creator and uses attachment_uuid for the attach-side upsert. Here we
-// only add the edge — re-adding the same edge to the same post is a
-// no-op in Dgraph's edge model.
-//
-// Why a separate function (vs. CreatePost): the Slack-import flow
-// downloads files AFTER the post has been created, so we need a way
-// to retroactively wire MediaObj. CreatePost is single-call and
-// constructs the post body in one transaction; this is a pure edge
-// append.
-func AddAttachmentToPostInDgraph(ctx context.Context, postUUID string, att *dgraphStruct.DgraphAttachment) error {
-	if att == nil {
-		return nil
-	}
-	dgraphPost := &dgraphStruct.DgraphPost{
-		Uid:      "uid(po)",
-		Uuid:     postUUID,
-		DType:    []string{"Post"},
-		MediaObj: []*dgraphStruct.DgraphAttachment{att},
-	}
-	_, err := CreateOrUpdateDgraphPost(ctx, dgraphPost)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/AddAttachmentToPostInDgraph failed post=%s att=%s err=%+v",
-			postUUID, att.Uuid, err)
-		return err
 	}
 	return nil
 }

@@ -18,8 +18,8 @@ package business
 //     trash when the re-check ran.
 // Another old import of Ada's brought FIN's issue, whose project is archived
 // when the re-check runs: FIN-1 "Yarrow budget" is under a level, assigned to
-// Pip, with an internal note and an open comment, and workspace memory holds
-// what was captured from both.
+// Pip, with a file, an internal note with a file of its own, and an open
+// comment, and workspace memory holds what was captured from both comments.
 // Ada runs the workspace and ran the imports, with her own connection to
 // Jira. A third old import of hers, of OPS, reaches another site now.
 // The first pass fails to restrict HR-5 and to hide HR-2's internal note, so
@@ -29,7 +29,8 @@ package business
 // and FIN-1; hides HR-2's two kept comments, HR-6's and FIN-1's from everyone,
 // FIN-1's memory too, and leaves the open ones; leaves Ada's choice on HR-3
 // and HR-4 as it was, listed; and hands OPS to the admins. HR-6 and FIN,
-// restored, are as the re-check left them. Ben, in the projects but not let
+// restored, are as the re-check left them: FIN-1's file is found again, and
+// its note's file, like the note, by no one. Ben, in the projects but not let
 // in, can't read or find what is kept, nor hear of it. A second pass changes
 // nothing. An import after the fix, and one rolled back, are never
 // re-checked. Ada keeps OPS's tasks to its admins, then undoes that (her
@@ -275,6 +276,19 @@ func TestAnOldJiraImportIsRecheckedAgainstJira(t *testing.T) {
 			t.Fatalf("%s wasn't imported: %v", src, made)
 		}
 	}
+	// FIN's import kept a file of FIN-1's and one of its internal note's, as
+	// the importer writes them.
+	keepFile := func(kind string, holder uuid.UUID, name string) {
+		t.Helper()
+		at := time.Now()
+		p := &attachmentParentInfo{Kind: kind, ParentUUID: holder, TaskUUID: made["FIN-1"], ProjectUUID: fin}
+		if err := linkKeptFile(ctx, p, &dgraphStruct.DgraphAttachment{Uuid: uuid.NewString(), FileName: name, ObjectKey: "import/" + name,
+			CreatedAt: &at}, importer); err != nil {
+			t.Fatalf("FIN's import keeping %s: %v", name, err)
+		}
+	}
+	keepFile("task", made["FIN-1"], "Xylophone ledger.xlsx")
+	keepFile("comment", made["c-5"], "Quince price sheet.pdf")
 
 	call := func(who string, h http.HandlerFunc, params map[string]string, body any) (int, string) {
 		t.Helper()
@@ -315,18 +329,26 @@ func TestAnOldJiraImportIsRecheckedAgainstJira(t *testing.T) {
 			}
 		}
 	}
-	// This line's search never shows an imported comment (its entry names no
-	// project: TestAnImportedCommentIsNotFoundInSearch), so it is asked about
-	// the tasks (zephyr; HR-6 by "appraisals", FIN-1 by "yarrow"), and the
-	// imports' comments are found by nobody throughout.
 	hits := func(who, text string) int {
 		t.Helper()
 		_, n := searchAs(t, ctx, people[who], text)
 		return n
 	}
 	waitFor("Ada's search to find what the imports wrote", func() bool {
-		return hits("ada", "zephyr") == 7 && hits("ada", "yarrow") == 1
+		return hits("ada", "zephyr") == 7 && hits("ada", "quokka") == 3 && hits("ada", "wombat") == 2 && hits("ada", "yarrow") == 3 &&
+			hits("ada", "xylophone") == 1
 	})
+	// noteEntries is each search entry naming FIN-1's internal note: its own
+	// and its file's.
+	noteEntries := func() []searchEntry {
+		t.Helper()
+		entries, err := searchEntries(ctx, made["c-5"].String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return entries
+	}
+	waitFor("search to hold the note's file", func() bool { return len(noteEntries()) == 2 })
 	// What workspace memory captured from FIN-1's two comments.
 	memo := func(comment string) uuid.UUID {
 		t.Helper()
@@ -396,7 +418,8 @@ func TestAnOldJiraImportIsRecheckedAgainstJira(t *testing.T) {
 	trash("HR-6")
 	finAs(true)
 	waitFor("HR-6 and FIN to leave search and memory", func() bool {
-		return hits("ada", "appraisals") == 0 && hits("ada", "yarrow") == 0 && memory(noteMemory) == "out archive" && memory(kickoffMemory) == "out archive"
+		return hits("ada", "wombat") == 0 && hits("ada", "yarrow") == 0 && hits("ada", "xylophone") == 0 &&
+			memory(noteMemory) == "out archive" && memory(kickoffMemory) == "out archive"
 	})
 
 	// The reviews: one of each gap for each project of each old import, an
@@ -551,11 +574,13 @@ func TestAnOldJiraImportIsRecheckedAgainstJira(t *testing.T) {
 	restore("HR-6")
 	finAs(false)
 	waitFor("HR-6 and FIN to come back to search and memory", func() bool {
-		return hits("ada", "appraisals") == 1 && hits("ada", "yarrow") == 1 && memory(kickoffMemory) == "live"
+		return hits("ada", "lunch") == 1 && hits("ada", "kickoff") == 1 && hits("ada", "xylophone") == 1 && memory(kickoffMemory) == "live"
 	})
-	for what, text := range map[string]string{"HR-6's kept comment": "scores", "FIN-1's note": "supplier"} {
-		if n := hits("ada", text); n != 0 {
-			t.Errorf("Ada finds %s after its restore: %d", what, n)
+	for what, text := range map[string]string{"HR-6's kept comment": "scores", "FIN-1's note": "supplier", "FIN-1's note's file": "quince"} {
+		for _, who := range []string{"ada", "ben"} {
+			if n := hits(who, text); n != 0 {
+				t.Errorf("%s finds %s after its restore: %d", who, what, n)
+			}
 		}
 	}
 	if got := memory(noteMemory); got != "out "+hiddenBy {
@@ -565,9 +590,17 @@ func TestAnOldJiraImportIsRecheckedAgainstJira(t *testing.T) {
 	// comment whose row is deleted, though not one on its files. Every entry
 	// naming HR-6's kept comment keeps the re-check's own mark through HR-6's
 	// restore, which clears only the trash's.
-	if marks, err := searchMarks(ctx, made["c-4"].String()); err != nil || len(marks) == 0 ||
-		slices.ContainsFunc(marks, func(m string) bool { return m != hiddenBy }) {
-		t.Errorf("HR-6's kept comment's search entries after HR-6's restore are marked %v (%v); want each by %q", marks, err, hiddenBy)
+	if entries, err := searchEntries(ctx, made["c-4"].String()); err != nil || len(entries) == 0 ||
+		slices.ContainsFunc(entries, func(e searchEntry) bool { return e.By != hiddenBy }) {
+		t.Errorf("HR-6's kept comment's search entries after HR-6's restore: %+v (%v); want each marked by %q", entries, err, hiddenBy)
+	}
+	// Nor can they see whether the note's file came back, as search reaches
+	// an import's comment files through no project (linkKeptFile). FIN's
+	// archive took the note's entries out by their ids before the re-check
+	// hid the note, so they carry no mark; FIN's restore brings back only
+	// what is live, so they stay out.
+	if entries := noteEntries(); len(entries) != 2 || slices.ContainsFunc(entries, func(e searchEntry) bool { return !e.out() }) {
+		t.Errorf("FIN-1's note's search entries, its file's too, after FIN's restore: %+v; want both out of search", entries)
 	}
 	readers("after the re-check", map[string][]string{
 		"HR-6": {"ada", "rae", "cy"}, "FIN-1": {"ada", "rae", "cy"},
@@ -595,7 +628,8 @@ func TestAnOldJiraImportIsRecheckedAgainstJira(t *testing.T) {
 	}
 	commentsSeen("after the re-check", []string{"c-1"})
 	waitFor("search to drop what is kept", func() bool {
-		return hits("ben", "zephyr") == 4 && hits("ben", "yarrow") == 0 && hits("ada", "yarrow") == 1
+		return hits("ben", "zephyr") == 4 && hits("ben", "quokka") == 1 && hits("ada", "quokka") == 1 &&
+			hits("ben", "yarrow") == 0 && hits("ada", "yarrow") == 2
 	})
 	for _, msg := range world.live()[heard:] {
 		for _, text := range []string{"pay bands", "bonus pool", "salaries of the movers", "vendor quote", "appraisal scores", "yarrow budget", "supplier rates"} {
@@ -647,7 +681,7 @@ func TestAnOldJiraImportIsRecheckedAgainstJira(t *testing.T) {
 	// brings it back with FIN-1, open, Pip on it again.
 	finAs(true)
 	waitFor("FIN to leave search and memory again", func() bool {
-		return hits("ada", "yarrow") == 0 && memory(kickoffMemory) == "out archive"
+		return hits("ada", "kickoff") == 0 && memory(kickoffMemory) == "out archive"
 	})
 	if err := UndoRecheck(ctx, finJob.Id, ada); err != nil {
 		t.Fatalf("Ada undoing FIN's re-check: %v", err)
@@ -665,7 +699,7 @@ func TestAnOldJiraImportIsRecheckedAgainstJira(t *testing.T) {
 	}
 	finAs(false)
 	waitFor("FIN's restore to bring FIN-1's note back", func() bool {
-		return hits("ben", "yarrow") == 1 && memory(noteMemory) == "live"
+		return hits("ben", "supplier") == 1 && memory(noteMemory) == "live"
 	})
 	readers("FIN's re-check undone", map[string][]string{"FIN-1": everyone})
 	if got := assignee("FIN-1"); got != people["pip"].String() {
@@ -682,7 +716,7 @@ func TestAnOldJiraImportIsRecheckedAgainstJira(t *testing.T) {
 		t.Fatalf("Rae deleting her note: %d %s", code, out)
 	}
 	trash("HR-6")
-	waitFor("HR-6 to leave search again", func() bool { return hits("ada", "appraisals") == 0 })
+	waitFor("HR-6 to leave search again", func() bool { return hits("ada", "lunch") == 0 })
 	if err := UndoRecheck(ctx, job.Id, ada); err != nil {
 		t.Fatalf("Ada undoing the re-check: %v", err)
 	}
@@ -698,17 +732,8 @@ func TestAnOldJiraImportIsRecheckedAgainstJira(t *testing.T) {
 			t.Errorf("Ada finds %s after the undo: %d", what, n)
 		}
 	}
-	// The hits can't see a comment's mark: every search entry naming HR-2's
-	// role comment is unmarked after the undo, and every one naming HR-6's
-	// carries the trash's mark ("cascade"), so HR-6's restore brings it back.
-	for comment, want := range map[string]string{"c-2": "", "c-4": "cascade"} {
-		if marks, err := searchMarks(ctx, made[comment].String()); err != nil || len(marks) == 0 ||
-			slices.ContainsFunc(marks, func(m string) bool { return m != want }) {
-			t.Errorf("%s's search entries after the undo are marked %v (%v); want each %q", comment, marks, err, want)
-		}
-	}
 	restore("HR-6")
-	waitFor("HR-6's restore to bring it back to search", func() bool { return hits("ben", "appraisals") == 1 })
+	waitFor("HR-6's restore to bring its comments back", func() bool { return hits("ben", "lunch") == 1 && hits("ben", "scores") == 1 })
 	readers("after the undo", map[string][]string{
 		"HR-6": everyone, "HR-1": {"ada", "rae", "ben", "cy"}, "HR-5": {"ada", "rae", "ben", "cy"}, "HR-3": {"ada", "ben", "cy"}, "HR-2": everyone,
 	})
@@ -722,9 +747,7 @@ func TestAnOldJiraImportIsRecheckedAgainstJira(t *testing.T) {
 		t.Errorf("HR-6's kept comment after the undo, for Ben: want it back:\n%.300s", out)
 	}
 	commentsSeen("after the undo", []string{"c-1", "c-2"})
-	if n := hits("ben", "quokka"); n != 0 {
-		t.Errorf("after the undo Ben finds %d of HR-2's comments in search; want none, as before the re-check", n)
-	}
+	waitFor("search to have the comments back", func() bool { return hits("ben", "quokka") == 2 })
 	if n := hits("ada", "vendor"); n != 0 {
 		t.Errorf("Ada finds Rae's deleted note after the undo: %d", n)
 	}

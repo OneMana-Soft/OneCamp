@@ -3,6 +3,7 @@ package formula
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,28 @@ type Field struct {
 	// with fields named by id (Canonical).
 	IsFormula bool
 	Formula   string
+	// Linked is the fields of the rows a link field links to, which a
+	// formula reads as {Link}.{Field}: the list of that field's values in
+	// the linked rows. Only a link to a table has them.
+	Linked []Field
+}
+
+// RollupValues is the field a rollup's formula reads its linked values
+// from, as Airtable's: SUM(values), ARRAYJOIN(values, "; ").
+const RollupValues = "values"
+
+// linkedSep joins a link field's id to a linked field's in the id a formula
+// reads {Link}.{Field} by: the caller's cell gives that list.
+const linkedSep = "."
+
+// LinkedRef is how {Link}.{Field} is named to a Run's cell: the link's id
+// and the linked field's, joined.
+func LinkedRef(link, field string) string { return link + linkedSep + field }
+
+// SplitLinkedRef is a LinkedRef's link and field; ok is false for a plain
+// field's id.
+func SplitLinkedRef(ref string) (link, field string, ok bool) {
+	return strings.Cut(ref, linkedSep)
 }
 
 // idRef is how a stored formula names a field: {#<id>}, which survives the
@@ -36,6 +59,11 @@ type compiled struct {
 	root node
 	kind Kind
 	err  error
+	// reads is the fields it reads, by id, and each {Link}.{Field} it reads
+	// as LinkedRef names it, sorted; known is whether they're known: it's
+	// blank, or it parsed.
+	reads []string
+	known bool
 }
 
 // Program is a table's formulas, ready to run on the rows of one read of it
@@ -46,7 +74,13 @@ type Program struct {
 	order  []compiled
 	kinds  map[string]Kind
 	budget *Budget
+	// linked is each {Link}.{Field} the formulas read (LinkedRef), sorted.
+	linked []string
 }
+
+// LinkedRefs is each {Link}.{Field} the formulas read, as LinkedRef names
+// it: the lists a Run's cell is asked for beyond the table's own fields.
+func (p *Program) LinkedRefs() []string { return p.linked }
 
 // Budget is the work one read can take (maxReadSteps): its own table's
 // formulas, those of the tables it links to, and the rollups adding them up
@@ -70,6 +104,29 @@ func (p *Program) Within(b *Budget) *Program {
 
 // RanOut is the value of anything a read's budget ran out before working out.
 func RanOut() Value { return tooMuchRead }
+
+// linkedResolver finds a field of the rows link links to, by its id or name.
+func linkedResolver(fields []Field) func(link, ref string) (string, error) {
+	byLink := map[string]func(string) (string, error){}
+	names := map[string]string{}
+	for _, f := range fields {
+		names[f.ID] = f.Name
+		if len(f.Linked) > 0 {
+			byLink[f.ID] = resolver(f.Linked)
+		}
+	}
+	return func(link, ref string) (string, error) {
+		r, ok := byLink[link]
+		if !ok {
+			return "", fmt.Errorf("{%s} doesn't link to a table's rows, so it has no fields to read", clip(names[link]))
+		}
+		id, err := r(ref)
+		if err != nil {
+			return "", fmt.Errorf("%s in the rows {%s} links to", err.Error(), clip(names[link]))
+		}
+		return id, nil
+	}
+}
 
 // resolver finds a field by its id ({#id}) or name ({Name}, ignoring case).
 func resolver(fields []Field) func(ref string) (string, error) {
@@ -100,7 +157,7 @@ func resolver(fields []Field) func(ref string) (string, error) {
 // Compile reads a table's formula fields. One that can't be read keeps its
 // error, shown in every row, and the rest still work.
 func Compile(fields []Field) *Program {
-	resolve := resolver(fields)
+	resolve, linked := resolver(fields), linkedResolver(fields)
 	kinds := map[string]Kind{}
 	formulas := map[string]*compiled{}
 	deps := map[string][]string{}
@@ -108,6 +165,7 @@ func Compile(fields []Field) *Program {
 	for _, f := range fields {
 		isFormula[f.ID] = f.IsFormula
 	}
+	linkedRefs := map[string]bool{}
 	var ids []string
 	for _, f := range fields {
 		kinds[f.ID] = f.Kind
@@ -118,13 +176,19 @@ func Compile(fields []Field) *Program {
 		formulas[f.ID] = c
 		ids = append(ids, f.ID)
 		if strings.TrimSpace(f.Formula) == "" {
+			c.known = true
 			continue // blank until it's written
 		}
-		root, refs, err := parse(f.Formula, resolve)
+		root, refs, err := parse(f.Formula, resolve, linked)
 		if err != nil {
 			c.err = err
 			continue
 		}
+		c.known = true
+		for id := range refs {
+			c.reads = append(c.reads, id)
+		}
+		sort.Strings(c.reads)
 		if refs[f.ID] {
 			c.err = errors.New("A formula can't read its own value")
 			continue
@@ -134,6 +198,9 @@ func Compile(fields []Field) *Program {
 			if isFormula[id] {
 				deps[f.ID] = append(deps[f.ID], id)
 			}
+			if _, _, isLinked := SplitLinkedRef(id); isLinked {
+				linkedRefs[id] = true
+			}
 		}
 	}
 
@@ -141,6 +208,10 @@ func Compile(fields []Field) *Program {
 	// through a loop.
 	ordered, looped := topo.Order(ids, func(id string) []string { return deps[id] })
 	p := &Program{kinds: kinds, budget: NewBudget()}
+	for ref := range linkedRefs {
+		p.linked = append(p.linked, ref)
+	}
+	sort.Strings(p.linked)
 	for _, id := range ordered {
 		c := formulas[id]
 		switch {
@@ -149,7 +220,12 @@ func Compile(fields []Field) *Program {
 		case c.root == nil:
 			c.kind = KindBlank
 		default:
-			c.kind = c.root.kind(func(ref string) Kind { return kinds[ref] })
+			c.kind = c.root.kind(func(ref string) Kind {
+				if _, _, isLinked := SplitLinkedRef(ref); isLinked {
+					return KindText // the list of the linked rows' values
+				}
+				return kinds[ref]
+			})
 		}
 		kinds[id] = c.kind
 		p.order = append(p.order, *c)
@@ -175,6 +251,20 @@ func (p *Program) Err(id string) error {
 		}
 	}
 	return nil
+}
+
+// Reads is the fields formula id reads, by id, and each {Link}.{Field} it
+// reads as LinkedRef names it, sorted, whatever else is wrong with it (it
+// reads itself, or gives the wrong kind). It is false when id isn't one of
+// the Program's formulas, or the formula can't be read that far: it names a
+// field that isn't there, or it doesn't parse.
+func (p *Program) Reads(id string) ([]string, bool) {
+	for _, c := range p.order {
+		if c.id == id {
+			return c.reads, c.known
+		}
+	}
+	return nil, false
 }
 
 // Empty is true when the table has no formula fields.
@@ -239,14 +329,26 @@ func ReadCost(raw string) int {
 	return len(raw) / slowBytesPerStep
 }
 
+// Row is what a formula reads of its row itself: RECORD_ID, CREATED_TIME
+// and LAST_MODIFIED_TIME. A zero Row (a draft's preview) gives blanks.
+type Row struct {
+	ID                string
+	Created, Modified time.Time
+}
+
 // Run works out every formula for one row. cell reads a field that isn't a
 // formula, once a row however many times formulas name it, and says how many
 // steps that took (ReadCost); now is the moment TODAY() and NOW() read, and
 // loc the reader's time zone, where today is.
 func (p *Program) Run(cell func(id string) (Value, int), now time.Time, loc *time.Location) map[string]Value {
+	return p.RunRow(Row{}, cell, now, loc)
+}
+
+// RunRow is Run for a row whose id and stamps its formulas may read.
+func (p *Program) RunRow(row Row, cell func(id string) (Value, int), now time.Time, loc *time.Location) map[string]Value {
 	out := make(map[string]Value, len(p.order))
 	read := map[string]Value{}
-	e := &env{now: now, loc: loc, read: &p.budget.spent}
+	e := &env{now: now, loc: loc, row: row, read: &p.budget.spent}
 	e.cell = func(id string) Value {
 		if v, ok := out[id]; ok {
 			return v
@@ -296,8 +398,9 @@ func Refs(src string) []string {
 		return nil
 	}
 	var out []string
-	for _, t := range toks {
-		if t.kind == tField {
+	for i, t := range toks {
+		// {Link}.{Field}'s field is the linked table's, not this one's.
+		if t.kind == tField && (i == 0 || toks[i-1].kind != tDot) {
 			out = append(out, t.text)
 		}
 	}
@@ -358,8 +461,18 @@ func Check(src string, fields []Field, self string) (Kind, error) {
 // field's id, so renaming the field doesn't break it. Everything else is kept
 // as written.
 func Canonical(src string, fields []Field) (string, error) {
-	resolve := resolver(fields)
-	return rewrite(src, func(ref string) (string, error) {
+	resolve, linked := resolver(fields), linkedResolver(fields)
+	return rewrite(src, func(ref, link string) (string, error) {
+		if link != "" {
+			lid, err := resolve(link)
+			if err != nil {
+				return "", err
+			}
+			if ref, err = linked(lid, ref); err != nil {
+				return "", err
+			}
+			return idRef + ref, nil
+		}
 		id, err := resolve(ref)
 		if err != nil {
 			return "", err
@@ -375,12 +488,23 @@ const DeletedField = "Deleted field"
 // name, and one deleted since as {Deleted field}, so it can be put right.
 func Display(src string, fields []Field) string {
 	names := map[string]string{}
+	linkedNames := map[string]map[string]string{}
 	for _, f := range fields {
 		names[f.ID] = f.Name
+		if len(f.Linked) > 0 {
+			linkedNames[f.ID] = map[string]string{}
+			for _, g := range f.Linked {
+				linkedNames[f.ID][g.ID] = g.Name
+			}
+		}
 	}
-	out, err := rewrite(src, func(ref string) (string, error) {
+	out, err := rewrite(src, func(ref, link string) (string, error) {
+		from := names
+		if link != "" {
+			from = linkedNames[strings.TrimPrefix(link, idRef)] // nil: deleted since
+		}
 		if strings.HasPrefix(ref, idRef) {
-			if name, ok := names[strings.TrimPrefix(ref, idRef)]; ok {
+			if name, ok := from[strings.TrimPrefix(ref, idRef)]; ok {
 				return name, nil
 			}
 			return DeletedField, nil
@@ -395,7 +519,8 @@ func Display(src string, fields []Field) string {
 
 // rewrite replaces each {field} in a formula with what to gives, escaping
 // braces and backslashes in it, and keeps every other character as it was.
-func rewrite(src string, to func(ref string) (string, error)) (string, error) {
+// For {Link}.{Field}'s field, to is told the link as written.
+func rewrite(src string, to func(ref, link string) (string, error)) (string, error) {
 	toks, err := lex(src)
 	if err != nil {
 		return "", err
@@ -403,11 +528,15 @@ func rewrite(src string, to func(ref string) (string, error)) (string, error) {
 	rs := []rune(src)
 	var b strings.Builder
 	at := 0
-	for _, t := range toks {
+	for i, t := range toks {
 		if t.kind != tField {
 			continue
 		}
-		ref, err := to(t.text)
+		link := ""
+		if i >= 2 && toks[i-1].kind == tDot && toks[i-2].kind == tField {
+			link = toks[i-2].text
+		}
+		ref, err := to(t.text, link)
 		if err != nil {
 			return "", &SyntaxError{Pos: t.pos + 1, Msg: err.Error()}
 		}

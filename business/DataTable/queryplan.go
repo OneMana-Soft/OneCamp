@@ -18,9 +18,9 @@ package business
 //
 // It is intentionally SINGLE-TABLE (no joins): the row model is a JSON cell bag,
 // so cross-table joins belong in a future connector/pushdown layer, not here.
-// Everything reuses aggregate.go's audited helpers (resolveField, matchFilter,
-// cellLabels, cellNumber, accumulator), so there is no second, divergent data
-// path. RunPlan is pure (fields+rows+plan → result) for exhaustive unit tests;
+// Everything reuses aggregate.go's audited helpers (resolveField, groupLabels,
+// cellNumber, accumulator) and reads its filters as the grid does
+// (rowFilters.go), so there is no second, divergent data path. RunPlan is pure (fields+rows+plan → result) for exhaustive unit tests;
 // ExecutePlan wraps it with the same permission-checked, bounded row loading as
 // AggregateTable.
 
@@ -30,7 +30,6 @@ import (
 	"sort"
 	"strings"
 
-	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -65,6 +64,8 @@ type QueryPlan struct {
 	Ascending bool         `json:"ascending,omitempty"`
 	Limit     int          `json:"limit,omitempty"`
 	ShareOf   string       `json:"share_of,omitempty"` // a metric label to also emit as % of its total
+	// at is how its filters read, as QuerySpec's.
+	at reading
 }
 
 // PlanBucket is one group's row in the result: its label, every metric's value,
@@ -166,6 +167,11 @@ func RunPlan(fields []*model.Field, rows []*model.Row, plan QueryPlan) (*PlanRes
 		ops[i], valueFields[i], labels[i] = op, vf, lbl
 	}
 
+	filters, err := newRowFilters(fields, plan.Filters, plan.at)
+	if err != nil {
+		return nil, err
+	}
+
 	// Fold rows into per-bucket, per-metric accumulators.
 	type bucketAgg struct {
 		count int
@@ -181,29 +187,21 @@ func RunPlan(fields []*model.Field, rows []*model.Row, plan QueryPlan) (*PlanRes
 		values := parseRowValues(r.Values)
 		short = short || readsShort(values, reads)
 
-		skip := false
-		for _, f := range plan.Filters {
-			if !matchFilter(values, fields, f) {
-				skip = true
-				break
-			}
-		}
-		if skip {
+		if ok, err := filters.meets(r, values); err != nil {
+			return nil, err
+		} else if !ok {
 			continue
 		}
 		matched++
 
-		var groupLabels []string
+		var inGroups []string
 		if groupField == nil {
-			groupLabels = []string{"Total"}
+			inGroups = []string{"Total"}
 		} else {
-			groupLabels = fieldTypes.Labels(values[groupField.Id.String()])
-			if len(groupLabels) == 0 {
-				groupLabels = []string{"(empty)"}
-			}
+			inGroups = groupLabels(groupField, values[groupField.Id.String()], plan.at.zone)
 		}
 
-		for _, glbl := range groupLabels {
+		for _, glbl := range inGroups {
 			b := buckets[glbl]
 			if b == nil {
 				if len(order) >= maxDistinctGroups {
@@ -256,7 +254,7 @@ func RunPlan(fields []*model.Field, rows []*model.Row, plan QueryPlan) (*PlanRes
 	if sortBy == "" {
 		sortBy = labels[0]
 	}
-	chronological := groupField != nil && groupField.Type == model.FieldDate
+	chronological := isDateField(groupField)
 	sortPlanBuckets(out, sortBy, plan.Ascending, chronological)
 
 	// Limit (keep most-recent window for a time series, top-N otherwise).
@@ -288,7 +286,7 @@ func RunPlan(fields []*model.Field, rows []*model.Row, plan QueryPlan) (*PlanRes
 	}
 	if groupField != nil {
 		res.GroupByLabel = groupField.Name
-		res.GroupByType = groupField.Type
+		res.GroupByType = groupByType(groupField)
 	}
 	return res, nil
 }
@@ -380,11 +378,17 @@ func ExecutePlan(ctx context.Context, tableID uuid.UUID, actor Actor, plan Query
 	if err != nil {
 		return nil, nil, err
 	}
+	// Filters it can't read are refused before any row is.
+	plan.at = readingFor(ctx, actor, fields, plan.Filters)
+	filters, err := newRowFilters(fields, plan.Filters, plan.at)
+	if err != nil {
+		return nil, nil, err
+	}
 	reads := []*model.Field{resolveField(fields, plan.GroupBy)}
 	for _, m := range plan.Metrics {
 		reads = append(reads, resolveField(fields, m.ValueField))
 	}
-	rows, scannedAll, serr := scanRowsForQuery(ctx, tableID, actor, fields, plan.Filters, computedReads(fields, plan.Filters, reads...))
+	rows, scannedAll, serr := scanRowsForQuery(ctx, tableID, actor, fields, filters.terms(), computedReads(fields, plan.Filters, reads...))
 	if serr != nil {
 		return nil, nil, serr
 	}

@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/opensearch-project/opensearch-go/v4"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
@@ -100,6 +102,52 @@ func TestEveryCascadeLeavesAnEntryDeletedAlreadyAsItIs(t *testing.T) {
 		}
 		if r.params["deleted_at"] != float64(at) || r.params["deleted_by"] != "cascade" {
 			t.Errorf("the %s cascade marks entries with %v", index, r.params)
+		}
+	}
+}
+
+// A settle bounds how long a change waits for search to stop granting what it
+// took (business/Board settleBoardDelete, business/Doc searchFollowsTrash).
+// The cascades ran their update under context.Background(), so a run still
+// held by another write waited out every retry past that bound. Each now
+// stops when its caller does.
+func TestACascadeStopsWhenItsCallerDoes(t *testing.T) {
+	fakeUpdates(t, opensearchapi.UpdateByQueryResp{VersionConflicts: 1})
+	conflictBackoff = func(int) time.Duration { return time.Hour }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	byDoc := map[string][]string{"comment_doc_id": {"d1"}}
+	comments := []string{"comments"}
+	cascades := map[string]func() error{
+		"deletion": func() error {
+			return SyncCascadingDeletionInOpenSearch(ctx, []string{"comment_doc_id"}, "d1", 1, comments, "cascade")
+		},
+		"deletion of many": func() error {
+			return SyncCascadingDeletionInOpenSearchMulti(ctx, "comment_doc_id", []string{"d1"}, 1, comments, "cascade")
+		},
+		"combined deletion": func() error {
+			return SyncCascadingDeletionInOpenSearchCombined(ctx, byDoc, 1, comments, "cascade")
+		},
+		"unarchive": func() error {
+			return SyncCascadingUnarchiveInOpenSearch(ctx, []string{"comment_doc_id"}, "d1", comments, "cascade")
+		},
+		"unarchive of many": func() error {
+			return SyncCascadingUnarchiveInOpenSearchMulti(ctx, "comment_doc_id", []string{"d1"}, comments, "cascade")
+		},
+		"combined unarchive": func() error {
+			return SyncCascadingUnarchiveInOpenSearchCombined(ctx, byDoc, comments, "cascade")
+		},
+	}
+	for name, run := range cascades {
+		done := make(chan error, 1)
+		go func() { done <- run() }()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("the %s cascade answered %v once its caller had stopped; want context.Canceled", name, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("the %s cascade kept waiting to run again after its caller had stopped", name)
 		}
 	}
 }

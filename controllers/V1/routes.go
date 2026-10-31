@@ -34,7 +34,7 @@ func reaches(kind string) func(r *http.Request) (string, string) {
 // handler acts on. A body that can't be read names no place.
 func reachesIn(kind string, place func(body []byte) string) func(r *http.Request) (string, string) {
 	return func(r *http.Request) (string, string) {
-		body, err := v1api.PeekBody(r)
+		body, err := helpers.PeekBody(r)
 		if err != nil {
 			return kind, ""
 		}
@@ -55,19 +55,13 @@ func param(field string) func(body []byte) string {
 
 // narrowed is items cut to the places an app was added to when the token is
 // an app's (business/App Narrow), and as they are for anyone else, with the
-// app so a list can count only what it kept. ok is false once it has
-// answered: what the app may reach couldn't be read.
-func narrowed[T any](w http.ResponseWriter, r *http.Request, items []T, placesOf func(T) []appBusiness.Place) (kept []T, app *appBusiness.Identity, ok bool) {
-	app, err := appBusiness.ActsAsApp(r.Context())
-	if err != nil {
-		helpers.LogErrorWithContext(r.Context(), "controllers/V1 %s %s: %+v", r.Method, r.URL.Path, err)
-		helpers.WriteRetryLater(w, "What this app may reach couldn't be checked.")
-		return nil, nil, false
+// app so a list can count only what it kept. The app is the one the route's
+// check resolved (v1api.AppOf), which already refused a call it couldn't read.
+func narrowed[T any](r *http.Request, items []T, placesOf func(T) []appBusiness.Place) (kept []T, app *appBusiness.Identity) {
+	if app = v1api.AppOf(r); app == nil {
+		return items, nil
 	}
-	if app == nil {
-		return items, nil, true
-	}
-	return appBusiness.Narrow(r.Context(), app, items, placesOf), app, true
+	return appBusiness.Narrow(r.Context(), app, items, placesOf), app
 }
 
 func init() {

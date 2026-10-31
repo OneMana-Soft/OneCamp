@@ -15,6 +15,7 @@ import (
 	business "github.com/akashc777/OneCamp/business/Publish"
 	viewBusiness "github.com/akashc777/OneCamp/business/ResourceView"
 	customMiddleware "github.com/akashc777/OneCamp/middleware"
+	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -72,9 +73,9 @@ func stub(t *testing.T) *seams {
 		return s.file(ctx, ref, obj, token)
 	}
 	openStored = func(ctx context.Context, key string) (*storedFile, error) { return s.stored(ctx, key) }
-	addressAllowed = func(_ context.Context, surface, ip string, _ int) bool {
+	addressAllowed = func(_ context.Context, surface, ip string, _ int) redisStore.RateLimitResult {
 		s.ips = append(s.ips, surface+"|"+ip)
-		return s.allow
+		return redisStore.RateLimitResult{Allowed: s.allow}
 	}
 	s.page = func(context.Context, business.Ref, string) (*business.Page, error) {
 		return &business.Page{Slug: slug, Title: "Launch notes", HTML: "<p>We ship on Friday.</p>",

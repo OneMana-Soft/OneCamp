@@ -148,8 +148,10 @@ type mondayItem struct {
 
 // ─── Value parsers ──────────────────────────────────────────────────
 
-// parseDateValue reads a date column. `time`, when present, is UTC.
-func parseDateValue(cv mondayColumnValue) *time.Time {
+// parseDateValue reads a date column: the instant monday gives when it has a
+// time (UTC), else the day with no time, which the import writes where the
+// team is (provider.Day).
+func parseDateValue(cv mondayColumnValue) (*time.Time, importProvider.Day) {
 	if b := cv.valueJSON(); b != nil {
 		var v struct {
 			Date string `json:"date"`
@@ -158,40 +160,43 @@ func parseDateValue(cv mondayColumnValue) *time.Time {
 		if json.Unmarshal(b, &v) == nil && v.Date != "" {
 			if v.Time != "" {
 				if t, err := time.Parse("2006-01-02 15:04:05", v.Date+" "+v.Time); err == nil {
-					return &t
+					return &t, importProvider.Day{}
 				}
 			}
-			if t := parseDay(v.Date); t != nil {
-				return t
+			if d, ok := importProvider.ParseDay(v.Date); ok {
+				return nil, d
 			}
 		}
 	}
 	// Fallback: text is "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" in the
 	// account's zone; the day is what matters for a due date.
-	return parseDay(firstField(cv.text()))
+	d, _ := importProvider.ParseDay(firstField(cv.text()))
+	return nil, d
 }
 
 // parseTimelineValue reads a timeline column: one column, both ends.
-func parseTimelineValue(cv mondayColumnValue) (from, to *time.Time) {
+func parseTimelineValue(cv mondayColumnValue) (from, to importProvider.Day) {
 	if b := cv.valueJSON(); b != nil {
 		var v struct {
 			From string `json:"from"`
 			To   string `json:"to"`
 		}
 		if json.Unmarshal(b, &v) == nil && (v.From != "" || v.To != "") {
-			return parseDay(v.From), parseDay(v.To)
+			from, _ = importProvider.ParseDay(v.From)
+			to, _ = importProvider.ParseDay(v.To)
+			return from, to
 		}
 	}
 	txt := cv.text()
 	if txt == "" {
-		return nil, nil
+		return from, to
 	}
 	// "2026-10-01 - 2026-10-10". Split on " - " so the dashes inside
 	// the dates are left alone.
 	parts := strings.SplitN(txt, " - ", 2)
-	from = parseDay(strings.TrimSpace(parts[0]))
+	from, _ = importProvider.ParseDay(parts[0])
 	if len(parts) == 2 {
-		to = parseDay(strings.TrimSpace(parts[1]))
+		to, _ = importProvider.ParseDay(parts[1])
 	}
 	return from, to
 }
@@ -252,17 +257,6 @@ func cleanLabel(s string) string {
 		return r
 	}, s)
 	return strings.Join(strings.Fields(s), " ")
-}
-
-func parseDay(s string) *time.Time {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil
-	}
-	if t, err := time.Parse("2006-01-02", s); err == nil {
-		return &t
-	}
-	return nil
 }
 
 func parseStamp(s *string) time.Time {
@@ -421,9 +415,11 @@ type itemReading struct {
 	Priority  string
 	Assignees []string
 	Labels    []string
-	Start     *time.Time
-	Due       *time.Time
-	Extra     [][2]string // title, text of columns not mapped above
+	Start     *time.Time         // a date column with a time
+	Due       *time.Time         // a date column with a time
+	StartDay  importProvider.Day // a date with no time, or a timeline's start
+	DueDay    importProvider.Day // a date with no time, or a timeline's end
+	Extra     [][2]string        // title, text of columns not mapped above
 }
 
 // carried are columns a custom field holds whole: they stay out of the
@@ -446,24 +442,24 @@ func readItemFields(item mondayItem, carried map[string]bool) itemReading {
 		f.Assignees = parsePeopleValue(*pk.people)
 	}
 
-	var tlFrom, tlTo *time.Time
+	var tlFrom, tlTo importProvider.Day
 	if pk.timeline != nil {
 		tlFrom, tlTo = parseTimelineValue(*pk.timeline)
 	}
 	if pk.startDate != nil {
-		f.Start = parseDateValue(*pk.startDate)
+		f.Start, f.StartDay = parseDateValue(*pk.startDate)
 	}
-	if f.Start == nil {
-		f.Start = tlFrom
+	if f.Start == nil && f.StartDay.IsZero() {
+		f.StartDay = tlFrom
 	}
 	if pk.dueDate != nil {
-		f.Due = parseDateValue(*pk.dueDate)
+		f.Due, f.DueDay = parseDateValue(*pk.dueDate)
 	}
-	if f.Due == nil {
-		f.Due = tlTo
+	if f.Due == nil && f.DueDay.IsZero() {
+		f.DueDay = tlTo
 	}
-	if f.Due == nil && pk.otherDate != nil {
-		f.Due = parseDateValue(*pk.otherDate)
+	if f.Due == nil && f.DueDay.IsZero() && pk.otherDate != nil {
+		f.Due, f.DueDay = parseDateValue(*pk.otherDate)
 	} else if pk.otherDate != nil {
 		pk.used[pk.otherDate.ID] = false // keep it visible in the description
 	}
@@ -549,6 +545,8 @@ func (p *Provider) itemToSourceTask(item mondayItem, boardID, parentID string, c
 		CreatedBy:       deref(item.CreatorID),
 		StartDate:       f.Start,
 		DueDate:         f.Due,
+		StartDay:        f.StartDay,
+		DueDay:          f.DueDay,
 		Created:         parseStamp(item.CreatedAt),
 		Updated:         parseStamp(item.UpdatedAt),
 		Completed:       importProvider.ApplyStatusMap(f.Status, nil, p.DefaultStatusMap()) == "done",

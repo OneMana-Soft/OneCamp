@@ -61,8 +61,11 @@ type eventPlace struct {
 //   - user.joined, user.left: who, and the channel they're in, if any;
 //   - github.*: what the repository's own webhook said;
 //   - doc.*: built for outside (business/Follow webhooks.go): ids, and a
-//     title only when the doc isn't private.
-var wholeAtOrg = []string{"user.joined", "user.left", "github.*", "doc.*"}
+//     title only when the doc isn't private;
+//   - call.started, call.ended: built for outside (business/CallState
+//     webhooks.go): ids, times and counts, never a name, a title or anything
+//     said. Named one by one: a call's kind added later stays private.
+var wholeAtOrg = []string{"user.joined", "user.left", "github.*", "doc.*", "call.started", "call.ended"}
 
 func sentWholeAtOrg(eventType string) bool {
 	for _, k := range wholeAtOrg {
@@ -160,8 +163,9 @@ func namesSomething(key string) bool {
 	return strings.HasSuffix(key, "_id") || strings.HasSuffix(key, "_ids") || strings.HasSuffix(key, "_uuid")
 }
 
-// ScopeError is a scope a webhook can't be set up for; its message is
-// the one the admin sees.
+// ScopeError is what a webhook can't be set up to be sent: a scope it can't
+// have (webhookScope), or no kind of event at all (eventsColumn). Its message
+// is the one the admin sees, with a 400.
 type ScopeError struct{ msg string }
 
 func (e ScopeError) Error() string { return e.msg }

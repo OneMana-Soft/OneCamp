@@ -45,6 +45,7 @@ const (
 	KindTeam    Kind = "team"
 	KindComment Kind = "comment"
 	KindMemory  Kind = "memory"
+	KindEvent   Kind = "event" // a meeting: a standalone event or a series (DG13)
 )
 
 // kindSpec is how the graph names a kind: its uuid predicate and its
@@ -66,6 +67,29 @@ var specs = map[Kind]kindSpec{
 	KindTeam:    {"team_uuid", "team_deleted_at"},
 	KindComment: {"comment_uuid", "comment_deleted_at"},
 	KindMemory:  {"mem_uuid", ""},
+	KindEvent:   {"cal_event_uuid", "cal_event_deleted_at"},
+}
+
+// projectedTypes are the kinds Postgres owns (DG12), by the Dgraph type of
+// their nodes. Such a node is thin: its uuid, its deletion and change times
+// and its own edges (those the allow-list walks forward from its kind), a
+// projection business/Refs keeps from the kind's projector and can rebuild.
+// Nothing else writes it.
+var projectedTypes = map[Kind]string{
+	KindEvent: "CalEvent",
+}
+
+// IsProjected is whether k's nodes are projections of Postgres.
+func IsProjected(k Kind) bool { _, ok := projectedTypes[k]; return ok }
+
+// ProjectedKinds is every projected kind, in a fixed order.
+func ProjectedKinds() []Kind {
+	out := make([]Kind, 0, len(projectedTypes))
+	for k := range projectedTypes {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // Kinds is every kind, in a fixed order.
@@ -86,7 +110,8 @@ func Known(k Kind) bool { _, ok := specs[k]; return ok }
 // (DG7 asks for it by name), so neither is shown unless asked for.
 // A comment that links a thing is shown with it all the same (business/
 // WorkGraph): it is a reference, not a comment that is merely on the thing.
-var DefaultKinds = []Kind{KindDoc, KindTask, KindProject, KindPerson, KindBoard, KindChannel, KindMessage, KindChat, KindTeam}
+// Meetings (DG13) are shown since the web words them.
+var DefaultKinds = []Kind{KindDoc, KindTask, KindProject, KindPerson, KindBoard, KindChannel, KindMessage, KindChat, KindTeam, KindEvent}
 
 // Edge is one relationship that counts as a connection: from a kind, along a
 // predicate as Dgraph walks it ("~pred" for a reverse edge), to one or more
@@ -106,6 +131,13 @@ type Edge struct {
 	Opt bool
 }
 
+// DocParent is the doc tree's one edge, from a node to the page or folder it
+// is under. Its two rows below name it parent and subpage; business/WorkGraph
+// names it again from the nodes at its ends, once the reader's read has
+// decided them (a folder's contents are in_folder and contains, a folder, a
+// file or a link under a page is held by it: docs F1).
+const DocParent = "doc_parent"
+
 // Edges is the allow-list. Its order is the order a panel lists a node's
 // reasons in.
 var Edges = []Edge{
@@ -113,8 +145,8 @@ var Edges = []Edge{
 	{From: KindDoc, Rel: "linked_from", Pred: "~linked_docs", To: []Kind{KindTask, KindProject}},
 	{From: KindDoc, Rel: "links_to", Pred: "doc_mentions", To: []Kind{KindDoc}},
 	{From: KindDoc, Rel: "mentioned_by", Pred: "~doc_mentions", To: []Kind{KindDoc}},
-	{From: KindDoc, Rel: "parent", Pred: "doc_parent", To: []Kind{KindDoc}},
-	{From: KindDoc, Rel: "subpage", Pred: "~doc_parent", To: []Kind{KindDoc}},
+	{From: KindDoc, Rel: "parent", Pred: DocParent, To: []Kind{KindDoc}},
+	{From: KindDoc, Rel: "subpage", Pred: "~" + DocParent, To: []Kind{KindDoc}},
 	{From: KindDoc, Rel: "shared_in", Pred: "~post_doc", To: []Kind{KindMessage}},
 	{From: KindDoc, Rel: "created_by", Pred: "doc_created_by", To: []Kind{KindPerson}},
 	{From: KindDoc, Rel: "owned_by", Pred: "doc_owner", To: []Kind{KindPerson}},
@@ -131,6 +163,7 @@ var Edges = []Edge{
 	{From: KindTask, Rel: "subtask_of", Pred: "task_parent_task", To: []Kind{KindTask}},
 	{From: KindTask, Rel: "subtask", Pred: "task_sub_tasks", To: []Kind{KindTask}},
 	{From: KindTask, Rel: "linked_from", Pred: "~" + RefersTo, To: RefSources},
+	{From: KindTask, Rel: "links_to", Pred: RefersTo, To: RefTargets},
 	{From: KindTask, Rel: "comment", Pred: "task_comments", To: []Kind{KindComment}, Opt: true},
 	// A project.
 	{From: KindProject, Rel: "links_to", Pred: "linked_docs", To: []Kind{KindDoc}},
@@ -139,6 +172,7 @@ var Edges = []Edge{
 	{From: KindProject, Rel: "in_team", Pred: "project_team", To: []Kind{KindTeam}},
 	{From: KindProject, Rel: "linked_from", Pred: "~" + RefersTo, To: RefSources},
 	{From: KindProject, Rel: "memory", Pred: "~mem_project", To: []Kind{KindMemory}, Opt: true},
+	{From: KindProject, Rel: "meeting", Pred: "~cal_event_on", To: []Kind{KindEvent}},
 	// A whiteboard.
 	{From: KindBoard, Rel: "linked_from", Pred: "~linked_boards", To: []Kind{KindTask, KindProject}},
 	// A channel post.
@@ -150,15 +184,21 @@ var Edges = []Edge{
 	// A direct or group message: what it links to (DG6). Who wrote it and the
 	// conversation it's in are gates for the reader, never walked.
 	{From: KindChat, Rel: "links_to", Pred: RefersTo, To: RefTargets},
-	// A channel: the posts in it that share a doc.
+	// A channel: the posts in it that share a doc, and the meetings on its
+	// calendar.
 	{From: KindChannel, Rel: "message", Pred: "~post_channel", To: []Kind{KindMessage}, Scan: true},
-	// A person: what they made, own and are given, and their posts that share a doc.
+	{From: KindChannel, Rel: "meeting", Pred: "~cal_event_on", To: []Kind{KindEvent}},
+	// A person: what they made, own and are given, their posts that share a
+	// doc, and the meetings they organised or are invited to.
 	{From: KindPerson, Rel: "created", Pred: "~doc_created_by", To: []Kind{KindDoc}},
 	{From: KindPerson, Rel: "owns", Pred: "~doc_owner", To: []Kind{KindDoc}},
 	{From: KindPerson, Rel: "assigned", Pred: "~task_assignee", To: []Kind{KindTask}},
 	{From: KindPerson, Rel: "posted", Pred: "~post_by", To: []Kind{KindMessage}, Scan: true},
+	{From: KindPerson, Rel: "organised", Pred: "~cal_event_organiser", To: []Kind{KindEvent}},
+	{From: KindPerson, Rel: "invited_to", Pred: "~cal_event_with", To: []Kind{KindEvent}},
 	// A team.
 	{From: KindTeam, Rel: "project", Pred: "team_projects", To: []Kind{KindProject}},
+	{From: KindTeam, Rel: "meeting", Pred: "~cal_event_on", To: []Kind{KindEvent}},
 	// A comment, back to what it's on.
 	{From: KindComment, Rel: "on", Pred: "comment_task", To: []Kind{KindTask}},
 	{From: KindComment, Rel: "on", Pred: "comment_doc", To: []Kind{KindDoc}},
@@ -166,6 +206,12 @@ var Edges = []Edge{
 	{From: KindComment, Rel: "links_to", Pred: RefersTo, To: RefTargets},
 	// A memory item, back to its project.
 	{From: KindMemory, Rel: "about", Pred: "mem_project", To: []Kind{KindProject}},
+	// A meeting: who organised it and who it's with, the calendar it's on
+	// (a project's, a channel's or a team's), and what its notes link to.
+	{From: KindEvent, Rel: "organised_by", Pred: "cal_event_organiser", To: []Kind{KindPerson}},
+	{From: KindEvent, Rel: "with", Pred: "cal_event_with", To: []Kind{KindPerson}},
+	{From: KindEvent, Rel: "on_calendar_of", Pred: "cal_event_on", To: []Kind{KindProject, KindChannel, KindTeam}},
+	{From: KindEvent, Rel: "links_to", Pred: RefersTo, To: RefTargets},
 }
 
 // Gates are the membership edges: who may see a thing, never a connection.

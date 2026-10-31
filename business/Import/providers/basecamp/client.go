@@ -12,10 +12,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
-	"strconv"
 	"time"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
@@ -50,6 +48,9 @@ const userAgent = "OneCamp importer (https://onemana.dev)"
 // first pages Basecamp gives 100 a page, so about 20,000 items.
 const maxPages = 200
 
+// statusRules reads Basecamp's answers: 50 requests per 10 seconds.
+var statusRules = importProvider.StatusRules{Name: "Basecamp", Wait: 10 * time.Second}
+
 var nextLink = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
 
 // get reads one page of url into out and returns the next page's URL, "" at
@@ -73,18 +74,8 @@ func (p *Provider) get(ctx context.Context, tok, url string, out any) (string, e
 		return "", err
 	}
 	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusTooManyRequests:
-		wait := 10 * time.Second
-		if secs, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && secs > 0 {
-			wait = time.Duration(secs) * time.Second
-		}
-		return "", &importProvider.ErrRateLimited{RetryAfter: wait, Reason: "Basecamp 429"}
-	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return "", &importProvider.TokenRejected{Msg: fmt.Sprintf("Basecamp refused the sign-in (HTTP %d); reconnect Basecamp", resp.StatusCode)}
-	case resp.StatusCode >= 400:
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", fmt.Errorf("basecamp HTTP %d: %s", resp.StatusCode, raw)
+	if err := statusRules.Check(resp); err != nil {
+		return "", err
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return "", fmt.Errorf("basecamp %s: %w", req.URL.Path, err)

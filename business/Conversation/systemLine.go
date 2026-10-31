@@ -29,6 +29,11 @@ import (
 // KindSystem is a system line's post_kind and chat_kind.
 const KindSystem = "system"
 
+// KindHuddle is a call's post's post_kind and chat_kind (calls CALLS-3b,
+// business/Huddle): a message with a thread, pinnable, never edited or
+// shared, telling nobody (helpers.KindHuddle).
+const KindHuddle = helpers.KindHuddle
+
 // The kinds of line, as the web app draws them. Never renamed once shipped.
 const (
 	// In a group opened for a new set of people: Actor started it with

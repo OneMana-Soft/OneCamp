@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // fakeSink gives every blank node of a batch a uid of its own, as Dgraph
@@ -59,7 +62,7 @@ var tiny = Tier{
 	Chats: 500, BusiestDMChats: 120,
 	Docs: 300, DocDepth: 6, DocParentChildren: 40, Backlinks: 100,
 	Boards: 6, Tasks: 400, BoardTasks: 120, ChainLength: 10, MemoryItems: 20,
-	DocPosts: 60, RefPosts: 60,
+	DocPosts: 60, RefPosts: 60, FolderItems: 25,
 }
 
 func generate(t *testing.T, tier Tier, seed uint64, keep bool) (*Fixture, *fakeSink) {
@@ -101,6 +104,7 @@ func TestEachTierWritesItsSizeAndItsSuperNodes(t *testing.T) {
 				"people": tier.People, "teams": tier.Teams, "projects": tier.Projects, "channels": tier.Channels,
 				"posts": tier.Posts, "superposts": tier.SuperPosterPosts, "groups": tier.Groups, "chats": tier.Chats,
 				"docs": tier.Docs, "boards": tier.Boards, "tasks": tier.Tasks, "memory": tier.MemoryItems, "deletedShares": 1, "docPosts": tier.DocPosts, "refPosts": tier.RefPosts,
+				"folders": 2, "folderItems": tier.FolderItems, "folderDeleted": tier.FolderItems / 10,
 			}
 			for kind, n := range want {
 				if f.Counts[kind] != n {
@@ -118,13 +122,18 @@ func TestEachTierWritesItsSizeAndItsSuperNodes(t *testing.T) {
 			if f.Quads == 0 || f.Batches == 0 || len(s.batches) != f.Batches {
 				t.Errorf("%d N-Quads in %d batches (%d sent)", f.Quads, f.Batches, len(s.batches))
 			}
-			for _, h := range []string{f.General, f.ViewerChannel, f.BusiestDM, f.ViewerGroup, f.DocParent, f.DeepDoc, f.BacklinkedDoc, f.SpaceProject, f.BoardProject, f.ChainHead} {
+			for _, h := range []string{f.General, f.ViewerChannel, f.BusiestDM, f.ViewerGroup, f.DocParent, f.DeepDoc, f.BacklinkedDoc, f.SpaceProject, f.BoardProject, f.ChainHead, f.Folder} {
 				if h == "" {
 					t.Errorf("a handle is empty: %+v", f)
 				}
 			}
 			if f.ViewerUID() == "" || f.UID("ch0") == "" || f.UID("doc0") == "" {
 				t.Error("kept uids missing")
+			}
+			// The folder's nodes stay out of the work graph's hops only while
+			// the viewer, their owner, owns more docs than a hop takes.
+			if tier.Name != "tiny" && f.Counts["viewerDocs"] <= widestHop {
+				t.Errorf("the viewer owns %d live docs, not more than a work graph hop takes (%d)", f.Counts["viewerDocs"], widestHop)
 			}
 			if tier.Name != "tiny" {
 				return
@@ -173,6 +182,108 @@ func TestEachTierWritesItsSizeAndItsSuperNodes(t *testing.T) {
 				t.Errorf("the backlinked doc is shared in %d posts, want %d", n, sharedDocPosts)
 			}
 		})
+	}
+}
+
+// The folder (docs F1) sits at the top of the space project's space and
+// holds FolderItems live items of every kind, a folder among them with files
+// of its own, and deleted items besides: what a folder's level and its count
+// read. A page has no kind, a link has its https address, the colours are
+// camp hues, and every node in it is the viewer's.
+func TestTheFolderHoldsEveryKind(t *testing.T) {
+	f, s := generate(t, tiny, DefaultSeed, true)
+	nodes := map[string]map[string][]string{} // subject -> predicate -> objects
+	line := regexp.MustCompile(`^(\S+) <([^>]+)> (.+) \.$`)
+	for _, q := range s.quads {
+		m := line.FindStringSubmatch(q)
+		if m == nil {
+			t.Fatalf("not an N-Quad: %s", q)
+		}
+		if nodes[m[1]] == nil {
+			nodes[m[1]] = map[string][]string{}
+		}
+		nodes[m[1]][m[2]] = append(nodes[m[1]][m[2]], m[3])
+	}
+	one := func(n map[string][]string, p string) string {
+		if len(n[p]) != 1 {
+			return ""
+		}
+		v, err := strconv.Unquote(n[p][0])
+		if err != nil {
+			return n[p][0]
+		}
+		return v
+	}
+	var folder string
+	for subj, n := range nodes {
+		if one(n, "doc_uuid") == f.Folder {
+			folder = subj
+		}
+	}
+	top := nodes[folder]
+	switch {
+	case top == nil:
+		t.Fatalf("no node has the folder's uuid %s", f.Folder)
+	case one(top, "doc_node_kind") != "folder" || len(top["doc_parent"]) != 0 || one(top, "doc_space_kind") != "project" || one(top, "doc_space_uuid") != f.SpaceProject:
+		t.Errorf("the folder is not a folder at the top of the space project's space: %v", top)
+	}
+	viewer := func(n map[string][]string) bool {
+		for _, p := range []string{"doc_owner", "doc_created_by"} {
+			if len(n[p]) != 1 || n[p][0] != "_:"+f.Viewer.Key && n[p][0] != "<"+f.ViewerUID()+">" {
+				return false
+			}
+		}
+		return true
+	}
+	if !viewer(top) {
+		t.Errorf("the folder is not the viewer's: %v %v", top["doc_owner"], top["doc_created_by"])
+	}
+	live, deleted := 0, 0
+	kinds := map[string]int{}
+	for _, n := range nodes {
+		if len(n["doc_parent"]) != 1 || n["doc_parent"][0] != folder {
+			continue
+		}
+		if one(n, "doc_deleted_at") != zeroTime {
+			deleted++
+			continue
+		}
+		live++
+		kind := one(n, "doc_node_kind")
+		kinds[kind]++
+		switch link := one(n, "doc_link_url"); {
+		case kind == "link" && !strings.HasPrefix(link, "https://"):
+			t.Errorf("a link without its https address: %v", n)
+		case kind != "link" && link != "":
+			t.Errorf("a %q with an address: %v", kind, n)
+		}
+		if one(n, "doc_space_uuid") != f.SpaceProject {
+			t.Errorf("an item outside the folder's space: %v", n)
+		}
+		if !viewer(n) {
+			t.Errorf("an item that is not the viewer's: %v", n)
+		}
+	}
+	if live != tiny.FolderItems || deleted != tiny.FolderItems/10 {
+		t.Errorf("the folder holds %d live and %d deleted items, want %d and %d", live, deleted, tiny.FolderItems, tiny.FolderItems/10)
+	}
+	if kinds["folder"] != 1 || kinds[""] == 0 || kinds["file"] == 0 || kinds["link"] == 0 || len(kinds) != 4 {
+		t.Errorf("the folder's kinds: %v, want a folder and pages, files and links", kinds)
+	}
+	colours := 0
+	for _, n := range nodes {
+		if c := one(n, "doc_color"); c != "" {
+			colours++
+			if !helpers.IsCampHue(c) {
+				t.Errorf("a colour that is not a camp hue: %q", c)
+			}
+		}
+		if k := one(n, "doc_node_kind"); k == "page" || (len(n["doc_node_kind"]) > 0 && k == "") {
+			t.Errorf("a node written with the kind %q: %v", k, n)
+		}
+	}
+	if colours == 0 {
+		t.Error("nothing in the folder is coloured")
 	}
 }
 

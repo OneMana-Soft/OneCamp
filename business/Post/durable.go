@@ -57,12 +57,16 @@ var (
 // postEvents is a post's change as its two outbox events. A post an import
 // writes (helpers.IsBulkImport) is only indexed, as today's CreatePost does:
 // nobody is told of history, and no app is sent it live. Pure.
-func postEvents(kind string, post, channel uuid.UUID, actor string, imported bool) []outboxBusiness.Entry {
+func postEvents(kind string, post, channel uuid.UUID, actor string, imported bool, postKind string) []outboxBusiness.Entry {
 	entities := map[string]string{"message": post.String(), "conversation": channel.String(), "kind": "channel"}
 	rest := outboxBusiness.Entry{Topic: MessageTopic, Kind: kind, Key: "post:" + post.String(), Entities: entities, Actor: actor, Sinks: effectSinks}
 	if imported {
 		rest.Sinks = []string{sinkSearch}
 		return []outboxBusiness.Entry{rest}
+	}
+	// A call's post (calls CALLS-3b) tells nobody, and isn't embedded.
+	if postKind == helpers.KindHuddle {
+		rest.Sinks = []string{sinkSearch, sinkEvents}
 	}
 	live := outboxBusiness.Entry{Topic: MessageTopic, Kind: kind, Key: "channel:" + channel.String(), Entities: entities, Actor: actor, Sinks: liveSinks}
 	return []outboxBusiness.Entry{live, rest}
@@ -89,6 +93,9 @@ func CreatePostDurably(ctx context.Context, postInfo *adapter.InputCreateOrUpdat
 	postUUID := uuid.New()
 	at := helpers.CreateTimeOrNow(ctx)
 	author := userInfo.UserPostgresInfo.Id
+	if postInfo.Kind != "" {
+		ctx = helpers.WithMessageKind(ctx, postInfo.Kind)
+	}
 
 	// 1. The rows and the event.
 	events, err := writeRows(ctx, postUUID, author, postInfo.ChannelUUID, clientMsgID, at, userInfo.UserDgraphInfo.Uuid)
@@ -185,7 +192,7 @@ func writePostRows(ctx context.Context, tx *sql.Tx, postUUID, author, channel uu
 		return nil, err
 	}
 	var events []int64
-	for _, e := range postEvents(MessageCreated, postUUID, channel, authorUUID, helpers.IsBulkImport(ctx)) {
+	for _, e := range postEvents(MessageCreated, postUUID, channel, authorUUID, helpers.IsBulkImport(ctx), helpers.MessageKind(ctx)) {
 		id, err := outboxBusiness.Add(cctx, tx, e)
 		if err != nil {
 			return nil, err

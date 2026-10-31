@@ -29,11 +29,13 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
 	slackapi "github.com/akashc777/OneCamp/services/Slack"
 )
 
@@ -49,6 +51,12 @@ type APIReadOptions struct {
 	MaxBytes int64
 	// MaxFileBytes bounds one file (0: defaultMaxFileBytes).
 	MaxFileBytes int64
+	// Kinds are the kinds of conversation read (none: every kind, apiKinds).
+	Kinds []string
+	// MembersOnly reads only the conversations the token's own person is in:
+	// one the list gives that they aren't in is left out, unnamed. A member
+	// bringing their own DMs reads this way (member_read.go).
+	MembersOnly bool
 	// Progress, when set, hears how far the read is after each conversation.
 	// An error from it stops the read with that error (a discarded job).
 	Progress func(ctx context.Context, r APIReadReport) error
@@ -56,11 +64,14 @@ type APIReadOptions struct {
 
 // APIReadReport is what a read found.
 type APIReadReport struct {
-	Users    int `json:"users"`
-	Channels int `json:"channels"`
-	Groups   int `json:"groups"`
-	DMs      int `json:"dms"`
-	MPIMs    int `json:"mpims"`
+	// TeamID is the Slack workspace's id, and UserID the token's person.
+	TeamID   string `json:"team_id,omitempty"`
+	UserID   string `json:"user_id,omitempty"`
+	Users    int    `json:"users"`
+	Channels int    `json:"channels"`
+	Groups   int    `json:"groups"`
+	DMs      int    `json:"dms"`
+	MPIMs    int    `json:"mpims"`
 	// Conversations is how many have been read of Of.
 	Conversations int   `json:"conversations"`
 	Of            int   `json:"of"`
@@ -165,19 +176,21 @@ func ReadAPIExport(ctx context.Context, c apiClient, opts APIReadOptions, w io.W
 	if opts.MaxFileBytes <= 0 {
 		opts.MaxFileBytes = defaultMaxFileBytes
 	}
-	var self struct {
-		slackapi.OK
-		UserID string `json:"user_id"`
+	self, err := tokenOwner(ctx, c)
+	if err != nil {
+		return report, err
 	}
-	if err := c.Call(ctx, "auth.test", url.Values{}, &self); err != nil {
-		return report, fmt.Errorf("Slack didn't accept the token: %w", err)
-	}
+	report.TeamID, report.UserID = self.TeamID, self.UserID
 	users, err := readAPIUsers(ctx, c)
 	if err != nil {
 		return report, err
 	}
 	report.Users = len(users)
-	conversations, err := readAPIConversations(ctx, c, &report)
+	kinds := opts.Kinds
+	if len(kinds) == 0 {
+		kinds = apiKinds
+	}
+	conversations, err := readAPIConversations(ctx, c, kinds, &report)
 	if err != nil {
 		return report, err
 	}
@@ -205,6 +218,14 @@ func ReadAPIExport(ctx context.Context, c apiClient, opts APIReadOptions, w io.W
 			return report, err
 		}
 		entry, err := r.conversation(ctx, conv, self.UserID)
+		if errors.Is(err, errNotAMember) {
+			// Not theirs: left out without a word to them, not even its
+			// name. Slack lists a person's token only what they're in, so
+			// the server's log says it once, by id.
+			helpers.LogWarnWithContext(ctx, "SlackImport API read: Slack listed %s to a token whose person isn't in it; left out", conv.ID)
+			report.Of--
+			continue
+		}
 		if err != nil {
 			if errors.Is(err, ErrAPIReadTooLarge) || ctx.Err() != nil {
 				return report, err
@@ -234,7 +255,7 @@ func ReadAPIExport(ctx context.Context, c apiClient, opts APIReadOptions, w io.W
 	for _, f := range []struct {
 		name string
 		v    any
-	}{{"users.json", users}, {"channels.json", orEmpty(channels)}, {"groups.json", orEmpty(groups)}, {"dms.json", orEmpty(dms)}, {"mpims.json", orEmpty(mpims)}} {
+	}{{"users.json", users}, {"channels.json", helpers.NonNil(channels)}, {"groups.json", helpers.NonNil(groups)}, {"dms.json", helpers.NonNil(dms)}, {"mpims.json", helpers.NonNil(mpims)}} {
 		if err := writeZipJSON(r.zw, f.name, f.v); err != nil {
 			return report, err
 		}
@@ -244,10 +265,14 @@ func ReadAPIExport(ctx context.Context, c apiClient, opts APIReadOptions, w io.W
 	return report, err
 }
 
+// errNotAMember is a conversation a members-only read was listed that its
+// person isn't in: left out, and not named to them.
+var errNotAMember = errors.New("not_a_member")
+
 // conversation reads conv into the zip, its days and its files, and answers
 // its manifest entry.
 func (r *apiRead) conversation(ctx context.Context, conv apiConversation, self string) (any, error) {
-	dir, entry, err := describeAPIConversation(ctx, r.c, conv, self)
+	dir, entry, err := describeAPIConversation(ctx, r.c, conv, self, r.opts.MembersOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -432,13 +457,13 @@ func readAPIUsers(ctx context.Context, c apiClient) ([]json.RawMessage, error) {
 	return out, err
 }
 
-// readAPIConversations is every conversation the token is in or can see:
-// public and private channels, group DMs and DMs, archived ones too. A kind
-// the token has no scope for is noted and left out.
-func readAPIConversations(ctx context.Context, c apiClient, report *APIReadReport) ([]apiConversation, error) {
+// readAPIConversations is every conversation of kinds the token is in or can
+// see: public and private channels, group DMs and DMs, archived ones too. A
+// kind the token has no scope for is noted and left out.
+func readAPIConversations(ctx context.Context, c apiClient, kinds []string, report *APIReadReport) ([]apiConversation, error) {
 	var out []apiConversation
 	seen := map[string]bool{}
-	for _, kind := range apiKinds {
+	for _, kind := range kinds {
 		form := url.Values{"types": {kind}, "exclude_archived": {"false"}, "limit": {apiPage}}
 		err := pages(ctx, c, "conversations.list", form, func(raw json.RawMessage) (string, error) {
 			var r struct {
@@ -477,14 +502,19 @@ func readAPIConversations(ctx context.Context, c apiClient, report *APIReadRepor
 // describeAPIConversation is conv as an export's manifest lists it, and the
 // folder its days go in: a channel's or group's name, a DM's id, a group
 // DM's name. A channel's people and pins are asked for; a DM's people are
-// the token's owner and the other person.
-func describeAPIConversation(ctx context.Context, c apiClient, conv apiConversation, self string) (string, any, error) {
+// the token's owner and the other person. A members-only read stops at the
+// people of one its person isn't in (errNotAMember).
+func describeAPIConversation(ctx context.Context, c apiClient, conv apiConversation, self string, membersOnly bool) (string, any, error) {
 	if conv.IsIM {
 		return conv.ID, map[string]any{"id": conv.ID, "created": conv.Created, "members": []string{self, conv.User}}, nil
 	}
 	members, err := readAPIMembers(ctx, c, conv.ID)
 	if err != nil {
 		return "", nil, err
+	}
+	// A members-only read asks nothing more of one its person isn't in.
+	if membersOnly && !slices.Contains(members, self) {
+		return "", nil, errNotAMember
 	}
 	entry := conv.raw
 	entry["members"] = members
@@ -495,6 +525,28 @@ func describeAPIConversation(ctx context.Context, c apiClient, conv apiConversat
 		}
 	}
 	return conv.Name, entry, nil
+}
+
+// tokenIdentity is whose token a read holds: the workspace, the person, and
+// whether it is an app's bot.
+type tokenIdentity struct {
+	TeamID string
+	UserID string
+	Bot    bool
+}
+
+// tokenOwner asks Slack whose token c holds (auth.test).
+func tokenOwner(ctx context.Context, c apiClient) (tokenIdentity, error) {
+	var who struct {
+		slackapi.OK
+		TeamID string `json:"team_id"`
+		UserID string `json:"user_id"`
+		BotID  string `json:"bot_id"`
+	}
+	if err := c.Call(ctx, "auth.test", url.Values{}, &who); err != nil {
+		return tokenIdentity{}, fmt.Errorf("Slack didn't accept the token: %w", err)
+	}
+	return tokenIdentity{TeamID: who.TeamID, UserID: who.UserID, Bot: who.BotID != ""}, nil
 }
 
 // readAPIMembers is a conversation's people.
@@ -692,14 +744,6 @@ func writeZipJSON(zw *zip.Writer, name string, v any) error {
 		return err
 	}
 	return json.NewEncoder(f).Encode(v)
-}
-
-// orEmpty is v, or an empty list for none, as an export writes an empty manifest.
-func orEmpty(v []any) []any {
-	if v == nil {
-		return []any{}
-	}
-	return v
 }
 
 // pages calls a paged method until its last page, handing each page's raw

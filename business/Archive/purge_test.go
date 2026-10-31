@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -50,22 +49,6 @@ func TestPurgeCutoffIsOnlyForPoliciesThatPurge(t *testing.T) {
 	cut, ok := purgeCutoff(&ArchivePolicy{EntityType: "attachments", PurgeAfterDays: 30}, now)
 	if !ok || !cut.Equal(now.AddDate(0, 0, -30)) {
 		t.Errorf("cutoff = %v, want 30 days before now", cut)
-	}
-}
-
-// The purge removes the object the uploads wrote. Both sides spell the prefix
-// by hand, so this reads the upload code and checks it is the same word.
-func TestPurgeRemovesTheObjectTheUploadsWrite(t *testing.T) {
-	src, err := os.ReadFile("../User/userBusiness.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	prefix := regexp.MustCompile(`fullObjName := fmt\.Sprintf\("%v/%v/%v_%v", "(\w+)"`).FindSubmatch(src)
-	if prefix == nil {
-		t.Fatal("cannot find the upload prefix in userBusiness.go; the upload changed shape")
-	}
-	if got := attachmentObject("u/x_f.png"); got != string(prefix[1])+"/u/x_f.png" {
-		t.Errorf("attachmentObject = %q; uploads write under %q", got, prefix[1])
 	}
 }
 

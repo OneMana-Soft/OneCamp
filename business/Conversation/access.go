@@ -76,6 +76,8 @@ var (
 	indexPeople   = models.People
 	// The graph's standings for many channels at once.
 	readChannelStandings = channelDomain.ChannelStandings
+	// The graph's account for someone, nil once they are deactivated.
+	activeGraphUser = userDomain.GetActiveDgraphUserInfoByUUID
 )
 
 // fromIndex is whether this decision reads the index.
@@ -281,7 +283,7 @@ func uidOf(ctx context.Context, who accessBusiness.Subject) (string, error) {
 	if who.UserUUID == "" {
 		return "", nil
 	}
-	u, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, who.UserUUID)
+	u, err := activeGraphUser(ctx, who.UserUUID)
 	if err != nil || u == nil {
 		return "", err
 	}
@@ -575,6 +577,18 @@ func (threadRules) DecideMany(ctx context.Context, who accessBusiness.Subject, i
 			out[id] = decideThread(s)
 		}
 	}
+	// A live call's thread, for someone let into the call through its invite:
+	// never for someone the graph has no uid for (deactivated), whom no rule
+	// above decides either.
+	if uid != "" {
+		if err := callInvites(ctx, who, out, ids); err != nil {
+			return nil, err
+		}
+	}
+	// Then what a live call holds, over whichever reader decided.
+	if err := chatHolds(ctx, who, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -610,6 +624,9 @@ func (callRules) DecideMany(ctx context.Context, who accessBusiness.Subject, ids
 				}
 			}
 		}
+		if err := callRoomInvites(ctx, who, out, ids); err != nil {
+			return nil, err
+		}
 		return out, nil
 	}
 	uid, err := uidOf(ctx, who)
@@ -641,6 +658,13 @@ func (callRules) DecideMany(ctx context.Context, who accessBusiness.Subject, ids
 		}
 		// An instant meeting (meet-…) is in no conversation: its guests join
 		// by its link, which the guest routes decide.
+	}
+	// A call someone was let into through a link they opened as themselves:
+	// never for someone the graph has no uid for (deactivated).
+	if uid != "" {
+		if err := callRoomInvites(ctx, who, out, ids); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }

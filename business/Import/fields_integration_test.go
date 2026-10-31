@@ -219,11 +219,16 @@ func TestImportedFields(t *testing.T) {
 	if err := taskFieldModel.SetValue(ctx, used, got["Channel"].ID, json.RawMessage(`"`+got["Channel"].Options[0].ID+`"`), by); err != nil {
 		t.Fatal(err)
 	}
+	t1Values, err := taskFieldModel.ValuesFor(ctx, []uuid.UUID{t1})
+	if err != nil || len(t1Values[t1.String()]) != 7 {
+		t.Fatalf("the rolled-back task has its seven values: %v %v", t1Values, err)
+	}
+	liveBefore := len(fieldsOf(project))
 	tx, err := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := deleteUnusedFields(ctx, tx, job.Id); err != nil {
+	if err := deleteUnusedMade(ctx, tx, job.Id, importModels.EntityField); err != nil {
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
@@ -236,6 +241,58 @@ func TestImportedFields(t *testing.T) {
 	if after := fieldsOf(project2); len(after) != 0 {
 		t.Errorf("the second project's fields go: %v", keys(after))
 	}
+
+	// It takes them away as a person's delete does (V-78): each is kept with
+	// the task values on it, so undoing the rollback (its tasks back from the
+	// trash, the fields restored) has every value again.
+	gone := keptDeleted(t, "task_fields", "project_id", project)
+	if len(gone) != liveBefore-2 {
+		t.Fatalf("the %d fields it took away are kept for their restore: %d kept, so the rollback's delete is hard", liveBefore-2, len(gone))
+	}
+	exec(`UPDATE tasks SET deleted_at = NULL WHERE id IN ($1, $2)`, t1, t2)
+	for _, id := range gone {
+		if err := taskField.Restore(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	back, err := taskFieldModel.ValuesFor(ctx, []uuid.UUID{t1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back[t1.String()]) != len(t1Values[t1.String()]) {
+		t.Errorf("every value back: %d of %d", len(back[t1.String()]), len(t1Values[t1.String()]))
+	}
+	for field, was := range t1Values[t1.String()] {
+		if compact(back[t1.String()][field]) != compact(was) {
+			t.Errorf("field %s is %s again, not %s", field, was, back[t1.String()][field])
+		}
+	}
+	if after := fieldsOf(project); len(after) != liveBefore {
+		t.Errorf("the project has its %d fields again: %v", liveBefore, keys(after))
+	}
+}
+
+// keptDeleted is the ids of a project's rows of table that are deleted and
+// kept (V-78): what a restore can bring back.
+func keptDeleted(t *testing.T, table, projectColumn string, project uuid.UUID) []uuid.UUID {
+	t.Helper()
+	rows, err := postgresInit.DBConn.SqlDB.Query(`SELECT id FROM `+table+` WHERE `+projectColumn+` = $1 AND deleted_at IS NOT NULL ORDER BY id`, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return ids
 }
 
 func keys(m map[string]*taskFieldModel.Field) []string {

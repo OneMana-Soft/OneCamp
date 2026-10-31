@@ -23,14 +23,14 @@ const SortedCap = 1000
 // at a time (16 Oct 2026). A page names its first, so it may pass SortedCap.
 const ReadAllPage = 5000
 
-// ErrTooMany is a ReadAll of a list longer than readAllMax.
+// ErrTooMany is a ReadAll of a list longer than ReadAllMax.
 var ErrTooMany = errors.New("too many results to read in one go")
 
-// readAllMax bounds ReadAll at ten pages, a few seconds of sorting: a longer
+// ReadAllMax bounds ReadAll at ten pages, a few seconds of sorting: a longer
 // list is read a page at a time by whoever asks for it, and a list that never
 // ends (or a block that ignores its offset) fails instead of growing until the
 // server runs out of memory.
-const readAllMax = 10 * ReadAllPage
+const ReadAllMax = 10 * ReadAllPage
 
 // Page is one window of a sorted block: First results after the first Offset.
 type Page struct {
@@ -45,37 +45,55 @@ func (p Page) Args() string {
 }
 
 // ReadAll reads all of a sorted list, size results at a time (ReadAllPage
-// when size is below 1): read gets each window in turn, from the start, until
-// one comes back short. A list longer than readAllMax is ErrTooMany; one of
-// exactly readAllMax is read whole. Run the reads in one snapshot
+// when size is below 1), as EachPage does. A list longer than ReadAllMax is
+// ErrTooMany; one of exactly ReadAllMax is read whole.
+func ReadAll[T any](size int, read func(Page) ([]T, error)) ([]T, error) {
+	var all []T
+	more, err := EachPage(size, ReadAllMax, read, func(got []T) error {
+		all = append(all, got...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if more {
+		return nil, ErrTooMany
+	}
+	return all, nil
+}
+
+// EachPage reads a sorted list size results at a time (ReadAllPage when size
+// is below 1): read gets each window in turn, from the start, and each is
+// handed it, until one comes back short or most results have been handed.
+// more says the list goes on past most. Run the reads in one snapshot
 // (dgraphInit.InSnapshot): a write between two pages moves the offsets, and a
 // result is skipped or read twice.
-func ReadAll[T any](size int, read func(Page) ([]T, error)) ([]T, error) {
+func EachPage[T any](size, most int, read func(Page) ([]T, error), each func([]T) error) (more bool, err error) {
 	if size < 1 {
 		size = ReadAllPage
 	}
-	var all []T
 	for offset := 0; ; {
-		p := Page{First: min(size, readAllMax-offset), Offset: offset}
+		p := Page{First: min(size, most-offset), Offset: offset}
 		if p.First < 1 {
-			// As many as ReadAll gives, and no short page yet: one more result
-			// makes the list too long.
-			more, err := read(Page{First: 1, Offset: offset})
+			// As many as most, and no short page yet: one more result says the
+			// list goes on.
+			next, err := read(Page{First: 1, Offset: offset})
 			if err != nil {
-				return nil, err
+				return false, err
 			}
-			if len(more) > 0 {
-				return nil, ErrTooMany
-			}
-			return all, nil
+			return len(next) > 0, nil
 		}
 		got, err := read(p)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
-		all = append(all, got...)
+		if len(got) > 0 {
+			if err := each(got); err != nil {
+				return false, err
+			}
+		}
 		if len(got) < p.First {
-			return all, nil
+			return false, nil
 		}
 		offset += p.First
 	}

@@ -64,6 +64,9 @@ const (
 // itemsOf is what a relation field links to when it links to OneCamp items:
 // one kind, or fieldTypes.ItemAny; ok is false for any other field.
 func itemsOf(f *model.Field) (target string, ok bool) {
+	if f != nil && f.Type == model.FieldPeople {
+		return fieldTypes.ItemUser, true // members, kept as a link to people is
+	}
 	if f == nil || f.Type != model.FieldRelation {
 		return "", false
 	}
@@ -71,6 +74,15 @@ func itemsOf(f *model.Field) (target string, ok bool) {
 		return "", false
 	}
 	return target, true
+}
+
+// namedPerReader is a field whose cells read as what their reader may open:
+// a link to docs, tasks, boards or projects, which nameItems names by the
+// reader. No one stored value serves every reader, so a value over one is
+// never kept (CR-92 M1). People are named alike for everyone (peopleNames).
+func namedPerReader(f *model.Field) bool {
+	target, items := itemsOf(f)
+	return items && target != fieldTypes.ItemUser
 }
 
 // itemField is a relation field linking to items, and the kind it links to.

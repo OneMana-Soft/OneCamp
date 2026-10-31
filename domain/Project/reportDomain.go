@@ -49,8 +49,7 @@ func GetDgraphReport(ctx context.Context, userDgraphUID string, since time.Time)
 	if err != nil {
 		return nil, err
 	}
-	closed := fmt.Sprintf(`(eq(task_status, %q) OR eq(task_status, %q)) AND ge(task_status_since, $since)`,
-		dgraphStruct.TASK_STATUS_DONE, dgraphStruct.TASK_STATUS_CANCELED)
+	closed := dgraphStruct.TASK_CLOSED_FILTER + ` AND ge(task_status_since, $since)`
 	query := fmt.Sprintf(`query Report($user: string, $since: string) {
 		me(func: uid($user)) {
 			user_projects @filter(not gt(project_deleted_at, %[1]s)) {

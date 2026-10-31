@@ -11,8 +11,6 @@ import (
 // query each runs now, and its user id column.
 func lookups() []struct{ lookup, query, userCol string } {
 	return []struct{ lookup, query, userCol string }{
-		{"GetFCMTokenByUserId", tokensOfPersonQuery(), "users_fcm_token.user_id"},
-		{"GetFCMTokenByListOfUserId", tokensOfPeopleQuery(3), "users_fcm_token.user_id"},
 		{"ReachableNow", reachableQuery(), "u.id"},
 	}
 }

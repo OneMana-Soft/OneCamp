@@ -95,9 +95,10 @@ func parseWorkflowDraft(raw string) (*WorkflowDraft, error) {
 
 	d.Name = strings.TrimSpace(d.Name)
 
-	// Trigger type: only the engine-supported kinds; default to message_posted.
+	// Trigger type: only the engine-supported kinds a workspace workflow
+	// takes (time is a project rule's); default to message_posted.
 	d.TriggerType = strings.TrimSpace(d.TriggerType)
-	if !IsEngineTrigger(d.TriggerType) {
+	if !IsEngineTrigger(d.TriggerType) || d.TriggerType == workflowModel.TriggerSchedule || isDueTrigger(d.TriggerType) {
 		d.TriggerType = workflowModel.TriggerMessagePosted
 	}
 

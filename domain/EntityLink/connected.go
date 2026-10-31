@@ -19,8 +19,9 @@ import (
 )
 
 // DocChips reads what a chip shows of each doc (its title, icon, parent and
-// space), keyed by lower-case uuid, in one query. A doc that isn't there is
-// left out.
+// space, and what the node is and its colour when it isn't a plain page:
+// docs F1's folders, files and links), keyed by lower-case uuid, in one
+// query. A doc that isn't there is left out.
 func DocChips(ctx context.Context, docUUIDs []string) (map[string]*dgraphStruct.DgraphDoc, error) {
 	out := map[string]*dgraphStruct.DgraphDoc{}
 	list := dgraphquery.UUIDList(docUUIDs)
@@ -32,6 +33,9 @@ func DocChips(ctx context.Context, docUUIDs []string) (map[string]*dgraphStruct.
 			doc_uuid
 			doc_title
 			doc_icon
+			doc_node_kind
+			doc_link_url
+			doc_color
 			doc_space_kind
 			doc_space_uuid
 			doc_parent { doc_uuid }

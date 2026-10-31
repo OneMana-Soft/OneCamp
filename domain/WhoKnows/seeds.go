@@ -41,13 +41,6 @@ func jsonOf(v any) string {
 	return string(b)
 }
 
-func orNone(ids []string) []string {
-	if ids == nil {
-		return []string{}
-	}
-	return ids
-}
-
 // SeedQuery is the OpenSearch body that finds up to size docs, tasks and
 // channel posts matching text, within reach, best first, live only. Every
 // value is JSON-marshalled into it, never formatted as text. DMs and group
@@ -56,8 +49,8 @@ func orNone(ids []string) []string {
 func SeedQuery(r Reach, text string, size int) string {
 	user := jsonOf(r.UserUUID)
 	words := jsonOf(text)
-	channels, projects, teams := jsonOf(orNone(r.Channels)), jsonOf(orNone(r.Projects)), jsonOf(orNone(r.Teams))
-	spaces := jsonOf(append(append([]string{}, orNone(r.Projects)...), orNone(r.Teams)...))
+	channels, projects, teams := jsonOf(helpers.NonNil(r.Channels)), jsonOf(helpers.NonNil(r.Projects)), jsonOf(helpers.NonNil(r.Teams))
+	spaces := jsonOf(append(append([]string{}, helpers.NonNil(r.Projects)...), helpers.NonNil(r.Teams)...))
 	live := `"filter": { "bool": { "must_not": [ { "exists": { "field": "deleted_date" } } ] } }`
 	return fmt.Sprintf(`{
 	"size": %d,

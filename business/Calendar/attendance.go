@@ -284,7 +284,7 @@ func (s *service) withAnswers(ctx context.Context, rows []instance, guests map[u
 			for _, a := range own {
 				if a.Key().Is(gs[i]) {
 					at := a.RespondedAt
-					gs[i].Response, gs[i].Note, gs[i].RespondedAt = a.Response, a.Note, &at
+					gs[i].Response, gs[i].Note, gs[i].RespondedAt, gs[i].Proposal = a.Response, a.Note, &at, a.Proposal
 				}
 			}
 		}
@@ -345,12 +345,17 @@ func (s *service) Answer(ctx context.Context, who *model.UserInfo, id string, in
 		kept = answerOf(guests, key)
 	}
 	note := ""
+	var keptProposal *models.Proposal
 	if kept != nil {
-		note = kept.Note
+		note, keptProposal = kept.Note, kept.Proposal
 	}
 	note = in.noteOr(note)
 	at := s.now()
-	on, err := s.store.answer(ctx, owner.ID, rid, key, response, note, at)
+	proposal, err := proposalFor(in.Proposal, keptProposal, inst.Event, owner.RRule != "", rid, at)
+	if err != nil {
+		return nil, err
+	}
+	on, err := s.store.answer(ctx, owner.ID, rid, key, response, note, at, proposal)
 	if err != nil {
 		return nil, err
 	}
@@ -362,10 +367,11 @@ func (s *service) Answer(ctx context.Context, who *model.UserInfo, id string, in
 		data["instance"] = inst.ref
 	}
 	s.announce(ctx, who, resourceEventBusiness.CalendarEventRSVP, owner, []string{me.String()}, data)
-	// Told once: the same answer again tells nobody.
-	if was == nil || was.Response != response || was.Note != note {
+	// Told once: the same answer again tells nobody; a time proposed anew is told.
+	proposed := newlyProposed(in.Proposal, was, proposal)
+	if was == nil || was.Response != response || was.Note != note || proposed != nil {
 		t := telling{what: toldAnswered, event: owner, now: inst.Event, guestsAfter: guests,
-			answer: &answered{key: key, response: response, note: note}}
+			answer: &answered{key: key, response: response, note: note, proposal: proposed}}
 		if rid != nil {
 			t.ref = inst.ref
 		}
@@ -456,5 +462,6 @@ func (s *service) GuestLink(ctx context.Context, who *model.UserInfo, id, email 
 	if g == nil {
 		return "", inputError("That address isn't one of this event's guests.")
 	}
-	return s.linkOf(ctx, owner, *g)
+	link, _, err := s.linkOf(ctx, owner, *g)
+	return link, err
 }

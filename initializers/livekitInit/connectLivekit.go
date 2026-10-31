@@ -91,16 +91,17 @@ func ConnectLiveKit(config *LiveKitConfigStruct) (err error) {
 
 }
 
-// callPublishSources is what everyone in a call may publish: their own
-// microphone and camera, and their screen.
+// CallPublishSources is everything someone in a call may publish: their own
+// microphone and camera, and their screen. What the people running the call
+// hold for everyone else narrows it (business/LiveKit's PublishSources).
 //
 // It used to follow the green room's toggles. Someone who joined muted got a
 // token without "microphone", so Unmute was refused by the server ("failed to
 // publish track, insufficient permissions") for the rest of the call, and the
 // same for the camera. A token says what a person is ALLOWED to do in the
 // call, not what they chose to do at the door: the toggles are the client's
-// state, and a later role (a webinar attendee) will narrow this on purpose.
-var callPublishSources = []string{"camera", "microphone", "screen_share", "screen_share_audio"}
+// state.
+var CallPublishSources = []string{"camera", "microphone", "screen_share", "screen_share_audio"}
 
 // CallTokenTTL is how long a minted call token can be used to connect.
 //
@@ -131,25 +132,28 @@ func CleanLanguage(raw string) string {
 	return tag
 }
 
-// callGrant is the grant every call token carries. Pure.
-func callGrant(room string, roomAdmin bool) *lka.VideoGrant {
+// callGrant is the grant a call token carries, and, as a permission, what
+// SetPublishSources gives someone already in the call: sources is what they
+// may publish (some of CallPublishSources). Pure.
+func callGrant(room string, roomAdmin bool, sources []string) *lka.VideoGrant {
 	grant := &lka.VideoGrant{
 		RoomJoin:  true,
 		Room:      room,
 		RoomAdmin: roomAdmin,
 	}
-	grant.SetCanPublish(true)
+	// LiveKit reads an empty list as every source, so none is no publishing.
+	grant.SetCanPublish(len(sources) > 0)
 	grant.SetCanSubscribe(true)
 	grant.SetCanPublishData(true)
-	grant.CanPublishSources = append([]string(nil), callPublishSources...)
+	grant.CanPublishSources = append([]string(nil), sources...)
 	return grant
 }
 
 // mintCallToken signs a token for one room, with the person's language when
 // they gave a usable one.
-func (s *LiveKitServiceStruct) mintCallToken(room, identity, name string, roomAdmin bool, language string) (string, error) {
+func (s *LiveKitServiceStruct) mintCallToken(room, identity, name string, roomAdmin bool, language string, sources []string) (string, error) {
 	at := lka.NewAccessToken(s.Config.ApiKey, s.Config.ApiSecret)
-	at.SetVideoGrant(callGrant(room, roomAdmin)).
+	at.SetVideoGrant(callGrant(room, roomAdmin, sources)).
 		SetIdentity(identity).
 		SetName(name).
 		SetValidFor(CallTokenTTL)
@@ -159,19 +163,21 @@ func (s *LiveKitServiceStruct) mintCallToken(room, identity, name string, roomAd
 	return at.ToJWT()
 }
 
-// GenerateToken mints a member's token for a call room. RoomAdmin only for the
-// host of an instant meeting.
-func (s *LiveKitServiceStruct) GenerateToken(room, identity, name string, isAdmin bool, language string) (string, error) {
-	return s.mintCallToken(room, identity, name, isAdmin, language)
+// GenerateToken mints a member's token for a call room, letting them publish
+// sources (some of CallPublishSources). RoomAdmin only for the host of an
+// instant meeting.
+func (s *LiveKitServiceStruct) GenerateToken(room, identity, name string, isAdmin bool, language string, sources []string) (string, error) {
+	return s.mintCallToken(room, identity, name, isAdmin, language, sources)
 }
 
 // GenerateGuestToken mints a single-room LiveKit token for an unauthenticated
 // guest. Unlike GenerateToken it NEVER grants RoomAdmin and is scoped to exactly
 // one room. The identity is supplied by the caller in the reserved `guest-`
 // namespace so it can never collide with a member's identity or the
-// transcription agent.
-func (s *LiveKitServiceStruct) GenerateGuestToken(room, identity, name, language string) (string, error) {
-	return s.mintCallToken(room, identity, name, false, language)
+// transcription agent. sources is what they may publish (some of
+// CallPublishSources).
+func (s *LiveKitServiceStruct) GenerateGuestToken(room, identity, name, language string, sources []string) (string, error) {
+	return s.mintCallToken(room, identity, name, false, language, sources)
 }
 
 func (s *LiveKitServiceStruct) StartRecording(ctx context.Context, roomName string, userName string) (*livekit.EgressInfo, string, error) {
@@ -386,9 +392,10 @@ func (s *LiveKitServiceStruct) GetRoom(ctx context.Context, room string) (*livek
 	return nil, ErrRoomNotFound
 }
 
-// ConnectedParticipants answers who is in a room now: connected people (and
-// the transcription agent, which callers drop with IsAgentIdentity). Someone
-// LiveKit still lists as DISCONNECTED has left. An unknown room has nobody.
+// ConnectedParticipants answers who is connected to a room now: people, and
+// whoever isn't one (the transcription agent, a recorder, a hidden watcher),
+// which callers tell apart with IsPerson. Someone LiveKit still lists as
+// DISCONNECTED has left. An unknown room has nobody.
 func (s *LiveKitServiceStruct) ConnectedParticipants(ctx context.Context, room string) ([]*livekit.ParticipantInfo, error) {
 	resp, err := s.LiveKitClient.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: room})
 	if err != nil {
@@ -435,9 +442,14 @@ func (s *LiveKitServiceStruct) RemoveParticipant(ctx context.Context, room, iden
 	return err
 }
 
-func (s *LiveKitServiceStruct) ListRooms(ctx context.Context, roomName string) (rooms []*livekit.Room, err error) {
+// ListRooms lists those of the rooms named that exist. No names, no rooms:
+// LiveKit would list every room (ListAllRooms).
+func (s *LiveKitServiceStruct) ListRooms(ctx context.Context, names ...string) (rooms []*livekit.Room, err error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
 	resp, err := s.LiveKitClient.ListRooms(ctx, &livekit.ListRoomsRequest{
-		Names: []string{roomName},
+		Names: names,
 	})
 
 	if err != nil {
@@ -465,38 +477,24 @@ func (s *LiveKitServiceStruct) ListAllRooms(ctx context.Context) (rooms []*livek
 	return
 }
 
-// RoomHasHumanParticipants reports whether the named room currently has at
-// least one human (non-agent) participant connected.
+// RoomHasHumanParticipants reports whether a person (IsPerson) is connected to
+// the named room now: the room's part of "is a call active".
 //
-// This is the authoritative "is a call active" check. It deliberately does
-// NOT use room existence (ListRooms), because:
-//   - The transcription agent auto-joins every room, so the room object
-//     outlives the human call until the agent's own empty-room timeout.
-//   - LiveKit keeps an empty room object alive for EmptyTimeout seconds
-//     after the last participant leaves.
+// It deliberately does NOT use room existence (ListRooms), nor count anyone
+// connected: the transcription agent auto-joins every room, a recording's
+// egress stays in a room nobody is in, a hidden watcher is nobody's call, and
+// LiveKit keeps an empty room object alive for EmptyTimeout seconds after the
+// last participant leaves. Each would report a call as "active" after every
+// person has hung up.
 //
-// Both cases would otherwise report a call as "active" after every human
-// has hung up. By counting non-agent participants we report inactive the
-// instant the last human leaves.
-//
-// Returns (false, nil) when the room does not exist — LiveKit's
-// ListParticipants returns NotFound for an unknown room, which we treat as
-// "no active call" rather than an error so callers don't surface spurious
-// failures on the common "no call" path.
-func (s *LiveKitServiceStruct) RoomHasHumanParticipants(ctx context.Context, roomName string) (active bool, err error) {
-	return s.roomHasHumanParticipantsExcluding(ctx, roomName, "")
-}
-
-// RoomHasHumanParticipantsExcluding is like RoomHasHumanParticipants but
-// ignores the participant with identity excludeIdentity.
-//
-// Used by the participant_left webhook: depending on LiveKit's internal
-// ordering, the just-departed participant may still appear in
-// ListParticipants for a brief window. Excluding them makes the
-// "is anyone still here?" decision correct regardless of that race, so we
-// don't miss broadcasting the call-stop when the last human leaves.
-func (s *LiveKitServiceStruct) RoomHasHumanParticipantsExcluding(ctx context.Context, roomName, excludeIdentity string) (active bool, err error) {
-	return s.roomHasHumanParticipantsExcluding(ctx, roomName, excludeIdentity)
+// An unknown room has nobody in it: (false, nil), so callers don't surface a
+// spurious failure on the common "no call" path.
+func (s *LiveKitServiceStruct) RoomHasHumanParticipants(ctx context.Context, roomName string) (bool, error) {
+	people, err := s.ConnectedParticipants(ctx, roomName)
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(people, IsPerson), nil
 }
 
 // RoomHasParticipant reports whether one identity is currently connected to a
@@ -520,44 +518,14 @@ func (s *LiveKitServiceStruct) RoomHasParticipant(ctx context.Context, roomName,
 	return slices.ContainsFunc(people, func(p *livekit.ParticipantInfo) bool { return p.Identity == identity }), nil
 }
 
-func (s *LiveKitServiceStruct) roomHasHumanParticipantsExcluding(ctx context.Context, roomName, excludeIdentity string) (active bool, err error) {
-	resp, err := s.LiveKitClient.ListParticipants(ctx, &livekit.ListParticipantsRequest{
-		Room: roomName,
-	})
-	if err != nil {
-		// Unknown room → no active call. LiveKit returns a NotFound-style
-		// error for a room that doesn't exist; treat that as inactive.
-		if isRoomNotFoundErr(err) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	for _, p := range resp.Participants {
-		// Only ACTIVE/JOINED participants count. A participant that is
-		// JOINING or DISCONNECTED is not in a live call.
-		if p.State == livekit.ParticipantInfo_DISCONNECTED {
-			continue
-		}
-		if isAgentIdentity(p.Identity) {
-			continue
-		}
-		if excludeIdentity != "" && p.Identity == excludeIdentity {
-			continue
-		}
-		return true, nil
-	}
-	return false, nil
-}
-
 // HumanActiveRoomNames returns the set of room names that currently have at
 // least one human (non-agent) participant. Used by the sidebar hydration
 // path to compute call-active state for many conversations in one pass
 // without an N+1 ListParticipants call per conversation.
 //
-// It lists all rooms, then queries participants only for rooms that report
-// NumParticipants > 0 (rooms with zero participants can't have a human).
-// Rooms whose only participant is the agent are excluded from the result.
+// It lists all rooms, then asks each one whether a person is in it (personIn).
+// A room with nobody but the agent, a recorder or a hidden watcher in it is
+// left out.
 func (s *LiveKitServiceStruct) HumanActiveRoomNames(ctx context.Context) (map[string]bool, error) {
 	// No calls server connected: no call is active. The sidebar asks on every
 	// read, and a nil client took the whole read down with it.
@@ -568,27 +536,44 @@ func (s *LiveKitServiceStruct) HumanActiveRoomNames(ctx context.Context) (map[st
 	if err != nil {
 		return nil, err
 	}
-
 	active := make(map[string]bool, len(rooms))
 	for _, room := range rooms {
-		if room.NumParticipants == 0 {
-			continue
-		}
-		hasHuman, perr := s.RoomHasHumanParticipants(ctx, room.Name)
-		if perr != nil {
-			// Don't fail the whole batch for one room; log-and-skip keeps
-			// the sidebar resilient. A transient per-room error simply
-			// means that room is treated as inactive this pass.
-			helpers.LogErrorWithContext(ctx,
-				"liveKitInit/HumanActiveRoomNames Failed to list participants for room %s err: %+v",
-				room.Name, perr)
-			continue
-		}
-		if hasHuman {
+		if s.personIn(ctx, room) {
 			active[room.Name] = true
 		}
 	}
 	return active, nil
+}
+
+// RoomsHaveHumanParticipants reports whether a person is in any of the rooms
+// named. It lists them at once, then asks who is in them only until a person
+// turns up (personIn). No names, no person. The call's dot asks it of a call's
+// breakout rooms; the sidebar, which wants every room with a person in it,
+// reads HumanActiveRoomNames.
+func (s *LiveKitServiceStruct) RoomsHaveHumanParticipants(ctx context.Context, names ...string) (bool, error) {
+	rooms, err := s.ListRooms(ctx, names...)
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(rooms, func(room *livekit.Room) bool { return s.personIn(ctx, room) }), nil
+}
+
+// personIn is the one per-room answer to "is a person in this room"
+// (RoomHasHumanParticipants), asked only where LiveKit counts someone: a room
+// with nobody connected can't have a person. A room that can't be read counts
+// as having nobody in it this pass, so one room never fails a whole read.
+func (s *LiveKitServiceStruct) personIn(ctx context.Context, room *livekit.Room) bool {
+	if room.NumParticipants == 0 {
+		return false
+	}
+	hasHuman, err := s.RoomHasHumanParticipants(ctx, room.Name)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"liveKitInit/personIn Failed to list participants for room %s err: %+v",
+			room.Name, err)
+		return false
+	}
+	return hasHuman
 }
 
 // isRoomNotFoundErr reports whether a LiveKit API error indicates the room
@@ -611,6 +596,22 @@ func isRoomNotFoundErr(err error) bool {
 // webhook handlers can skip the agent's own join/leave events.
 func IsAgentIdentity(identity string) bool {
 	return isAgentIdentity(identity)
+}
+
+// IsPerson is the one rule for whether someone connected to a call is a person
+// in it: not the transcription agent, a recorder (an egress, which LiveKit
+// connects hidden) or a hidden watcher. Only a person keeps a call going and
+// lights its dot, so every "is anyone in this call" asks this: the paths that
+// end a call (business/CallControl), the call's dot and the sidebar's
+// (RoomHasHumanParticipants), and who a call's view lists. Pure.
+func IsPerson(p *livekit.ParticipantInfo) bool {
+	if p == nil || strings.TrimSpace(p.Identity) == "" || isAgentIdentity(p.Identity) {
+		return false
+	}
+	if p.Permission != nil && p.Permission.Hidden {
+		return false
+	}
+	return p.Kind != livekit.ParticipantInfo_EGRESS && p.Kind != livekit.ParticipantInfo_AGENT
 }
 
 // DeleteRoom force-closes a LiveKit room, disconnecting all remaining

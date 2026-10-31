@@ -10,12 +10,15 @@ import (
 // a provider's pages from the name "pages" (docs programme C4): a capability
 // without a name is one the admin is never offered.
 func TestEveryImportCapabilityHasAName(t *testing.T) {
-	for bit := importProvider.CapTeams; bit <= importProvider.CapPages; bit <<= 1 {
+	for bit := importProvider.CapTeams; bit <= importProvider.CapTables; bit <<= 1 {
 		if capabilityNameMap[bit] == "" {
 			t.Errorf("capability %b has no name", bit)
 		}
 	}
 	if got := capabilityNames(importProvider.CapPages); len(got) != 1 || got[0] != "pages" {
 		t.Fatalf("CapPages is named %v, want [pages]", got)
+	}
+	if got := capabilityNames(importProvider.CapTables); len(got) != 1 || got[0] != "tables" {
+		t.Fatalf("CapTables is named %v, want [tables]", got)
 	}
 }

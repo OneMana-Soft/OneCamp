@@ -414,6 +414,8 @@ func WriteJSON(w http.ResponseWriter, status int, data interface{}, headers ...h
 	// constraint, table, column, and Postgres' own source location. Doing it here closes the class
 	// for every handler at once, including ones not yet written.
 	data = RedactErrorsInResponse(data)
+	// An empty list goes as [], never null, which a client reads as "not read yet" (V-52).
+	data = EmptyListsInResponse(data)
 	status = edgeSafeStatus(status)
 
 	out, err := json.MarshalIndent(data, "", "\t")
@@ -618,17 +620,19 @@ func HTMLToPlainText(s string) string {
 	s = htmlBlockBoundary.ReplaceAllString(s, " ")
 	s = RemoveHTMLTags(s)
 	s = html.UnescapeString(s)
-	// Normalize non-breaking spaces (&nbsp; → U+00A0) and other Unicode
-	// spaces to a regular space, then collapse runs of whitespace into a
-	// single space for a tidy one-line snippet.
+	return strings.TrimSpace(collapseSpaces(s))
+}
+
+// collapseSpaces makes each run of white space one space: non-breaking spaces
+// (&nbsp; → U+00A0) and the other Unicode spaces too, as HTML shows them.
+func collapseSpaces(s string) string {
 	s = strings.Map(func(r rune) rune {
 		if r == '\u00a0' || unicode.IsSpace(r) {
 			return ' '
 		}
 		return r
 	}, s)
-	s = htmlWhitespaceRun.ReplaceAllString(s, " ")
-	return strings.TrimSpace(s)
+	return htmlWhitespaceRun.ReplaceAllString(s, " ")
 }
 
 // TruncateRunes shortens s to at most maxRunes characters, counting CHARACTERS

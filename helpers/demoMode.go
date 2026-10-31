@@ -28,7 +28,7 @@ const DemoSignInMsg = "The demo is shared by everyone who opens it, so how it si
 // DemoPersonalAccountMsg is why the demo refuses to connect a personal
 // account, in words a visitor can act on.
 const DemoPersonalAccountMsg = "The demo is shared by everyone who opens it, so it never connects anyone's own " +
-	"Google or GitHub account: the next visitor would see it. Install OneCamp free to try this with yours."
+	"Google, GitHub or Slack account: the next visitor would see it. Install OneCamp free to try this with yours."
 
 // DemoSeededMsg is why the demo keeps its own channels, projects, teams and
 // docs from the shared visitor (business/DemoGuard).

@@ -65,12 +65,9 @@ func ListTables(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "failed to load tables"})
 		return
 	}
-	items, _, ok := narrowed(w, r, items, func(t *dataTableModel.DataTable) []appBusiness.Place {
+	items, _ = narrowed(r, items, func(t *dataTableModel.DataTable) []appBusiness.Place {
 		return []appBusiness.Place{{Kind: "table", ID: t.Id.String()}}
 	})
-	if !ok {
-		return
-	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": items})
 }
 

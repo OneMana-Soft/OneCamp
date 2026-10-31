@@ -1,6 +1,6 @@
 package business
 
-// Old imports re-checked against their source (P-IMP-3D, 4D and 5D: design
+// Old imports re-checked against their source (P-IMP-3D, 4D, 5D and 6D: design
 // release-1010/design/permissions/REMEDIATION-P-IMP-3D-6D-2026-10-25.md, and
 // main's rulings A to F). Before each provider's fix (its key in
 // importFixes.go), an import let every member of each project it filled read
@@ -31,7 +31,10 @@ package business
 // (needs_admin), who re-check it with a connection of their own
 // (RecheckWithConnection), keep it as it is, or keep its tasks to the
 // project's admins until then (ContainImport: offered, never the default,
-// ruling A).
+// ruling A). Comments held back from search (commentSearchRepair.go) are
+// released once an import's re-check has settled (commentRelease.go). An old
+// Basecamp import's re-check is of its people, not its tasks
+// (recheckPeople.go).
 
 import (
 	"context"
@@ -40,6 +43,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,6 +51,7 @@ import (
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	businessComment "github.com/akashc777/OneCamp/business/Comment"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
+	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	repairBusiness "github.com/akashc777/OneCamp/business/Repair"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
@@ -117,22 +122,22 @@ var (
 )
 
 // recheckGaps is a provider whose old imports are re-checked: the fix they
-// came before, the gap its tasks' review is of, and the gap its comments'
-// review is of ("" for a source that keeps no comment from some people).
+// came before, and the gaps its reviews are of: its tasks', its comments'
+// ("" for a source that keeps no comment from some people), or instead its
+// people's, for a source whose imports made members of people it keeps out
+// of projects (recheckPeople.go).
 type recheckGaps struct {
-	fix, tasks, comments string
+	fix, tasks, comments, people string
 }
 
 func (g recheckGaps) list() []string {
-	if g.comments == "" {
-		return []string{g.tasks}
-	}
-	return []string{g.tasks, g.comments}
+	return slices.DeleteFunc([]string{g.tasks, g.comments, g.people}, func(gap string) bool { return gap == "" })
 }
 
 var rechecks = map[string]recheckGaps{
-	importModels.ProviderJira:   {JiraRestrictionsFixed, reviewModel.GapJiraSecurity, reviewModel.GapJiraComments},
-	importModels.ProviderLinear: {LinearPrivateTeamsFixed, reviewModel.GapLinearTeams, ""},
+	importModels.ProviderJira:     {fix: JiraRestrictionsFixed, tasks: reviewModel.GapJiraSecurity, comments: reviewModel.GapJiraComments},
+	importModels.ProviderLinear:   {fix: LinearPrivateTeamsFixed, tasks: reviewModel.GapLinearTeams},
+	importModels.ProviderBasecamp: {fix: BasecampClientsFixed, people: reviewModel.GapBasecampClients},
 }
 
 func recheckProviders() []string {
@@ -167,6 +172,8 @@ type recheckCounts struct {
 	Reason               string         `json:"reason,omitempty"`
 	CheckedBy            *uuid.UUID     `json:"checked_by,omitempty"`
 	Cursor               *recheckCursor `json:"cursor,omitempty"`
+	Clients              int            `json:"clients,omitempty"`         // people the source keeps out of projects, in one here: listed
+	PeopleUnlisted       int            `json:"people_unlisted,omitempty"` // people the source no longer lists, in one here: listed
 }
 
 // recheckCursor is the last task a pass finished: its id map kind and source id.
@@ -195,13 +202,16 @@ func list(ids []uuid.UUID, id uuid.UUID) []uuid.UUID {
 }
 
 // RecheckCandidates records, once per install, a review of each gap for each
-// live project of each import that ran before its provider's fix:
-// rechecking, or needs_admin when whoever ran it can't act any more or has no
-// stored connection. A server writes them as it starts, before the re-check
-// (StartRechecks) and the admins' notice, which waits while any is being
-// re-checked.
+// project (archived ones too) of each import that ran before its provider's
+// fix: rechecking, or needs_admin when whoever ran it can't act any more or
+// has no stored connection. A server writes them as it starts, before the
+// re-check (StartRechecks) and the admins' notice, which waits while any is
+// being re-checked. Its key names the providers it covers, so an install
+// that ran it before a provider's re-check came records that provider's
+// reviews too (a second recording adds nothing).
 var RecheckCandidates = repairBusiness.Once[recheckCandidates]{
-	Key: recheckCandidatesKey, Name: "import.access-review-candidates", Tries: 12, Repair: writeRecheckCandidates,
+	Key: recheckCandidatesKey + ":" + strings.Join(recheckProviders(), ","), Name: "import.access-review-candidates", Tries: 12,
+	Repair: writeRecheckCandidates,
 }
 
 // recheckCandidates is how many reviews RecheckCandidates recorded.
@@ -213,6 +223,7 @@ func (n recheckCandidates) String() string {
 
 func writeRecheckCandidates(ctx context.Context) (recheckCandidates, error) {
 	var added int64
+	var unchecked []uuid.UUID
 	for _, provider := range recheckProviders() {
 		g := rechecks[provider]
 		before, err := FixedBefore(g.fix)
@@ -228,8 +239,30 @@ func writeRecheckCandidates(ctx context.Context) (recheckCandidates, error) {
 		if err != nil {
 			return recheckCandidates(added), err
 		}
+		if g.people != "" {
+			unchecked = append(unchecked, needingAdmins(cands)...)
+		}
+	}
+	// Imports of people that can't be re-checked from the start list everyone
+	// they added for their admins, as one that stops does (toAdmins).
+	if len(unchecked) > 0 {
+		if err := listEveryone(ctx, unchecked); err != nil {
+			return recheckCandidates(added), err
+		}
 	}
 	return recheckCandidates(added), nil
+}
+
+// needingAdmins is the imports among cands whose reviews need an admin from
+// the start, once each. Pure.
+func needingAdmins(cands []reviewModel.AccessCandidate) []uuid.UUID {
+	var ids []uuid.UUID
+	for _, c := range cands {
+		if c.Reason != "" && !slices.Contains(ids, c.ImportID) {
+			ids = append(ids, c.ImportID)
+		}
+	}
+	return ids
 }
 
 // StartRechecks re-checks, in the background from a server's start, each
@@ -267,9 +300,10 @@ func (r recheckReport) String() string {
 // running, or another server is re-checking it.
 var errRecheckWaits = errors.New("the import's re-check waits")
 
-// recheckPending re-checks each import with a review being re-checked. It
-// fails while any is left, naming each that failed and why, so its caller
-// logs it and tries again.
+// recheckPending re-checks each import with a review being re-checked, and
+// then releases the held-back comments of those that settled, whether or not
+// another waits. It fails while any is left, naming each that failed and why,
+// so its caller logs it and tries again.
 func recheckPending(ctx context.Context) (recheckReport, error) {
 	var rep recheckReport
 	ids, err := reviewModel.ImportsInState(ctx, recheckProviders(), reviewModel.StateRechecking)
@@ -292,10 +326,12 @@ func recheckPending(ctx context.Context) (recheckReport, error) {
 		}
 		rep.Settled++
 	}
+	released := releaseSettled(ctx)
 	if rep.Waiting > 0 {
-		return rep, errors.Join(append([]error{fmt.Errorf("%d imports still to re-check", rep.Waiting)}, failed...)...)
+		errs := append([]error{fmt.Errorf("%d imports still to re-check", rep.Waiting)}, failed...)
+		return rep, errors.Join(append(errs, released)...)
 	}
-	return rep, nil
+	return rep, released
 }
 
 // recheckLock is the advisory lock a server holds while it re-checks,
@@ -325,12 +361,21 @@ func lockImport(ctx context.Context, importID uuid.UUID) (func(), error) {
 }
 
 // recheckUnit is one project of an import being re-checked: its reviews of
-// tasks and of comments (nil when its source keeps no comment from some),
-// with their counts so far.
+// tasks and of comments (nil when its source keeps no comment from some), or
+// of people, with their counts so far.
 type recheckUnit struct {
-	project                    uuid.UUID
-	tasks, comments            *reviewModel.AccessReview
-	taskCounts, commentsCounts recheckCounts
+	project                                  uuid.UUID
+	tasks, comments, people                  *reviewModel.AccessReview
+	taskCounts, commentsCounts, peopleCounts recheckCounts
+}
+
+// lead is the counts of the review a unit's re-check leads with: its
+// people's, or its tasks'.
+func (u *recheckUnit) lead() *recheckCounts {
+	if u.people != nil {
+		return &u.peopleCounts
+	}
+	return &u.taskCounts
 }
 
 // recheck is one import being re-checked with the connection of cred
@@ -375,25 +420,29 @@ func recheckImport(ctx context.Context, job *importModels.Job) error {
 	if err != nil || len(units) == 0 {
 		return err
 	}
-	g, source := rechecks[job.Provider], importProvider.Get(job.Provider)
-	rc, ok := source.(importProvider.Rechecker)
-	if !ok || g.tasks == "" {
-		return fmt.Errorf("%s has no re-check", job.Provider)
-	}
-	r := &recheck{job: job, source: rc, checker: units[0].taskCounts.CheckedBy, at: time.Now()}
+	r := &recheck{job: job, checker: units[0].lead().CheckedBy, at: time.Now()}
 	switch {
 	case r.checker != nil:
 		r.cred = *r.checker
 	case job.TriggeredBy != nil:
 		r.cred = *job.TriggeredBy
 	default:
-		return toAdmins(ctx, job.Id, reasonOwnerGone)
+		return toAdmins(ctx, job, reasonOwnerGone)
 	}
 	if r.actor, err = userDomain.ActorByUUID(ctx, r.cred); errors.Is(err, userDomain.ErrNoActor) {
-		return toAdmins(ctx, job.Id, reasonOwnerGone)
+		return toAdmins(ctx, job, reasonOwnerGone)
 	} else if err != nil {
 		return err
 	}
+	g := rechecks[job.Provider]
+	if g.people != "" {
+		return r.recheckPeople(ctx, units)
+	}
+	rc, ok := importProvider.Get(job.Provider).(importProvider.Rechecker)
+	if !ok || g.tasks == "" {
+		return fmt.Errorf("%s has no re-check", job.Provider)
+	}
+	r.source = rc
 	if err := sameSource(ctx, rc, job, r.cred); err != nil {
 		return r.failed(ctx, units, err)
 	}
@@ -455,9 +504,11 @@ func unitsOf(ctx context.Context, job *importModels.Job) ([]*recheckUnit, error)
 			u.tasks, u.taskCounts = rev, countsOf(rev)
 		case g.comments:
 			u.comments, u.commentsCounts = rev, countsOf(rev)
+		case g.people:
+			u.people, u.peopleCounts = rev, countsOf(rev)
 		}
 	}
-	return slices.DeleteFunc(units, func(u *recheckUnit) bool { return u.tasks == nil }), nil
+	return slices.DeleteFunc(units, func(u *recheckUnit) bool { return u.tasks == nil && u.people == nil }), nil
 }
 
 // sameSource proves cred's connection reaches the import's own source: a
@@ -512,18 +563,24 @@ func answersAsRecorded(sample []importModels.MappedTask, got map[string]importPr
 	return answered*2 > len(sample) && inPlace*2 >= answered
 }
 
-// readSource reads the tasks (and comments) from the source, waiting out
-// its rate limit up to recheckWaits times.
+// readSource reads the tasks (and comments) from the source (waitOut).
 func readSource(ctx context.Context, rc importProvider.Rechecker, cred uuid.UUID, keys []string, comments map[string][]string) (map[string]importProvider.RecheckedTask, error) {
+	return waitOut(ctx, func() (map[string]importProvider.RecheckedTask, error) { return rc.Recheck(ctx, cred, keys, comments) })
+}
+
+// waitOut reads from a source, waiting out its rate limit up to recheckWaits
+// times.
+func waitOut[T any](ctx context.Context, read func() (T, error)) (T, error) {
 	for waited := 0; ; waited++ {
-		got, err := rc.Recheck(ctx, cred, keys, comments)
+		got, err := read()
 		var limited *importProvider.ErrRateLimited
 		if !errors.As(err, &limited) || waited == recheckWaits {
 			return got, err
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			var none T
+			return none, ctx.Err()
 		case <-time.After(limited.RetryAfter):
 		}
 	}
@@ -536,15 +593,15 @@ func readSource(ctx context.Context, rc importProvider.Rechecker, cred uuid.UUID
 func (r *recheck) failed(ctx context.Context, units []*recheckUnit, err error) error {
 	switch {
 	case errors.Is(err, importModels.ErrTokenNotFound), errors.Is(err, importModels.ErrTokenUnreadable):
-		return toAdmins(ctx, r.job.Id, reasonNoConnection)
+		return toAdmins(ctx, r.job, reasonNoConnection)
 	case errors.Is(err, importProvider.ErrTokenRejected):
-		return toAdmins(ctx, r.job.Id, reasonConnectionExpired)
+		return toAdmins(ctx, r.job, reasonConnectionExpired)
 	case errors.Is(err, errOtherSource):
-		return toAdmins(ctx, r.job.Id, reasonOtherSource)
+		return toAdmins(ctx, r.job, reasonOtherSource)
 	}
-	failures := units[0].taskCounts.Failures + 1
+	failures := units[0].lead().Failures + 1
 	if failures >= recheckFailures {
-		return toAdmins(ctx, r.job.Id, reasonSourceFailing)
+		return toAdmins(ctx, r.job, reasonSourceFailing)
 	}
 	if _, serr := reviewModel.MoveAccessReviews(ctx, r.job.Id, []string{reviewModel.StateRechecking}, reviewModel.StateRechecking,
 		map[string]any{"failures": failures}, nil); serr != nil {
@@ -560,7 +617,7 @@ func (r *recheck) failed(ctx context.Context, units []*recheckUnit, err error) e
 func (r *recheck) retryLater(ctx context.Context, units []*recheckUnit) error {
 	retries := units[0].taskCounts.Retries + 1
 	if retries >= recheckFailures {
-		return toAdmins(ctx, r.job.Id, reasonTasksFailing)
+		return toAdmins(ctx, r.job, reasonTasksFailing)
 	}
 	failing := errors.Join(append([]error{errTasksFailing}, r.taskErrs...)...)
 	if _, err := reviewModel.MoveAccessReviews(ctx, r.job.Id, []string{reviewModel.StateRechecking}, reviewModel.StateRechecking,
@@ -571,15 +628,22 @@ func (r *recheck) retryLater(ctx context.Context, units []*recheckUnit) error {
 }
 
 // toAdmins hands an import's reviews being re-checked to its admins, with
-// why, and records it.
-func toAdmins(ctx context.Context, importID uuid.UUID, reason string) error {
-	if _, err := reviewModel.MoveAccessReviews(ctx, importID, []string{reviewModel.StateRechecking}, reviewModel.StateNeedsAdmin,
+// why, and records it. An import of people first lists everyone it added,
+// as 510 does, since its source can't tell them apart now; a failure there
+// leaves it being re-checked, for the next pass.
+func toAdmins(ctx context.Context, job *importModels.Job, reason string) error {
+	if rechecks[job.Provider].people != "" {
+		if err := listEveryone(ctx, []uuid.UUID{job.Id}); err != nil {
+			return err
+		}
+	}
+	if _, err := reviewModel.MoveAccessReviews(ctx, job.Id, []string{reviewModel.StateRechecking}, reviewModel.StateNeedsAdmin,
 		map[string]any{"reason": reason}, nil); err != nil {
 		return err
 	}
 	if err := auditBusiness.RecordForPrincipal(ctx, nil, "", auditBusiness.ActorSystem, "import.access_needs_admin",
-		auditBusiness.CategorySecurity, "An old import's access needs an admin", map[string]any{"import_id": importID.String(), "reason": reason}); err != nil {
-		helpers.LogErrorWithContext(ctx, "Re-check of import %s: recording that it needs an admin: %v", importID, err)
+		auditBusiness.CategorySecurity, "An old import's access needs an admin", map[string]any{"import_id": job.Id.String(), "reason": reason}); err != nil {
+		helpers.LogErrorWithContext(ctx, "Re-check of import %s: recording that it needs an admin: %v", job.Id, err)
 	}
 	return nil
 }
@@ -1045,7 +1109,8 @@ func (r *recheck) recordDone(ctx context.Context, units []*recheckUnit) {
 			"already_restricted": u.taskCounts.AlreadyRestricted, "opened_since": u.taskCounts.OpenedSince, "opened": u.taskCounts.Opened,
 			"creator_outside": u.taskCounts.CreatorOutside, "assignee_outside": u.taskCounts.AssigneeOutside,
 			"gone_or_hidden": u.taskCounts.GoneOrHidden, "comments_hidden": u.commentsCounts.CommentsHidden,
-			"comments_gone_or_hidden": u.commentsCounts.GoneOrHidden} {
+			"comments_gone_or_hidden": u.commentsCounts.GoneOrHidden, "clients": u.peopleCounts.Clients,
+			"people_unlisted": u.peopleCounts.PeopleUnlisted} {
 			prev, _ := total[k].(int)
 			total[k] = prev + n
 		}
@@ -1064,11 +1129,7 @@ func RecheckWithConnection(ctx context.Context, importID, by uuid.UUID) error {
 	if err != nil {
 		return err
 	}
-	rc, ok := importProvider.Get(job.Provider).(importProvider.Rechecker)
-	if !ok {
-		return ErrNotRecheckable
-	}
-	switch err := sameSource(recheckContext(ctx), rc, job, by); {
+	switch err := proveSource(recheckContext(ctx), job, by); {
 	case errors.Is(err, importModels.ErrTokenNotFound), errors.Is(err, importModels.ErrTokenUnreadable),
 		errors.Is(err, importProvider.ErrTokenRejected):
 		return ErrNoConnection
@@ -1089,6 +1150,26 @@ func RecheckWithConnection(ctx context.Context, importID, by uuid.UUID) error {
 		return recheckReport{Imports: 1, Settled: 1}, recheckImport(ctx, job)
 	})
 	return nil
+}
+
+// proveSource proves cred's connection reaches the import's own source, by
+// what its re-check reads: its people (samePeople) or its tasks
+// (sameSource).
+func proveSource(ctx context.Context, job *importModels.Job, cred uuid.UUID) error {
+	source := importProvider.Get(job.Provider)
+	if rechecks[job.Provider].people != "" {
+		rp, ok := source.(importProvider.PeopleRechecker)
+		if !ok {
+			return ErrNotRecheckable
+		}
+		_, err := samePeople(ctx, rp, job, cred)
+		return err
+	}
+	rc, ok := source.(importProvider.Rechecker)
+	if !ok {
+		return ErrNotRecheckable
+	}
+	return sameSource(ctx, rc, job, cred)
 }
 
 // jobAwaitingAdmin is the import an admin acts on, refused when it has no
@@ -1123,6 +1204,7 @@ func inBackground(ctx context.Context, what string, importID uuid.UUID, do func(
 			helpers.LogErrorWithContext(ctx, "Admin's %s of import %s stopped: %v", what, importID, err)
 		default:
 			helpers.LogInfoWithContext(ctx, "Admin's %s of import %s: %s", what, importID, done)
+			releaseInBackground(ctx)
 		}
 	})
 }
@@ -1153,6 +1235,11 @@ func UndoRecheck(ctx context.Context, importID, by uuid.UUID) error {
 	job, err := jobAwaitingAdmin(ctx, importID, reviewModel.StateRechecked, reviewModel.StateContained)
 	if err != nil {
 		return err
+	}
+	if rechecks[job.Provider].tasks == "" {
+		// A re-check of people changes nothing to put back: it lists them
+		// for an admin, who decides about each (business/ImportReview).
+		return ErrNotRecheckable
 	}
 	inBackground(ctx, "undo", job.Id, func(ctx context.Context) (fmt.Stringer, error) {
 		return undoRecheck(ctx, job.Id, by)
@@ -1254,14 +1341,14 @@ func undoChange(ctx context.Context, ch, kept *reviewModel.AccessChange, who tas
 		if err := json.Unmarshal(ch.Before, &before); err != nil || before.Assignee == "" {
 			return false, nil
 		}
-		// Someone who has left the project since, or whose account is
-		// deactivated, stays off it.
+		// Someone who has left the project since, or can't be given work
+		// any more, stays off it.
 		in, err := projectBusiness.MembersAmong(ctx, dg.Project.Uuid, []string{before.Assignee})
 		if err != nil || !in[before.Assignee] {
 			return false, err
 		}
 		person, err := userDomain.GetDgraphUserInfoByUUID(ctx, before.Assignee)
-		if err != nil || person == nil || helpers.IsSoftDeleted(person.DeletedAt) {
+		if err != nil || person == nil || !principalBusiness.CanBeAssigned(person).Allowed {
 			return false, err
 		}
 		if helpers.IsSoftDeleted(dg.DeletedAt) {
@@ -1347,6 +1434,11 @@ func ContainImport(ctx context.Context, importID, by uuid.UUID) error {
 	job, err := jobAwaitingAdmin(ctx, importID, reviewModel.StateNeedsAdmin)
 	if err != nil {
 		return err
+	}
+	if rechecks[job.Provider].tasks == "" {
+		// An import of people has no tasks to keep: its people are listed
+		// for an admin already (toAdmins).
+		return ErrNotRecheckable
 	}
 	inBackground(ctx, "containment", job.Id, func(ctx context.Context) (fmt.Stringer, error) {
 		n, err := containImport(ctx, job, by)

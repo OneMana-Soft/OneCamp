@@ -333,14 +333,16 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 		googleEventID, syncGuests := *existingEvent.GoogleCalendarEventId, eventInfo.Participants != nil
 		helpers.GoSafeNamed("business/Calendar/eventBusiness:UpdateEvent", func() {
 			bgCtx := context.Background()
-			updateErr := integrationBusiness.UpdateGoogleCalendarEvent(bgCtx, googleEventID, eventInfo, userInfo, syncGuests)
+			updateErr := updateGoogleEvent(bgCtx, googleEventID, eventInfo, userInfo, syncGuests)
 			var goneErr *integrationBusiness.GCalEventGoneError
 			if errors.As(updateErr, &goneErr) {
 				// Deleted on Google: forget the copy in both stores, so later
-				// edits stop failing against it.
+				// edits stop failing against it. Only the copy, and only while
+				// it is still the gone one: an edit made since keeps its title,
+				// words and times, and a copy made since stays.
 				helpers.MessageLogs.InfoLog.Printf("UpdateEvent: clearing stale GCal ID %s for event %s", goneErr.GoogleEventId, eventUUID.String())
-				_ = domain.UpdateCalendarEvent(bgCtx, eventUUID, eventInfo.Title, eventInfo.Description, startTime, endTime, nil, time.Now())
-				_ = domain.ClearDgraphEventGoogleId(bgCtx, existingEvent.Uid)
+				_ = domain.ForgetCalendarEventGoogleCopy(bgCtx, eventUUID, googleEventID)
+				_ = domain.ForgetDgraphEventGoogleCopy(bgCtx, existingEvent.Uid, googleEventID)
 			}
 		})
 	}
@@ -354,6 +356,9 @@ const eventUninvited = "event.uninvited"
 
 // tellNotice tells people; swapped in tests.
 var tellNotice = notificationBusiness.Tell
+
+// updateGoogleEvent writes an edit to an event's Google copy; swapped in tests.
+var updateGoogleEvent = integrationBusiness.UpdateGoogleCalendarEvent
 
 // tellRemovedGuests tells the people taken off an event, in their inbox and
 // by a push that opens their calendar: who took them off and when it was,
@@ -419,7 +424,7 @@ func DeleteEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserI
 		return err
 	}
 
-	err = domain.DeleteDgraphEvent(ctx, eventUUID.String())
+	err = domain.DeleteDgraphEvent(ctx, eventUUID.String(), currentTime)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/DeleteEvent failed to delete event in dgraph err: %+v", err)
 		return err

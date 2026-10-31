@@ -17,20 +17,14 @@ package integration_test
 // Run: go test -tags=integration ./tests/integration/ -run TestOnlyThoseWhoMayAddToADocUploadItsFiles -v
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"mime/multipart"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
-	userController "github.com/akashc777/OneCamp/controllers/User"
-	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/minioInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -70,23 +64,8 @@ func TestOnlyThoseWhoMayAddToADocUploadItsFiles(t *testing.T) {
 	// (VerifyAuthOnlyPostgres) leaves the request: the Postgres account only.
 	upload := func(who, docUUID string) (int, map[string]any) {
 		t.Helper()
-		var body bytes.Buffer
-		mw := multipart.NewWriter(&body)
-		part, _ := mw.CreateFormFile("file", "bands.txt")
-		_, _ = part.Write([]byte("band A, band B"))
-		_ = mw.WriteField("jsonData", `{"src_key":"doc","src_value":"`+docUUID+`"}`)
-		_ = mw.Close()
-		req := httptest.NewRequest(http.MethodPost, "/uploadFile", &body)
-		req.Header.Set("Content-Type", mw.FormDataContentType())
-		var u userModels.UserInfo
-		u.UserPostgresInfo.Id = people[who]
-		u.UserPostgresInfo.EmailID = people[who].String() + "@example.test"
-		req = req.WithContext(context.WithValue(ctx, helpers.UserInfoContextKey, u))
-		rec := httptest.NewRecorder()
-		userController.UploadFile(rec, req)
-		var out map[string]any
-		_ = json.Unmarshal(rec.Body.Bytes(), &out)
-		return rec.Code, out
+		as := userModels.User{Id: people[who], EmailID: people[who].String() + "@example.test"}
+		return uploadAs(t, as, "bands.txt", []byte("band A, band B"), `{"src_key":"doc","src_value":"`+docUUID+`"}`)
 	}
 	stored := func(who string) int {
 		t.Helper()

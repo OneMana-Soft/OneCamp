@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -45,6 +46,28 @@ func PeopleOf(ctx context.Context, groupingID string) ([]*dgraphStruct.DgraphUse
 		}
 	}
 	return nil, ErrNoConversation
+}
+
+// ChannelPeople is a channel's members as the graph has them (uid, uuid and
+// the flags that say who can sign in), whoever asks: who a board made in the
+// channel's call is shared with. ErrNoConversation when there is no such
+// channel.
+func ChannelPeople(ctx context.Context, channelUUID string) ([]*dgraphStruct.DgraphUser, error) {
+	// ch_uuid answers a channel with nobody in it, which isn't a missing one.
+	c, err := dgexec.First[struct {
+		People []*dgraphStruct.DgraphUser `json:"ch_members"`
+	}](ctx, `query ChannelPeople($ch: string) {
+		c(func: eq(ch_uuid, $ch)) {
+			ch_uuid
+			ch_members { uid user_uuid is_bot is_external user_deleted_at }
+		} }`, map[string]string{"$ch": channelUUID}, "c")
+	if errors.Is(err, dgexec.ErrNotFound) {
+		return nil, ErrNoConversation
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c.People, nil
 }
 
 // ChannelNode is a channel's graph node and name. ErrNoConversation when there

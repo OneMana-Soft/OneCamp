@@ -292,7 +292,7 @@ func TestGraphToolsOverMCP(t *testing.T) {
 		for _, args := range []map[string]any{
 			{"kind": "doc", "uuid": people["olu"].UserDgraphInfo.Uid},
 			{"kind": "doc", "uuid": `{ q(func: has(doc_uuid)) { uid doc_title } }`},
-			{"kind": "folder", "uuid": id["plan"]},
+			{"kind": "nonsense", "uuid": id["plan"]},
 		} {
 			if text, refused := tool(miaTok, "related_items", args); refused == "" {
 				t.Errorf("%v answered: %s", args, text)

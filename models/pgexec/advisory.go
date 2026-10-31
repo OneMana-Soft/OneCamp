@@ -33,3 +33,27 @@ func TryAdvisoryLock(ctx context.Context, key int64) (release func() error, held
 		return err
 	}, true, nil
 }
+
+// Capped runs add, in one transaction (InTx), when count says fewer than
+// limit are there, and says whether it ran. The count and add hold the
+// transaction lock named key: counted apart from the write, two writes at
+// once could each see room for the last one. A call's polls and questions
+// are capped this way.
+func Capped(ctx context.Context, key string, limit int, count func(context.Context) (int, error), add func(context.Context) error) (bool, error) {
+	added := false
+	err := InTx(ctx, func(ctx context.Context) error {
+		if _, err := Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, key); err != nil {
+			return err
+		}
+		n, err := count(ctx)
+		if err != nil || n >= limit {
+			return err
+		}
+		if err := add(ctx); err != nil {
+			return err
+		}
+		added = true
+		return nil
+	})
+	return added && err == nil, err
+}

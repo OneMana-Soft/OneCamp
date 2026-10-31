@@ -25,7 +25,6 @@ import (
 	domain "github.com/akashc777/OneCamp/domain/User"
 	userChannelNotificationDomain "github.com/akashc777/OneCamp/domain/UserChannelNotification"
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/helpers/avscan"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/helpers/uploadsafe"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -43,7 +42,6 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/google/uuid"
-	"github.com/minio/minio-go/v7"
 	"golang.org/x/oauth2"
 )
 
@@ -126,111 +124,42 @@ func CreateExternalGitHubUser(ctx context.Context, login string, displayName str
 }
 
 func UploadUserFile(ctx context.Context, reader io.Reader, objectSize int64, fileName string, srcKey string, srcValue string) (u uuid.UUID, err error) {
-	// Upload the test file with PutObject
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-	// Magic-byte / safe-content-type validation. PrepareUpload peeks
-	// the leading bytes to derive the real Content-Type, coerces
-	// dangerous extensions (.html, .svg, .js, etc.) to
-	// application/octet-stream, and forces Content-Disposition:
-	// attachment so a malicious upload can't be served inline by the
-	// browser via the presigned MinIO GET.
-	safe, err := uploadsafe.PrepareUpload(reader, fileName, uploadsafe.Options{
-		AllowInlineImages: true, // images are visibly previewable in chat
-	})
+	// The upload checked, stored and scanned (attachmentBusiness.StoreUpload):
+	// images are visibly previewable in chat, so they may show inline.
+	stored, err := attachmentBusiness.StoreUpload(ctx, reader, objectSize, fileName, userInfo.UserPostgresInfo.Id,
+		attachmentBusiness.StoreOptions{Safe: uploadsafe.Options{AllowInlineImages: true}})
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("upload validation: %w", err)
-	}
-	u = uuid.New()
-	bucketName := helpers.UserUploadBucket()
-	objName := fmt.Sprintf("%v/%v_%v", userInfo.UserPostgresInfo.Id, u.String(), safe.SafeName)
-	fullObjName := fmt.Sprintf("%v/%v/%v_%v", "userFileUpload", userInfo.UserPostgresInfo.Id, u.String(), safe.SafeName)
-
-	uploadInfo, scanResult, err := attachmentBusiness.SafeUploadToMinio(ctx, safe.Reader,
-		attachmentBusiness.SafeUploadOptions{
-			Bucket:             bucketName,
-			ObjectName:         fullObjName,
-			ContentType:        safe.ContentType,
-			ContentDisposition: safe.ContentDisposition,
-			Size:               objectSize,
-		})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/UploadFile Failed to upload the file err: %+v",
-			err)
 		return uuid.Nil, err
 	}
-	_ = uploadInfo // size from MinIO is informational here
-	if scanResult.Verdict == avscan.VerdictInfected {
-		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucketName, fullObjName,
-			minio.RemoveObjectOptions{})
-		helpers.LogWarnWithContext(ctx,
-			"business/UploadFile rejected by AV: %s (%s)", safe.SafeName, scanResult.Signature)
-		return uuid.Nil, fmt.Errorf("upload blocked: %w (%s)", avscan.ErrInfected, scanResult.Signature)
-	}
-
-	err = attachmentBusiness.CreateAttachment(ctx, u, objName, userInfo.UserPostgresInfo.Id, srcKey, srcValue)
+	err = attachmentBusiness.CreateAttachment(ctx, stored.ID, stored.ObjKey, userInfo.UserPostgresInfo.Id, srcKey, srcValue)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/UploadFile Failed to add attachment to postgres err: %+v",
 			err)
-		// Roll back the MinIO upload so a retry doesn't leak orphans.
-		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucketName, fullObjName,
-			minio.RemoveObjectOptions{})
-		return
+		// Roll back the upload so a retry doesn't leak orphans.
+		_ = attachmentBusiness.RemoveStored(ctx, stored.ObjKey)
+		return uuid.Nil, err
 	}
-
-	return
+	return stored.ID, nil
 }
 
 func UploadUserFileToChannelsAndChats(ctx context.Context, reader io.Reader, objectSize int64, fileName string, channelUUIDs []string, chatUUIDs []string) (u uuid.UUID, err error) {
-	// Upload the test file with PutObject
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-	safe, err := uploadsafe.PrepareUpload(reader, fileName, uploadsafe.Options{
-		AllowInlineImages: true,
-	})
+	stored, err := attachmentBusiness.StoreUpload(ctx, reader, objectSize, fileName, userInfo.UserPostgresInfo.Id,
+		attachmentBusiness.StoreOptions{Safe: uploadsafe.Options{AllowInlineImages: true}})
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("upload validation: %w", err)
-	}
-	u = uuid.New()
-	bucketName := helpers.UserUploadBucket()
-	objName := fmt.Sprintf("%v/%v_%v", userInfo.UserPostgresInfo.Id, u.String(), safe.SafeName)
-	fullObjName := fmt.Sprintf("%v/%v/%v_%v", "userFileUpload", userInfo.UserPostgresInfo.Id, u.String(), safe.SafeName)
-
-	uploadInfo, scanResult, err := attachmentBusiness.SafeUploadToMinio(ctx, safe.Reader,
-		attachmentBusiness.SafeUploadOptions{
-			Bucket:             bucketName,
-			ObjectName:         fullObjName,
-			ContentType:        safe.ContentType,
-			ContentDisposition: safe.ContentDisposition,
-			Size:               objectSize,
-		})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/UploadUserFileToChannelsAndChats Failed to upload the file err: %+v",
-			err)
 		return uuid.Nil, err
 	}
-	_ = uploadInfo
-	if scanResult.Verdict == avscan.VerdictInfected {
-		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucketName, fullObjName,
-			minio.RemoveObjectOptions{})
-		helpers.LogWarnWithContext(ctx,
-			"business/UploadUserFileToChannelsAndChats rejected by AV: %s (%s)",
-			safe.SafeName, scanResult.Signature)
-		return uuid.Nil, fmt.Errorf("upload blocked: %w (%s)", avscan.ErrInfected, scanResult.Signature)
-	}
-
-	err = attachmentBusiness.CreateAttachmentForChannelsAndChats(ctx, u, objName, userInfo.UserPostgresInfo.Id, channelUUIDs, chatUUIDs)
+	err = attachmentBusiness.CreateAttachmentForChannelsAndChats(ctx, stored.ID, stored.ObjKey, userInfo.UserPostgresInfo.Id, channelUUIDs, chatUUIDs)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/UploadUserFileToChannelsAndChats Failed to add attachment to postgres err: %+v",
 			err)
-		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucketName, fullObjName,
-			minio.RemoveObjectOptions{})
-		return
+		_ = attachmentBusiness.RemoveStored(ctx, stored.ObjKey)
+		return uuid.Nil, err
 	}
-
-	return
+	return stored.ID, nil
 }
 
 // RecordingURLTTL is how long a recording's playback link lives: its length
@@ -294,7 +223,7 @@ const PlaceFileRedirectMaxAge = 4 * time.Minute
 // lasting ttl.
 func GetFileURLByObjectNameFor(ctx context.Context, objName string, ttl time.Duration) (objURL string, err error) {
 	bucketName := helpers.UserUploadBucket()
-	completeObjectName := fmt.Sprintf("%v/%v", "userFileUpload", objName)
+	completeObjectName := attachmentBusiness.ObjectName(objName)
 	// Get a pre-signed URL for the object.
 	url, err := minioInit.MinioClient.PresignedGetObject(ctx, bucketName, completeObjectName, ttl, nil)
 	if err != nil {
@@ -1432,11 +1361,12 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID uuid.UUI
 
 	// Active Call Hydration
 	//
-	// A call is "active" only when a human (non-agent) participant is in the
-	// room. We can't use bare room existence here: the transcription agent
-	// auto-joins every room and LiveKit keeps an empty room alive for its
-	// EmptyTimeout, so existence would keep the call dot lit after everyone
-	// has left. HumanActiveRoomNames filters the agent out.
+	// A call is "active" only while a person is in one of its rooms: not the
+	// agent, a recorder or a hidden watcher. We can't use bare room existence
+	// here: the transcription agent auto-joins every room and LiveKit keeps an
+	// empty room alive for its EmptyTimeout, so existence would keep the call
+	// dot lit after everyone has left. HumanActiveRoomNames answers the calls'
+	// own rooms, by IsCallActive's rule.
 	activeRoomMap, lrErr := LiveKitBusiness.HumanActiveRoomNames(ctx)
 	if lrErr != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetDgraphUserInfoByUUIDForSidebarNav Failed to list livekit rooms err: %+v", lrErr)

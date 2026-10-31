@@ -205,13 +205,9 @@ func BuildPlan(ctx context.Context, jobId uuid.UUID, arc *Archive) (*importAdapt
 		}
 	}
 
-	// One chunk per file URL. Files chunks live behind a separate worker
-	// pool so they don't block message imports.
-	if totalFiles > 0 {
-		// Files are scheduled lazily by the message worker (it knows the
-		// concrete file id and url after parsing each message). We don't
-		// pre-enqueue here to avoid duplicating walk effort.
-	}
+	// No file chunks here: the message worker schedules each file once it has
+	// parsed the message that carries it and knows the file's id and url, so
+	// the plan only counts them (resp.FileCount).
 
 	// Single reaction-pass chunk that runs after messages+threads.
 	chunks = append(chunks, &importModels.Chunk{
@@ -227,13 +223,36 @@ func BuildPlan(ctx context.Context, jobId uuid.UUID, arc *Archive) (*importAdapt
 	resp.FileCount = totalFiles
 	resp.FileBytes = totalFileBytes
 
-	warnIfFileLinksHaveExpired(resp, parsed, time.Now())
+	// An export that carries its files (Enterprise Grid's, the API reader's)
+	// has no links to expire.
+	if len(parsed.Uploads) == 0 {
+		warnIfFileLinksHaveExpired(resp, parsed, time.Now())
+	}
+
+	// The Slack workspace it is, so a member bringing their own DMs finds
+	// the team's import (member_read.go).
+	if team := slackTeamOf(parsed.Users); team != "" {
+		if patch, err := json.Marshal(map[string]string{"slack_team": team}); err == nil {
+			_ = importModels.UpdateProgress(ctx, jobId, patch)
+		}
+	}
 
 	planJSON, _ := json.Marshal(resp)
 	if err := importModels.SavePlan(ctx, jobId, planJSON, chunks); err != nil {
 		return nil, err
 	}
 	return resp, nil
+}
+
+// slackTeamOf is the Slack workspace's team id, as its people carry it: the
+// first person's who isn't a bot. Pure.
+func slackTeamOf(users []SlackUser) string {
+	for _, u := range users {
+		if !u.IsBot && strings.TrimSpace(u.TeamID) != "" {
+			return strings.TrimSpace(u.TeamID)
+		}
+	}
+	return ""
 }
 
 // exportDayPattern matches the per-day message files Slack writes as

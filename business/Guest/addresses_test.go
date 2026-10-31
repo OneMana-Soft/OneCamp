@@ -3,6 +3,7 @@ package business
 import (
 	"errors"
 	"testing"
+	"time"
 
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 )
@@ -52,7 +53,16 @@ func TestEachKindHasItsOwnAddressAndSurfaces(t *testing.T) {
 	if KindPage.Address("launch-notes") != "/public/p/launch-notes" || KindPage.WebAddress("launch-notes") != "/p/launch-notes" {
 		t.Fatalf("a page answers at %q and %q", KindPage.Address("launch-notes"), KindPage.WebAddress("launch-notes"))
 	}
-	if KindPage.Surface("") != "page" || KindPage.Surface("file") != "page-file" || KindRoom.Surface("") == KindPage.Surface("") {
+	// A room's, as router.go mounts it and the web app's /r/[slug] page.
+	if KindRoom.Address("maya-chen") != "/public/r/maya-chen" || KindRoom.WebAddress("maya-chen") != "/r/maya-chen" {
+		t.Fatalf("a room answers at %q and %q", KindRoom.Address("maya-chen"), KindRoom.WebAddress("maya-chen"))
+	}
+	if KindPage.Surface("") != "page" || KindPage.Surface("file") != "page-file" || KindRoom.Surface("") == KindPage.Surface("") ||
+		KindRoom.Surface("unlock") != "room-unlock" {
 		t.Fatal("surfaces are shared between kinds")
+	}
+	// A room's passcode opens it for a working day, signed apart from a page's.
+	if KindRoom.UnlockFor != 12*time.Hour || KindRoom.unlockLabel == KindPage.unlockLabel {
+		t.Fatalf("a room's unlock: %v, %q", KindRoom.UnlockFor, KindRoom.unlockLabel)
 	}
 }

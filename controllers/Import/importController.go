@@ -38,6 +38,7 @@ import (
 	importBusiness "github.com/akashc777/OneCamp/business/Import"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	importRun "github.com/akashc777/OneCamp/business/ImportRun"
+	slackImportBusiness "github.com/akashc777/OneCamp/business/SlackImport"
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	importDomain "github.com/akashc777/OneCamp/domain/Import"
 	"github.com/akashc777/OneCamp/helpers"
@@ -109,8 +110,8 @@ func HandleListProviders(w http.ResponseWriter, r *http.Request) {
 			DefaultStatusMap: p.DefaultStatusMap(),
 			DefaultPriority:  p.DefaultPriorityMap(),
 		}
-		if conn := importBusiness.SignInConnector(p); conn != nil {
-			info.SignIn = &importAdapter.SignInInfo{Configured: conn.Configured(), Setup: conn.Setup}
+		if conn := importBusiness.OfferedSignIn(p); conn != nil {
+			info.SignIn = &importAdapter.SignInInfo{Configured: conn.Configured(), Setup: conn.Setup, Optional: conn.Optional}
 		}
 		out = append(out, info)
 	}
@@ -139,6 +140,8 @@ var capabilityNameMap = map[importProvider.Capability]string{
 	importProvider.CapMessages:     "messages",
 	importProvider.CapReactions:    "reactions",
 	importProvider.CapPages:        "pages",
+	importProvider.CapBoards:       "boards",
+	importProvider.CapTables:       "tables",
 }
 
 // ─── CreateJob (live-API) ──────────────────────────────────────────
@@ -464,6 +467,9 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return
 	}
+	if refuseMemberRead(w, job) {
+		return
+	}
 	switch job.Status {
 	case importModels.StatusValidating, importModels.StatusPlanned:
 	case importModels.StatusFailed:
@@ -540,6 +546,9 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 	job, err := importModels.GetJob(ctx, jobId)
 	if err != nil || job == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
+		return
+	}
+	if refuseMemberRead(w, job) {
 		return
 	}
 	if job.Status != importModels.StatusPlanned && job.Status != importModels.StatusFailed {
@@ -681,7 +690,8 @@ func HandleRollback(w http.ResponseWriter, r *http.Request) {
 // max 200) and `?offset` for pagination.
 func HandleListJobs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := requireAdmin(w, r); !ok {
+	viewer, ok := requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	provider := r.URL.Query().Get("provider")
@@ -695,7 +705,7 @@ func HandleListJobs(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
 		return
 	}
-	views := jobViews(ctx, jobs)
+	views := jobViews(ctx, jobs, viewer.UserPostgresInfo.Id)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"jobs":   views,
 		"limit":  limit,
@@ -706,7 +716,8 @@ func HandleListJobs(w http.ResponseWriter, r *http.Request) {
 // HandleGetJob returns the full view of a single job.
 func HandleGetJob(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := requireAdmin(w, r); !ok {
+	viewer, ok := requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	jobId, validID := helpers.UUIDParam(w, r, "jobId")
@@ -718,7 +729,7 @@ func HandleGetJob(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, jobViews(ctx, []*importModels.Job{j})[0])
+	helpers.WriteJSON(w, http.StatusOK, jobViews(ctx, []*importModels.Job{j}, viewer.UserPostgresInfo.Id)[0])
 }
 
 // HandleImportPeople returns who an import brought across that the admin can
@@ -795,14 +806,21 @@ func HandleOutcomeSeen(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"ok": true})
 }
 
-// HandleListErrors returns paginated error log entries.
+// HandleListErrors returns paginated error log entries. A member's own read's
+// are shown to that member alone: they name the member's conversations.
 func HandleListErrors(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := requireAdmin(w, r); !ok {
+	viewer, ok := requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	jobId, validID := helpers.UUIDParam(w, r, "jobId")
 	if !validID {
+		return
+	}
+	if j, err := importModels.GetJob(ctx, jobId); err == nil && j != nil &&
+		!slackImportBusiness.ContentsShownTo(j.Options, j.TriggeredBy, viewer.UserPostgresInfo.Id) {
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"errors": []any{}, "hidden": true})
 		return
 	}
 	severity := r.URL.Query().Get("severity")
@@ -969,10 +987,10 @@ func HandleListConnections(w http.ResponseWriter, r *http.Request) {
 
 // ─── helpers ───────────────────────────────────────────────────────
 
-// jobViews is the jobs as the screens show them, their counts and mappings
-// read for all of them at once (five statements in all, where it was five a
-// job).
-func jobViews(ctx context.Context, jobs []*importModels.Job) []importAdapter.JobView {
+// jobViews is the jobs as the screens show viewer them, their counts and
+// mappings read for all of them at once (five statements in all, where it was
+// five a job).
+func jobViews(ctx context.Context, jobs []*importModels.Job, viewer uuid.UUID) []importAdapter.JobView {
 	ids := make([]uuid.UUID, len(jobs))
 	for i, j := range jobs {
 		ids[i] = j.Id
@@ -981,12 +999,15 @@ func jobViews(ctx context.Context, jobs []*importModels.Job) []importAdapter.Job
 	status, priority, _ := importModels.JobMappings(ctx, ids)
 	views := make([]importAdapter.JobView, 0, len(jobs))
 	for _, j := range jobs {
-		views = append(views, jobToView(j, counts[j.Id], status[j.Id], priority[j.Id]))
+		views = append(views, jobToView(j, counts[j.Id], status[j.Id], priority[j.Id], viewer))
 	}
 	return views
 }
 
-func jobToView(j *importModels.Job, c importModels.JobCount, status, priority map[string]string) importAdapter.JobView {
+// jobToView is a job as viewer is shown it: all of it, but for a member's own
+// read of their Slack DMs, which anyone else is shown without what's in it
+// (business/SlackImport member_view.go).
+func jobToView(j *importModels.Job, c importModels.JobCount, status, priority map[string]string, viewer uuid.UUID) importAdapter.JobView {
 	view := importAdapter.JobView{
 		Id:                  j.Id,
 		Provider:            j.Provider,
@@ -1012,7 +1033,23 @@ func jobToView(j *importModels.Job, c importModels.JobCount, status, priority ma
 	view.ChunksTotal, view.ChunksDone, view.ChunksFailed = c.ChunksTotal, c.ChunksDone, c.ChunksFailed
 	view.ItemsImported, view.ErrorsTotal = c.ItemsImported, c.ErrorsTotal
 	view.StatusMappings, view.PriorityMappings = status, priority
+	if !slackImportBusiness.ContentsShownTo(j.Options, j.TriggeredBy, viewer) {
+		view.Plan = nil
+		view.ErrorMessage = slackImportBusiness.HiddenFailure(view.ErrorMessage)
+		view.Progress = slackImportBusiness.HiddenProgress(view.Progress)
+	}
 	return view
+}
+
+// refuseMemberRead answers 409, and true, for a member's own read of their
+// Slack DMs: it plans and runs itself, as its member, and an admin's plan, run
+// or retry of it would bring it in as the admin, with options of theirs.
+func refuseMemberRead(w http.ResponseWriter, job *importModels.Job) bool {
+	if !slackImportBusiness.MemberRead(job.Options) {
+		return false
+	}
+	helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": slackImportBusiness.MemberReadRefused, "code": "member_read"})
+	return true
 }
 
 // siteOf is the address a self-addressed provider (Jira) was connected to,
@@ -1158,6 +1195,9 @@ func HandleRetryFailedChunks(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return
 	}
+	if refuseMemberRead(w, job) {
+		return
+	}
 	switch job.Status {
 	case importModels.StatusRunning, importModels.StatusValidating, importModels.StatusPaused:
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
@@ -1224,7 +1264,9 @@ func HandleOAuthURL(w http.ResponseWriter, r *http.Request) {
 		writeRateLimitExceeded(w, res.RetryAfterSeconds())
 		return
 	}
-	url, problem := importBusiness.StartOAuthConnect(ctx, prov, user.UserPostgresInfo.Id, importOAuthRedirectURI())
+	// ?site= is the address the admin named, for a sign-in that can reach
+	// several (Atlassian's); none is fine when it reaches one.
+	url, problem := importBusiness.StartOAuthConnect(ctx, prov, user.UserPostgresInfo.Id, importOAuthRedirectURI(), strings.TrimSpace(r.URL.Query().Get("site")))
 	if problem != nil {
 		// {"msg", "code"}: the one error shape, with what the app acts on.
 		helpers.WriteJSON(w, problem.Status, helpers.Envolope{"msg": problem.Msg, "code": problem.Code})

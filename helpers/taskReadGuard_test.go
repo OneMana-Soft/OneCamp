@@ -81,15 +81,17 @@ var filteringModels = map[string]string{
 // systemReads are the functions that may read every task, restricted ones
 // too (taskread.WithSystem), by file and name: reads with no audience.
 var systemReads = map[string]bool{
-	"business/WorkAccess/restricted.go:hiddenFor":                                        true, // the decision's own read
+	"business/WorkAccess/restricted.go:hidden":                                           true, // the decision's own read
+	"business/WorkAccess/hiddenAmong.go:HiddenUnassignedAmong":                           true, // the same decision's read, for many readers at once
 	"domain/Task/taskReaders.go:projectReaders":                                          true, // who may read, for others
 	"domain/Task/taskDomain.go:GetDgraphTasksWithoutStatusSince":                         true, // a backfill
 	"domain/Project/projectDomain.go:GetDgraphProjectInfoAndTeamAdminFlagAndAttachments": true, // files that go with a project
 	"domain/Project/projectDomain.go:GetDgraphProjectTasksForTemplate":                   true, // copied as nobody's (Nobody)
 	"domain/Team/teamDomain.go:GetDgraphTeamInfoByUUIDForArchivingAndUnarchivingTeam":    true, // a team's archive
 	"business/Comment/commentBusiness.go:sendNewTaskCommentNotification":                 true, // whom a comment is told to, kept to its readers
+	"business/Import/commentSearchRepair.go:RepairTaskCommentSearch":                     true, // a repair: task comments' search entries, which search reads with each reader's rule
 	"business/Cycle/scheduler.go:runSchedule":                                            true, // the Cycle Scheduler completes a cycle, restricted tasks and all
-	"business/Import/orchestrator.go:importContext":                                      true, // an import reads the tasks it makes, restricted ones too, to write the rest (a sub-task's parent, a comment's task)
+	"business/Import/orchestrator.go:importContext":                                      true, // an import reads the tasks it makes, restricted ones too, to write the rest (a sub-task's parent, a comment's task), and its rollback takes them all away
 	"business/Import/recheck.go:recheckContext":                                          true, // an old import's re-check narrows the tasks it brought for everyone else, restricted ones too, and an admin's undo or containment of it
 }
 
@@ -97,9 +99,9 @@ var systemReads = map[string]bool{
 // context for others to read in, each with the only functions that may use
 // it, so no new caller reads every task unnoticed.
 var systemReadHelpers = map[string][]string{
-	"business/Import/orchestrator.go:importContext": {"business/Import/orchestrator.go:RunImport"},
+	"business/Import/orchestrator.go:importContext": {"business/Import/orchestrator.go:RunImport", "business/Import/rollback.go:unmakeImported"},
 	"business/Import/recheck.go:recheckContext": {"business/Import/recheck.go:recheckImport", "business/Import/recheck.go:RecheckWithConnection",
-		"business/Import/recheck.go:undoRecheck", "business/Import/recheck.go:containImport"},
+		"business/Import/recheck.go:undoRecheck", "business/Import/recheck.go:containImport", "business/Import/commentRelease.go:releaseSettled"},
 }
 
 // systemSearches are the searches of those indexes with no audience: what

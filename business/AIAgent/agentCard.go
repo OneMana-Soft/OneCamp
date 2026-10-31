@@ -27,6 +27,7 @@ import (
 
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	"github.com/google/uuid"
@@ -119,20 +120,13 @@ func GetAgentCard(ctx context.Context, botUserID uuid.UUID, actor Actor) (*Agent
 	return card, nil
 }
 
-// memberName is how a member is named to other members: their full name, else
-// their display name, and never an email address. DisplayNamesByUUIDs falls
-// back to the address, which suits the admin screens it was written for and
-// put "maya.chen@cast.demo.onemana.dev" on a card every member can open. Pure.
+// memberName names a member on a card every member can open: their full name,
+// else their display name, never an address (userDomain.MemberName). Pure.
 func memberName(u *dgraphStruct.DgraphUser) string {
 	if u == nil {
 		return ""
 	}
-	for _, n := range []string{u.UserFullName, u.UserName} {
-		if n = strings.TrimSpace(n); n != "" && !strings.Contains(n, "@") {
-			return n
-		}
-	}
-	return ""
+	return userDomain.MemberName(u.UserFullName, u.UserName)
 }
 
 // buildCard copies what a member may see from the agent row.

@@ -40,14 +40,16 @@ import (
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
-// appInOneChannel is an app added to #deploys alone, whose own user is in
-// #deploys and #deploys-payroll, with a token for messages, search and unread
-// counts; and the admin who made it all.
+// appInOneChannel is an app added to #deploys and the Website project alone,
+// whose own user is in #deploys, #deploys-payroll, Website and Billing, with a
+// token for messages, search, unread counts, projects, tasks and docs; and the
+// admin who made it all.
 type appInOneChannel struct {
 	t                *testing.T
 	env              *integration.Env
 	admin            uuid.UUID
 	deploys, payroll string
+	website, billing string
 	token            string
 }
 
@@ -91,16 +93,17 @@ func seedAppInOneChannel(t *testing.T) *appInOneChannel {
 		}
 		return id.String()
 	}
-	fx := &appInOneChannel{t: t, env: env, admin: adminID, deploys: channel("deploys"), payroll: channel("deploys-payroll")}
+	fx := &appInOneChannel{t: t, env: env, admin: adminID, deploys: channel("deploys"), payroll: channel("deploys-payroll"),
+		website: uuid.NewString(), billing: uuid.NewString()}
 
 	view, err := commandBusiness.CreateApp(ctx, commandAdapter.CreateAppRequest{Slug: "deploy-bot", Name: "Deploy bot", Kind: "external"}, adminID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	appID := uuid.MustParse(view.ID)
-	scopes := []string{"messages:write", "search:read", "attention:read"}
+	scopes := []string{"messages:write", "search:read", "attention:read", "projects:read", "tasks:write", "docs:write"}
 	if _, err := appBusiness.SetAccess(ctx, appID, scopes,
-		appBusiness.Audience{Places: []appBusiness.Place{{Kind: "channel", ID: fx.deploys}}}); err != nil {
+		appBusiness.Audience{Places: []appBusiness.Place{{Kind: "channel", ID: fx.deploys}, {Kind: "project", ID: fx.website}}}, ""); err != nil {
 		t.Fatal(err)
 	}
 	made, err := appBusiness.MintToken(ctx, appID, "ci", scopes, 0)
@@ -109,8 +112,9 @@ func seedAppInOneChannel(t *testing.T) *appInOneChannel {
 	}
 	fx.token = made.Plaintext
 
-	// The app's own user is in both channels, both ways, as the app writes it:
-	// what holds it to #deploys is its places, not its membership.
+	// The app's own user is in both channels, both ways, as the app writes it,
+	// and in both projects: what holds it to #deploys and Website is its
+	// places, not its membership.
 	identity, err := appBusiness.Get(ctx, appID)
 	if err != nil || identity.BotUserID == nil {
 		t.Fatalf("the app's user: %+v, %v", identity, err)
@@ -128,7 +132,11 @@ func seedAppInOneChannel(t *testing.T) *appInOneChannel {
 	if err := json.Unmarshal(raw, &got); err != nil || len(got.U) != 1 || len(got.C) != 2 {
 		t.Fatalf("the app's user and the channels in the graph: %v %s", err, raw)
 	}
-	edges := []map[string]any{{"uid": got.U[0].UID, "user_channels": []map[string]any{{"uid": got.C[0].UID}, {"uid": got.C[1].UID}}}}
+	edges := []map[string]any{{"uid": got.U[0].UID, "user_channels": []map[string]any{{"uid": got.C[0].UID}, {"uid": got.C[1].UID}},
+		"user_projects": []map[string]any{
+			{"uid": "_:website", "dgraph.type": "Project", "project_uuid": fx.website, "project_name": "Website"},
+			{"uid": "_:billing", "dgraph.type": "Project", "project_uuid": fx.billing, "project_name": "Billing"},
+		}}}
 	for _, c := range got.C {
 		edges = append(edges, map[string]any{"uid": c.UID, "ch_members": []map[string]any{{"uid": got.U[0].UID}}})
 	}
@@ -173,6 +181,34 @@ func TestAnAppIsHeldToItsPlaces(t *testing.T) {
 	var posted int
 	if err := fx.env.PG.QueryRow(`SELECT count(*) FROM posts WHERE post_channel = $1`, fx.payroll).Scan(&posted); err != nil || posted != 0 {
 		t.Errorf("the refused post: %d in #deploys-payroll (%v)", posted, err)
+	}
+
+	// A list is cut to its places: of the two projects its user is in, the
+	// app lists the one it was added to.
+	_, out = fx.call("GET", "/v1/projects", nil)
+	data, _ := out["data"].(map[string]any)
+	raw, _ := data["structured_json"].(string)
+	var projects []struct {
+		UUID string `json:"uuid"`
+	}
+	if err := json.Unmarshal([]byte(raw), &projects); err != nil || len(projects) != 1 || projects[0].UUID != fx.website {
+		t.Errorf("the projects listed: %s (%v), want Website alone (%s)", raw, err, fx.website)
+	}
+
+	// A write names its place in its body: a task only in a project it was
+	// added to, a doc only under a page it was added to, never at the top.
+	for _, c := range []struct {
+		name, path string
+		body       map[string]any
+	}{
+		{"a task in Billing", "/v1/tasks", map[string]any{"project_uuid": fx.billing, "title": "Ship the invoice fix"}},
+		{"a doc at the top", "/v1/docs", map[string]any{"title": "Runbook", "markdown": "# Runbook"}},
+		{"a doc under a page it wasn't added to", "/v1/docs", map[string]any{"title": "Runbook", "markdown": "# Runbook", "parent_uuid": uuid.NewString()}},
+	} {
+		code, out := fx.call("POST", c.path, c.body)
+		if got, _ := refusal(out); code != http.StatusForbidden || got != "not_in_audience" {
+			t.Errorf("%s: %d %v, want 403 not_in_audience", c.name, code, out)
+		}
 	}
 
 	// Search finds the channel it was added to, never the other.

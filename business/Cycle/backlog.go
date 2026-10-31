@@ -5,7 +5,8 @@ package business
 // and the project's capacity (what its recent cycles finished), then the
 // open top-level tasks in no open cycle, counted and totalled over all of
 // them. Moving a task in or out is SetTask (POST /task/cycle); starting the
-// next cycle is Start.
+// next cycle is Start. In a project that estimates in points, the totals and
+// the capacity are in points too (business/EstimateScale).
 
 import (
 	"context"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"time"
 
+	estimateScale "github.com/akashc777/OneCamp/business/EstimateScale"
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -24,11 +26,13 @@ import (
 // the next two, as Linear keeps them ready.
 const OpenShown = 3
 
-// PlanCycle is an open cycle as a container: its tasks and their estimate.
+// PlanCycle is an open cycle as a container: its tasks and their estimate,
+// in points too when the project estimates in them.
 type PlanCycle struct {
 	View
 	Tasks           []*dgraphStruct.DgraphTask `json:"tasks"`
 	EstimateMinutes int                        `json:"estimate_minutes"`
+	EstimatePoints  *float64                   `json:"estimate_points,omitempty"`
 }
 
 // Backlog is the backlog tab's answer.
@@ -39,9 +43,17 @@ type Backlog struct {
 	// a page of them.
 	Count           int `json:"count"`
 	EstimateMinutes int `json:"estimate_minutes"`
+	// EstimatePoints is them in points, when the project estimates in them.
+	EstimatePoints *float64 `json:"estimate_points,omitempty"`
 	// CapacityMinutes is what the project's latest completed cycles finished
-	// on average, in estimated minutes; none until one has.
-	CapacityMinutes *int `json:"capacity_minutes,omitempty"`
+	// on average, in estimated minutes; none until one has. CapacityPoints is
+	// the same in points.
+	CapacityMinutes *int     `json:"capacity_minutes,omitempty"`
+	CapacityPoints  *float64 `json:"capacity_points,omitempty"`
+	// Scale is the project's estimate scale, null when it estimates in hours:
+	// the unit every number here is shown in, in the same answer as them, so
+	// the tab never paints one unit and then the other.
+	Scale *estimateScale.View `json:"scale"`
 }
 
 // openCycles is the cycles not yet completed, by number, at most OpenShown.
@@ -67,8 +79,9 @@ func minutesOf(t *dgraphStruct.DgraphTask) int {
 }
 
 // Assemble puts the backlog together from the project's cycles, their
-// members and the graph's read. Pure.
-func Assemble(cycles []cycleModel.Cycle, members map[uuid.UUID][]string, read *projectDomain.BacklogRead, now time.Time) Backlog {
+// members and the graph's read, counting points too with a scale (nil: the
+// project estimates in hours). Pure.
+func Assemble(cycles []cycleModel.Cycle, members map[uuid.UUID][]string, read *projectDomain.BacklogRead, now time.Time, scale *estimateScale.Scale) Backlog {
 	byID := make(map[string]*dgraphStruct.DgraphTask, len(read.Planned))
 	progress := make(map[string]TaskProgress, len(read.Planned))
 	for _, t := range read.Planned {
@@ -79,9 +92,16 @@ func Assemble(cycles []cycleModel.Cycle, members map[uuid.UUID][]string, read *p
 	if b.Tasks == nil {
 		b.Tasks = []*dgraphStruct.DgraphTask{}
 	}
+	if scale != nil {
+		// The graph adds up the points there are; each task with none counts
+		// as the scale says.
+		points := round1(estimateScale.CountedAll(scale, read.Count, read.Pointed, read.Points))
+		b.EstimatePoints = &points
+	}
 	for _, c := range openCycles(cycles) {
 		pc := PlanCycle{Tasks: []*dgraphStruct.DgraphTask{}}
 		var statuses []string
+		var points float64
 		for _, id := range members[c.Id] {
 			t, ok := byID[id]
 			if !ok { // deleted, or kept from the reader
@@ -89,7 +109,14 @@ func Assemble(cycles []cycleModel.Cycle, members map[uuid.UUID][]string, read *p
 			}
 			pc.Tasks = append(pc.Tasks, t)
 			pc.EstimateMinutes += minutesOf(t)
+			if scale != nil {
+				points += estimateScale.Counted(scale, t.EstimatePoints)
+			}
 			statuses = append(statuses, t.Status)
+		}
+		if scale != nil {
+			points = round1(points)
+			pc.EstimatePoints = &points
 		}
 		// Open work first, then done; each oldest first.
 		sort.SliceStable(pc.Tasks, func(i, j int) bool {
@@ -102,10 +129,12 @@ func Assemble(cycles []cycleModel.Cycle, members map[uuid.UUID][]string, read *p
 		pc.View = View{Cycle: c, Progress: Count(statuses), State: State(c, now)}
 		b.Cycles = append(b.Cycles, pc)
 	}
-	if v := BuildVelocity(cycles, members, progress); v.TypicalHours != nil {
+	v := BuildVelocity(cycles, members, progress, scale)
+	if v.TypicalHours != nil {
 		m := int(*v.TypicalHours*60 + 0.5)
 		b.CapacityMinutes = &m
 	}
+	b.CapacityPoints = v.TypicalPoints
 	return b
 }
 
@@ -149,7 +178,12 @@ func GetBacklog(ctx context.Context, project uuid.UUID, now time.Time) (*Backlog
 	if err != nil {
 		return nil, err
 	}
-	b := Assemble(cycles, members, read, now)
+	scale, err := estimateScale.Of(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	b := Assemble(cycles, members, read, now, scale)
+	b.Scale = estimateScale.ViewOf(scale)
 	shown := append([]*dgraphStruct.DgraphTask{}, b.Tasks...)
 	for _, c := range b.Cycles {
 		shown = append(shown, c.Tasks...)

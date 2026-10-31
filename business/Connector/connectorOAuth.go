@@ -15,6 +15,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/oauth"
+	calendarModel "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/google/uuid"
@@ -176,13 +177,19 @@ func HandleCallback(ctx context.Context, state, code string) (CallbackResult, er
 		st.ExpiresAt = &t
 	}
 	// The calendar shows which Google account it is linked to.
+	var account string
 	var metadata *string
 	if providerID == ProviderCalendar {
-		m := calendarAccountMetadata(ctx, tok.AccessToken)
-		metadata = &m
+		email, m := calendarAccountMetadata(ctx, tok.AccessToken)
+		account, metadata = email, &m
 	}
 	if err := saveUserToken(ctx, userUUID, providerID, st, metadata); err != nil {
 		return res, fmt.Errorf("persist token: %w", err)
+	}
+	// Two-way calendar sync, stopped when Google stopped answering for the
+	// account, carries on now that that account is connected again.
+	if providerID == ProviderCalendar {
+		_ = calendarModel.ReconnectSyncLinks(ctx, userUUID, "google", account)
 	}
 	// Bust the briefing "Your day" cache so the newly-connected account shows
 	// up immediately rather than after the TTL.

@@ -53,9 +53,10 @@ func CreateTask(ctx context.Context, taskUUID uuid.UUID, projectUUID uuid.UUID, 
 }
 
 // CreateTaskNumbered is CreateTask keeping a number the task had in another
-// tool (an import's ENG-123) when the project hasn't used it.
-func CreateTaskNumbered(ctx context.Context, taskUUID, projectUUID, createdByUUID uuid.UUID, createdAt time.Time, number int) (int, error) {
-	n, err := taskKeyModel.InsertTaskNumbered(ctx, taskUUID, projectUUID, createdByUUID, createdAt, number)
+// tool (an import's ENG-123) when the project hasn't used it, for a task of
+// the type typeID (nil: a Task).
+func CreateTaskNumbered(ctx context.Context, taskUUID, projectUUID, createdByUUID uuid.UUID, createdAt time.Time, number int, typeID *uuid.UUID) (int, error) {
+	n, err := taskKeyModel.InsertTaskNumbered(ctx, taskUUID, projectUUID, createdByUUID, createdAt, number, typeID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/CreateTaskNumbered Failed to create new task err: %+v", err)
 	}
@@ -296,6 +297,19 @@ func CreateOrUpdateDgraphTask(ctx context.Context, dgraphTask *dgraphStruct.Dgra
 		return
 	}
 	return
+}
+
+// SetDgraphTaskPoints writes a task's points with write's other fields (its
+// update time and history), or takes them off when write has none: zero can
+// be a size, so no points is no value.
+func SetDgraphTaskPoints(ctx context.Context, write *dgraphStruct.DgraphTask) (string, error) {
+	write.DType = []string{"Task"}
+	query := fmt.Sprintf(`query { task as var(func: eq(task_uuid, "%s")) }`, write.Uuid)
+	del := ""
+	if write.EstimatePoints == nil {
+		del = `{"uid": "uid(task)", "task_estimate_points": null}`
+	}
+	return dgraphModels.CreateOrUpdateDgraphTask(ctx, write, query, del)
 }
 
 func UpdateTaskInOpenSearch(openSearchTask *openSearchStruct.OpenSearchTask) {
@@ -589,6 +603,7 @@ func GetDgraphBasicTaskInfoByUUID(ctx context.Context, teamUUID string, userDgra
 					task_due_date
 					task_deleted_at
 					task_estimate_minutes
+					task_estimate_points
 					task_description
 					task_team {
 						team_name
@@ -833,9 +848,10 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID
 
 	variables := make(map[string]string)
 	variables["$id"] = teamUUID
-	// The asker's standing in the project, which CanViewTask reads. A system
-	// read has nobody asking (userDgraphUID empty) and counts none: Dgraph
-	// refuses uid(""), which failed the read for every such caller.
+	// The asker's standing in the task's project and in each dependency end's,
+	// which CanViewTask and KeepSeenEnds read. A system read has nobody asking
+	// (userDgraphUID empty) and counts none: Dgraph refuses uid(""), and an
+	// undeclared $userUid, which failed the read for every such caller.
 	params, standing := "$id: string", ""
 	if userDgraphUID != "" {
 		variables["$userUid"] = userDgraphUID
@@ -899,15 +915,16 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID
 				task_github_pr_url
 				task_github_branch
 				task_estimate_minutes
+				task_estimate_points
 				task_parent_task {
 					task_uuid
 					task_name
 				}
 				task_blocked_by @facets(kind, lag) @filter(` + dgraphStruct.TASK_LIVE_FILTER + `) {
-					` + dependencyFields + `
+					` + dependencyFields(standing) + `
 				}
 				task_blocks: ~task_blocked_by @facets(kind, lag) @filter(` + dgraphStruct.TASK_LIVE_FILTER + `) {
-					` + dependencyFields + `
+					` + dependencyFields(standing) + `
 				}
 				task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")){
 						task_uuid
@@ -1459,12 +1476,40 @@ func UpdateDgraphTaskClearing(ctx context.Context, dgraphTask *dgraphStruct.Dgra
 }
 
 // RestatusTasksInCustomStatus moves every task in the custom status fromID to
-// the given category and custom status (both "" clear it), in one transaction.
-// Used when a custom status is renamed, recategorised or deleted.
-func RestatusTasksInCustomStatus(ctx context.Context, fromID string, category string, customID, customName string) error {
+// the given category and custom status (both "" clear it), in one transaction,
+// and answers which tasks it moved. Used when a custom status is renamed,
+// recategorised or deleted.
+func RestatusTasksInCustomStatus(ctx context.Context, fromID string, category string, customID, customName string) ([]string, error) {
 	if _, err := uuid.Parse(fromID); err != nil {
-		return fmt.Errorf("custom status id %q: %w", fromID, err)
+		return nil, fmt.Errorf("custom status id %q: %w", fromID, err)
 	}
+	return restatus(ctx, fmt.Sprintf(`eq(task_custom_status, %q)`, fromID), category, customID, customName)
+}
+
+// RestatusTasksStillIn moves the tasks listed to the given category and custom
+// status, each only while it is still in the status at names (at's custom id,
+// or at's category with no custom status): a deleted status's restore takes
+// back the tasks its delete moved, and leaves those moved on since.
+func RestatusTasksStillIn(ctx context.Context, taskIDs []string, atCategory, atCustomID string, category, customID, customName string) ([]string, error) {
+	if len(taskIDs) == 0 {
+		return nil, nil
+	}
+	for _, id := range taskIDs {
+		if _, err := uuid.Parse(id); err != nil {
+			return nil, fmt.Errorf("task id %q: %w", id, err)
+		}
+	}
+	ids, _ := json.Marshal(taskIDs)
+	still := fmt.Sprintf(`eq(task_status, %q) AND NOT has(task_custom_status)`, atCategory)
+	if atCustomID != "" {
+		still = fmt.Sprintf(`eq(task_custom_status, %q)`, atCustomID)
+	}
+	return restatus(ctx, fmt.Sprintf(`eq(task_uuid, %s)) @filter(%s`, ids, still), category, customID, customName)
+}
+
+// restatus moves the tasks match finds (a DQL function, with any filter) to
+// the given category and custom status, in one transaction, and answers which.
+func restatus(ctx context.Context, match string, category string, customID, customName string) ([]string, error) {
 	set := &dgraphStruct.DgraphTask{Uid: "uid(task)", Status: category}
 	var clear []string
 	if customID != "" {
@@ -1474,22 +1519,22 @@ func RestatusTasksInCustomStatus(ctx context.Context, fromID string, category st
 	}
 	del, err := clearJSON("task", clear)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	set.DType = []string{"Task"}
 	query := fmt.Sprintf(`query {
-		task as var(func: eq(task_custom_status, %q))
+		task as var(func: %s)
 		affected(func: uid(task)) { task_uuid }
-	}`, fromID)
+	}`, match)
 	uuids, err := dgraphModels.UpdateExistingTasksReturning(ctx, set, query, del)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/RestatusTasksInCustomStatus err: %+v", err)
-		return err
+		helpers.LogErrorWithContext(ctx, "domain/restatus err: %+v", err)
+		return nil, err
 	}
 	// Search keeps each task's category. It changes when the status moves to
 	// another one, or its tasks move on its deletion.
 	helpers.GoSafeNamed("syncTaskStatusToOpenSearch", func() { syncTaskStatusToOpenSearch(uuids, category) })
-	return nil
+	return uuids, nil
 }
 
 // syncTaskStatusToOpenSearch sets the category on each task's search document.
@@ -1513,25 +1558,35 @@ func UpdateTasksInOpenSearch(docs []*openSearchStruct.OpenSearchTask) {
 	}
 }
 
-// GetDgraphTaskStatuses is the status of each live task listed, when it was
-// set and the task's estimate, for a cycle's progress, burndown and velocity.
-// Archived tasks are left out.
-func GetDgraphTaskStatuses(ctx context.Context, taskUUIDs []string) (tasks []*dgraphStruct.DgraphTask, err error) {
+// GetDgraphTaskStatuses is the status of each live task listed that the
+// reader of ctx may see, when it was set and the task's estimate, for a
+// cycle's progress, burndown and velocity. Archived tasks are left out, and
+// so are tasks the reader may not see: in the query itself (models/taskread),
+// as QueryDgraphTasks does after it, so what is counted from it is what they
+// may see. A project's admins may see every task in it (WorkAccess's LetIn),
+// so completing a cycle, which only they may do, carries every open task on.
+func GetDgraphTaskStatuses(ctx context.Context, taskUUIDs []string) ([]*dgraphStruct.DgraphTask, error) {
 	if len(taskUUIDs) == 0 {
 		return nil, nil
 	}
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	hidden := tr.And()
 	ids, err := json.Marshal(taskUUIDs)
 	if err != nil {
 		return nil, err
 	}
 	query := fmt.Sprintf(`{
-				tasks(func: eq(task_uuid, %s)) @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")) {
+				tasks(func: eq(task_uuid, %s)) @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")%s) {
 					task_uuid
 					task_status
 					task_status_since
 					task_estimate_minutes
+					task_estimate_points
 				}
-			}`, ids)
+			}`, ids, hidden)
 	return dgraphModels.QueryDgraphTasks(ctx, query, nil)
 }
 

@@ -309,6 +309,7 @@ func TestTheMoveSaysWhereAZoneCameFrom(t *testing.T) {
 		hints      models.ZoneHints
 		zone, from string
 	}{
+		{models.ZoneHints{Stored: "Europe/Berlin", QuietHours: "Asia/Kolkata"}, "Europe/Berlin", "stored"},
 		{models.ZoneHints{QuietHours: "Asia/Kolkata", BookingPage: "Europe/London"}, "Asia/Kolkata", "quiet_hours"},
 		{models.ZoneHints{QuietHours: "Mars/Olympus", BookingPage: "Europe/London"}, "Europe/London", "booking_page"},
 		{models.ZoneHints{TaskRepeat: "Pacific/Chatham"}, "Pacific/Chatham", "task_repeat"},

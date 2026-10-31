@@ -53,6 +53,10 @@ func refuse(w http.ResponseWriter, r *http.Request, err error) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such app; it may have been removed."})
 		return
 	}
+	if errors.Is(err, appBusiness.ErrStale) {
+		helpers.WriteJSON(w, http.StatusPreconditionFailed, helpers.Envolope{"msg": "Someone changed what this app may do since you opened it."})
+		return
+	}
 	helpers.LogErrorWithContext(r.Context(), "controllers/App: %+v", err)
 	helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 }
@@ -97,7 +101,10 @@ type identityView struct {
 	Audience appBusiness.AudienceView `json:"audience"`
 }
 
-// SetAccess is PUT /admin/apps/{appId}/access: {scopes, audience}.
+// SetAccess is PUT /admin/apps/{appId}/access: {scopes, audience}. If-Match
+// holds the identity's access_version the admin's screen was read at: a change
+// made since is refused, 412, never overwritten. "*", or no If-Match, changes
+// it whatever it is.
 func SetAccess(w http.ResponseWriter, r *http.Request) {
 	id, ok := appID(w, r)
 	if !ok {
@@ -111,7 +118,11 @@ func SetAccess(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Send the app's scopes and audience as JSON."})
 		return
 	}
-	app, err := appBusiness.SetAccess(r.Context(), id, body.Scopes, body.Audience)
+	from := strings.Trim(r.Header.Get("If-Match"), `"`)
+	if from == "*" {
+		from = ""
+	}
+	app, err := appBusiness.SetAccess(r.Context(), id, body.Scopes, body.Audience, from)
 	if err != nil {
 		refuse(w, r, err)
 		return

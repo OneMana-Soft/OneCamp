@@ -93,3 +93,26 @@ func IncrMany(ctx context.Context, counters []CounterIncr, scores []ScoreIncr) {
 		helpers.LogErrorWithContext(ctx, "redis store: IncrMany failed err=%+v", err)
 	}
 }
+
+// StringSet is one SetString: the key its spec and args build, and its value.
+type StringSet struct {
+	Key   CounterKey
+	Value string
+}
+
+// SetStringMany is SetString for several keys in one pipeline, each with its
+// spec's TTL.
+func SetStringMany(ctx context.Context, sets []StringSet) error {
+	if !IsAvailable() || len(sets) == 0 {
+		return nil
+	}
+	pipe := redisInit.RedisClient.Pipeline()
+	for _, s := range sets {
+		pipe.Set(ctx, s.Key.Spec.Build(s.Key.Args...), s.Value, s.Key.Spec.TTL)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		helpers.LogErrorWithContext(ctx, "redis store: SetStringMany failed err=%+v", err)
+		return err
+	}
+	return nil
+}

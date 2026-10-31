@@ -9,6 +9,7 @@ import (
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
@@ -56,11 +57,12 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 
 	statusMap, _ := importModels.GetStatusMappings(ctx, job.Id)
 	priorityMap, _ := importModels.GetPriorityMappings(ctx, job.Id)
-	defaultStatus := prov.DefaultStatusMap()
+	defaultStatus := importProvider.StatusDefaults(prov.DefaultStatusMap(), planKinds(job))
 	defaultPriority := prov.DefaultPriorityMap()
 
 	fields := newProjectFields(job, &chunk.Id, projectSrcId, projectUUID, importingUser.UserPostgresInfo.Id)
 	who := newPeople(job)
+	days := dayZone(ctx, job, opts)
 	taskCh, errCh := prov.IterTasksOfProject(ctx, job, opts, projectSrcId)
 
 	committed := 0
@@ -73,7 +75,7 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 		}
 		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		importModels.LogImportErrors(bg, job.Id, &chunk.Id, notes)
+		importModels.LogImportErrors(bg, job.Id, notes)
 		notes = notes[:0]
 		if len(pendingChunks) == 0 {
 			return
@@ -110,7 +112,7 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 			if st.ParentTaskID == "" {
 				if err := importOneTask(ctx, job, &st, projectUUID, projectInfo,
 					statusMap, priorityMap, defaultStatus, defaultPriority,
-					importingUser, fields, &pendingChunks, &notes, who); err != nil {
+					importingUser, fields, &pendingChunks, &notes, who, days); err != nil {
 					importModels.LogImportError(ctx, job.Id, &chunk.Id,
 						importModels.EntityTask, st.SourceID,
 						importModels.SeverityError, "TASK_IMPORT_FAILED",
@@ -148,7 +150,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	projectUUID uuid.UUID, projectInfo *dgraphStruct.DgraphProject,
 	statusMap, priorityMap, defaultStatus, defaultPriority map[string]string,
 	importingUser *userModels.UserInfo, fields *projectFields, pendingChunks *[]*importModels.Chunk,
-	notes *[]importModels.ImportError, who *people,
+	notes *[]importModels.ImportError, who *people, days *time.Location,
 ) error {
 	if existing, _ := importModels.LookupIdMapping(ctx, job.Id,
 		importModels.EntityTask, st.SourceID); existing != uuid.Nil {
@@ -157,29 +159,12 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	if existing, _ := importModels.LookupWorkspaceMapping(ctx,
 		job.Provider, job.SourceWorkspaceName,
 		importModels.EntityTask, st.SourceID); existing != uuid.Nil {
-		_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+		return importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 			importModels.EntityTask, st.SourceID, existing, nil,
 			mustMarshal(map[string]any{"matched_by": "workspace_map"}), false)
-		return nil
 	}
 
-	creator := importingUser
-	if st.CreatedBy != "" {
-		if _, info := who.resolve(ctx, st.CreatedBy); info != nil {
-			creator = info
-		}
-	}
-
-	var assigneeDg *dgraphStruct.DgraphUser
-	extraAssignees := []string{}
-	if len(st.AssigneeIds) > 0 {
-		_, info := who.resolve(ctx, st.AssigneeIds[0])
-		if info != nil {
-			a := info.UserDgraphInfo
-			assigneeDg = &a
-		}
-		extraAssignees = coAssigneeNames(ctx, who, st.AssigneeIds[1:])
-	}
+	creator, assigneeDg, unplaced, extraAssignees := who.ofTask(ctx, st, importingUser)
 
 	finalStatus := closedIfCompleted(importProvider.ApplyStatusMap(st.Status, statusMap, defaultStatus), st.Completed)
 	finalPriority := importProvider.ApplyPriorityMap(st.Priority, priorityMap, defaultPriority)
@@ -187,7 +172,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	// Field values are read first: one no field can keep goes into the
 	// description, which is written with the task.
 	values, lost := fields.prepare(ctx, st.Fields)
-	descHTML := renderTaskDescription(st, extraAssignees) + renderLostValues(lost)
+	descHTML := unassignedLine(job, unplaced) + renderTaskDescription(st, extraAssignees) + renderLostValues(lost)
 	label := taskLabel(st.Labels)
 
 	createdAt := st.Created
@@ -198,6 +183,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	if updatedAt.IsZero() {
 		updatedAt = createdAt
 	}
+	start, due := taskDates(st, days)
 
 	why := restrictedWhy(job, st)
 	taskUUID, left, err := writeTask(ctx, job, importTaskInput{
@@ -210,12 +196,14 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 		Status:          finalStatus,
 		Priority:        finalPriority,
 		Label:           label,
-		StartDate:       st.StartDate,
-		DueDate:         st.DueDate,
+		StartDate:       start,
+		DueDate:         due,
 		CreatedAt:       createdAt,
 		UpdatedAt:       updatedAt,
 		Number:          sourceNumber(st),
+		TypeID:          builtinType(st.Type),
 		EstimateMinutes: st.EstimateMinutes,
+		EstimatePoints:  st.EstimatePoints,
 		Restricted:      why,
 		People:          peopleOf(st),
 		Importer:        importingUser,
@@ -225,11 +213,16 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	}
 	md := taskMapMetadata(st, finalStatus, finalPriority)
 	if why != "" {
-		*notes = append(*notes, restrictedNote(job, importModels.EntityTask, st.SourceID, why, left))
+		*notes = append(*notes, restrictedNote(job, nil, importModels.EntityTask, st.SourceID, why, left))
 		md = restrictedRecord(md, why, left)
+	} else if unplaced != "" {
+		// A restricted task's line already names an assignee it doesn't let in.
+		*notes = append(*notes, unassignedNote(job, nil, importModels.EntityTask, st.SourceID, unplaced))
 	}
 	// Before the task is recorded as imported: a retry skips recorded tasks.
 	fields.write(ctx, taskUUID, values)
+	keepSourceAliases(ctx, job, st, taskUUID)
+	placeInCycle(ctx, job, st, taskUUID)
 
 	// Mapped for this import and the workspace in one statement.
 	if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
@@ -400,11 +393,12 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 
 	statusMap, _ := importModels.GetStatusMappings(ctx, job.Id)
 	priorityMap, _ := importModels.GetPriorityMappings(ctx, job.Id)
-	defaultStatus := prov.DefaultStatusMap()
+	defaultStatus := importProvider.StatusDefaults(prov.DefaultStatusMap(), planKinds(job))
 	defaultPriority := prov.DefaultPriorityMap()
 
 	fields := newProjectFields(job, &chunk.Id, parentProjectSrc, projectUUID, importingUser.UserPostgresInfo.Id)
 	who := newPeople(job)
+	days := dayZone(ctx, job, opts)
 	subCh, errCh := prov.IterSubtasksOfTask(ctx, job, opts, parentSrc)
 	committed := 0
 	var pending []*importModels.Chunk
@@ -413,7 +407,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 		if len(notes) > 0 {
 			bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			importModels.LogImportErrors(bg, job.Id, &chunk.Id, notes)
+			importModels.LogImportErrors(bg, job.Id, notes)
 		}
 	}()
 	finish := func() error {
@@ -448,21 +442,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 				importModels.EntitySubtask, st.SourceID); existing != uuid.Nil {
 				continue
 			}
-			creator := importingUser
-			if st.CreatedBy != "" {
-				if _, info := who.resolve(ctx, st.CreatedBy); info != nil {
-					creator = info
-				}
-			}
-			var assigneeDg *dgraphStruct.DgraphUser
-			extraAssignees := []string{}
-			if len(st.AssigneeIds) > 0 {
-				if _, info := who.resolve(ctx, st.AssigneeIds[0]); info != nil {
-					a := info.UserDgraphInfo
-					assigneeDg = &a
-				}
-				extraAssignees = coAssigneeNames(ctx, who, st.AssigneeIds[1:])
-			}
+			creator, assigneeDg, unplaced, extraAssignees := who.ofTask(ctx, &st, importingUser)
 			finalStatus := closedIfCompleted(importProvider.ApplyStatusMap(st.Status, statusMap, defaultStatus), st.Completed)
 			finalPriority := importProvider.ApplyPriorityMap(st.Priority, priorityMap, defaultPriority)
 			label := taskLabel(st.Labels)
@@ -471,6 +451,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 				createdAt = time.Now()
 			}
 			values, lost := fields.prepare(ctx, st.Fields)
+			start, due := taskDates(&st, days)
 			// Under a restricted task it is restricted too, with its own people.
 			why := restrictedWhy(job, &st)
 			if why == "" {
@@ -483,15 +464,17 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 				Creator:         creator,
 				Assignee:        assigneeDg,
 				Name:            truncate(st.Name, 256),
-				Description:     renderTaskDescription(&st, extraAssignees) + renderLostValues(lost),
+				Description:     unassignedLine(job, unplaced) + renderTaskDescription(&st, extraAssignees) + renderLostValues(lost),
 				Status:          finalStatus,
 				Priority:        finalPriority,
 				Label:           label,
-				StartDate:       st.StartDate,
-				DueDate:         st.DueDate,
+				StartDate:       start,
+				DueDate:         due,
 				CreatedAt:       createdAt,
 				UpdatedAt:       ifZeroNow(st.Updated),
+				Number:          sourceNumber(&st),
 				EstimateMinutes: st.EstimateMinutes,
+				EstimatePoints:  st.EstimatePoints,
 				Restricted:      why,
 				People:          peopleOf(&st),
 				Importer:        importingUser,
@@ -510,13 +493,22 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 				"name":              st.Name,
 			}
 			if why != "" {
-				notes = append(notes, restrictedNote(job, importModels.EntitySubtask, st.SourceID, why, left))
+				notes = append(notes, restrictedNote(job, &chunk.Id, importModels.EntitySubtask, st.SourceID, why, left))
 				md = restrictedRecord(md, why, left)
+			} else if unplaced != "" {
+				notes = append(notes, unassignedNote(job, &chunk.Id, importModels.EntitySubtask, st.SourceID, unplaced))
 			}
 			fields.write(ctx, subUUID, values)
-			_ = importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
+			keepSourceAliases(ctx, job, &st, subUUID)
+			if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 				importModels.EntitySubtask, st.SourceID, subUUID, &parentSrc,
-				mustMarshal(md), true)
+				mustMarshal(md), true); err != nil {
+				importModels.LogImportError(ctx, job.Id, &chunk.Id,
+					importModels.EntitySubtask, st.SourceID,
+					importModels.SeverityError, "SUBTASK_IMPORT_FAILED",
+					err.Error(), nil)
+				continue
+			}
 			pending = append(pending, followUpChunks(job, &st)...)
 			committed++
 		}
@@ -625,8 +617,12 @@ type importTaskInput struct {
 	// Number is the task's number in the source (ENG-123's 123), kept when the
 	// project hasn't used it; 0 numbers it as it's made.
 	Number int
-	// EstimateMinutes is the source's estimate; 0 is none.
+	// TypeID is the built-in type it comes as (WorkTaxonomy); nil is a Task.
+	TypeID *uuid.UUID
+	// EstimateMinutes is the source's estimate; 0 is none. EstimatePoints is
+	// its points, kept as the source has them; nil is none.
 	EstimateMinutes int
+	EstimatePoints  *float64
 }
 
 // writeTask is the import-side equivalent of taskBusiness.CreateTask
@@ -667,7 +663,7 @@ func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (
 	// the source has a single timestamp. Only when updated_at differs
 	// (the source had a real edit history) do we patch it.
 	number, err := taskDomain.CreateTaskNumbered(ctx, taskUUID, in.ProjectUUID,
-		in.Creator.UserPostgresInfo.Id, in.CreatedAt, in.Number)
+		in.Creator.UserPostgresInfo.Id, in.CreatedAt, in.Number, in.TypeID)
 	if err != nil {
 		return uuid.Nil, nil, fmt.Errorf("pg create task: %w", err)
 	}
@@ -738,6 +734,7 @@ func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (
 	if m := estimateMinutes(in.EstimateMinutes); m > 0 {
 		dgraphTask.EstimateMinutes = &m
 	}
+	dgraphTask.EstimatePoints = in.EstimatePoints
 	if in.ParentTask != nil {
 		dgraphTask.ParentTask = &dgraphStruct.DgraphTask{
 			Uid: in.ParentTask.Uid,
@@ -757,6 +754,8 @@ func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (
 	if _, err := taskDomain.CreateOrUpdateDgraphTask(ctx, dgraphTask); err != nil {
 		return uuid.Nil, nil, fmt.Errorf("dgraph task: %w", err)
 	}
+	// A OneCamp link in an imported description shows on what it links (DG15a).
+	refsBusiness.Saved(ctx, refsBusiness.Task, taskUUID.String(), in.Description, true)
 
 	// 3. OpenSearch (async, best-effort).
 	emptyString := ""

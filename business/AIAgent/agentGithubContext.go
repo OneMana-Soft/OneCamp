@@ -21,20 +21,28 @@ import (
 	"context"
 	"strings"
 
+	"github.com/google/uuid"
+
+	aiBusiness "github.com/akashc777/OneCamp/business/AI"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
 	"github.com/akashc777/OneCamp/helpers"
+	githubLinkModel "github.com/akashc777/OneCamp/models/postgres/GitHubLink"
 )
 
 // maxGitHubContextRepos caps how many linked repos are listed so the grounding
 // stays compact (a workspace with many links can't balloon the prompt / TPM).
 const maxGitHubContextRepos = 20
 
-// buildGitHubContext returns a system-prompt snippet listing the workspace's
-// connected GitHub repositories as exact owner/name pairs, so an agent resolves
-// a repo by name deterministically instead of a global search or a "which repo?"
-// question. Best-effort: returns "" when nothing is linked or the lookup fails,
-// so a run is never blocked by it.
-func buildGitHubContext(ctx context.Context) string {
+// buildGitHubContext returns a system-prompt snippet listing the connected
+// GitHub repositories this run may read, as exact owner/name pairs, so an
+// agent resolves a repo by name deterministically instead of a global search
+// or a "which repo?" question. Only a repository linked to a project the
+// sponsor is in, and the asker too when someone else asked, is named
+// (business/AI RepoReader, the code tools' own rule): a run is never told of
+// repositories its tools refuse, or of what other projects link. Best-effort:
+// returns "" when nothing is listed or a lookup fails, so a run is never
+// blocked by it.
+func buildGitHubContext(ctx context.Context, sponsorUUID string) string {
 	links, err := githubBusiness.GetAllLinkedRepos(ctx)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "agentRunner: list linked github repos failed: %v", err)
@@ -43,28 +51,48 @@ func buildGitHubContext(ctx context.Context) string {
 	if len(links) == 0 {
 		return ""
 	}
-	seen := make(map[string]bool, len(links))
-	repos := make([]string, 0, len(links))
+	readsFor, err := aiBusiness.RepoReader(ctx, sponsorUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "agentRunner: who the linked github repos are read for: %v", err)
+		return ""
+	}
+	return renderGitHubContext(readableRepos(links, readsFor))
+}
+
+// readableRepos are the linked repositories mayRead allows, given all the
+// projects linking each, as "owner/name" spelled as in the first of its links
+// given (GetAllLinkedRepos gives the newest first); names match in any case,
+// as GitHub matches them. At most maxGitHubContextRepos.
+func readableRepos(links []*githubLinkModel.GitHubLink, mayRead func(projects []uuid.UUID) bool) []string {
+	var order []string
+	spelled := map[string]string{}
+	linking := map[string][]uuid.UUID{}
 	for _, l := range links {
 		if l == nil {
 			continue
 		}
-		owner := strings.TrimSpace(l.RepoOwner)
-		name := strings.TrimSpace(l.RepoName)
+		owner, name := strings.TrimSpace(l.RepoOwner), strings.TrimSpace(l.RepoName)
 		if owner == "" || name == "" {
 			continue
 		}
-		full := owner + "/" + name
-		if seen[full] {
+		key := strings.ToLower(owner + "/" + name)
+		if _, seen := spelled[key]; !seen {
+			spelled[key] = owner + "/" + name
+			order = append(order, key)
+		}
+		linking[key] = append(linking[key], l.ProjectId)
+	}
+	repos := make([]string, 0, len(order))
+	for _, key := range order {
+		if !mayRead(linking[key]) {
 			continue
 		}
-		seen[full] = true
-		repos = append(repos, full)
+		repos = append(repos, spelled[key])
 		if len(repos) >= maxGitHubContextRepos {
 			break
 		}
 	}
-	return renderGitHubContext(repos)
+	return repos
 }
 
 // renderGitHubContext builds the system-prompt snippet from a resolved list of

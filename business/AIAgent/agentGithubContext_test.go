@@ -1,9 +1,47 @@
 package business
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
+
+	githubLinkModel "github.com/akashc777/OneCamp/models/postgres/GitHubLink"
 )
+
+// A run is told only of the repositories its code tools would read: each is
+// judged on every project linking it, as CodeRepoAllowed judges it, so a
+// repository linked to a project outside the run's reach is never named (A13).
+func TestARunIsToldOnlyOfRepositoriesItMayRead(t *testing.T) {
+	web, docs, billing := uuid.New(), uuid.New(), uuid.New()
+	link := func(owner, name string, project uuid.UUID) *githubLinkModel.GitHubLink {
+		return &githubLinkModel.GitHubLink{RepoOwner: owner, RepoName: name, ProjectId: project}
+	}
+	links := []*githubLinkModel.GitHubLink{
+		link("acme", "web", web),
+		link("acme", "billing", billing),
+		nil,
+		link("ACME", "Web", docs),
+		link("acme", " ", web),
+	}
+	var asked [][]uuid.UUID
+	got := readableRepos(links, func(projects []uuid.UUID) bool {
+		asked = append(asked, projects)
+		for _, p := range projects {
+			if p == billing {
+				return false
+			}
+		}
+		return true
+	})
+	if !reflect.DeepEqual(got, []string{"acme/web"}) {
+		t.Errorf("listed %v, want acme/web alone, spelled as its first link given", got)
+	}
+	if want := [][]uuid.UUID{{web, docs}, {billing}}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("asked about %v, want each repository once, with every project linking it", asked)
+	}
+}
 
 func TestRenderGitHubContext_Empty(t *testing.T) {
 	if got := renderGitHubContext(nil); got != "" {

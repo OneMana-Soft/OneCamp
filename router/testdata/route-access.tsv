@@ -1,0 +1,1259 @@
+# Who may call each route: see router/routeAccess_test.go for the columns and their words.
+# METHOD	PATTERN	GATE	TOKEN	DEMO	CHECK	REFUSAL	NOTE
+GET	/.well-known/oauth-authorization-server	public	none	public	public	-	OAuth server metadata (RFC 8414)
+GET	/.well-known/oauth-protected-resource	public	none	public	public	-	OAuth discovery for /v1/mcp (RFC 9728) — OAuth 2.1 for the MCP endpoint (business/MCPServer/oauth). Called by an MCP client's own servers before anyone is signed in; discovery and registration hold nothing secret, authorize only parks a request for a signed-in person to approve, and token/revoke are authenticated by the code, PKCE verifier or refresh token they are sent.
+GET	/.well-known/oauth-protected-resource/v1/mcp	public	none	public	public	-	OAuth discovery for /v1/mcp (RFC 9728)
+GET	/activity/comments	session	none	member	TODO(activity)	-	
+GET	/activity/mentions	session	none	member	TODO(activity)	-	
+GET	/activity/reactions	session	none	member	TODO(activity)	-	
+POST	/activity/seen	session	none	member	TODO(activity)	-	
+GET	/activity/unified	session	none	member	TODO(activity)	-	
+POST	/admin/activateUser	admin	none	refused	gate	gate	
+POST	/admin/addInvitation	admin	none	refused	gate	gate	
+GET	/admin/ai/activity	admin	none	refused	gate	gate	
+POST	/admin/ai/agent-delegation	admin	none	refused	gate	gate	
+GET	/admin/ai/authorized-models	admin	none	refused	gate	gate	
+POST	/admin/ai/authorized-models	admin	none	refused	gate	gate	
+DELETE	/admin/ai/authorized-models/{id}	admin	none	refused	gate	gate	
+GET	/admin/ai/authorized-models/{id}/discover-limits	admin	none	refused	gate	gate	
+POST	/admin/ai/authorized-models/{id}/enabled	admin	none	refused	gate	gate	
+POST	/admin/ai/authorized-models/{id}/limits	admin	none	refused	gate	gate	
+POST	/admin/ai/chat-model	admin	none	refused	gate	gate	
+POST	/admin/ai/code-analysis-max-files	admin	none	refused	gate	gate	
+POST	/admin/ai/code-pr	admin	none	refused	gate	gate	
+POST	/admin/ai/code-pr/enabled	admin	none	refused	gate	gate	
+POST	/admin/ai/code-pr/model	admin	none	refused	gate	gate	
+GET	/admin/ai/code-pr/runs	admin	none	refused	gate	gate	
+GET	/admin/ai/code-pr/scorecard	admin	none	refused	gate	gate	
+POST	/admin/ai/code-pr/test	admin	none	refused	gate	gate	
+GET	/admin/ai/config	admin	none	refused	gate	gate	
+POST	/admin/ai/context-window	admin	none	refused	gate	gate	
+POST	/admin/ai/coworker	admin	none	refused	gate	gate	
+POST	/admin/ai/embedding-model	admin	none	refused	gate	gate	
+POST	/admin/ai/enabled	admin	none	refused	gate	gate	
+POST	/admin/ai/issue-triage	admin	none	refused	gate	gate	
+POST	/admin/ai/local-only	admin	none	refused	gate	gate	
+GET	/admin/ai/mcp-server	admin	none	refused	gate	gate	
+POST	/admin/ai/mcp-server	admin	none	refused	gate	gate	
+POST	/admin/ai/meeting-notes-doc	admin	none	refused	gate	gate	
+POST	/admin/ai/meeting-recap	admin	none	refused	gate	gate	
+POST	/admin/ai/meeting-recap/instructions	admin	none	refused	gate	gate	
+POST	/admin/ai/memory-layer	admin	none	refused	gate	gate	
+POST	/admin/ai/memory/digest/test	admin	none	refused	gate	gate	
+POST	/admin/ai/memory/rebuild	admin	none	refused	gate	gate	
+GET	/admin/ai/memory/rebuild/status	admin	none	refused	gate	gate	
+GET	/admin/ai/model-routing	admin	none	refused	gate	gate	
+POST	/admin/ai/model-routing	admin	none	refused	gate	gate	
+POST	/admin/ai/models/delete	admin	none	refused	gate	gate	
+POST	/admin/ai/models/pull	admin	none	refused	gate	gate	
+POST	/admin/ai/nudges	admin	none	refused	gate	gate	
+POST	/admin/ai/pii-patterns	admin	none	refused	gate	gate	
+POST	/admin/ai/pii-redaction	admin	none	refused	gate	gate	
+POST	/admin/ai/providers	admin	none	refused	gate	gate	
+POST	/admin/ai/providers/test	admin	none	refused	gate	gate	
+DELETE	/admin/ai/providers/{providerId}	admin	none	refused	gate	gate	
+PATCH	/admin/ai/providers/{providerId}	admin	none	refused	gate	gate	
+GET	/admin/ai/providers/{providerId}/catalog	admin	none	refused	gate	gate	
+GET	/admin/ai/providers/{providerId}/models	admin	none	refused	gate	gate	
+POST	/admin/ai/rate-limit	admin	none	refused	gate	gate	
+POST	/admin/ai/reasoning	admin	none	refused	gate	gate	
+GET	/admin/ai/reindex/status	admin	none	refused	gate	gate	
+POST	/admin/ai/sandbox	admin	none	refused	gate	gate	
+POST	/admin/ai/sandbox/enabled	admin	none	refused	gate	gate	
+POST	/admin/ai/sandbox/test	admin	none	refused	gate	gate	
+POST	/admin/ai/self-test	admin	none	refused	gate	gate	
+GET	/admin/ai/self-test/status	admin	none	refused	gate	gate	
+GET	/admin/ai/system	admin	none	refused	gate	gate	
+POST	/admin/ai/team-report	admin	none	refused	gate	gate	
+POST	/admin/ai/team-report/run	admin	none	refused	gate	gate	
+GET	/admin/ai/usage/channels	admin	none	refused	gate	gate	
+GET	/admin/ai/usage/users	admin	none	refused	gate	gate	
+POST	/admin/ai/user-token-budget	admin	none	refused	gate	gate	
+POST	/admin/ai/vision-model	admin	none	refused	gate	gate	
+POST	/admin/ai/web-search	admin	none	refused	gate	gate	
+POST	/admin/ai/workspace-token-budget	admin	none	refused	gate	gate	
+GET	/admin/apps	admin	none	refused	gate	gate	
+POST	/admin/apps	admin	none	refused	gate	gate	
+GET	/admin/apps/oauth/callback	public	none	public	link:oauth-state	-	state-verified app-install OAuth redirect
+DELETE	/admin/apps/{appId}	admin	none	refused	gate	gate	
+GET	/admin/apps/{appId}	admin	none	refused	gate	gate	
+PATCH	/admin/apps/{appId}	admin	none	refused	gate	gate	
+PUT	/admin/apps/{appId}/access	admin	none	refused	gate	gate	
+POST	/admin/apps/{appId}/enabled	admin	none	refused	gate	gate	
+GET	/admin/apps/{appId}/identity	admin	none	refused	gate	gate	
+POST	/admin/apps/{appId}/oauth-disconnect	admin	none	refused	gate	gate	
+GET	/admin/apps/{appId}/oauth-url	admin	none	refused	gate	gate	
+POST	/admin/apps/{appId}/test	admin	none	refused	gate	gate	
+POST	/admin/apps/{appId}/tokens	admin	none	refused	gate	gate	
+DELETE	/admin/apps/{appId}/tokens/{tokenId}	admin	none	refused	gate	gate	
+POST	/admin/apps/{appId}/tokens/{tokenId}/rotate	admin	none	refused	gate	gate	
+GET	/admin/archive/jobs	admin	none	refused	gate	gate	
+GET	/admin/archive/policies	admin	none	refused	gate	gate	
+PUT	/admin/archive/policies/{entityType}	admin	none	refused	gate	gate	
+GET	/admin/archive/recent-items/{entityType}	admin	none	refused	gate	gate	
+POST	/admin/archive/restore	admin	none	refused	gate	gate	
+POST	/admin/archive/run/{entityType}	admin	none	refused	gate	gate	
+GET	/admin/archive/stats	admin	none	refused	gate	gate	
+POST	/admin/archive/undo/{jobId}	admin	none	refused	gate	gate	
+GET	/admin/audit-log	admin	none	refused	gate	gate	
+GET	/admin/audit-log/evidence-pack	admin	none	refused	gate	gate	
+GET	/admin/audit-log/export	admin	none	refused	gate	gate	
+GET	/admin/audit-log/receipts	admin	none	refused	gate	gate	
+GET	/admin/audit-log/verify	admin	none	refused	gate	gate	
+POST	/admin/auth/2fa/reset	admin	none	refused	gate	gate	
+GET	/admin/auth/oauth-config	admin	none	refused	gate	gate	
+POST	/admin/auth/oauth-config	admin	none	refused	gate	gate	
+GET	/admin/capabilities	admin	none	refused	gate	gate	
+POST	/admin/capabilities	admin	none	refused	gate	gate	
+GET	/admin/config/email	admin	none	refused	gate	gate	
+POST	/admin/config/email	admin	none	refused	gate	gate	
+DELETE	/admin/config/email/logo	admin	none	refused	gate	gate	
+POST	/admin/config/email/logo	admin	none	refused	gate	gate	
+POST	/admin/createAdmin	admin	none	refused	gate	gate	
+GET	/admin/csp-violations	admin	none	refused	gate	gate	
+POST	/admin/csp-violations/clear	admin	none	refused	gate	gate	
+GET	/admin/data-subject/{userId}/inventory	admin	none	refused	gate	gate	
+POST	/admin/deactivateUser	admin	none	refused	gate	gate	
+GET	/admin/default-channels	admin	none	refused	gate	gate	
+POST	/admin/default-channels	admin	none	refused	gate	gate	
+DELETE	/admin/deleteInvitation/{email}	admin	none	refused	gate	gate	
+POST	/admin/deleteTeam	admin	none	refused	gate	gate	
+GET	/admin/departed	admin	none	refused	gate	gate	
+POST	/admin/departed/{user_uuid}/handover	admin	none	refused	gate	gate	
+POST	/admin/departed/{user_uuid}/links/off	admin	none	refused	gate	gate	
+GET	/admin/disk	admin	none	refused	gate	gate	
+GET	/admin/docs/exports	admin	none	refused	gate	gate	
+POST	/admin/docs/exports	admin	none	refused	gate	gate	
+GET	/admin/docs/exports/{job_id}	admin	none	refused	gate	gate	
+GET	/admin/external-users	admin	none	refused	gate	gate	
+POST	/admin/external-users/unlink	admin	none	refused	gate	gate	
+GET	/admin/getAllAdminUsers	admin	none	refused	gate	gate	
+GET	/admin/getAllInvitations	admin	none	refused	gate	gate	
+GET	/admin/getAllTeamList	admin	none	refused	gate	gate	
+GET	/admin/getAllUsersList	admin	none	refused	gate	gate	
+GET	/admin/getSelfAdminProfile	admin	none	refused	gate	gate	
+GET	/admin/github/auth-url	admin	none	refused	gate	gate	
+GET	/admin/github/callback	admin	none	refused	gate	gate	
+POST	/admin/github/callback	admin	none	refused	gate	gate	
+GET	/admin/github/config	admin	none	refused	gate	gate	
+POST	/admin/github/config	admin	none	refused	gate	gate	
+POST	/admin/github/disconnect	admin	none	refused	gate	gate	
+POST	/admin/github/import-issues/{linkId}	admin	none	refused	gate	gate	
+GET	/admin/github/import-job/{jobId}	admin	none	refused	gate	gate	
+GET	/admin/github/import-jobs/{linkId}	admin	none	refused	gate	gate	
+POST	/admin/github/import-prs/{linkId}	admin	none	refused	gate	gate	
+POST	/admin/github/link-repo	admin	none	refused	gate	gate	
+GET	/admin/github/linked-repos/{projectId}	admin	none	refused	gate	gate	
+POST	/admin/github/links/{linkId}/automation-rules	admin	none	refused	gate	gate	
+POST	/admin/github/links/{linkId}/branch-format	admin	none	refused	gate	gate	
+GET	/admin/github/rate-limit	admin	none	refused	gate	gate	
+GET	/admin/github/repos	admin	none	refused	gate	gate	
+GET	/admin/github/status	admin	none	refused	gate	gate	
+DELETE	/admin/github/unlink-repo/{linkId}	admin	none	refused	gate	gate	
+GET	/admin/github/webhook-health	admin	none	refused	gate	gate	
+GET	/admin/governance-drill	admin	none	refused	gate	gate	
+POST	/admin/governance-drill/run	admin	none	refused	gate	gate	
+POST	/admin/governance-drill/setup	admin	none	refused	gate	gate	
+POST	/admin/guest-access	admin	none	refused	gate	gate	
+GET	/admin/guest-grants	admin	none	refused	gate	gate	
+POST	/admin/guest-grants/{id}/revoke	admin	none	refused	gate	gate	
+GET	/admin/guest-links/stopped	admin	none	refused	gate	gate	
+GET	/admin/import-access	admin	none	refused	admin	TestOnlyAnAdminInTheAppListsOrKeepsAnOldImportsAccess	the old imports' access re-check card; the handler refuses a member and an admin's token itself (importAccessAdmin)
+POST	/admin/import-access/{import_id}/contain	admin	none	refused	admin	TestOnlyAnAdminInTheAppDecidesAboutAnOldImportsAccess	keeps an old import's tasks to its projects' admins; the handler refuses a member and an admin's token itself
+POST	/admin/import-access/{import_id}/keep	admin	none	refused	admin	TestOnlyAnAdminInTheAppListsOrKeepsAnOldImportsAccess	keeps an old import's access as it is; the handler refuses a member and an admin's token itself
+POST	/admin/import-access/{import_id}/recheck	admin	none	refused	admin	TestOnlyAnAdminInTheAppDecidesAboutAnOldImportsAccess	re-checks with the admin's own connection, which must reach the import's own site; the handler refuses a member and an admin's token itself
+POST	/admin/import-access/{import_id}/undo	admin	none	refused	admin	TestOnlyAnAdminInTheAppDecidesAboutAnOldImportsAccess	undoes a re-check; the handler refuses a member and an admin's token itself
+GET	/admin/import-reviews	admin	none	refused	admin	TestOldImportsMembersAreReviewedByAdmins	who old Todoist and Notion imports added, by project; RequireAdmin, and the business refuses a token (ErrThroughToken)
+GET	/admin/import-reviews/projects/{project_uuid}	admin	none	refused	admin	TestOldImportsMembersAreReviewedByAdmins	a project's people old imports added; RequireAdmin, and the business refuses a token
+POST	/admin/import-reviews/projects/{project_uuid}/keep	admin	none	refused	admin	TestOldImportsMembersAreReviewedByAdmins	keeps a project's undecided people; RequireAdmin, and the business refuses a token
+POST	/admin/import-reviews/projects/{project_uuid}/remove-all	admin	none	refused	admin	TestOldImportsMembersAreReviewedByAdmins	takes a project's undecided people off it, never its creator; RequireAdmin, and the business refuses a token
+POST	/admin/import-reviews/{id}/remove	admin	none	refused	admin	TestOldImportsMembersAreReviewedByAdmins	takes one person an import added off the project, never its creator; RequireAdmin, and the business refuses a token
+GET	/admin/import/connections	admin	none	refused	gate	gate	
+GET	/admin/import/jobs	admin	none	refused	gate	gate	
+GET	/admin/import/jobs/{jobId}	admin	none	refused	gate	gate	
+POST	/admin/import/jobs/{jobId}/cancel	admin	none	refused	gate	gate	
+GET	/admin/import/jobs/{jobId}/errors	admin	none	refused	gate	gate	
+POST	/admin/import/jobs/{jobId}/outcome-seen	admin	none	refused	gate	gate	
+GET	/admin/import/jobs/{jobId}/people	admin	none	refused	gate	gate	
+POST	/admin/import/jobs/{jobId}/plan	admin	none	refused	gate	gate	
+POST	/admin/import/jobs/{jobId}/retry-failed	admin	none	refused	gate	gate	
+POST	/admin/import/jobs/{jobId}/rollback	admin	none	refused	gate	gate	
+POST	/admin/import/jobs/{jobId}/run	admin	none	refused	gate	gate	
+DELETE	/admin/import/jobs/{jobId}/staged-zip	admin	none	refused	gate	gate	
+GET	/admin/import/oauth/callback	admin	none	refused	gate	gate	
+GET	/admin/import/outcomes	admin	none	refused	gate	gate	
+GET	/admin/import/providers	admin	none	refused	gate	gate	
+POST	/admin/import/slack/api-read	admin	none	refused	gate	gate	
+POST	/admin/import/slack/cancel/{jobId}	admin	none	refused	gate	gate	
+POST	/admin/import/slack/finalize/{jobId}	admin	none	refused	gate	gate	
+GET	/admin/import/slack/jobs	admin	none	refused	gate	gate	
+GET	/admin/import/slack/jobs/{jobId}	admin	none	refused	gate	gate	
+GET	/admin/import/slack/jobs/{jobId}/errors	admin	none	refused	gate	gate	
+DELETE	/admin/import/slack/jobs/{jobId}/staged-zip	admin	none	refused	gate	gate	
+GET	/admin/import/slack/limits	admin	none	refused	gate	gate	
+POST	/admin/import/slack/plan/{jobId}	admin	none	refused	gate	gate	
+POST	/admin/import/slack/presign	admin	none	refused	gate	gate	
+POST	/admin/import/slack/rollback/{jobId}	admin	none	refused	gate	gate	
+POST	/admin/import/slack/run/{jobId}	admin	none	refused	gate	gate	
+POST	/admin/import/slack/upload	admin	none	refused	gate	gate	
+POST	/admin/import/{provider}/connect	admin	none	refused	gate	gate	
+POST	/admin/import/{provider}/disconnect	admin	none	refused	gate	gate	
+POST	/admin/import/{provider}/discover	admin	none	refused	gate	gate	
+POST	/admin/import/{provider}/finalize/{jobId}	admin	none	refused	gate	gate	
+POST	/admin/import/{provider}/jobs	admin	none	refused	gate	gate	
+GET	/admin/import/{provider}/oauth-url	admin	none	refused	gate	gate	
+POST	/admin/import/{provider}/presign	admin	none	refused	gate	gate	
+GET	/admin/marketplace	admin	none	refused	gate	gate	
+POST	/admin/marketplace/install	admin	none	refused	gate	gate	
+POST	/admin/marketplace/uninstall	admin	none	refused	gate	gate	
+GET	/admin/onboarding	admin	none	refused	gate	gate	
+POST	/admin/onboarding/dismiss	admin	none	refused	gate	gate	
+POST	/admin/onboarding/sample	admin	none	refused	gate	gate	
+POST	/admin/onboarding/sample/remove	admin	none	refused	gate	gate	
+POST	/admin/onboarding/skip	admin	none	refused	gate	gate	
+GET	/admin/policies	admin	none	refused	gate	gate	
+PUT	/admin/policies/{key}	admin	none	refused	gate	gate	
+DELETE	/admin/push	admin	none	refused	gate	gate	
+GET	/admin/push	admin	none	refused	gate	gate	
+POST	/admin/push	admin	none	refused	gate	gate	
+POST	/admin/read-receipts	admin	none	refused	gate	gate	
+POST	/admin/removeAdmin	admin	none	refused	gate	gate	
+POST	/admin/resendInvitation	admin	none	refused	gate	gate	
+GET	/admin/retention	admin	none	refused	gate	gate	
+POST	/admin/retention	admin	none	refused	gate	gate	
+GET	/admin/scim/tokens	admin	none	refused	gate	gate	
+POST	/admin/scim/tokens	admin	none	refused	gate	gate	
+POST	/admin/scim/tokens/{id}/revoke	admin	none	refused	gate	gate	
+GET	/admin/seats	admin	none	refused	gate	gate	
+GET	/admin/settings	admin	none	refused	gate	gate	
+POST	/admin/settings	admin	none	refused	gate	gate	
+DELETE	/admin/slack-bridge	admin	none	refused	gate	gate	
+GET	/admin/slack-bridge	admin	none	refused	gate	gate	
+PUT	/admin/slack-bridge	admin	none	refused	gate	gate	
+POST	/admin/slack-bridge/links	admin	none	refused	gate	gate	
+DELETE	/admin/slack-bridge/links/{id}	admin	none	refused	gate	gate	
+GET	/admin/slack-bridge/slack-channels	admin	none	refused	gate	gate	
+GET	/admin/system-check	admin	none	refused	gate	gate	
+POST	/admin/teams/{team_uuid}/admins/me	admin	none	refused	gate	gate	
+GET	/admin/transcription/config	admin	none	refused	gate	gate	
+POST	/admin/transcription/config	admin	none	refused	gate	gate	
+POST	/admin/transcription/test	admin	none	refused	gate	gate	
+POST	/admin/unDeleteTeam	admin	none	refused	gate	gate	
+GET	/admin/updates	admin	none	refused	gate	gate	
+GET	/admin/webhook-health	admin	none	refused	gate	gate	
+GET	/admin/webhook-logs	admin	none	refused	gate	gate	
+GET	/admin/webhooks	admin	none	refused	gate	gate	
+POST	/admin/webhooks	admin	none	refused	gate	gate	
+GET	/admin/webhooks/event-types	admin	none	refused	gate	gate	
+DELETE	/admin/webhooks/{webhookId}	admin	none	refused	gate	gate	
+GET	/admin/webhooks/{webhookId}	admin	none	refused	gate	gate	
+PUT	/admin/webhooks/{webhookId}	admin	none	refused	gate	gate	
+GET	/admin/webhooks/{webhookId}/deliveries	admin	none	refused	gate	gate	
+POST	/admin/webhooks/{webhookId}/deliveries/replay-failed	admin	none	refused	gate	gate	
+POST	/admin/webhooks/{webhookId}/deliveries/{deliveryId}/replay	admin	none	refused	gate	gate	
+GET	/admin/webhooks/{webhookId}/logs	admin	none	refused	gate	gate	
+POST	/admin/webhooks/{webhookId}/pause	admin	none	refused	gate	gate	
+POST	/admin/webhooks/{webhookId}/regenerate-secret	admin	none	refused	gate	gate	
+POST	/admin/webhooks/{webhookId}/regenerate-token	admin	none	refused	gate	gate	
+POST	/admin/webhooks/{webhookId}/resume	admin	none	refused	gate	gate	
+POST	/admin/webhooks/{webhookId}/test	admin	none	refused	gate	gate	
+GET	/agent-card/channel/{channelId}	session	none	member	TODO(agent-card)	-	
+GET	/agent-card/{botUserId}	session	none	member	TODO(agent-card)	-	
+GET	/agent-skills	session	none	member	capability:agent.manage	gate	
+POST	/agent-skills	session	none	member	capability:agent.manage	gate	
+POST	/agent-skills/{id}/delete	session	none	member	capability:agent.manage	gate	
+POST	/agent-skills/{id}/revert	session	none	member	capability:agent.manage	gate	
+GET	/agent-skills/{id}/revisions	session	none	member	capability:agent.manage	gate	
+POST	/agent-skills/{id}/update	session	none	member	capability:agent.manage	gate	
+GET	/agent-skills/{id}/usage	session	none	member	capability:agent.manage	gate	
+GET	/agents	session	none	member	capability:agent.manage	gate	
+POST	/agents	session	none	member	capability:agent.manage	gate	
+GET	/agents/activity	session	none	member	capability:agent.manage	gate	
+POST	/agents/agui/check	session	none	refused	capability:agent.manage	gate	
+POST	/agents/draft	session	none	member	capability:agent.manage	gate	
+POST	/agents/eval/scenarios/{sid}/delete	session	none	member	capability:agent.manage	gate	
+POST	/agents/eval/scenarios/{sid}/run	session	none	member	capability:agent.manage	gate	
+POST	/agents/eval/scenarios/{sid}/update	session	none	member	capability:agent.manage	gate	
+GET	/agents/eval/summary	session	none	member	capability:agent.manage	gate	
+GET	/agents/health	session	none	member	capability:agent.manage	gate	
+GET	/agents/inventory	session	none	member	capability:agent.manage	gate	
+POST	/agents/inventory/credentials/{id}/revoke	session	none	member	capability:agent.manage	gate	
+GET	/agents/outcomes	session	none	member	capability:agent.manage	gate	
+GET	/agents/overview	session	none	member	capability:agent.manage	gate	
+GET	/agents/work	session	none	member	capability:agent.manage	gate	
+GET	/agents/{id}	session	none	member	capability:agent.manage	gate	
+POST	/agents/{id}/active	session	none	member	capability:agent.manage	gate	
+POST	/agents/{id}/delete	session	none	member	capability:agent.manage	gate	
+POST	/agents/{id}/eval/run	session	none	member	capability:agent.manage	gate	
+GET	/agents/{id}/eval/scenarios	session	none	member	capability:agent.manage	gate	
+POST	/agents/{id}/eval/scenarios	session	none	member	capability:agent.manage	gate	
+GET	/agents/{id}/eval/summary	session	none	member	capability:agent.manage	gate	
+GET	/agents/{id}/learning	session	none	member	capability:agent.manage	gate	
+GET	/agents/{id}/outcome	session	none	member	capability:agent.manage	gate	
+GET	/agents/{id}/routines	session	none	member	capability:agent.manage	gate	
+DELETE	/agents/{id}/routines/{rid}	session	none	member	capability:agent.manage	gate	
+POST	/agents/{id}/routines/{rid}/enabled	session	none	member	capability:agent.manage	gate	
+POST	/agents/{id}/run	session	none	member	capability:agent.manage	gate	
+GET	/agents/{id}/runs	session	none	member	capability:agent.manage	gate	
+GET	/agents/{id}/signatures	session	none	member	capability:agent.manage	gate	
+GET	/agents/{id}/stats	session	none	member	capability:agent.manage	gate	
+POST	/agents/{id}/update	session	none	member	capability:agent.manage	gate	
+POST	/ai/action/execute	session	none	member	TODO(ai)	-	
+GET	/ai/activity	session	none	member	TODO(ai)	-	
+GET	/ai/activity/proof	session	none	member	TODO(ai)	-	
+POST	/ai/agent-note	session	none	member	TODO(ai)	-	
+GET	/ai/agent-note/preference	session	none	member	TODO(ai)	-	
+POST	/ai/agent-note/preference	session	none	member	TODO(ai)	-	
+GET	/ai/agent-work	session	none	member	TODO(ai)	-	
+GET	/ai/agent-work/for/{entityId}	session	none	member	TODO(ai)	-	
+POST	/ai/agent-work/{id}/stop	session	none	member	TODO(ai)	-	
+POST	/ai/analyze-document	session	none	member	TODO(ai)	-	
+POST	/ai/analyze-image	session	none	member	TODO(ai)	-	
+POST	/ai/ask	session	none	member	TODO(ai)	-	
+POST	/ai/ask/stop	session	none	member	TODO(ai)	-	
+POST	/ai/ask/stream	session	none	member	TODO(ai)	-	
+GET	/ai/attention	session	none	member	TODO(ai)	-	
+GET	/ai/briefing	session	none	member	TODO(ai)	-	
+POST	/ai/catch-up	session	none	member	TODO(ai)	-	
+POST	/ai/code/analyze	session	none	member	TODO(ai)	-	
+POST	/ai/doc/complete	session	none	member	TODO(ai)	-	
+POST	/ai/doc/complete/stream	session	none	member	TODO(ai)	-	
+POST	/ai/extract-tasks	session	none	member	TODO(ai)	-	
+POST	/ai/extract-tasks/create	session	none	member	TODO(ai)	-	
+POST	/ai/goal-checkin/draft	session	none	member	TODO(ai)	-	
+GET	/ai/governance-drill	session	none	member	TODO(ai)	-	
+POST	/ai/governance-drill/run	session	none	member	TODO(ai)	-	
+POST	/ai/in-call/ask/stream	session	none	member	TODO(ai)	-	
+GET	/ai/instructions	session	none	member	TODO(ai)	-	
+POST	/ai/instructions	session	none	member	TODO(ai)	-	
+GET	/ai/memory	session	none	member	TODO(ai)	-	
+POST	/ai/memory/capture	session	none	member	TODO(ai)	-	
+GET	/ai/memory/channel-exclusion	session	none	member	TODO(ai)	-	
+POST	/ai/memory/channel-exclusion	session	none	member	TODO(ai)	-	
+DELETE	/ai/memory/{id}	session	none	member	TODO(ai)	-	
+POST	/ai/memory/{id}/create-task	session	none	member	TODO(ai)	-	
+POST	/ai/memory/{id}/due	session	none	member	TODO(ai)	-	
+POST	/ai/memory/{id}/remind	session	none	member	TODO(ai)	-	
+POST	/ai/memory/{id}/status	session	none	member	TODO(ai)	-	
+POST	/ai/model-preference	session	none	member	TODO(ai)	-	
+GET	/ai/models	session	none	member	TODO(ai)	-	
+GET	/ai/nudges	session	none	member	TODO(ai)	-	
+POST	/ai/nudges/dismiss-all	session	none	member	TODO(ai)	-	
+POST	/ai/nudges/{id}/act	session	none	member	TODO(ai)	-	
+POST	/ai/nudges/{id}/dismiss	session	none	member	TODO(ai)	-	
+GET	/ai/pending-actions	session	none	member	TODO(ai)	-	
+POST	/ai/pending-actions/{id}/approve	session	none	member	TODO(ai)	-	
+POST	/ai/pending-actions/{id}/reject	session	none	member	TODO(ai)	-	
+POST	/ai/project-template/draft	session	none	member	TODO(ai)	-	
+GET	/ai/project-template/draft/{draft_id}	session	none	member	TODO(ai)	-	
+POST	/ai/project-update/draft	session	none	member	TODO(ai)	-	
+POST	/ai/release-notes	session	none	member	TODO(ai)	-	
+POST	/ai/schedule/confirm	session	none	member	TODO(ai)	-	
+POST	/ai/schedule/prep	session	none	member	TODO(ai)	-	
+POST	/ai/schedule/propose	session	none	member	TODO(ai)	-	
+POST	/ai/schedule/reschedule	session	none	member	TODO(ai)	-	
+POST	/ai/schedule/reschedule/confirm	session	none	member	TODO(ai)	-	
+POST	/ai/search	session	none	member	TODO(ai)	-	
+POST	/ai/search/answer	session	none	member	TODO(ai)	-	
+GET	/ai/sessions	session	none	member	TODO(ai)	-	
+DELETE	/ai/sessions/{session_id}	session	none	member	TODO(ai)	-	
+GET	/ai/sessions/{session_id}	session	none	member	TODO(ai)	-	
+POST	/ai/social-posts	session	none	member	TODO(ai)	-	
+GET	/ai/status	session	none	member	TODO(ai)	-	
+POST	/ai/summarize/channel	session	none	member	TODO(ai)	-	
+POST	/ai/summarize/dm	session	none	member	TODO(ai)	-	
+POST	/ai/summarize/group	session	none	member	TODO(ai)	-	
+POST	/ai/transcribe	session	none	member	TODO(ai)	-	
+POST	/ai/translate	session	none	member	TODO(ai)	-	
+GET	/ai/usage	session	none	member	TODO(ai)	-	
+GET	/ai/voice-input	session	none	member	TODO(ai)	-	
+GET	/api-tokens/	session	none	member	TODO(api-tokens)	-	
+POST	/api-tokens/	session	none	member	TODO(api-tokens)	-	
+GET	/api-tokens/scopes	session	none	member	TODO(api-tokens)	-	
+POST	/api-tokens/{id}/revoke	session	none	member	TODO(api-tokens)	-	
+GET	/approvals/waiting	session	none	member	self	TestWaitingShowsOnlyWhatTheReaderCanSee	the requests waiting for the caller's answer, each task read as them
+GET	/auth/2fa	session	none	member	TODO(auth)	-	
+POST	/auth/2fa/confirm	session	none	refused	TODO(auth)	-	
+POST	/auth/2fa/disable	session	none	refused	TODO(auth)	-	
+POST	/auth/2fa/setup	session	none	refused	TODO(auth)	-	
+POST	/auth/admin-setup	public	none	public	public	-	creates the first admin, before any account exists
+GET	/auth/admin-setup-required	public	none	public	public	-	first-boot check, before any account exists
+POST	/auth/change-password	session	none	refused	TODO(auth)	-	
+GET	/auth/csrf	session	none	member	TODO(auth)	-	
+POST	/auth/forgot-password	public	none	public	public	-	sends a reset mail; uniform response, no account oracle
+GET	/auth/has-password	session	none	member	TODO(auth)	-	
+POST	/auth/ldap-login	public	none	public	public	-	directory credentials exchange
+POST	/auth/login	public	none	public	public	-	credentials exchange — Sign-in and account recovery. Pre-auth by definition.
+POST	/auth/login/totp	public	none	public	public	-	completes a 2FA challenge issued by /auth/login; no session exists yet — The second half of a two-step sign-in, and unauthenticated by necessity: the caller has no session yet, which is the entire reason this endpoint exists. It is not open, though — it accepts nothing but a challenge token minted by /auth/login after a correct password, checked for a purpose claim so a session token cannot be presented in its place, and it is rate limited under its own key because it is the one place a six-digit secret can be guessed.
+POST	/auth/passkey/begin	public	none	public	public	-	a passkey sign-in starts before anyone is signed in
+POST	/auth/passkey/finish	public	none	public	public	-	a passkey sign-in is how someone becomes signed in
+GET	/auth/passkeys	session	none	member	TODO(auth)	-	
+POST	/auth/passkeys/begin	session	none	refused	TODO(auth)	-	
+POST	/auth/passkeys/finish	session	none	refused	TODO(auth)	-	
+POST	/auth/passkeys/{id}/delete	session	none	refused	TODO(auth)	-	
+POST	/auth/passkeys/{id}/rename	session	none	refused	TODO(auth)	-	
+GET	/auth/providers	public	none	public	public	-	which sign-in methods to render on the login page, and the workspace's name
+POST	/auth/reset-password	public	none	public	public	-	consumes a mailed reset token
+POST	/auth/reset-password/check	public	none	public	public	-	whether a mailed reset token can still be used, before the form; ResetPassword's rate limit
+POST	/auth/set-password	session	none	refused	TODO(auth)	-	
+POST	/auth/signup	public	none	public	public	-	invited-user registration
+GET	/auth/token	session	none	member	self	TestTheCollabTokenIsThisServersOwnSession	the caller's own session token, this server's own; another workspace's session on the zone gets 401
+GET	/auth/validate-token	public	none	public	public	-	checks a mailed token before showing a form
+GET	/avatar/{obj_uuid}	session	none	member	TODO(avatar)	-	
+GET	/basicSelfProfile	session	none	member	TODO(basicselfprofile)	-	
+POST	/board/aiCluster	session	none	member	TODO(board)	-	
+POST	/board/aiGenerate	session	none	member	TODO(board)	-	
+POST	/board/aiGenerateStream	session	none	member	TODO(board)	-	
+POST	/board/aiGenerateUI	session	none	member	TODO(board)	-	
+POST	/board/aiPlan	session	none	member	TODO(board)	-	
+POST	/board/aiRefineDiagram	session	none	member	TODO(board)	-	
+POST	/board/aiRefineUI	session	none	member	TODO(board)	-	
+POST	/board/commentDelete	session	none	member	TODO(board)	-	
+POST	/board/commentMention	session	none	member	TODO(board)	-	
+POST	/board/createBoard	session	none	member	TODO(board)	-	
+POST	/board/deleteBoard	session	none	member	TODO(board)	-	
+GET	/board/getBoardAttachment/{board_uuid}/{obj_uuid}	session	none	member	TODO(board)	-	
+GET	/board/getBoardInfo/{board_uuid}	session	none	member	TODO(board)	-	
+GET	/board/getBoardList	session	none	member	TODO(board)	-	
+GET	/board/getBoardPermissions	session	none	member	TODO(board)	-	
+GET	/board/getBoardSnapshots	session	none	member	TODO(board)	-	
+GET	/board/getViewers	session	none	member	TODO(board)	-	
+POST	/board/recordView	session	none	member	TODO(board)	-	
+POST	/board/restoreBoardSnapshot	session	none	member	TODO(board)	-	
+POST	/board/searchUsers	session	none	member	TODO(board)	-	
+POST	/board/updateBoard	session	none	member	TODO(board)	-	
+POST	/board/updateBoardPermissions	session	none	member	TODO(board)	-	
+POST	/boardColab/authorize	session	none	member	object:board	TestTheLiveSessionChecksTakeOnlyTheirOwnTokens	the collaboration service asks, with the member's own access token, whether they may join the board's live canvas: read access lets them in, read-only unless they may edit
+GET	/boardColab/getBoard/{board_uuid}	internal	none	n/a	gate	gate	
+POST	/boardColab/guestAuthorize	public	none	public	link:guest	TestTheLiveSessionChecksTakeOnlyTheirOwnTokens	the collaboration service asks for a guest's board link: their collab token is checked against its grant (kind, board, revoked, expired, guest access on); always read-only
+POST	/boardColab/updateBoard	internal	none	n/a	gate	gate	
+GET	/calendar/calendars	session	none	member	self	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own calendars, those shared with them and their projects'
+GET	/calendar/calendars/events	session	none	member	object:calendar	TestAPersonsCalendarIsBusyUntilTheyShareIt	per calendar: details only when shared, else busy (or nothing with the workspace's free/busy off)
+PATCH	/calendar/calendars/{calendarId}	session	none	member	object:calendar	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its manager (manageable), or the person of a subscribed calendar
+DELETE	/calendar/calendars/{calendarId}/feed	session	none	member	self	gate	stops only the caller's own feed of it
+GET	/calendar/calendars/{calendarId}/feed	session	none	member	object:calendar	TestAProjectsCalendarHasAFeedForEachMember	the caller's own feed of a calendar they may see (feedCalendar, as MakeFeed)
+PUT	/calendar/calendars/{calendarId}/feed	session	none	member	object:calendar	TestAProjectsCalendarHasAFeedForEachMember	a calendar they may see, at most at the level they see it
+GET	/calendar/calendars/{calendarId}/shares	session	none	member	object:calendar	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its manager only (manageable)
+PUT	/calendar/calendars/{calendarId}/shares/{userId}	session	none	member	object:calendar	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its manager only, with a member
+GET	/calendar/events	session	none	member	self	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the events the caller is on
+POST	/calendar/events	session	none	member	object:calendar	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own event; a calendar_id must be one they may edit (writableCalendar)
+GET	/calendar/events/export	session	none	member	self	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own events
+GET	/calendar/events/trash	session	none	member	self	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	what the caller deleted
+DELETE	/calendar/events/{eventId}	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	someone on it (resolve), then its own rules
+GET	/calendar/events/{eventId}	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	someone on it (resolve)
+PATCH	/calendar/events/{eventId}	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	someone on it; who may see or change it, its creator only
+POST	/calendar/events/{eventId}/answer	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	a guest on it
+DELETE	/calendar/events/{eventId}/call	session	none	member	object:event	TestAnEventsOwnCallIsItsOrganisersToGiveAndItsGuestsToJoin	whoever may change it
+POST	/calendar/events/{eventId}/call	session	none	member	object:event	TestAnEventsOwnCallIsItsOrganisersToGiveAndItsGuestsToJoin	whoever may change it
+POST	/calendar/events/{eventId}/guest-link	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its organiser
+POST	/calendar/events/{eventId}/nudge	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its organiser
+POST	/calendar/events/{eventId}/proposal/dismiss	session	none	member	object:event	TestOnlyWhoMayChangeAnEventDismissesAProposal	whoever may change the event (mayChange: its organiser, or a guest it lets change it); an instance's id dismisses that instance's
+GET	/calendar/events/{eventId}/reminders	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own reminders on an event they are on
+PUT	/calendar/events/{eventId}/reminders	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own reminders on an event they are on
+POST	/calendar/events/{eventId}/restore	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	someone on it
+POST	/calendar/events/{eventId}/snooze	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own reminder on an event they are on
+GET	/calendar/insights	session	none	member	self	TestYourWeekIsOnlyTheAskersOwn	the caller's own week: takes no person, reads only events they are on
+GET	/calendar/people/{userId}/calendar	session	none	member	member	gate	any member may name a member's calendar; its events read busy-only until shared (TestAPersonsCalendarIsBusyUntilTheyShareIt)
+POST	/calendar/projects/{projectId}/calendar	session	none	member	object:project	TestAProjectsCalendarIsAsTheProjectIs	a project the caller may read
+GET	/calendar/repeats	session	none	member	self	TestCalendarRepeatsAreTheAskersOwn	the caller's own: check-ins of the channels in their session, their own open tasks that repeat on a schedule
+GET	/calendar/subscriptions	session	none	member	self	TestASubscribedCalendarIsReadOnlyAndItsPersonsAlone	the caller's own subscriptions
+POST	/calendar/subscriptions	session	none	member	self	TestASubscribedCalendarIsReadOnlyAndItsPersonsAlone	a subscription of the caller's own, read by the server's outbound guard
+DELETE	/calendar/subscriptions/{calendarId}	session	none	member	self	TestUnsubscribingRemovesTheCalendarAndEverythingOnIt	the caller's own subscription
+POST	/calendar/subscriptions/{calendarId}/refresh	session	none	member	self	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own subscription
+GET	/calendar/sync/google	session	none	member	self	gate	the caller's own Google link
+POST	/calendar/sync/google/move	session	none	member	self	gate	the caller's own Google events
+GET	/calls/current	session	none	member	TODO(calls)	-	
+POST	/calls/door	session	none	member	TODO(calls)	-	
+POST	/calls/invite	session	none	member	TODO(calls)	-	
+POST	/calls/meetings/{meeting_id}/lobby	session	none	member	TODO(calls)	-	
+GET	/calls/quality/days	session	none	member	admin	TestTheInstallsCallDaysAreAnAdminsAlone	an admin acting themselves, never through a token
+DELETE	/calls/room	session	none	member	TODO(calls)	-	
+GET	/calls/room	session	none	member	TODO(calls)	-	
+PATCH	/calls/room	session	none	member	TODO(calls)	-	
+POST	/calls/room	session	none	member	TODO(calls)	-	
+GET	/calls/{session_id}	session	none	member	TODO(calls)	-	
+POST	/calls/{session_id}/act	session	none	member	TODO(calls)	-	
+GET	/calls/{session_id}/activities	session	none	member	object:call	TestCallPollsAndQuestionsInACall	someone in the call: here now while it's live, or in it once it has ended; never removed, never through a token (ActivitiesFor)
+POST	/calls/{session_id}/activities	session	none	member	object:call	TestCallPollsAndQuestionsInACall	someone here in the live call, never through a token; polls and Q&A are run only by whoever runs the call (TestOnlyWhoRunsTheCallRunsItsActivities)
+POST	/calls/{session_id}/breakout-token	session	none	member	object:call	TestCallBreakoutRoomTokensAreForTheRoomYouMayBeIn	someone in the call or one of its open breakout rooms now, never through a token; answers a LiveKit token for an open room of that call only: their own room, any while the call lets people choose, any for whoever runs the call (MayTakeRoom)
+GET	/calls/{session_id}/quality	session	none	member	object:call	TestWhoReadsWhyACallStuttered	whoever runs the call, or an admin; never through a token
+POST	/calls/{session_id}/quality	session	none	member	object:call	TestOnlySomeoneInTheCallSendsItsSamples	someone in the live call sends their own samples, never through a token; a stranger or someone who left is not in it
+GET	/calls/{session_id}/thread	session	none	member	object:call	TestTheCallsThreadIsNothingOutsideTheCall	someone the call's thread is open to while the call is live (the conversation resolver); nothing for anyone else
+POST	/calls/{session_id}/thread	session	none	member	object:call	TestNoReplyOutsideTheCall	someone who may reply in the call's thread while it's live; a reader reads it as closed
+POST	/cards/act	session	none	member	TODO(cards)	-	
+POST	/ch/addMember	session	none	member	TODO(ch)	-	
+POST	/ch/addModerator	session	none	member	TODO(ch)	-	
+POST	/ch/ai-budget	session	none	member	TODO(ch)	-	
+POST	/ch/ai-teammates	session	none	member	TODO(ch)	-	
+GET	/ch/allActiveChannels	session	none	member	TODO(ch)	-	
+GET	/ch/chNameIsAvailable	session	none	member	TODO(ch)	-	
+POST	/ch/channelActiveListWithLatestPostWithSearchText	session	none	member	TODO(ch)	-	
+POST	/ch/channelArchivedListWithLatestPostWithSearchText	session	none	member	TODO(ch)	-	
+GET	/ch/channelBasicInfo/{channel_uuid}	session	none	member	TODO(ch)	-	
+GET	/ch/channelInfoWithMemberAdminFlag/{channel_uuid}	session	none	member	TODO(ch)	-	
+POST	/ch/channelListWithLatestPostWithSearchText	session	none	member	TODO(ch)	-	
+POST	/ch/checkins/{checkin_id}/ask	session	none	member	TODO(ch)	-	
+POST	/ch/checkins/{checkin_id}/delete	session	none	member	TODO(ch)	-	
+POST	/ch/checkins/{checkin_id}/edit	session	none	member	TODO(ch)	-	
+POST	/ch/checkins/{checkin_id}/pause	session	none	member	TODO(ch)	-	
+POST	/ch/create	session	none	member	TODO(ch)	-	
+POST	/ch/deleteRecording/{egressId}	session	none	member	TODO(ch)	-	
+GET	/ch/discover	session	none	member	TODO(ch)	-	
+POST	/ch/getCallToken	session	none	member	TODO(ch)	-	
+GET	/ch/getFile/{channel_uuid}/{obj_uuid}	session	none	member	TODO(ch)	-	
+GET	/ch/getRecordingList/{channel_uuid}	session	none	member	TODO(ch)	-	
+GET	/ch/getRecordingTranscript/{channel_uuid}/{egress_id}	session	none	member	TODO(ch)	-	
+GET	/ch/getRecordingURL/{channel_uuid}/{egress_id}	session	none	member	TODO(ch)	-	
+POST	/ch/joinChannel	session	none	member	TODO(ch)	-	
+POST	/ch/markSeen/{channel_uuid}	session	none	member	TODO(ch)	-	
+POST	/ch/postPolicy	session	none	member	TODO(ch)	-	
+POST	/ch/publishChannelTyping	session	none	member	TODO(ch)	-	
+POST	/ch/removeMember	session	none	member	TODO(ch)	-	
+POST	/ch/removeModerator	session	none	member	TODO(ch)	-	
+POST	/ch/restore	session	none	member	TODO(ch)	-	
+POST	/ch/startCallRecording	session	none	member	TODO(ch)	-	
+POST	/ch/stopCallRecording	session	none	member	TODO(ch)	-	
+GET	/ch/suggested	session	none	member	TODO(ch)	-	
+POST	/ch/updateInfo	session	none	member	TODO(ch)	-	
+GET	/ch/userActiveChannelsWithLatestPost	session	none	member	TODO(ch)	-	
+GET	/ch/userArchiveChannelsWithLatestPost	session	none	member	TODO(ch)	-	
+GET	/ch/{channelId}/ai-budget	session	none	member	TODO(ch)	-	
+GET	/ch/{channelId}/ai-teammates	session	none	member	TODO(ch)	-	
+GET	/ch/{channelId}/mention-agents	session	none	member	TODO(ch)	-	
+GET	/ch/{channelId}/weekly-report	session	none	member	TODO(ch)	-	
+POST	/ch/{channelId}/weekly-report	session	none	member	TODO(ch)	-	
+GET	/ch/{channel_uuid}/checkins	session	none	member	TODO(ch)	-	
+POST	/ch/{channel_uuid}/checkins	session	none	member	TODO(ch)	-	
+GET	/chat-threads	session	none	member	TODO(chat-threads)	-	
+POST	/chat-threads/read-all	session	none	member	TODO(chat-threads)	-	
+GET	/chat-threads/unread	session	none	member	TODO(chat-threads)	-	
+GET	/chat-threads/{root}/follow	session	none	member	TODO(chat-threads)	-	
+PUT	/chat-threads/{root}/follow	session	none	member	TODO(chat-threads)	-	
+PUT	/chat-threads/{root}/read	session	none	member	TODO(chat-threads)	-	
+POST	/command-responses/{token}	public	none	public	link:command-response	-	the 24-byte path token IS the credential (an app's response URL) — An app's answer to one of its commands: the 24-byte token is the credential, good for five answers in 30 minutes, rate-limited per address.
+GET	/command/catalog	session	none	member	TODO(command)	-	
+POST	/command/execute	session	none	member	TODO(command)	-	
+GET	/command/giphy	session	none	member	member	gate	any member: a page of trending or searched GIFs, kept in Redis per search and page
+POST	/command/interact	session	none	member	TODO(command)	-	
+GET	/config/client	session	none	member	TODO(config)	-	
+GET	/config/mqttConfig	session	none	member	TODO(config)	-	
+GET	/connector/oauth/callback	public	none	public	link:oauth-state	-	state-verified integration OAuth redirect — OAuth callbacks for integrations: the provider redirects the browser here with a state parameter, so they cannot require a session cookie.
+GET	/connectors/	session	none	member	TODO(connectors)	-	
+GET	/connectors/gmail/inbox	session	none	member	TODO(connectors)	-	
+GET	/connectors/gmail/threads/{id}	session	none	member	TODO(connectors)	-	
+POST	/connectors/gmail/threads/{id}/reply	session	none	member	TODO(connectors)	-	
+POST	/connectors/gmail/threads/{id}/summary	session	none	member	TODO(connectors)	-	
+GET	/connectors/{provider}/connect	session	none	refused	TODO(connectors)	-	
+POST	/connectors/{provider}/disconnect	session	none	member	TODO(connectors)	-	
+GET	/content-io/capabilities	session	none	member	TODO(content-io)	-	
+GET	/content-io/jobs/{job_id}	session	none	member	TODO(content-io)	-	
+GET	/conversations/{kind}/{id}/broadcasts	session	none	member	object:channel	TestAChannelsBroadcastRules	a channel's members (memberChannel: a private one not theirs is not found, a public one not joined refused)
+PUT	/conversations/{kind}/{id}/broadcasts	session	none	member	object:channel	TestAChannelsBroadcastRules	the channel's managers only
+POST	/conversations/{kind}/{id}/hidden	session	none	member	object:conversation	TestSomeoneOutsideAConversationIsRefusedEveryRoute	someone who may read it (Resolve), for themselves
+POST	/conversations/{kind}/{id}/leave	session	none	member	object:conversation	TestAGroupConversationCanBeLeft	someone in the group; a DM or a group of three can't be left
+GET	/conversations/{kind}/{id}/members	session	none	member	object:conversation	TestSomeoneOutsideAConversationIsRefusedEveryRoute	someone who may read it
+GET	/conversations/{kind}/{id}/mentionables	session	none	member	object:conversation	TestSomeoneOutsideAConversationIsRefusedEveryRoute	a channel's members (memberChannel), a DM's or group's people (Resolve)
+POST	/conversations/{kind}/{id}/name	session	none	member	object:conversation	TestSomeoneOutsideAConversationIsRefusedEveryRoute	someone who posts in the group
+POST	/conversations/{kind}/{id}/people	session	none	member	object:conversation	TestSomeoneOutsideAConversationIsRefusedEveryRoute	someone who posts in it
+GET	/conversations/{kind}/{id}/pins	session	none	member	object:conversation	TestSomeoneOutsideAConversationIsRefusedEveryRoute	someone who may read it
+POST	/conversations/{kind}/{id}/pins	session	none	member	object:conversation	TestOnlyThoseWhoPostMayPin	someone who posts in it, while it isn't archived
+POST	/conversations/{kind}/{id}/private-channel	session	none	member	object:conversation	TestSomeoneOutsideAConversationIsRefusedEveryRoute	someone who posts in the DM or group
+GET	/conversations/{kind}/{id}/read-state	session	none	member	object:conversation	TestSomeoneOutsideAConversationIsRefusedEveryRoute	someone who may read it, their own marker
+GET	/conversations/{kind}/{id}/share-choices	session	none	member	object:conversation	TestSomeoneOutsideAConversationIsRefusedEveryRoute	someone who posts in it
+POST	/conversations/{kind}/{id}/unread	session	none	member	object:conversation	TestSomeoneOutsideAConversationIsRefusedEveryRoute	someone who may read it, their own marker
+GET	/data-sources/	session	none	member	capability:agent.manage	gate	
+POST	/data-sources/	session	none	member	capability:agent.manage	gate	
+GET	/data-sources/queryable	session	none	member	TODO(data-sources)	-	
+POST	/data-sources/test-connection	session	none	member	capability:agent.manage	gate	
+GET	/data-sources/{id}	session	none	member	capability:agent.manage	gate	
+POST	/data-sources/{id}/aggregate	session	none	member	TODO(data-sources)	-	
+POST	/data-sources/{id}/delete	session	none	member	capability:agent.manage	gate	
+POST	/data-sources/{id}/enabled	session	none	member	capability:agent.manage	gate	
+POST	/data-sources/{id}/query-plan	session	none	member	TODO(data-sources)	-	
+GET	/data-sources/{id}/schema	session	none	member	TODO(data-sources)	-	
+POST	/data-sources/{id}/test	session	none	member	capability:agent.manage	gate	
+POST	/data-sources/{id}/update	session	none	member	capability:agent.manage	gate	
+POST	/demo-login	public	none	public	public	-	demo deployments only
+POST	/dm/addOrCreateReaction	session	none	member	TODO(dm)	-	
+POST	/dm/addOrUpdateReactionOnComment	session	none	member	TODO(dm)	-	
+GET	/dm/chatWithAllComments/{chat_uuid}	session	none	member	TODO(dm)	-	
+POST	/dm/createChat	session	none	member	TODO(dm)	-	
+POST	/dm/createComment	session	none	member	TODO(dm)	-	
+POST	/dm/deleteChat	session	none	member	TODO(dm)	-	
+POST	/dm/deleteRecording/{egressId}	session	none	member	TODO(dm)	-	
+POST	/dm/getCallToken	session	none	member	TODO(dm)	-	
+GET	/dm/getChatOnlyText/{chat_uuid}	session	none	member	TODO(dm)	-	
+GET	/dm/getFile/{chat_uuid}/{obj_uuid}	session	none	member	TODO(dm)	-	
+GET	/dm/getLatestChatList	session	none	member	TODO(dm)	-	
+GET	/dm/getRecordingList/{chat_uuid}	session	none	member	TODO(dm)	-	
+GET	/dm/getRecordingTranscript/{chat_uuid}/{egress_id}	session	none	member	TODO(dm)	-	
+GET	/dm/getRecordingURL/{chat_uuid}/{egress_id}	session	none	member	TODO(dm)	-	
+GET	/dm/latestChat/{user_uuid}	session	none	member	TODO(dm)	-	
+GET	/dm/newChats/{user_uuid}/{time_stamp}	session	none	member	TODO(dm)	-	
+GET	/dm/newChatsIncludingCurrentChat/{user_uuid}/{chat_uuid}	session	none	member	TODO(dm)	-	
+GET	/dm/oldChats/{user_uuid}/{time_stamp}	session	none	member	TODO(dm)	-	
+POST	/dm/publishChatTyping	session	none	member	TODO(dm)	-	
+POST	/dm/removeComment	session	none	member	TODO(dm)	-	
+POST	/dm/removeReaction	session	none	member	TODO(dm)	-	
+POST	/dm/removeReactionOnComment	session	none	member	TODO(dm)	-	
+POST	/dm/searchChatWithUser	session	none	member	TODO(dm)	-	
+GET	/dm/seen/{user_uuid}	session	none	member	TODO(dm)	-	
+POST	/dm/seen/{user_uuid}	session	none	member	TODO(dm)	-	
+POST	/dm/startCallRecording	session	none	member	TODO(dm)	-	
+POST	/dm/stopCallRecording	session	none	member	TODO(dm)	-	
+POST	/dm/updateChat	session	none	member	TODO(dm)	-	
+POST	/dm/updateComment	session	none	member	TODO(dm)	-	
+POST	/doc/access/answer	session	none	member	TODO(doc)	-	
+POST	/doc/access/invite	session	none	member	TODO(doc)	-	
+POST	/doc/access/preview	session	none	member	TODO(doc)	-	
+POST	/doc/access/request	session	none	member	TODO(doc)	-	
+GET	/doc/access/requests	session	none	member	TODO(doc)	-	
+POST	/doc/access/transfer	session	none	member	TODO(doc)	-	
+POST	/doc/access/update	session	none	member	TODO(doc)	-	
+GET	/doc/access/{doc_uuid}	session	none	member	TODO(doc)	-	
+POST	/doc/addOrUpdateReactionOnComment	session	none	member	TODO(doc)	-	
+GET	/doc/ai/activity	session	none	member	TODO(doc)	-	
+GET	/doc/ai/agent-edits	session	none	member	TODO(doc)	-	
+POST	/doc/ai/agent-edits/revert	session	none	member	TODO(doc)	-	
+POST	/doc/ai/applied	session	none	member	TODO(doc)	-	
+GET	/doc/ai/model	session	none	member	TODO(doc)	-	
+GET	/doc/ai/starters	session	none	member	TODO(doc)	-	
+POST	/doc/ai/tasks	session	none	member	TODO(doc)	-	
+POST	/doc/ai/tasks/create	session	none	member	TODO(doc)	-	
+GET	/doc/ancestors/{doc_uuid}	session	none	member	TODO(doc)	-	
+POST	/doc/applyTemplate	session	none	member	TODO(doc)	-	
+GET	/doc/backlinks/{doc_uuid}	session	none	member	TODO(doc)	-	
+POST	/doc/blocks/append	session	none	member	TODO(doc)	-	
+GET	/doc/children	session	none	member	TODO(doc)	-	
+GET	/doc/client-review	session	none	member	TODO(doc)	-	
+POST	/doc/color	session	none	member	TODO(doc)	-	
+POST	/doc/createComment	session	none	member	TODO(doc)	-	
+POST	/doc/createDoc	session	none	member	TODO(doc)	-	
+POST	/doc/delete	session	none	member	TODO(doc)	-	
+POST	/doc/deleteDoc	session	none	member	TODO(doc)	-	
+POST	/doc/duplicate	session	none	member	TODO(doc)	-	
+POST	/doc/export	session	none	member	TODO(doc)	-	
+GET	/doc/exportConsent	session	none	member	TODO(doc)	-	
+POST	/doc/exportConsent	session	none	member	TODO(doc)	-	
+POST	/doc/files	session	none	member	TODO(doc)	-	
+GET	/doc/files/{doc_uuid}/versions	session	none	member	TODO(doc)	-	
+POST	/doc/files/{doc_uuid}/versions	session	none	member	TODO(doc)	-	
+GET	/doc/getCommentList/{doc_uuid}	session	none	member	TODO(doc)	-	
+GET	/doc/getDocAttachment/{doc_uuid}/{obj_uuid}	session	none	member	TODO(doc)	-	
+GET	/doc/getDocInfo/{doc_uuid}	session	none	member	TODO(doc)	-	
+GET	/doc/getDocPermissions	session	none	member	TODO(doc)	-	
+GET	/doc/getDocSnapshots	session	none	member	TODO(doc)	-	
+GET	/doc/getFile/{doc_uuid}/{obj_uuid}	session	none	member	TODO(doc)	-	
+GET	/doc/getInsights	session	none	member	TODO(doc)	-	
+GET	/doc/getPrivateDoc	session	none	member	TODO(doc)	-	
+GET	/doc/getPublicDoc	session	none	member	TODO(doc)	-	
+GET	/doc/getViewers	session	none	member	TODO(doc)	-	
+GET	/doc/guest-thread	session	none	member	TODO(doc)	-	
+POST	/doc/guest-thread/remove	session	none	member	TODO(doc)	-	
+POST	/doc/guest-thread/reply	session	none	member	TODO(doc)	-	
+POST	/doc/import	session	none	member	object:doc	TestAnImportGoesOnlyUnderAPageTheyCanEdit	under a page the caller may edit; a calendar or table import makes the caller's own
+POST	/doc/import/presign	session	none	member	object:doc	TestAnImportGoesOnlyUnderAPageTheyCanEdit	as POST /doc/import: under a page the caller may edit
+POST	/doc/import/{job_id}/choose	session	none	member	self	TestAPreviewIsAnsweredOnlyAsItMayBe	the caller's own import job; anyone else's is not found
+POST	/doc/import/{job_id}/start	session	none	member	TODO(doc)	-	
+GET	/doc/list	session	none	member	TODO(doc)	-	
+POST	/doc/lock	session	none	member	TODO(doc)	-	
+POST	/doc/look	session	none	member	TODO(doc)	-	
+POST	/doc/mentionAccess	session	none	member	TODO(doc)	-	
+POST	/doc/move	session	none	member	TODO(doc)	-	
+POST	/doc/move/preview	session	none	member	TODO(doc)	-	
+POST	/doc/purge	session	none	member	TODO(doc)	-	
+POST	/doc/recordExport	session	none	member	TODO(doc)	-	
+POST	/doc/recordView	session	none	member	TODO(doc)	-	
+POST	/doc/removeComment	session	none	member	TODO(doc)	-	
+POST	/doc/removeReactionOnComment	session	none	member	TODO(doc)	-	
+POST	/doc/restore	session	none	member	TODO(doc)	-	
+POST	/doc/restoreDocSnapshot	session	none	member	TODO(doc)	-	
+POST	/doc/saveAsTemplate	session	none	member	TODO(doc)	-	
+GET	/doc/search	session	none	member	TODO(doc)	-	
+POST	/doc/searchPrivate	session	none	member	TODO(doc)	-	
+POST	/doc/searchPublic	session	none	member	TODO(doc)	-	
+POST	/doc/searchUsers	session	none	member	TODO(doc)	-	
+POST	/doc/todoTask	session	none	member	TODO(doc)	-	
+POST	/doc/todoTask/check	session	none	member	TODO(doc)	-	
+GET	/doc/trash	session	none	member	TODO(doc)	-	
+GET	/doc/trashed/{doc_uuid}	session	none	member	TODO(doc)	-	
+POST	/doc/updateComment	session	none	member	TODO(doc)	-	
+POST	/doc/updateDoc	session	none	member	TODO(doc)	-	
+POST	/doc/updateDocPermissions	session	none	member	TODO(doc)	-	
+GET	/doc/versions	session	none	member	TODO(doc)	-	
+POST	/doc/versions	session	none	member	TODO(doc)	-	
+GET	/doc/versions/{version_id}	session	none	member	TODO(doc)	-	
+POST	/doc/versions/{version_id}/name	session	none	member	TODO(doc)	-	
+POST	/doc/versions/{version_id}/restore	session	none	member	TODO(doc)	-	
+POST	/docColab/authorize	session	none	member	object:doc	TestTheLiveSessionChecksTakeOnlyTheirOwnTokens	the collaboration service asks, with the member's own access token, whether they may open the doc live: the Access Resolver must let them edit it
+GET	/docColab/getDoc/{doc_uuid}	internal	none	n/a	gate	gate	
+POST	/docColab/guestAuthorize	public	none	public	link:guest	TestTheLiveSessionChecksTakeOnlyTheirOwnTokens	the collaboration service asks for a guest's doc link: their collab token is checked against its grant (kind, doc, revoked, expired, page-only, guest access on, doc deleted); always read-only
+GET	/docColab/proposals/{proposal_id}	internal	none	n/a	gate	gate	
+POST	/docColab/proposals/{proposal_id}/prepared	internal	none	n/a	gate	gate	
+POST	/docColab/session	internal	none	n/a	gate	gate	
+POST	/docColab/updateDoc	internal	none	n/a	gate	gate	
+DELETE	/drafts	session	none	member	TODO(drafts)	-	
+GET	/drafts	session	none	member	TODO(drafts)	-	
+PUT	/drafts	session	none	member	TODO(drafts)	-	
+POST	/entities	session	none	member	TODO(entities)	-	
+GET	/event/bookingPages	session	none	member	self	gate	the caller's own booking pages
+POST	/event/bookingPages	session	none	member	self	TestBookingPages	a page of the caller's own: an id must be theirs (SavePage: id and user_id), and an address someone else's page holds, live or deleted, is a clash
+POST	/event/bookingPages/delete	session	none	member	self	TestBookingPages	a page of the caller's own (DeletePage: id and user_id)
+POST	/event/createEvent	session	none	member	member	gate	the caller's own event; inviting members is by design
+DELETE	/event/deleteEvent/{eventId}	session	none	member	object:event	TestOnlyThePeopleOnAnEventSeeItAndOnlyItsMakerChangesIt	its maker
+POST	/event/endFocus	session	none	member	self	gate	the caller's own focus time
+POST	/event/explain	session	none	member	object:calendar	TestExplainKeepsSomeoneElsesDayFromTheAsker	why a person isn't free, only when the asker may see when they are busy (PeopleSeenBy); else 403, their day unread
+POST	/event/findTime	session	none	member	TODO(event)	-	
+GET	/event/getEvent/{eventId}	session	none	member	object:event	TestOnlyThePeopleOnAnEventSeeItAndOnlyItsMakerChangesIt	someone on it
+GET	/event/getEvents	session	none	member	self	TestEveryReadOfTheStoreKeepsAnEventToItsPeople	the events the caller is on
+POST	/event/hours	session	none	member	object:calendar	TestWorkingHoursAreSeenByTheCalendarsOneRule	working hours of the people whose busy times the asker may see (PeopleSeenBy); the rest named private. Given a day, also where each works (their working location; shown to those who see only busy times, as Google does; a private one to its owner alone: TestWhereSomeoneWorksIsTheirWorkingLocationThatDay)
+POST	/event/leaveEvent/{eventId}	session	none	member	object:event	TestOnlyThePeopleOnAnEventSeeItAndOnlyItsMakerChangesIt	a guest on it; its maker can't leave
+GET	/event/status/{user_uuid}	session	none	member	object:calendar	TestAStatusIsSeenByTheCalendarsOneRule	a person's status (in a meeting, focus, away), only when the asker may see when they are busy (PeopleSeenBy); else marked private and empty
+POST	/event/suggestTimes	session	none	member	object:calendar	TestSuggestionsLeaveOutWhoseBusyTimesAreKeptPrivate	ranked times over the people whose busy times the asker may see (PeopleSeenBy); the rest unread and named private
+POST	/event/updateEvent/{eventId}	session	none	member	object:event	TestOnlyThePeopleOnAnEventSeeItAndOnlyItsMakerChangesIt	its maker
+DELETE	/follows	session	none	member	TODO(follows)	-	
+GET	/follows	session	none	member	TODO(follows)	-	
+PUT	/follows	session	none	member	TODO(follows)	-	
+GET	/getFile/{obj_uuid}	session	none	member	TODO(getfile)	-	
+POST	/getIfUserNameIsAvailable	session	none	member	TODO(getifusernameisavailable)	-	
+POST	/goal/create	session	none	member	object:goal	TestGoals	any member, with projects they're in, an owner in the workspace and a parent they may edit
+GET	/goal/list	session	none	member	object:goal	TestGoals	every live goal, by design; a goal's projects as the reader sees them (counts only)
+GET	/goal/{goal_id}	session	none	member	object:goal	TestGoals	any live goal; projects named only to their members, the rest counted
+POST	/goal/{goal_id}/checkins	session	none	member	object:goal	TestGoals	its owner, its creator or a workspace admin (Reader.CanEdit); a channel by the send rules (PrepareChannelPost)
+GET	/goal/{goal_id}/checkins/draft	session	none	member	object:goal	TestGoals	the goal as its page shows the caller (Get)
+POST	/goal/{goal_id}/checkins/{checkin_id}/delete	session	none	member	object:goal	TestGoals	the check-in's author, or whoever may change the goal
+POST	/goal/{goal_id}/checkins/{checkin_id}/edit	session	none	member	object:goal	TestGoals	the check-in's author only
+POST	/goal/{goal_id}/delete	session	none	member	object:goal	TestGoals	its owner, its creator or a workspace admin (Reader.CanEdit)
+POST	/goal/{goal_id}/edit	session	none	member	object:goal	TestGoals	its owner, its creator or a workspace admin (Reader.CanEdit); a new parent they may edit
+POST	/goal/{goal_id}/projects	session	none	member	object:goal	TestGoals	its owner, its creator or a workspace admin (Reader.CanEdit), adding a project they're in
+POST	/goal/{goal_id}/projects/{project_uuid}/delete	session	none	member	object:goal	TestGoals	its owner, its creator or a workspace admin (Reader.CanEdit)
+POST	/goal/{goal_id}/reopen	session	none	member	object:goal	TestGoals	its owner, its creator or a workspace admin (Reader.CanEdit)
+GET	/graph/connected	session	none	member	TODO(graph)	-	
+GET	/graph/path	session	none	member	TODO(graph)	-	
+POST	/groupChat/addParticipant	session	none	member	TODO(groupchat)	-	
+POST	/groupChat/createChat	session	none	member	TODO(groupchat)	-	
+POST	/groupChat/deleteRecording/{egressId}	session	none	member	TODO(groupchat)	-	
+POST	/groupChat/getCallToken	session	none	member	TODO(groupchat)	-	
+GET	/groupChat/getChatOnlyText/{chat_uuid}	session	none	member	TODO(groupchat)	-	
+GET	/groupChat/getDmParticipants/{grp_id}	session	none	member	TODO(groupchat)	-	
+GET	/groupChat/getFile/{grp_id}/{obj_uuid}	session	none	member	TODO(groupchat)	-	
+GET	/groupChat/getRecordingList/{grp_id}	session	none	member	TODO(groupchat)	-	
+GET	/groupChat/getRecordingTranscript/{grp_id}/{egress_id}	session	none	member	TODO(groupchat)	-	
+GET	/groupChat/getRecordingURL/{grp_id}/{egress_id}	session	none	member	TODO(groupchat)	-	
+GET	/groupChat/latestChat/{grp_id}	session	none	member	TODO(groupchat)	-	
+GET	/groupChat/newChats/{grp_id}/{time_stamp}	session	none	member	TODO(groupchat)	-	
+GET	/groupChat/newChatsIncludingCurrentChat/{grp_id}/{chat_uuid}	session	none	member	TODO(groupchat)	-	
+GET	/groupChat/oldChats/{grp_id}/{time_stamp}	session	none	member	TODO(groupchat)	-	
+GET	/groupChat/seen/{grp_id}	session	none	member	TODO(groupchat)	-	
+POST	/groupChat/seen/{grp_id}	session	none	member	TODO(groupchat)	-	
+POST	/groupChat/startCallRecording	session	none	member	TODO(groupchat)	-	
+POST	/groupChat/stopCallRecording	session	none	member	TODO(groupchat)	-	
+POST	/groupChat/updateChat	session	none	member	TODO(groupchat)	-	
+GET	/guest/board-attachment/{token}/{obj_uuid}	public	none	public	link:guest	-	share-link grant scopes the attachment
+POST	/guest/calls/act	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, the call in its room); only their own hand and feedback; rate-limited
+GET	/guest/calls/activities	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room); reads the call's polls and questions as a guest sees them (no counts held back for whoever runs the call, no anonymous asker or voter); votes, asks and upvotes only, each limited per call identity; reads and writes rate-limited per address
+POST	/guest/calls/activities	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room); reads the call's polls and questions as a guest sees them (no counts held back for whoever runs the call, no anonymous asker or voter); votes, asks and upvotes only, each limited per call identity; reads and writes rate-limited per address
+POST	/guest/calls/board-token	public	none	public	link:guest	TestCallBoardTokenIsOnlyAGuestsInACall	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room now); answers a 30-minute collab token for the board on that call's stage only, which the collaboration service re-checks on every connect (still in the call, the board still on its stage; drawing only under "Guests can draw"); rate-limited
+POST	/guest/calls/breakout-token	public	none	public	link:guest	TestCallBreakoutRoomTokensForGuests	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room or one of its breakout rooms now); answers a LiveKit token for one of that call's open breakout rooms only, the guest's own room (or any while the call lets people choose), with the name and holds they have in the call; a token for a room they may not be in is put out when it connects; rate-limited
+POST	/guest/calls/quality	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, the call in its room); only their own connection's numbers, in range; rate-limited
+GET	/guest/calls/thread	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room); reads only the call's thread over the call's span, as plain text, nothing of the conversation; writes a plain-text reply as the guest bot, in a channel's call only; reads and writes rate-limited per address
+POST	/guest/calls/thread	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room); reads only the call's thread over the call's span, as plain text, nothing of the conversation; writes a plain-text reply as the guest bot, in a channel's call only; reads and writes rate-limited per address
+GET	/guest/channel/{token}	public	none	public	link:guest	-	share-link token
+POST	/guest/channel/{token}	public	none	public	link:guest	-	share-link token
+GET	/guest/channel/{token}/thread/{post_id}	public	none	public	link:guest	-	share-link token
+POST	/guest/collab/{token}	public	none	public	link:guest	-	share-link token
+GET	/guest/doc-attachment/{token}/{obj_uuid}	public	none	public	link:guest	-	share-link grant scopes the attachment to its doc
+GET	/guest/doc-comments/{token}	public	none	public	link:guest	-	share-link token
+POST	/guest/doc-comments/{token}	public	none	public	link:guest	-	share-link token
+POST	/guest/doc-review/{token}	public	none	public	link:guest	-	share-link token (comment links only)
+GET	/guest/links	session	none	member	object:guest-link	TestOnlyWhoMayShareSomethingManagesItsGuestLinks	the links to a doc, board, table, channel or project the caller may share (mayShare); someone who may not share a doc sees only their own links to it
+POST	/guest/links	session	none	member	object:guest-link	TestOnlyWhoMayShareSomethingManagesItsGuestLinks	who may share the thing (mayShare): a doc's owner, a board's creator or editors, a table's managers, a channel's or project's admins or a workspace admin
+POST	/guest/links/copy	session	none	member	member	TestACopyIsThePersonsOwn	any member may copy a page its publisher lets be copied, once it's unlocked, as a person and never an agent; the copy is their own
+DELETE	/guest/links/{id}/publish	session	none	member	object:guest-link	TestOnlyWhoMayShareSomethingManagesItsGuestLinks	someone who may share the doc the live link opens (publishable, mayShare)
+PUT	/guest/links/{id}/publish	session	none	member	object:guest-link	TestOnlyWhoMayShareSomethingManagesItsGuestLinks	someone who may share the doc the live link opens (publishable, mayShare)
+POST	/guest/links/{id}/revoke	session	none	member	object:guest-link	TestOnlyWhoMayShareSomethingManagesItsGuestLinks	the link's maker, or someone who may share what it opens (mayShare); never a meeting's link
+GET	/guest/meet/{token}	public	none	public	link:guest	-	share-link token
+POST	/guest/meet/{token}/join	public	none	public	link:guest	-	share-link token
+DELETE	/guest/meet/{token}/knock/{ticket}	public	none	public	link:guest	-	share-link token, and a ticket only that link's knock holds; rate-limited
+GET	/guest/meet/{token}/knock/{ticket}	public	none	public	link:guest	-	share-link token, and a ticket only that link's knock holds; rate-limited
+GET	/guest/project/{token}	public	none	public	link:guest	-	share-link token
+GET	/guest/project/{token}/task/{task_id}	public	none	public	link:guest	-	share-link token
+POST	/guest/project/{token}/task/{task_id}/comment	public	none	public	link:guest	-	share-link token
+POST	/guest/project/{token}/task/{task_id}/review	public	none	public	link:guest	-	share-link token
+GET	/guest/table/{token}	public	none	public	link:guest	-	share-link token
+GET	/health	public	none	public	public	-	liveness probe — Operational.
+GET	/health/ready	public	none	public	public	-	dependency readiness for make verify and wait-ready; answers only a loopback caller (helpers.ServeReadiness), 404 to anyone else
+POST	/integration/github/webhook	public	none	public	signed:github	-	HMAC signature verified in the handler — Inbound webhooks. Each authenticates the SENDER in its handler — a signature or a token — because the caller is a third party with no session.
+GET	/integration/google-calendar/auth-url	session	none	refused	TODO(integration)	-	
+GET	/integration/google-calendar/status	session	none	member	TODO(integration)	-	
+POST	/integration/google-calendar/sync-task	session	none	member	TODO(integration)	-	
+POST	/integration/google-calendar/unlink	session	none	member	TODO(integration)	-	
+POST	/integration/google-calendar/webhook	public	none	public	signed:google	-	channel token verified in the handler
+POST	/internal/code-run/llm	public	none	public	link:code-run	-	shared runner token, constant-time compared — Internal service-to-service. Not admin-gated because the caller is not a user; authenticated by a shared runner token compared with subtle.ConstantTimeCompare in business/AI/codePRLLMProxy.go.
+POST	/internal/mqtt/authorize	internal	none	n/a	gate	gate	internal secret, constant-time compared — The broker's question before each subscription. VerifyInternalServiceRequest: the broker sends INTERNAL_SECRET with every ask.
+POST	/invitations	session	none	member	capability:invitation.create	gate	
+GET	/later/	session	none	member	TODO(later)	-	
+POST	/later/delete	session	none	member	TODO(later)	-	
+POST	/later/save	session	none	member	TODO(later)	-	
+POST	/later/update	session	none	member	TODO(later)	-	
+POST	/link/add	session	none	member	object:task	TestA1WorkAccessThroughTheHandlers	edit on the task (Work Access, a restricted task's LetIn included) or adding files to the project, and a doc or board the caller can open
+GET	/link/ref/{ref_type}/{ref_uuid}	session	none	member	TODO(link)	-	
+POST	/link/remove	session	none	member	TODO(link)	-	
+GET	/link/source/{source_type}/{source_uuid}	session	none	member	TODO(link)	-	
+POST	/livekit/agent-heartbeat	internal	none	n/a	gate	gate	
+POST	/livekit/my-capability	session	none	member	object:call	TestOnlySomeoneInTheCallHasATranscriptSession	the caller's own report (the session's identity), in a call they are connected to
+POST	/livekit/my-transcript	session	none	member	object:call	TestALineFromSomeoneNotInTheCallIsRefused	the caller's own words (the session's identity), in a call they are connected to, while its transcription is on
+POST	/livekit/transcript	internal	none	n/a	gate	gate	
+POST	/livekit/transcription	session	none	member	object:call	TestTheSwitchNeedsTheWorkspaceAndThePerson	someone connected to the call, while the workspace allows transcription
+GET	/livekit/transcription-config	internal	none	n/a	gate	gate	
+POST	/livekit/webhook	public	none	public	signed:livekit	TestTheLiveKitWebhookTakesOnlyEventsLiveKitSigned	LiveKit's own server: refused unless signed with this server's LiveKit key and secret over the body it sent
+POST	/logout	public	none	public	public	-	signing out clears this browser's cookies whoever asks; a valid refresh token also ends its session (VerifyRefreshTokenForLogout lets every caller through)
+GET	/marketplace/templates	session	none	member	TODO(marketplace)	-	
+POST	/marketplace/templates	session	none	member	TODO(marketplace)	-	
+GET	/marketplace/templates/{id}	session	none	member	TODO(marketplace)	-	
+POST	/marketplace/templates/{id}/delete	session	none	member	TODO(marketplace)	-	
+POST	/marketplace/templates/{id}/install	session	none	member	TODO(marketplace)	-	
+GET	/mcp/catalog	session	none	member	capability:agent.manage	gate	
+GET	/mcp/servers	session	none	member	capability:agent.manage	gate	
+POST	/mcp/servers	session	none	refused	capability:agent.manage	gate	
+GET	/mcp/servers/{id}	session	none	member	capability:agent.manage	gate	
+POST	/mcp/servers/{id}/delete	session	none	refused	capability:agent.manage	gate	
+POST	/mcp/servers/{id}/enabled	session	none	refused	capability:agent.manage	gate	
+POST	/mcp/servers/{id}/test	session	none	refused	capability:agent.manage	gate	
+POST	/mcp/servers/{id}/update	session	none	refused	capability:agent.manage	gate	
+GET	/me/assistants	session	none	member	TODO(me)	-	
+POST	/me/assistants/{id}/disconnect	session	none	member	TODO(me)	-	
+GET	/me/capabilities	session	none	member	TODO(me)	-	
+GET	/me/keywords	session	none	member	TODO(me)	-	
+PUT	/me/keywords	session	none	member	TODO(me)	-	
+GET	/me/slack/dms	session	none	member	TODO(me)	-	
+POST	/me/slack/dms	session	none	refused	TODO(me)	-	
+GET	/me/slack/dms/{jobId}/notes	session	none	member	TODO(me)	-	
+POST	/me/slack/dms/{jobId}/stop	session	none	member	TODO(me)	-	
+GET	/me/vips	session	none	member	TODO(me)	-	
+PUT	/me/vips	session	none	member	TODO(me)	-	
+POST	/meet/instant	session	none	member	self	gate	the caller's own instant meeting, with guest access on
+GET	/meet/instant/{meeting_id}	session	none	member	object:call	TestAMeetingThatNeverWasIsNotOneThatEnded	its host only (HostedMeeting); someone else's meeting answers not_host
+POST	/meet/instant/{meeting_id}/join	session	none	member	object:call	TestCallOnlyAnInstantMeetingsHostCanComeBackToIt	its host only (HostedMeeting)
+POST	/meet/instant/{meeting_id}/link	session	none	member	object:call	TestCallOnlyAnInstantMeetingsHostCanComeBackToIt	its host only (HostedMeeting), with guest access on
+POST	/message/schedule	session	none	member	TODO(message)	-	
+GET	/message/scheduled	session	none	member	TODO(message)	-	
+POST	/message/scheduled/cancel	session	none	member	TODO(message)	-	
+POST	/message/scheduled/sendNow	session	none	member	TODO(message)	-	
+POST	/message/scheduled/update	session	none	member	TODO(message)	-	
+GET	/notices	session	none	member	TODO(notices)	-	
+POST	/notices/{key}/seen	session	none	member	TODO(notices)	-	
+GET	/oauth/authorize	public	none	public	public	-	parks a sign-in for a signed-in person to approve
+POST	/oauth/register	public	none	public	public	-	dynamic client registration, rate limited per address
+GET	/oauth/requests/{id}	session	none	member	TODO(oauth)	-	
+POST	/oauth/requests/{id}/approve	session	none	member	TODO(oauth)	-	
+POST	/oauth/requests/{id}/deny	session	none	member	TODO(oauth)	-	
+POST	/oauth/revoke	public	none	public	public	-	authenticated by the token being revoked
+POST	/oauth/token	public	none	public	public	-	authenticated by the code and PKCE verifier, or the refresh token
+GET	/oauth_callback/oidc	public	none	public	link:oauth-state	-	receives the OIDC redirect
+GET	/oauth_callback/{oauth_provider}	public	none	public	link:oauth-state	-	receives the OAuth redirect
+GET	/oauth_login/oidc	public	none	public	public	-	starts an OIDC redirect
+GET	/oauth_login/{oauth_provider}	public	none	public	public	-	starts an OAuth redirect
+GET	/people/who-knows	session	none	member	TODO(people)	-	
+GET	/people/who-knows/me	session	none	member	TODO(people)	-	
+PUT	/people/who-knows/me	session	none	member	TODO(people)	-	
+DELETE	/places	session	none	member	TODO(places)	-	
+GET	/places	session	none	member	TODO(places)	-	
+POST	/places	session	none	member	TODO(places)	-	
+POST	/po/addReaction	session	none	member	TODO(po)	-	
+POST	/po/addReactionToComment	session	none	member	TODO(po)	-	
+GET	/po/allComments/{post_uuid}	session	none	member	TODO(po)	-	
+POST	/po/createComment	session	none	member	TODO(po)	-	
+POST	/po/createPost	session	none	member	TODO(po)	-	
+POST	/po/deletePost	session	none	member	TODO(po)	-	
+GET	/po/getOnlyPostText/{channel_uuid}/{post_uuid}	session	none	member	TODO(po)	-	
+GET	/po/latestPosts/{channel_uuid}	session	none	member	TODO(po)	-	
+GET	/po/newPosts/{channel_uuid}/{time_stamp}	session	none	member	TODO(po)	-	
+GET	/po/newPostsIncludingCurrent/{channel_uuid}/{post_uuid}	session	none	member	TODO(po)	-	
+GET	/po/oldPosts/{channel_uuid}/{time_stamp}	session	none	member	TODO(po)	-	
+POST	/po/removeComment	session	none	member	TODO(po)	-	
+POST	/po/removeReaction	session	none	member	TODO(po)	-	
+POST	/po/removeReactionFromComment	session	none	member	TODO(po)	-	
+POST	/po/updateComment	session	none	member	TODO(po)	-	
+POST	/po/updatePost	session	none	member	TODO(po)	-	
+POST	/poll/	session	none	member	TODO(poll)	-	
+GET	/poll/{id}	session	none	member	TODO(poll)	-	
+POST	/poll/{id}/close	session	none	member	TODO(poll)	-	
+POST	/poll/{id}/vote	session	none	member	TODO(poll)	-	
+POST	/project/addAdminRole	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins and its team's admins (NeedManagePeople, memberChangeRefusal): a member is refused (403), someone outside finds nothing (404)
+POST	/project/addAttachment	session	none	member	TODO(project)	-	
+POST	/project/addMember	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins and its team's admins (NeedManagePeople, memberChangeRefusal): a member is refused (403), someone outside finds nothing (404)
+GET	/project/attachments/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"
+GET	/project/boardColumn/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"
+POST	/project/createProject	session	none	member	object:team	TestATokenActsAsAMemberAcrossTheAPI	the workspace's "Who can make projects" (workAccess.CanMakeProjects), in a team the caller is in
+GET	/project/cycles/running	session	none	member	self	TestV20CycleCountsAreWhatTheReaderMaySee	the running cycle of each project the caller may view (NeedView, OfMany); archived projects left out; counts take in the cycle's live tasks the caller may see (taskread, in the query), as the per-project list
+POST	/project/deleteProject	session	none	member	object:project	TestA1WorkAccessThroughTheHandlers	the project's admins and its team's admins (NeedArchive): a member 403, someone outside 404
+GET	/project/forecasts	session	none	member	object:project	TestLinear20BForecastsInOneRead	each listed project the caller may see (NeedView, the single forecast route's check, made for every listed project in one read: workAccess.ProjectsViewable): a viewer reads it; one they cannot see, an id that names nothing and a string that is not an id are left out without a word; at most 100 distinct ids, more refused whole (400)
+GET	/project/getFile/{project_uuid}/{obj_uuid}	session	none	member	object:project	TestOnlyThoseWhoMaySeeAPlaceHaveItsFiles	FileAccess: the project's people; a restricted task's files only for its readers
+GET	/project/info/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"
+GET	/project/memberWithAdminFlag/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"; its team's admins too
+GET	/project/membersInfo/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"
+GET	/project/milestones	session	none	member	self	TestLinear16ASharedMilestoneCountsWhatEachReaderMayOpen	the milestones of each project the caller is in (their projects read from them; OfMany: NeedView, archived left out); progress and span over the tasks they may open (taskread), other projects only counted
+GET	/project/overview	session	none	member	self	gate	the caller's own projects; restricted tasks count for nothing (taskread)
+GET	/project/projectListByAdminUID	session	none	member	self	gate	the projects the caller is an admin of
+POST	/project/removeAdminRole	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins and its team's admins (NeedManagePeople, memberChangeRefusal): a member is refused (403), someone outside finds nothing (404); the creator stays an admin
+POST	/project/removeAttachment	session	none	member	object:project	TestAProjectsFilesAreAddedListedAndRemovedThroughTheHandlers	the project's admins (NeedManage): a member is refused (403)
+POST	/project/removeMember	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins and its team's admins (NeedManagePeople, memberChangeRefusal): a member is refused (403), someone outside finds nothing (404); anyone may leave; the creator is never taken off
+GET	/project/report	session	none	member	self	gate	the caller's own projects; ?projects= only narrows them; tasks through taskread
+GET	/project/taskList/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"; ?format=csv exports only what the reader may read (TestATaskListsCSV)
+GET	/project/taskListForKanban/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"
+GET	/project/templates	session	none	member	member	gate	the workspace's templates, by design; a snapshot reads tasks as nobody
+POST	/project/templates	session	none	member	TODO(project)	-	
+GET	/project/templates/{template_id}	session	none	member	member	gate	the workspace's templates, by design; a snapshot reads tasks as nobody
+POST	/project/templates/{template_id}/delete	session	none	member	object:template	TestSavedTemplates	its author or a workspace admin (mayDelete): anyone else ErrNotYours
+POST	/project/unDeleteProject	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins and its team's admins (NeedArchive): a member is refused (403); someone outside it finds nothing (404)
+POST	/project/updateName	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+GET	/project/workload	session	none	member	self	gate	the projects the caller is in; tasks through taskread; bots and agents' tasks left out
+POST	/project/workload/capacity	session	none	member	self	TestWorkload	the caller's own capacity, or anyone's for a workspace admin (ErrCapacityNotYours)
+GET	/project/{project_uuid}/backlog	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/critical-path	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/cycles	session	none	member	object:project	TestV20CycleCountsAreWhatTheReaderMaySee	the project's people (NeedView); progress counts the cycle's live tasks the reader may see (taskread, in the query); whoever may see every task counts them all
+POST	/project/{project_uuid}/cycles	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's admins (NeedManage)
+GET	/project/{project_uuid}/cycles/feed	session	none	member	object:project	TestLinear12DACycleFeedFollowsItsPersonsAccess	the caller's own link to the cycles of a project they may view (NeedView); never its address
+POST	/project/{project_uuid}/cycles/feed	session	none	member	object:project	TestLinear12DACycleFeedFollowsItsPersonsAccess	a project they may view (NeedView); the link's address shown once, only its hash kept; calendar.feeds.allowed
+POST	/project/{project_uuid}/cycles/feed/stop	session	none	member	self	gate	stops only the caller's own link
+POST	/project/{project_uuid}/cycles/schedule	session	none	member	object:project	TestB3bTheSchedulerRunsAProjectsCycles	the project's admins (NeedManage)
+POST	/project/{project_uuid}/cycles/schedule/stop	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's admins (NeedManage)
+GET	/project/{project_uuid}/cycles/{cycle_id}/burndown	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's people (NeedView); a cycle of that project only (cycleIn)
+POST	/project/{project_uuid}/cycles/{cycle_id}/capacity	session	none	member	object:project	TestL13AnAdminSetsACyclesCapacity	the project's admins (NeedManage); a cycle of that project only (cycleIn)
+POST	/project/{project_uuid}/cycles/{cycle_id}/complete	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's admins (NeedManage); a cycle of that project only (cycleIn)
+POST	/project/{project_uuid}/cycles/{cycle_id}/delete	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's admins (NeedManage); a cycle of that project only (cycleIn)
+POST	/project/{project_uuid}/cycles/{cycle_id}/rename	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's admins (NeedManage); a cycle of that project only (cycleIn)
+POST	/project/{project_uuid}/cycles/{cycle_id}/start	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's admins (NeedManage); a cycle of that project only (cycleIn)
+GET	/project/{project_uuid}/estimates	session	none	member	object:project	TestLinear05AProjectsScaleIsItsAdminsToSet	anyone who may see the project (NeedView): its scale, the scales it may take, and can_edit; someone outside it finds no project (404)
+POST	/project/{project_uuid}/estimates	session	none	member	object:project	TestLinear05AProjectsScaleIsItsAdminsToSet	the project's admins (NeedManage): a member, or someone outside it, is refused (403); kind hours puts it back on hours
+GET	/project/{project_uuid}/fields	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/fields	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/fields/reorder	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/fields/{field_id}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/fields/{field_id}/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/forecast	session	none	member	object:project	TestLinear20AForecastFromPaceAndLinks	anyone who may see the project (NeedView): a viewer reads it, someone outside it is refused; the pace and the links count only the tasks the reader may see, and another project's late task is named only to a reader who sees it
+GET	/project/{project_uuid}/forms	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/forms	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/forms/{form_id}/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/forms/{form_id}/submissions	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/glance	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/goals	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/invoices	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
+POST	/project/{project_uuid}/invoices	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
+GET	/project/{project_uuid}/invoices/{invoice_id}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
+POST	/project/{project_uuid}/invoices/{invoice_id}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
+POST	/project/{project_uuid}/invoices/{invoice_id}/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
+POST	/project/{project_uuid}/invoices/{invoice_id}/status	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
+GET	/project/{project_uuid}/key	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+PUT	/project/{project_uuid}/key	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/members/{user_uuid}/role	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins and its team's admins (NeedManagePeople, memberChangeRefusal): a member is refused (403), someone outside finds nothing (404)
+GET	/project/{project_uuid}/milestones	session	none	member	object:project	TestLinear16MilestonesAreTheProjectsAdminsToMake	anyone who may see the project (NeedView): outsider 404; progress and span over the tasks the caller may open, in projects they may open (others counted, never named)
+POST	/project/{project_uuid}/milestones	session	none	member	object:project	TestLinear16MilestonesAreTheProjectsAdminsToMake	the project's admins (NeedManage): member and viewer 403, outsider 404
+POST	/project/{project_uuid}/milestones/reorder	session	none	member	object:project	TestLinear16MilestonesAreTheProjectsAdminsToMake	the project's admins (NeedManage), their own list's order
+POST	/project/{project_uuid}/milestones/{milestone_id}/delete	session	none	member	object:project	TestLinear16MilestonesAreTheProjectsAdminsToMake	the admins of the milestone's home project (NeedManage, home): from a project it is shared with 403; one the project doesn't show 404
+POST	/project/{project_uuid}/milestones/{milestone_id}/edit	session	none	member	object:project	TestLinear16MilestonesAreTheProjectsAdminsToMake	the admins of the milestone's home project (NeedManage, home): from a project it is shared with 403; one the project doesn't show 404
+POST	/project/{project_uuid}/milestones/{milestone_id}/share	session	none	member	object:project	TestLinear16ASharedMilestoneCountsWhatEachReaderMayOpen	the home project's admins who also run the other project (NeedManage on both; the other read by RequireID: 404 unseen, 403 not its admin)
+POST	/project/{project_uuid}/milestones/{milestone_id}/unshare	session	none	member	object:project	TestLinear16ASharedMilestoneCountsWhatEachReaderMayOpen	a project's admins from their own list, or the home's admins from a project they shared it with (NeedManage); never off its home
+GET	/project/{project_uuid}/policies	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+PUT	/project/{project_uuid}/policies/{key}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/rates	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
+POST	/project/{project_uuid}/rates	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
+POST	/project/{project_uuid}/rates/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
+GET	/project/{project_uuid}/rules	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/rules	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/rules/runs	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/rules/runs/{run_id}/undo	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	whoever may change its tasks (NeedEditTask); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/rules/{rule_id}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/rules/{rule_id}/active	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/rules/{rule_id}/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/save-as-template	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); the snapshot reads tasks as nobody, so no restricted task
+GET	/project/{project_uuid}/statusRules	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/statusRules	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/statusRules/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/statuses	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project, and a workspace admin (read only, for GitHub rules); someone else is told they may not (403)
+POST	/project/{project_uuid}/statuses	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins: a member, or someone outside it, is refused (403)
+POST	/project/{project_uuid}/statuses/order	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins: a member, or someone outside it, is refused (403)
+POST	/project/{project_uuid}/statuses/reorder	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins: a member, or someone outside it, is refused (403); ids of other projects are ignored
+POST	/project/{project_uuid}/statuses/{status_id}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins: a member, or someone outside it, is refused (403); a status of this project only
+POST	/project/{project_uuid}/statuses/{status_id}/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins: a member, or someone outside it, is refused (403); a status of this project only
+GET	/project/{project_uuid}/tags	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/time	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404); rates only for its admins (ratesFor)
+GET	/project/{project_uuid}/timeline	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/types	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/types	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+DELETE	/project/{project_uuid}/types/{type_id}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+PUT	/project/{project_uuid}/types/{type_id}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/updates	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/updates	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	whoever may post its updates (NeedPostUpdate); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/updates/draft	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	whoever may post its updates (NeedPostUpdate); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/updates/{update_id}/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	an update's author, or the project's admins; someone outside it finds nothing (404)
+POST	/project/{project_uuid}/updates/{update_id}/edit	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	whoever may post its updates, on their own update; someone outside it finds nothing (404)
+GET	/proposals	session	none	member	object:doc	TestWithdrawAndVisibility	someone who can see the doc (a stranger: not found)
+POST	/proposals	session	none	member	object:doc	TestSuggestingIsCommentingAndAuthorshipIsTheServers	someone who may comment on the doc, not while it is locked; the author is the server's (the caller, or an agent and its asker)
+GET	/proposals/{proposal_id}	session	none	member	object:doc	TestWithdrawAndVisibility	someone who can see its doc
+POST	/proposals/{proposal_id}/decide	session	none	member	object:doc	TestAcceptingTwoOfThreeOnTheServer	someone who can edit the doc (full access while it is locked)
+POST	/proposals/{proposal_id}/reopen	session	none	member	object:doc	TestADeciderMovedDownToViewCantReopen	whoever decided those parts, within the reopen window, while they can still edit
+POST	/proposals/{proposal_id}/withdraw	session	none	member	object:doc	TestWithdrawAndVisibility	its author (an agent's asker), or someone who can edit the doc
+GET	/public/app-icon/{obj_uuid}	public	none	public	public	-	app icon by opaque uuid
+GET	/public/book/{slug}	public	none	public	link:booking	-	booking page: outsiders see free slots and book; rate-limited
+POST	/public/book/{slug}	public	none	public	link:booking	-	booking page: outsiders see free slots and book; rate-limited
+GET	/public/booking/{token}	public	none	public	link:booking	-	a guest's booking, by its cancel-link token
+POST	/public/booking/{token}/cancel	public	none	public	link:booking	-	a guest cancels through their cancel-link token
+GET	/public/calendar/{file}	public	none	public	link:calendar-feed	-	a calendar's secret link, read by another calendar app; only its hash is kept, every read checks access; rate-limited per link and per address
+POST	/public/csp-report	public	none	public	public	-	browser-posted CSP violation reports; uncredentialed by spec — Public assets rendered in contexts with no session (emails, login page). The browser posts CSP violation reports without credentials, and a violation on the sign-in page happens before anybody is authenticated, so this cannot require a session. It accepts nothing and returns nothing: the body is capped, a batch is capped, every response is 204, and it is rate limited under its own key. The worst an unauthenticated caller achieves is a bounded number of WARN lines.
+GET	/public/cycles/{file}	public	none	public	link:cycle-feed	-	a project's cycles by a person's secret link, read by another calendar app; only its hash is kept, every read checks the person may still view the project; rate-limited per link and per address
+GET	/public/d/{token}	public	none	public	link:published	-	a doc's view-only guest link, by its token: the same page; rate-limited
+GET	/public/d/{token}/files/{obj_uuid}	public	none	public	link:published	-	a view-only guest link's own files, by token and file; rate-limited
+POST	/public/d/{token}/unlock	public	none	public	link:published	-	a view-only guest link's password, tried for its unlock; rate-limited per address and page
+GET	/public/email/logo	public	none	public	public	-	branding in outbound mail
+GET	/public/form/{token}	public	none	public	link:form	-	intake form: anyone with the link fills it in; rate-limited — Guest share links. The token is the credential; every one is rate-limited and returns a uniform not-available response so there is no oracle.
+POST	/public/form/{token}	public	none	public	link:form	-	intake form: anyone with the link fills it in; rate-limited — Guest share links. The token is the credential; every one is rate-limited and returns a uniform not-available response so there is no oracle.
+POST	/public/form/{token}/file	public	none	public	link:form	-	intake form's files: a visitor adds them before sending; rate-limited, 10 MB, scanned, kept a day unless sent
+GET	/public/form/{token}/{kind:cover|logo}	public	none	public	link:form	-	intake form's cover and logo (tables B5c-2): anyone with the link sees them; rate-limited like the form; a 302 to the stored picture, the workspace's logo when the form has none, 404 when there is none
+POST	/public/notifications/resubscribe	public	none	public	link:unsubscribe	-	same token, reverses the above
+GET	/public/notifications/unsubscribe	public	none	public	link:unsubscribe	-	unsubscribe token; required by bulk-mail norms — Email-driven, must work from a mail client with no session.
+POST	/public/notifications/unsubscribe	public	none	public	link:unsubscribe	-	unsubscribe token; required by bulk-mail norms — Email-driven, must work from a mail client with no session.
+GET	/public/p/{slug}	public	none	public	link:published	-	a doc's published guest link: the same bytes for everyone, sandboxed; rate-limited — A doc's view-only guest link, by its token or its published address (docs C6, D-25): one access check (the guest grant, under the guest-access switch), one script-free page under a sandboxed policy that reads no cookie and sets none, answering 404 the moment the link is revoked or unpublished, limited per address (helpers.ClientIP) and per page; its files only its own doc's.
+GET	/public/p/{slug}/files/{obj_uuid}	public	none	public	link:published	-	a published page's own files, by slug and file; rate-limited
+GET	/public/p/{slug}/state	public	none	public	link:published	-	what a published address answers now (live, locked, gone, missing), for the web's /p; counted with the page's asks per address, saying nothing the page wouldn't
+POST	/public/p/{slug}/unlock	public	none	public	link:published	-	a published page's password, tried for its unlock; rate-limited per address and page
+GET	/public/r/{slug}	public	none	public	link:room	-	a personal room's address: live or locked, and once live its title and notices; counted per address, a dead address the uniform 404
+POST	/public/r/{slug}/join	public	none	public	link:room	-	a room's address (and its passcode's unlock when it has one): knock, or join with the lobby off; counted per address
+DELETE	/public/r/{slug}/knock/{ticket}	public	none	public	link:room	-	a room's address, and a ticket only its knock holds; counted per address
+GET	/public/r/{slug}/knock/{ticket}	public	none	public	link:room	-	a room's address, and a ticket only its knock holds; counted per address
+POST	/public/r/{slug}/unlock	public	none	public	link:room	-	a room's passcode, tried for its unlock; counted per address and per room
+GET	/public/rsvp/{token}	public	none	public	link:rsvp	-	a guest invited by email reads and answers their invitation through their link's token; rate-limited
+POST	/public/rsvp/{token}	public	none	public	link:rsvp	-	a guest invited by email reads and answers their invitation through their link's token; rate-limited
+POST	/query/parse	session	none	member	TODO(query)	-	
+POST	/query/search	session	none	member	member	TestAnOutsidersCountNeverMoves	any member; every hit and count is read as the asker
+GET	/refreshToken	refresh	none	n/a	gate	gate	
+POST	/restore/{kind}/{id}	session	none	member	object:project	TestEveryDeletedProjectPartComesBackWhole	V-78: brings back a soft-deleted row, each kind checked as its delete: a project's field, status, cycle, milestone, form or draft invoice by its project's admins (Work Access NeedManage; a member is refused 403, someone outside it finds nothing); a table's form by the table's managers; a time entry by its own person (anyone else: 404)
+POST	/saml/acs	public	none	public	signed:saml	-	SAML assertion consumer; assertion is signature-verified
+GET	/saml/login	public	none	public	public	-	starts a SAML redirect
+GET	/saml/metadata	public	none	public	public	-	SAML SP metadata, public by spec
+GET	/scim/v2/ServiceProviderConfig	scim	none	n/a	gate	gate	
+GET	/scim/v2/Users	scim	none	n/a	gate	gate	
+POST	/scim/v2/Users	scim	none	n/a	gate	gate	
+DELETE	/scim/v2/Users/{id}	scim	none	n/a	gate	gate	
+GET	/scim/v2/Users/{id}	scim	none	n/a	gate	gate	
+PATCH	/scim/v2/Users/{id}	scim	none	n/a	gate	gate	
+PUT	/scim/v2/Users/{id}	scim	none	n/a	gate	gate	
+POST	/search/unifiedSearch	session	none	member	TODO(search)	-	
+GET	/search/unifiedSearch/{search_text}	session	none	member	TODO(search)	-	
+POST	/slack/events	public	none	public	signed:slack	-	Slack signing-secret HMAC verified in the handler; before connection it only echoes Slack's URL challenge
+GET	/tables/	session	none	member	TODO(tables)	-	
+POST	/tables/	session	none	member	TODO(tables)	-	
+POST	/tables/generate	session	none	member	TODO(tables)	-	
+GET	/tables/trash	session	none	member	TODO(tables)	-	
+GET	/tables/{id}	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/aggregate	session	none	member	TODO(tables)	-	
+GET	/tables/{id}/ai-fills	session	none	member	object:table	TestATablesFillsAreReadOnlyByWhoeverMayOpenIt	whoever may open the table
+POST	/tables/{id}/delete	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/export	session	none	member	object:table	TestAnExportOfATableTheReaderCantOpenIsNotFound	a table the reader can open (loadViewable; else not found), its rows as the reader reads them
+GET	/tables/{id}/fields	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/fields	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/fields/{fieldId}/ai-fill	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/fields/{fieldId}/ai-fill/stop	session	none	member	object:table	TestAFillsStarterStopsItAndNoOtherMemberDoes	the fill's starter, or one who manages the table
+POST	/tables/{id}/fields/{fieldId}/convert-preview	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/fields/{fieldId}/delete	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/fields/{fieldId}/update	session	none	member	TODO(tables)	-	
+GET	/tables/{id}/files/{obj_uuid}	session	none	member	object:table	TestAFileFollowsItsPlacesRule	whoever may read the table's rows; the file must be that table's
+GET	/tables/{id}/forms	session	none	member	object:table	TestATablesFormsAreItsManagersAlone	a table's own forms (B5), for a manager of the table (its maker or an admin); an editor or reader is refused, a table they can't see is 404
+POST	/tables/{id}/forms	session	none	member	object:table	TestATablesFormsAreItsManagersAlone	makes or changes one of the table's own forms, by a manager of the table; its answers always add rows to that table, as the saver
+POST	/tables/{id}/forms/{form_id}/delete	session	none	member	object:table	TestATablesFormsAreItsManagersAlone	deletes one of the table's own forms, by a manager of the table; the rows it added stay
+GET	/tables/{id}/forms/{form_id}/submissions	session	none	member	object:table	TestATablesFormsAreItsManagersAlone	the latest answers to one of the table's own forms, by a manager of the table
+POST	/tables/{id}/formula/preview	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/presence	session	none	member	object:table	TestPresenceOnATable	whoever may open the table
+POST	/tables/{id}/query	session	none	member	object:table	TestRowQuerySummarisesEveryRowItKeeps	whoever may open the table; its rows as they may see them
+POST	/tables/{id}/query-plan	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/redo	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/restore	session	none	member	TODO(tables)	-	
+GET	/tables/{id}/rows	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/rows	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/rows/batch	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/rows/move	session	none	member	TODO(tables)	-	
+GET	/tables/{id}/rows/pick	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/rows/{rowId}/delete	session	none	member	TODO(tables)	-	
+GET	/tables/{id}/rows/{rowId}/history	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/rows/{rowId}/links	session	none	member	TODO(tables)	-	
+GET	/tables/{id}/rows/{rowId}/page	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/rows/{rowId}/page	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/rows/{rowId}/patch	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/rows/{rowId}/update	session	none	member	TODO(tables)	-	
+GET	/tables/{id}/trash	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/trash/restore	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/undo	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/update	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/views	session	none	member	object:table	TestASharedViewIsItsManagersToChange	a view of one's own on a table one can open, or a shared one by a manager of the table
+POST	/tables/{id}/views/{viewId}/delete	session	none	member	object:table	TestASharedViewIsItsManagersToChange	one's own view, or a shared one by a manager of the table; another's own view isn't found (TestAViewOfOnesOwnIsTheirsAlone)
+POST	/tables/{id}/views/{viewId}/lock	session	none	member	object:table	TestALockedViewTakesNoChangeUntilUnlocked	a shared view, by a manager of the table; one's own view is never locked
+POST	/tables/{id}/views/{viewId}/update	session	none	member	object:table	TestASharedViewIsItsManagersToChange	one's own view, or a shared one by a manager of the table; another's own view isn't found (TestAViewOfOnesOwnIsTheirsAlone)
+POST	/task/addAttachmentToTask	session	none	member	TODO(task)	-	
+POST	/task/addReactionToComment	session	none	member	TODO(task)	-	
+GET	/task/approval/{task_uuid}	session	none	member	object:task	TestARequestIsOnlyItsPeoplesToReadAnswerOrTakeBack	someone who may read the task (NeedView)
+POST	/task/approval/{task_uuid}/ask	session	none	member	object:task	TestAskingForATaskItselfToBeApproved	someone who may edit the task (NeedEditTask), asking approvers who can see it; never through a token
+POST	/task/approval/{task_uuid}/decide	session	none	member	object:task	TestARequestIsOnlyItsPeoplesToReadAnswerOrTakeBack	an approver the request names who can still read the task, through the request's own task; never through a token
+POST	/task/approval/{task_uuid}/withdraw	session	none	member	object:task	TestARequestIsOnlyItsPeoplesToReadAnswerOrTakeBack	whoever asked, or someone who manages the project; never through a token
+POST	/task/bulk	session	none	member	TODO(task)	-	
+GET	/task/clientReview/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/create-branch/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/createCommentTask	session	none	member	object:task	TestA1WorkAccessThroughTheHandlers	whoever may comment on the task (Work Access)
+POST	/task/createSubTask	session	none	member	object:project	TestA1WorkAccessThroughTheHandlers	whoever may add tasks to the parent task's project (Work Access)
+POST	/task/createTask	session	none	member	object:project	TestA1WorkAccessThroughTheHandlers	whoever may add tasks to the project (Work Access)
+POST	/task/createTasks	session	none	member	TODO(task)	-	
+POST	/task/cycle	session	none	member	object:task	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	someone who may edit the task (NeedEditTask), into a current or upcoming cycle of its own project
+GET	/task/cycle/{task_uuid}	session	none	member	object:task	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	someone who may read the task (NeedView)
+POST	/task/deleteTask	session	none	member	TODO(task)	-	
+POST	/task/deleteTaskAttachment	session	none	member	TODO(task)	-	
+POST	/task/deleteTaskComment	session	none	member	TODO(task)	-	
+POST	/task/dependency	session	none	member	TODO(task)	-	
+POST	/task/dependency/delete	session	none	member	TODO(task)	-	
+POST	/task/field	session	none	member	TODO(task)	-	
+GET	/task/getTaskActivityInfo/{task_uuid}/{activity_uuid}	session	none	member	TODO(task)	-	
+GET	/task/getTaskActivityList/{task_uuid}	session	none	member	TODO(task)	-	
+GET	/task/github-activity/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/github-bulk-link	session	none	member	TODO(task)	-	
+POST	/task/github-bulk-unlink	session	none	member	TODO(task)	-	
+POST	/task/github-create-pr/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/github-link/{task_uuid}	session	none	member	TODO(task)	-	
+GET	/task/github-pr-reviews/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/github-refresh/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/github-retry-sync/{task_uuid}	session	none	member	TODO(task)	-	
+GET	/task/github-search-issues/{task_uuid}	session	none	member	TODO(task)	-	
+GET	/task/github-search-prs/{task_uuid}	session	none	member	TODO(task)	-	
+GET	/task/github-sync-status/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/github-unlink/{task_uuid}	session	none	member	TODO(task)	-	
+GET	/task/info/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/milestone	session	none	member	object:task	TestLinear16ATaskJoinsAMilestoneItsProjectShows	whoever may edit the task (NeedEditTask, RequireTask: a restricted one 404); into a milestone its project shows (400 otherwise), the project read from the task
+GET	/task/milestone/{task_uuid}	session	none	member	object:task	TestLinear16ATaskJoinsAMilestoneItsProjectShows	whoever may read the task (NeedView, RequireTask)
+POST	/task/moveTask	session	none	member	TODO(task)	-	
+POST	/task/recurrence	session	none	member	TODO(task)	-	
+GET	/task/recurrence/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/removeReactionFromComment	session	none	member	TODO(task)	-	
+GET	/task/resolve/{ref}	session	none	member	TODO(task)	-	
+POST	/task/time/entry/{entry_id}/delete	session	none	member	TODO(task)	-	
+POST	/task/time/entry/{entry_id}/update	session	none	member	TODO(task)	-	
+GET	/task/time/running	session	none	member	TODO(task)	-	
+POST	/task/time/stop	session	none	member	TODO(task)	-	
+GET	/task/time/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/time/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/time/{task_uuid}/start	session	none	member	TODO(task)	-	
+POST	/task/type	session	none	member	TODO(task)	-	
+POST	/task/undeleteTask	session	none	member	TODO(task)	-	
+POST	/task/updateComment	session	none	member	TODO(task)	-	
+POST	/task/updateTaskAssignee	session	none	member	TODO(task)	-	
+POST	/task/updateTaskDates	session	none	member	TODO(task)	-	
+POST	/task/updateTaskDesc	session	none	member	TODO(task)	-	
+POST	/task/updateTaskDueDate	session	none	member	TODO(task)	-	
+POST	/task/updateTaskEstimate	session	none	member	TODO(task)	-	
+POST	/task/updateTaskLabel	session	none	member	TODO(task)	-	
+POST	/task/updateTaskName	session	none	member	TODO(task)	-	
+POST	/task/updateTaskPoints	session	none	member	object:task	TestLinear05PointsAreASizeOnTheProjectsScale	whoever may edit the task (NeedEditTask); a size on its project's scale, none in a project that estimates in hours
+POST	/task/updateTaskPriority	session	none	member	TODO(task)	-	
+POST	/task/updateTaskStartDate	session	none	member	TODO(task)	-	
+POST	/task/updateTaskStatus	session	none	member	TODO(task)	-	
+GET	/task/views	session	none	member	TODO(task)	-	
+POST	/task/views	session	none	member	TODO(task)	-	
+POST	/task/views/delete	session	none	member	TODO(task)	-	
+GET	/task/{task_ref}/restriction	session	none	member	TODO(task)	-	
+PUT	/task/{task_ref}/restriction	session	none	member	TODO(task)	-	
+GET	/task/{task_uuid}/impact	session	none	member	TODO(task)	-	
+POST	/team/addAdminRole	session	none	member	TODO(team)	-	
+POST	/team/addMember	session	none	member	TODO(team)	-	
+GET	/team/checkTeamNameExist	session	none	member	TODO(team)	-	
+POST	/team/createTeam	session	none	member	TODO(team)	-	
+GET	/team/info/{team_uuid}	session	none	member	TODO(team)	-	
+GET	/team/membersInfo/{team_uuid}	session	none	member	TODO(team)	-	
+GET	/team/projectList/{team_uuid}	session	none	member	TODO(team)	-	
+POST	/team/removeAdminRole	session	none	member	TODO(team)	-	
+POST	/team/removeMember	session	none	member	TODO(team)	-	
+GET	/team/teamListByAdminUID	session	none	member	TODO(team)	-	
+GET	/team/teamListByUserUID	session	none	member	TODO(team)	-	
+POST	/team/updateName	session	none	member	TODO(team)	-	
+GET	/threads	session	none	member	object:thread	TestWhoCannotTakePart	someone who can see the doc or row (a stranger: not found)
+POST	/threads	session	none	member	object:thread	TestWhoCannotTakePart	someone who may comment on the doc or row; a viewer is refused
+GET	/threads/{thread_id}	session	none	member	object:thread	TestWhoCannotTakePart	someone who can see where it is
+POST	/threads/{thread_id}/comments/{comment_id}/edit	session	none	member	object:thread	TestAStoredCommentChangesAsItsRulesSay	its writer, on a kind whose comments are stored here (a doc's change through the doc)
+POST	/threads/{thread_id}/comments/{comment_id}/react	session	none	member	object:thread	TestAStoredCommentChangesAsItsRulesSay	someone who may comment where it is, one reaction each
+POST	/threads/{thread_id}/comments/{comment_id}/remove	session	none	member	object:thread	TestAStoredCommentChangesAsItsRulesSay	its writer, the owner or someone with full access, or an admin (audited)
+POST	/threads/{thread_id}/comments/{comment_id}/unreact	session	none	member	object:thread	TestAStoredCommentChangesAsItsRulesSay	whoever made the reaction, while they can still see where it is
+POST	/threads/{thread_id}/read	session	none	member	object:thread	TestWhoCannotTakePart	someone who can see it, their own read marker
+POST	/threads/{thread_id}/reanchor	session	none	member	object:thread	TestWhoCannotTakePart	whoever started it, while they may comment, or someone who can edit where it is
+POST	/threads/{thread_id}/reopen	session	none	member	object:thread	TestWhoCannotTakePart	whoever started it, while they may comment, or someone who can edit where it is
+POST	/threads/{thread_id}/replies	session	none	member	object:thread	TestWhoCannotTakePart	someone who may comment where it is
+POST	/threads/{thread_id}/resolve	session	none	member	object:thread	TestAThreadIsStartedRepliedToAndResolved	whoever started it, while they may comment, or someone who can edit where it is
+POST	/threads/{thread_id}/task	session	none	member	object:thread	TestWhoCannotTakePart	whoever may resolve it, with a task they can see (taskread, CanViewTask); the sync then moves each side by its own rule
+GET	/unfurl	session	none	member	member	gate	any member's link preview: read anonymously through safefetch (nothing inside the network), the same card for everyone, within the person's fetch window
+GET	/unfurl/embeds	session	none	member	member	gate	the hosts an admin added to the ones docs can embed, which every doc's embeds follow
+POST	/unfurl/store	session	none	member	object:doc	TestStoreRemoteKeepsAPictureForAnEditorOnly	edit on the doc (Access Resolver): below view not found, below edit refused, and nothing fetched for either
+POST	/updateUserProfile	session	none	member	TODO(updateuserprofile)	-	
+POST	/updateUserTheme	session	none	member	TODO(updateusertheme)	-	
+POST	/uploadFile	session	none	member	TODO(uploadfile)	-	
+POST	/user/addFavChannel/{channel_id}	session	none	member	TODO(user)	-	
+GET	/user/allUsers	session	none	member	TODO(user)	-	
+GET	/user/assignedTaskList	session	none	member	TODO(user)	-	
+GET	/user/assignedTaskListForKanban	session	none	member	TODO(user)	-	
+GET	/user/botKinds	session	none	member	TODO(user)	-	
+POST	/user/clearUserEmojiStatus	session	none	member	TODO(user)	-	
+GET	/user/dm-ai-suggestions	session	none	member	TODO(user)	-	
+GET	/user/dm-ai-targets	session	none	member	TODO(user)	-	
+POST	/user/fwdMessage	session	none	member	TODO(user)	-	
+GET	/user/getActiveUserEmojiStatus	session	none	member	TODO(user)	-	
+GET	/user/getAllUserEmojiStatusList	session	none	member	TODO(user)	-	
+POST	/user/notificationPause	session	none	member	TODO(user)	-	
+GET	/user/notificationPreferences	session	none	member	TODO(user)	-	
+POST	/user/notificationPreferences	session	none	member	TODO(user)	-	
+GET	/user/notificationStatus/{user_uuid}	session	none	member	TODO(user)	-	
+POST	/user/notifyAnyway	session	none	member	TODO(user)	-	
+GET	/user/posts	session	none	member	TODO(user)	-	
+GET	/user/preferences	session	none	member	self	TestPersonPreferencesOverHTTP	the caller's own preferences, each key's default where none is kept
+PUT	/user/preferences/{key}	session	none	member	self	TestPersonPreferencesOverHTTP	the caller's own preference, a registered key, its value checked by that key; their other devices are told
+GET	/user/profile	session	none	member	TODO(user)	-	
+GET	/user/profile/{user_id}	session	none	member	TODO(user)	-	
+GET	/user/recordingList	session	none	member	TODO(user)	-	
+POST	/user/removeFavChannel/{channel_id}	session	none	member	TODO(user)	-	
+POST	/user/searchUserAndChannelList	session	none	member	TODO(user)	-	
+GET	/user/sidebarNav	session	none	member	TODO(user)	-	
+POST	/user/updateChatNotification	session	none	member	TODO(user)	-	
+POST	/user/updateFCMToken	session	none	member	TODO(user)	-	
+POST	/user/updateGroupChatNotification	session	none	member	TODO(user)	-	
+POST	/user/updateStatus	session	none	member	TODO(user)	-	
+POST	/user/updateStatusEmojiStatus	session	none	member	TODO(user)	-	
+POST	/user/updateUserChannelNotification	session	none	member	TODO(user)	-	
+POST	/user/updateUserProjectNotification	session	none	member	TODO(user)	-	
+GET	/user/userProjectList	session	none	member	TODO(user)	-	
+GET	/user/usersListNotBelongToChannelId/{channel_id}	session	none	member	TODO(user)	-	
+GET	/user/usersListWhoDontBelongToTheDM/{grp_id}	session	none	member	TODO(user)	-	
+GET	/user/usersListWhoDontBelongToTheProjectButBelongToTheTeam/{project_uuid}	session	none	member	TODO(user)	-	
+GET	/user/usersListWhoDontBelongToTheTeam/{team_uuid}	session	none	member	TODO(user)	-	
+GET	/v1/attention	token	as-member	n/a	self	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/docs	token	as-member	n/a	object:doc	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/docs	token	as-member	n/a	object:doc	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/docs/{id}	token	as-member	n/a	object:doc	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/docs/{id}/append	token	as-member	n/a	object:doc	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/mcp	token	as-member	n/a	member	TestATokenActsAsAMemberAcrossTheAPI	each tool call is authorised as the token's member (AuthorizeToolCall), the agent's kill switch asked per request (BoundAgent)
+GET	/v1/me	token	as-member	n/a	self	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/messages/channel	token	as-member	n/a	object:channel	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/messages/dm	token	as-member	n/a	object:chat	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/openapi.json	token	as-member	n/a	member	TestATokenActsAsAMemberAcrossTheAPI	the API's own description, for any token
+GET	/v1/projects	token	as-member	n/a	object:project	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/search	token	as-member	n/a	member	TestATokenActsAsAMemberAcrossTheAPI	results are what the token's member can read (search's own read filter)
+POST	/v1/search	token	as-member	n/a	member	TestATokenActsAsAMemberAcrossTheAPI	results are what the token's member can read (search's own read filter)
+GET	/v1/tables	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/tables/{id}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/tables/{id}/aggregate	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/tables/{id}/rows	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/tasks	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/tasks	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/tasks/{id}/status	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/unread	token	as-member	n/a	self	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/webhook/incoming/{token}	public	none	public	link:webhook	-	the 32-byte path token IS the credential — It only posts messages: its own slash commands (and their relay to a caller's response_url) were removed in P-API part 3; a payload naming a command is answered with where they went (business/Webhook SlashCommandsMoved).
+POST	/webhooks/resend	public	none	public	signed:resend	-	Svix signature verified in the handler, refused without the secret; rate limited per address
+GET	/workflows	session	none	member	capability:workflow.manage	gate	
+POST	/workflows	session	none	member	capability:workflow.manage	gate	
+POST	/workflows/draft	session	none	member	capability:workflow.manage	gate	
+DELETE	/workflows/{id}	session	none	member	capability:workflow.manage	gate	
+GET	/workflows/{id}	session	none	member	capability:workflow.manage	gate	
+PUT	/workflows/{id}	session	none	member	capability:workflow.manage	gate	
+POST	/workflows/{id}/active	session	none	member	capability:workflow.manage	gate	

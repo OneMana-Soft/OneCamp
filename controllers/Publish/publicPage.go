@@ -29,11 +29,15 @@ import (
 	"strings"
 	"time"
 
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	business "github.com/akashc777/OneCamp/business/Publish"
 	viewBusiness "github.com/akashc777/OneCamp/business/ResourceView"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/minioInit"
+	"github.com/akashc777/OneCamp/middleware"
+	"github.com/akashc777/OneCamp/models/redis/registry"
+	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/minio/minio-go/v7"
 )
@@ -81,7 +85,7 @@ var (
 		if minioInit.MinioClient == nil {
 			return nil, errors.New("publish: storage isn't connected")
 		}
-		obj, err := minioInit.MinioClient.GetObject(ctx, helpers.UserUploadBucket(), "userFileUpload/"+objKey, minio.GetObjectOptions{})
+		obj, err := minioInit.MinioClient.GetObject(ctx, helpers.UserUploadBucket(), attachmentBusiness.ObjectName(objKey), minio.GetObjectOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -96,9 +100,9 @@ var (
 		return &storedFile{Body: obj, ContentType: st.ContentType, Modified: st.LastModified}, nil
 	}
 	clientIP = helpers.ClientIP
-	// addressAllowed is every kind's one per-address limit, counted by the
-	// page kind's surfaces (business/Guest).
-	addressAllowed = guestBusiness.AddressAllowed
+	// addressAllowed is every public read's one per-address limit, counted by
+	// the page kind's surfaces (business/Guest Kind.Surface).
+	addressAllowed = redisStore.AllowPerAddress
 )
 
 // PagePolicy is the page's Content-Security-Policy: it runs nothing, posts
@@ -186,7 +190,7 @@ func LinkPage(w http.ResponseWriter, r *http.Request) { servePage(w, r, byToken(
 
 func servePage(w http.ResponseWriter, r *http.Request, ref business.Ref) {
 	ctx := r.Context()
-	if !addressAllowed(ctx, pageSurface, clientIP(r), pageAsksPerAddress) {
+	if !addressAllowed(ctx, pageSurface, clientIP(r), pageAsksPerAddress).Allowed {
 		answer(w, r, business.BusyDocument())
 		return
 	}
@@ -247,6 +251,15 @@ func plain(w http.ResponseWriter, status int, line string) {
 	_, _ = io.WriteString(w, line)
 }
 
+// busyAnswer is the per-address limit's 429, said as every public read's is
+// (middleware.WriteRateLimited: its real wait), with an unlock answer's headers.
+func busyAnswer(w http.ResponseWriter, res redisStore.RateLimitResult, msg string) {
+	h := w.Header()
+	common(h, false)
+	h.Set("Cache-Control", "no-store")
+	middleware.WriteRateLimited(w, res, registry.PublicReadRate, msg)
+}
+
 func unlockAnswer(w http.ResponseWriter, status int, body helpers.Envolope) {
 	h := w.Header()
 	common(h, false)
@@ -267,8 +280,8 @@ func PublishedPageUnlock(w http.ResponseWriter, r *http.Request) { unlockPageAt(
 // page's own asks from the address, and saying nothing the page wouldn't.
 func PublishedPageState(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if !addressAllowed(ctx, pageSurface, clientIP(r), pageAsksPerAddress) {
-		unlockAnswer(w, http.StatusTooManyRequests, helpers.Envolope{"msg": "This page is busy. Try again in a moment.", "status": "rate_limited"})
+	if res := addressAllowed(ctx, pageSurface, clientIP(r), pageAsksPerAddress); !res.Allowed {
+		busyAnswer(w, res, "This page is busy. Try again in a moment.")
 		return
 	}
 	state, err := pageState(ctx, bySlug(r))
@@ -286,8 +299,8 @@ func LinkPageUnlock(w http.ResponseWriter, r *http.Request) { unlockPageAt(w, r,
 func unlockPageAt(w http.ResponseWriter, r *http.Request, ref business.Ref) {
 	ctx := r.Context()
 	ip := clientIP(r)
-	if !addressAllowed(ctx, unlockSurface, ip, unlockAsksPerAddress) {
-		unlockAnswer(w, http.StatusTooManyRequests, helpers.Envolope{"msg": "Too many tries from here. Wait a few minutes and try again.", "status": "rate_limited"})
+	if res := addressAllowed(ctx, unlockSurface, ip, unlockAsksPerAddress); !res.Allowed {
+		busyAnswer(w, res, "Too many tries from here. Wait a few minutes and try again.")
 		return
 	}
 	var in struct {
@@ -341,7 +354,7 @@ func LinkFile(w http.ResponseWriter, r *http.Request) { serveFile(w, r, byToken(
 
 func serveFile(w http.ResponseWriter, r *http.Request, ref business.Ref) {
 	ctx := r.Context()
-	if !addressAllowed(ctx, fileSurface, clientIP(r), fileAsksPerAddress) {
+	if !addressAllowed(ctx, fileSurface, clientIP(r), fileAsksPerAddress).Allowed {
 		plain(w, http.StatusTooManyRequests, "Too many requests from here. Wait a minute and try again.")
 		return
 	}

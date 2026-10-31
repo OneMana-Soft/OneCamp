@@ -2,20 +2,27 @@ package controllers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
 	adapter "github.com/akashc777/OneCamp/adapter/GlobalSearch"
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	business "github.com/akashc777/OneCamp/business/GlobalSearch"
 	"github.com/akashc777/OneCamp/helpers"
-	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 )
 
 func GetUnifiedGlobalSearch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	// The signed-in person, as every handler that asks the Access Resolver
+	// names them: the search reads a place named in its text as them.
+	user, who := accessBusiness.RequestSubject(r)
+	if who.UserUUID == "" {
+		helpers.WriteUnauthorized(w)
+		return
+	}
 
 	var searchInfo adapter.GlobalSearchInfo
 
@@ -49,25 +56,19 @@ func GetUnifiedGlobalSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A later page: after the cursor the page before answered with.
-	var after []float64
-	if searchInfo.After != "" {
-		var cursorErr error
-		if after, cursorErr = business.DecodeSearchCursor(searchInfo.After); cursorErr != nil {
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That page of results can't be found. Search again."})
-			return
-		}
-	}
-
 	// Search in one conversation, from its header (QA F-15): a channel by its
 	// id, a DM by the other person's, a group by its own.
 	within := business.Within{ChannelUUID: strings.TrimSpace(searchInfo.Channel), GroupingID: strings.TrimSpace(searchInfo.Group)}
 	if dm := strings.TrimSpace(searchInfo.DM); dm != "" {
-		within.GroupingID = helpers.GetGroupingId(userInfo.UserDgraphInfo.Uuid, dm)
+		within.GroupingID = helpers.GetGroupingId(who.UserUUID, dm)
 	}
 
-	searchPage, err := business.GetUnifiedGlobalSearchPage(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserPostgresInfo.EmailID, userInfo.UserDgraphInfo.Channels, userInfo.UserDgraphInfo.Projects, userInfo.UserDgraphInfo.Teams, searchInfo.SearchText, after, within)
-
+	// A later page: after the cursor the page before answered with.
+	searchPage, err := business.GetUnifiedGlobalSearchPage(ctx, who, user.UserPostgresInfo.EmailID, user.UserDgraphInfo.Channels, user.UserDgraphInfo.Projects, user.UserDgraphInfo.Teams, searchInfo.SearchText, searchInfo.After, within)
+	if errors.Is(err, business.ErrBadSearchCursor) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That page of results can't be found. Search again."})
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/GetUnifiedGlobalSearch Failed to get unified search results err: %+v",

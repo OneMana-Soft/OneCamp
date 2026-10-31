@@ -35,6 +35,7 @@ import (
 	"strings"
 
 	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
+	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/helpers"
 	ai "github.com/akashc777/OneCamp/services/AI"
 )
@@ -592,6 +593,8 @@ func hasParam(def ai.ToolDef, name string) bool {
 // a team by being in it), so a work-graph call is never looser than the
 // tool that reads the thing itself; the others (a person, a board, a channel
 // post, a comment, a memory) by the work graph's own rule, ResourceWorkItem.
+// A folder, a file and a link are doc nodes (docs F1), which the tools'
+// answers name by what they are: each is the doc it is, by the doc's rule.
 var workItemKinds = map[string]ResourceKind{
 	"doc":     ResourceDoc,
 	"task":    ResourceTask,
@@ -603,6 +606,10 @@ var workItemKinds = map[string]ResourceKind{
 	"message": ResourceWorkItem,
 	"comment": ResourceWorkItem,
 	"memory":  ResourceWorkItem,
+
+	docDomain.NodeFolder: ResourceDoc,
+	docDomain.NodeFile:   ResourceDoc,
+	docDomain.NodeLink:   ResourceDoc,
 }
 
 // workItemRef is the object a work-graph call starts at: its kind's own
@@ -613,7 +620,7 @@ func workItemRef(kind, id string) (ResourceRef, error) {
 	kind, id = strings.ToLower(strings.TrimSpace(kind)), strings.ToLower(strings.TrimSpace(id))
 	rk, ok := workItemKinds[kind]
 	if !ok {
-		return ResourceRef{}, fmt.Errorf("the kind must be one of doc, task, project, person, board, channel, message, team")
+		return ResourceRef{}, fmt.Errorf("the kind must be one of doc, folder, file, link, task, project, person, board, channel, message, team")
 	}
 	if !helpers.IsCanonicalUUID(id) {
 		return ResourceRef{}, fmt.Errorf("the item must be named by its uuid")

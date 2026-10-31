@@ -83,6 +83,18 @@ func AddParticipants(ctx context.Context, people []Participant) error {
 	return err
 }
 
+// LastReplyAt is when thread id last had a reply: zero when it has had none,
+// or isn't a thread the index keeps. One row by its key: a call's chat asks
+// it on every poll (calls CALLS-3b).
+func LastReplyAt(ctx context.Context, id uuid.UUID) (time.Time, error) {
+	at, _, err := pgexec.QueryOne(ctx, `SELECT last_reply_at FROM threads WHERE id = $1`, func(r pgexec.Row) (time.Time, error) {
+		var at sql.NullTime
+		err := r.Scan(&at)
+		return at.Time, err
+	}, id)
+	return at, err
+}
+
 // TouchReply records a reply in thread id at at: its latest reply, which only
 // moves forward. touched is false when there is no such thread.
 func TouchReply(ctx context.Context, id uuid.UUID, at time.Time) (touched bool, err error) {

@@ -91,8 +91,10 @@ func processPageChunk(ctx context.Context, prov importProvider.Provider, job *im
 	}
 	if before, err := importModels.LookupWorkspaceMapping(ctx, job.Provider, job.SourceWorkspaceName, importModels.EntityDoc, root); err == nil &&
 		before != uuid.Nil && docIsLive(ctx, before.String(), importingUser.UserDgraphInfo.Uid) {
-		_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id, importModels.EntityDoc, root, before, nil,
-			mustMarshal(map[string]any{"matched_by": "workspace_map"}), false)
+		if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName, importModels.EntityDoc, root, before, nil,
+			mustMarshal(map[string]any{"matched_by": "workspace_map"}), false); err != nil {
+			return err
+		}
 		importModels.LogImportError(ctx, job.Id, &chunk.Id, importModels.EntityDoc, root, importModels.SeverityWarning,
 			"PAGES_IMPORTED_BEFORE", "These pages came across in an earlier import, so they were left as they are; pages added under them since are not brought across.", nil)
 		return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
@@ -126,6 +128,8 @@ func processPageChunk(ctx context.Context, prov importProvider.Provider, job *im
 		}
 		return errTryTreeAgain
 	}
+	// What the tree couldn't bring goes to the report together.
+	notes := newChunkNotes(job.Id, &chunk.Id)
 	for _, p := range pages {
 		id, err := uuid.Parse(made.Docs[p.SourceID])
 		if err != nil {
@@ -135,21 +139,20 @@ func processPageChunk(ctx context.Context, prov importProvider.Provider, job *im
 		if p.ParentSourceID != "" {
 			parent = strPtr(p.ParentSourceID)
 		}
-		if err := importModels.UpsertIdMappingWithOwnership(ctx, job.Id, importModels.EntityDoc, p.SourceID, id, parent, nil, true); err != nil {
-			importModels.LogImportError(ctx, job.Id, &chunk.Id, importModels.EntityDoc, p.SourceID, importModels.SeverityError,
-				"PAGE_NOT_RECORDED", "The page came across, but the import couldn't note it, so a roll back leaves it in place.", nil)
-			continue
+		if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName, importModels.EntityDoc, p.SourceID, id, parent, nil, true); err != nil {
+			notes.add(importModels.EntityDoc, p.SourceID, importModels.SeverityError,
+				"PAGE_NOT_RECORDED", "The page came across, but the import couldn't note it, so a roll back leaves it in place.")
 		}
-		_ = importModels.UpsertWorkspaceMapping(ctx, job.Provider, job.SourceWorkspaceName, importModels.EntityDoc, p.SourceID, id, job.Id)
 	}
 	for _, s := range made.Skipped {
-		importModels.LogImportError(ctx, job.Id, &chunk.Id, importModels.EntityDoc, s.What, importModels.SeverityWarning, "PAGE_PART_LEFT_OUT", s.Why, nil)
+		notes.add(importModels.EntityDoc, s.What, importModels.SeverityWarning, "PAGE_PART_LEFT_OUT", s.Why)
 	}
 	for _, p := range pages {
 		if len(p.Comments) > 0 {
 			pageComments(ctx, job, chunk, importingUser, made.Docs[p.SourceID], p)
 		}
 	}
+	notes.flush(ctx)
 	return importModels.FinishChunk(ctx, chunk.Id, len(made.Docs), nil)
 }
 
@@ -201,8 +204,11 @@ func pageComments(ctx context.Context, job *importModels.Job, chunk *importModel
 			continue
 		}
 		if made, err := uuid.Parse(id); err == nil {
-			_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id, importModels.EntityComment, c.SourceID, made, strPtr(p.SourceID),
-				mustMarshal(map[string]any{"page_source_id": p.SourceID, "author": c.AuthorSourceID}), true)
+			if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName, importModels.EntityComment, c.SourceID, made, strPtr(p.SourceID),
+				mustMarshal(map[string]any{"page_source_id": p.SourceID, "author": c.AuthorSourceID}), true); err != nil {
+				importModels.LogImportError(ctx, job.Id, &chunk.Id, importModels.EntityComment, c.SourceID, importModels.SeverityError,
+					"COMMENT_IMPORT_FAILED", err.Error(), nil)
+			}
 		}
 	}
 }

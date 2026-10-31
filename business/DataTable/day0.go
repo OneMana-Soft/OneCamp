@@ -25,7 +25,7 @@ func init() {
 	rowLedger.Rows = ledgerWriter{}
 	rowLedger.Log = ledgerLog{}
 	rowQuery.Rows = keyedRows{}
-	computedStore.Values = readTime{}
+	computedStore.Values = computedValues{}
 	tableAccess.Tables = todaysRule{}
 	accessBusiness.RegisterKind(tableAccess.KindTable, tableKind{})
 }

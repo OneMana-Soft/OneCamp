@@ -34,7 +34,7 @@ func TestASharingChangeToTooManyPagesIsRefusedAsTooMany(t *testing.T) {
 			t.Fatal(err)
 		}
 		if rec.Code != http.StatusUnprocessableEntity || body.Code != "too_many" ||
-			body.Msg != "There are too many pages under this one to do that at once." {
+			body.Msg != "There are too many pages and files under this one to do that at once." {
 			t.Errorf("%s: %d %+v", answer.name, rec.Code, body)
 		}
 	}

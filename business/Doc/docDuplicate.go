@@ -30,6 +30,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	ai "github.com/akashc777/OneCamp/services/AI"
+	"github.com/akashc777/OneCamp/services/collab"
 	"github.com/google/uuid"
 )
 
@@ -46,6 +47,9 @@ type Duplicated struct {
 	UUID   string `json:"doc_uuid"`
 	Count  int    `json:"count"`
 	Copies []Copy `json:"-"`
+	// Files are the copies that are files, whose search entries the caller
+	// writes once they have their sharing (IndexFiles).
+	Files []string `json:"-"`
 }
 
 // Copy is one page made by a duplicate.
@@ -121,22 +125,51 @@ func DuplicateDocs(ctx context.Context, by *dgraphStruct.DgraphUser, sourceUUIDs
 
 	now := time.Now()
 	nodes, copies := planCopies(by, sourceUUIDs, byUUID, editable, under, placed.Key, now)
+	// A file's copy takes its source's newest version as its own first, on
+	// the same stored object, before any copy is made: its node then never
+	// stands without a file. Taken back if the copies aren't made.
+	files := fileCopies(nodes, copies)
+	if len(files) > 0 {
+		if err := copyFileVersions(ctx, files, by.Uuid); err != nil {
+			return nil, err
+		}
+	}
 	renumber := placed.Renumber
 	if _, err := domain.CreateDocNodes(ctx, nodes, renumber, now); err != nil {
+		if len(files) > 0 {
+			if undo := helpers.CompensateOnFailure(ctx, "the versions of a duplicate's files", func(ctx context.Context) error {
+				return dropUnseenFiles(ctx, files)
+			}); undo != nil {
+				helpers.LogErrorWithContext(ctx, "business/DuplicateDocs: %v", undo)
+			}
+		}
 		return nil, err
 	}
 	unlock()
 
+	// The copies exist: their bodies go in to the end on a context of its own,
+	// whether or not the person's request still waits. Under the request, a
+	// duplicate cut part way left the copies past the cut blank.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), duplicateFillDeadline)
+	defer cancel()
 	for i, n := range nodes {
 		// A body is seeded, which indexes the doc with it (UpdateDoc, or the
-		// collaboration service's save); a page with none is indexed here.
-		if body := byUUID[copies[i].SourceUUID].Body; body != "" {
-			if err := seedBody(ctx, n.Doc.Uuid, body, by.Uuid); err != nil {
+		// collaboration service's save); a page with none is indexed here. The
+		// copy keeps whom its body mentions and tells nobody, since they were
+		// told when the page it copies was written: kept before the seed
+		// (KeepCopiedMentions), which is quiet.
+		if body := byUUID[copies[i].SourceUUID].Body; seedsCopy(n.Doc, body) {
+			KeepCopiedMentions(ctx, n.Doc.Uuid, body)
+			if _, err := seedBodyWith(ctx, n.Doc.Uuid, body, collab.Options{By: collab.By{UserUUID: by.Uuid}, Quiet: true}); err != nil {
 				helpers.LogErrorWithContext(ctx, "business/DuplicateDocs: the body of %s: %v", n.Doc.Uuid, err)
 			}
 		} else {
 			syncDocSearch(n.Doc.Uuid, false)
-			ai.EmbedDocContent(n.Doc.Title, "", n.Doc.Uuid, by.Uuid, by.DisplayName(), *n.Doc.IsPrivate, by.Uuid, nil, []string{by.Uuid}, nil)
+			// Only a page is embedded: a folder, a file or a link has no text
+			// (docs F1).
+			if domain.IsPage(n.Doc) {
+				ai.EmbedDocContent(n.Doc.Title, "", n.Doc.Uuid, by.Uuid, by.DisplayName(), *n.Doc.IsPrivate, by.Uuid, nil, []string{by.Uuid}, nil)
+			}
 		}
 		resourceEventBusiness.Bus.Emit(ctx, resourceEventBusiness.Event{
 			Kind: resourceEventBusiness.DocCreated, ResourceKind: "doc", ResourceUUID: n.Doc.Uuid,
@@ -144,7 +177,23 @@ func DuplicateDocs(ctx context.Context, by *dgraphStruct.DgraphUser, sourceUUIDs
 			Data: map[string]string{"duplicate_of": copies[i].SourceUUID},
 		})
 	}
-	return &Duplicated{UUID: copies[0].UUID, Count: len(copies), Copies: copies}, nil
+	out := &Duplicated{UUID: copies[0].UUID, Count: len(copies), Copies: copies}
+	for _, f := range files {
+		out.Files = append(out.Files, f.To.String())
+	}
+	return out, nil
+}
+
+// duplicateFillDeadline bounds filling a duplicate's copies, up to
+// DuplicateCap of them, each a seed through the collaboration service.
+const duplicateFillDeadline = 5 * time.Minute
+
+// seedsCopy is whether a copy has its source's body seeded into it: a page's
+// copy with a body. A folder, a file or a link holds none (docs F1); the
+// collaboration service opens pages only, and a seed it can't take falls back
+// to writing the body into the node itself (seedBodyWith, which refuses it too).
+func seedsCopy(doc *dgraphStruct.DgraphDoc, body string) bool {
+	return body != "" && IsPage(doc)
 }
 
 // planCopies is the pages a duplicate makes, the page's copy first: sources
@@ -209,8 +258,12 @@ func planCopies(by *dgraphStruct.DgraphUser, order []string, sources map[string]
 				private = parent.IsPrivate != nil && *parent.IsPrivate
 			}
 		}
+		// A copy keeps what its source is: a folder, a file or a link, in its
+		// colour (docs F1); a file's newest version is copied apart
+		// (fileCopies).
 		doc := &dgraphStruct.DgraphDoc{
 			DType: []string{"Doc"}, Uuid: uuid.NewString(), Title: title, Position: pos,
+			NodeKind: s.NodeKind, Color: s.Color, LinkURL: s.LinkURL,
 			Icon: s.Icon, CoverKey: s.CoverKey, CoverOffset: s.CoverOffset, FullWidth: s.FullWidth, Font: s.Font, SmallText: s.SmallText,
 			IsPrivate: &private, PublicComment: &no, SpaceKind: spaceKind, SpaceUUID: spaceUUID,
 			CreatedBy: &dgraphStruct.DgraphUser{Uid: by.Uid}, Owner: &dgraphStruct.DgraphUser{Uid: by.Uid}, UpdatedBy: &dgraphStruct.DgraphUser{Uid: by.Uid},

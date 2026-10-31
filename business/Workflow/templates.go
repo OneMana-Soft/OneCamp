@@ -11,12 +11,14 @@ type RuleTemplate struct {
 	Key         string           `json:"key"`
 	Name        string           `json:"name"`
 	Description string           `json:"description"`
-	Hue         string           `json:"hue"` // Projects' camp hue: colour names an area (design v3.1)
+	Hue         string           `json:"hue"` // Projects' camp hue: colour names an area (design v3.1); "agent" for AI
 	TriggerType string           `json:"trigger_type"`
 	Trigger     map[string]any   `json:"trigger_config,omitempty"`
 	Conditions  Conditions       `json:"conditions"`
 	Actions     []WorkflowAction `json:"actions"`
 	ElseActions []WorkflowAction `json:"else_actions,omitempty"`
+	// NeedsAI is a rule only the AI edition offers ("ask an agent").
+	NeedsAI bool `json:"needs_ai,omitempty"`
 }
 
 func days(n int) *int { return &n }
@@ -68,7 +70,7 @@ var RuleTemplates = []RuleTemplate{
 	},
 	{
 		Key: "bug-checklist", Name: "A checklist on every bug", Hue: "moss",
-		Description: "A new task tagged bug gets three sub-tasks to finish it properly.",
+		Description: "A new task tagged bug gets three subtasks to finish it properly.",
 		TriggerType: workflowModel.TriggerTaskCreated,
 		Conditions:  Conditions{Items: []Condition{{Field: "tags", Op: "has", Value: "bug"}}},
 		Actions: []WorkflowAction{
@@ -106,4 +108,59 @@ var RuleTemplates = []RuleTemplate{
 		},
 		ElseActions: []WorkflowAction{{Type: ActionNotify, Notify: NotifyCreator, Text: "{task} is done"}},
 	},
+	// On time (R3).
+	{
+		Key: "monday-review", Name: "A review task every Monday", Hue: "moss",
+		Description: "Every Monday morning, a task to review the week, due on Friday.",
+		TriggerType: workflowModel.TriggerSchedule, Trigger: map[string]any{"repeat": "FREQ=WEEKLY;BYDAY=MO", "at": "09:00"},
+		Actions: []WorkflowAction{
+			{Type: ActionCreateTask, TaskName: "Review the week", Priority: "medium"},
+			{Type: ActionSetDue, DueInDays: days(4)},
+		},
+	},
+	{
+		Key: "friday-overdue", Name: "Friday: chase what's overdue", Hue: "moss",
+		Description: "Every Friday afternoon, whoever has an overdue task hears about it.",
+		TriggerType: workflowModel.TriggerSchedule, Trigger: map[string]any{"repeat": "FREQ=WEEKLY;BYDAY=FR", "at": "16:00", "each_task": true},
+		Conditions: Conditions{Items: []Condition{{Field: "due", Op: "overdue"}, {Field: "assignee", Op: "is_set"}}},
+		Actions:    []WorkflowAction{{Type: ActionNotify, Notify: NotifyAssignee, Text: "{task} is overdue"}},
+	},
+	{
+		Key: "due-tomorrow", Name: "Nudge the day before it's due", Hue: "moss",
+		Description: "The morning before a task is due, whoever has it hears.",
+		TriggerType: workflowModel.TriggerTaskDueSoon, Trigger: map[string]any{"days": 1, "at": "09:00"},
+		Conditions: Conditions{Items: []Condition{{Field: "assignee", Op: "is_set"}}},
+		Actions:    []WorkflowAction{{Type: ActionNotify, Notify: NotifyAssignee, Text: "{task} is due tomorrow"}},
+	},
+	{
+		Key: "overdue-raises", Name: "Overdue work goes to the top", Hue: "moss",
+		Description: "The morning after a task's due date passes, it becomes high priority.",
+		TriggerType: workflowModel.TriggerTaskOverdue, Trigger: map[string]any{"at": "09:00"},
+		Actions: []WorkflowAction{
+			{Type: ActionSetPriority, Priority: "high"},
+			{Type: ActionNotify, Notify: NotifyAssignee, Text: "{task} is overdue, so it's now high priority"},
+		},
+	},
+	{
+		Key: "agent-triages-bugs", Name: "An agent reads every new bug", Hue: "agent", NeedsAI: true,
+		Description: "A new task tagged bug gets an AI teammate's first read: how bad, and what's missing.",
+		TriggerType: workflowModel.TriggerTaskCreated,
+		Conditions:  Conditions{Items: []Condition{{Field: "tags", Op: "has", Value: "bug"}}},
+		Actions: []WorkflowAction{{Type: ActionAskAgent,
+			Text: "Read this bug report. Say how severe it looks, what is missing to reproduce it, and what to check first."}},
+	},
+}
+
+// Templates is the catalogue this build offers: without AI, none that asks
+// an agent.
+func Templates() []RuleTemplate {
+	out := make([]RuleTemplate, 0, len(RuleTemplates))
+	ai := asker() != nil
+	for _, t := range RuleTemplates {
+		if t.NeedsAI && !ai {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }

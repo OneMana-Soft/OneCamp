@@ -4,6 +4,7 @@ import * as Y from 'yjs'
 import { TiptapTransformer } from '@hocuspocus/transformer'
 import { COLLAB_EXTENSIONS } from './extensions.js'
 import { EVERY_BLOCK } from './everyBlock.fixture.js'
+import { contributorMember, splitContributors } from './contributors.js'
 import { emptiedByEdit, persistDoc } from './storeDoc.js'
 
 // The save path: a failure never replaces good content.
@@ -163,4 +164,26 @@ test('who edited is cleared only once the API has the save', async () => {
     assert.deepEqual(posts[0].contributors, ['u-1'])
     assert.deepEqual(posts[0].agents, [{ agent_uuid: 'a-1', asker_uuid: 'u-2' }])
     assert.equal(acked.length, 2)
+})
+
+// A quiet write's contributor (a copy's body, an import's) is kept saying so,
+// and a save holding one is quiet: the API keeps whom the body mentions and
+// tells nobody. Whoever wrote it still counts among who edited.
+test('a save holding a quiet write says so, and still names who wrote it', async () => {
+    const quietPerson = contributorMember({ user: 'u-1', quiet: true })
+    const quietAgent = contributorMember({ user: 'u-2', agent: 'a-1', quiet: true })
+    assert.deepEqual(JSON.parse(quietPerson), { user: 'u-1', quiet: true })
+    assert.deepEqual(JSON.parse(quietAgent), { agent: 'a-1', asker: 'u-2', quiet: true })
+    assert.equal(contributorMember({ user: 'u-3' }), 'u-3', 'someone typing is kept by their id, as before')
+    assert.equal(contributorMember({ quiet: true }), '', 'nobody is nobody, quiet or not')
+
+    const posts = []
+    await persistDoc({ id: ID, document: docOf(EVERY_BLOCK), extensions: COLLAB_EXTENSIONS, contributors: members([quietPerson, quietAgent, 'u-1', 'u-3']), post: async (p) => posts.push(p), log: quiet() })
+    assert.equal(posts[0].quiet, true)
+    assert.deepEqual(posts[0].contributors, ['u-1', 'u-3'], 'a quiet person counts among who edited, once')
+    assert.deepEqual(posts[0].agents, [{ agent_uuid: 'a-1', asker_uuid: 'u-2' }])
+
+    // No quiet member, no quiet save: such a save sends no quiet at all (the
+    // first test's keys).
+    assert.equal(splitContributors(['u-1', JSON.stringify({ agent: 'a-1', asker: 'u-2' })]).quiet, false)
 })

@@ -207,3 +207,27 @@ func TestReadTableSaysTheTablesRowCount(t *testing.T) {
 		t.Errorf("a small table's rows:\n%s", out)
 	}
 }
+
+// read_table tells the model an id's prefix, so "DEAL-12" means the row
+// numbered 12, and that what a row says of itself (its id, when it was made
+// or changed, and by whom) can't be written.
+func TestReadTableSaysWhatAColumnsKindAdds(t *testing.T) {
+	field := func(kind, cfg string) *tableModel.Field {
+		return &tableModel.Field{Id: uuid.New(), Name: "F", Type: kind, Config: cfg}
+	}
+	for _, c := range []struct {
+		f    *tableModel.Field
+		want string
+	}{
+		{field(tableModel.FieldAutonumber, `{"prefix":"DEAL"}`), ", shown as DEAL-<number>, read-only"},
+		{field(tableModel.FieldAutonumber, `{}`), ", read-only"},
+		{field(tableModel.FieldCreatedBy, `{}`), ", read-only"},
+		{field(tableModel.FieldModifiedTime, `{}`), ", read-only"},
+		{field(tableModel.FieldPeople, `{}`), ""},
+		{field(tableModel.FieldText, `{}`), ""},
+	} {
+		if got := columnNote(c.f); got != c.want {
+			t.Errorf("%s %s: %q, want %q", c.f.Type, c.f.Config, got, c.want)
+		}
+	}
+}

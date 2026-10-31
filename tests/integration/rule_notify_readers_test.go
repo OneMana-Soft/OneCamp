@@ -55,11 +55,10 @@ func TestARulesNoticeReachesNoCreatorWhoLeftTheProject(t *testing.T) {
 	benToldNothingOf(t, w, w.assigned)
 }
 
-// A task kept to some people after its event set the rule going. A batch's
-// new tasks are marked open, so their events reach rules without a read of
-// their restriction (business/Task CreateTasks), and a restriction can land
-// before the run. On this line a rule's run reads its task with no reader,
-// who sees no restricted task: it skips before any step, and no one is told.
+// A task kept to some people after its event set the rule going: the run
+// tells only those it still lets in. A batch's new tasks are marked open, so
+// their events reach rules without a read of their restriction (business/Task
+// CreateTasks), and a restriction can land before the notify step runs.
 func TestARulesNoticeReachesNoOneTheTaskKeepsOutWhenItRuns(t *testing.T) {
 	w := seedWorkWorld(t)
 	ctx := context.Background()
@@ -76,12 +75,10 @@ func TestARulesNoticeReachesNoOneTheTaskKeepsOutWhenItRuns(t *testing.T) {
 	}
 
 	webhookBusiness.DispatchEvent(helpers.WithOpenTasks(ctx, uuid.MustParse(w.task)), "task.created", taskCreatedEvent(w))
-	if run := runsOf(t, uuid.MustParse(w.project), rule, 1)[0]; run.Status != workflowModel.RunSkipped || len(run.Steps) != 0 {
-		t.Fatalf("the run: %+v, want it skipped before any step", run)
-	}
+	ruleRanOnce(t, w, rule)
 	benToldNothingOf(t, w, w.task)
-	if n := noticesTo(t, w, "ana", w.task); n != 0 {
-		t.Errorf("ana was told %d times of a task the run skipped", n)
+	if n := noticesTo(t, w, "ana", w.task); n != 1 {
+		t.Errorf("ana, whose task it is, was told %d times, want once", n)
 	}
 }
 

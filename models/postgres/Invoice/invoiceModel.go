@@ -12,6 +12,8 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 )
 
@@ -121,7 +123,7 @@ func scan(row interface{ Scan(...any) error }) (*Invoice, error) {
 func List(ctx context.Context, projectID uuid.UUID) ([]*Invoice, error) {
 	c, cancel := withTimeout(ctx)
 	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `SELECT `+columns+` FROM invoices WHERE project_id = $1 ORDER BY issued_on DESC, created_at DESC`, projectID)
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `SELECT `+columns+` FROM invoices WHERE project_id = $1 AND `+softDelete.Live("")+` ORDER BY issued_on DESC, created_at DESC`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -141,14 +143,15 @@ func List(ctx context.Context, projectID uuid.UUID) ([]*Invoice, error) {
 func Get(ctx context.Context, projectID, id uuid.UUID) (*Invoice, error) {
 	c, cancel := withTimeout(ctx)
 	defer cancel()
-	return scan(postgresInit.DBConn.SqlDB.QueryRowContext(c, `SELECT `+columns+` FROM invoices WHERE id = $1 AND project_id = $2`, id, projectID))
+	return scan(postgresInit.DBConn.SqlDB.QueryRowContext(c, `SELECT `+columns+` FROM invoices WHERE id = $1 AND project_id = $2 AND `+softDelete.Live(""), id, projectID))
 }
 
-// Numbers is every invoice number that starts with prefix, whatever its case.
+// Numbers is every live invoice number that starts with prefix, whatever its
+// case: a deleted draft's number is the next again.
 func Numbers(ctx context.Context, prefix string) ([]string, error) {
 	c, cancel := withTimeout(ctx)
 	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `SELECT number FROM invoices WHERE lower(number) LIKE lower($1) || '%'`, prefix)
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `SELECT number FROM invoices WHERE lower(number) LIKE lower($1) || '%' AND `+softDelete.Live(""), prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +221,7 @@ func Update(ctx context.Context, inv *Invoice) (*Invoice, error) {
 		UPDATE invoices SET number = $3, issued_on = $4, due_on = $5, period_from = $6, period_to = $7, currency = $8,
 			seller = $9, client = $10, lines = $11, subtotal_cents = $12, tax_percent = $13, tax_cents = $14,
 			total_cents = $15, notes = $16, updated_at = NOW()
-		WHERE id = $1 AND project_id = $2 AND status = 'draft' AND (first_sent_at IS NULL OR number = $3)
+		WHERE id = $1 AND project_id = $2 AND status = 'draft' AND (first_sent_at IS NULL OR number = $3) AND `+softDelete.Live("")+`
 		RETURNING `+columns,
 		inv.ID, inv.ProjectID, inv.Number, inv.IssuedOn, inv.DueOn, inv.PeriodFrom, inv.PeriodTo, inv.Currency,
 		seller, client, lines, inv.SubtotalCents, inv.TaxPercent, inv.TaxCents, inv.TotalCents, inv.Notes))
@@ -240,22 +243,29 @@ func SetStatus(ctx context.Context, projectID, id uuid.UUID, status string) (*In
 			paid_at = CASE WHEN $3::text = 'paid' THEN COALESCE(paid_at, NOW()) WHEN $3::text = 'void' THEN paid_at ELSE NULL END,
 			first_sent_at = CASE WHEN $3::text IN ('sent', 'paid') THEN COALESCE(first_sent_at, NOW()) ELSE first_sent_at END,
 			updated_at = NOW()
-		WHERE id = $1 AND project_id = $2 AND status <> 'void'
+		WHERE id = $1 AND project_id = $2 AND status <> 'void' AND `+softDelete.Live("")+`
 		RETURNING `+columns, id, projectID, status))
 }
 
 // Delete removes a draft never sent. A sent invoice is voided, not deleted,
 // so its number is never given to another; that holds after it goes back to
 // draft too.
-func Delete(ctx context.Context, projectID, id uuid.UUID) error {
-	c, cancel := withTimeout(ctx)
-	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(c, `DELETE FROM invoices WHERE id = $1 AND project_id = $2 AND status = 'draft' AND first_sent_at IS NULL`, id, projectID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
+// DeletedNumber is a deleted draft's number, for its restore.
+func DeletedNumber(ctx context.Context, id uuid.UUID) (string, error) {
+	return pgexec.Scalar[string](ctx, `SELECT number FROM invoices WHERE id = $1 AND deleted_at IS NOT NULL`, id)
+}
+
+// Renumber gives a deleted draft the number its restore brings it back as:
+// another invoice has taken its own since.
+func Renumber(ctx context.Context, id uuid.UUID, number string) error {
+	_, err := pgexec.Exec(ctx, `UPDATE invoices SET number = $2, updated_at = NOW() WHERE id = $1 AND deleted_at IS NOT NULL`, id, number)
+	return err
+}
+
+func Delete(ctx context.Context, projectID, id, by uuid.UUID) error {
+	deleted, err := softDelete.Delete(ctx, softDelete.Invoice, id, by, "project_id = $3 AND status = 'draft' AND first_sent_at IS NULL", projectID)
+	if err == nil && !deleted {
 		return ErrNotFound
 	}
-	return nil
+	return err
 }

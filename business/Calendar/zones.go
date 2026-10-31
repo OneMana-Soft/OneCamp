@@ -1,11 +1,11 @@
 package Calendar
 
 // A person's zone, for an event they make without naming one (CAL3). The app
-// has never sent its zone with an event, and OneCamp keeps no zone of its own
-// for a person yet (Person Preferences come with A3), so it is the first one
-// they have given OneCamp that this server's clock can read: their quiet
-// hours', their newest booking page's, their newest task repeat's. Otherwise
-// UTC, which leaves an event exactly as it was before the store: instants.
+// has never sent its zone with an event, so it is the zone the person keeps
+// (Person Preferences' `zone`, calendar A3), else the first one they have
+// given OneCamp that this server's clock can read: their quiet hours', their
+// newest booking page's, their newest task repeat's. Otherwise UTC, which
+// leaves an event exactly as it was before the store: instants.
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 
 // zoneFrom is the zone the hints give, or UTC. Pure.
 func zoneFrom(h models.ZoneHints) string {
-	loc, ok := helpers.FirstLocation(h.QuietHours, h.BookingPage, h.TaskRepeat)
+	loc, ok := helpers.FirstLocation(h.Stored, h.QuietHours, h.BookingPage, h.TaskRepeat)
 	if !ok {
 		return "UTC"
 	}

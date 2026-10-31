@@ -37,6 +37,7 @@ func BulkAddChatAndPostToDgraph(ctx context.Context, query string, dgraphPosts [
 		Mutations: []*api.Mutation{mu},
 		Query:     query,
 	}
+	dgraphStruct.StampLastChats(req, dgraphDMs...)
 
 	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {

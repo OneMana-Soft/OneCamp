@@ -70,6 +70,32 @@ func List[T any](ctx context.Context, q string, vars map[string]string, block st
 	return out, nil
 }
 
+// UUIDPage reads one page of the values of pred, the uuid every node of a
+// kind holds (doc_uuid, board_uuid), over every node that has it, in the
+// graph's order: first of them after offset, of those filter keeps (a
+// @filter's inside; "" keeps every one). For a reader that walks every node
+// of a kind a page at a time, as the workspace export and the docs' search
+// repair do.
+func UUIDPage(ctx context.Context, pred, filter string, offset, first int) ([]string, error) {
+	at := ""
+	if filter != "" {
+		at = " @filter(" + filter + ")"
+	}
+	rows, err := List[map[string]string](ctx, fmt.Sprintf(`{
+		page(func: has(%s), first: %d, offset: %d)%s {
+			%s
+		}
+	}`, pred, first, offset, at, pred), map[string]string{}, "page")
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(rows))
+	for i, r := range rows {
+		ids[i] = r[pred]
+	}
+	return ids, nil
+}
+
 // First reads the first node of one block of a read-only query: ErrNotFound
 // when the block is empty.
 func First[T any](ctx context.Context, q string, vars map[string]string, block string) (*T, error) {

@@ -94,6 +94,15 @@ func handleTaskAssignedForAgent(ctx context.Context, eventType string, data map[
 	if eventType != "task.assigned" {
 		return
 	}
+	HandOffAssignment(ctx, data)
+}
+
+// HandOffAssignment starts an AI teammate on a task given to its principal:
+// the one hand-off, from the task.assigned event (a person assigning it) and
+// from a rule's assign step, whose writes the event bus keeps from every
+// listener (business/Workflow agent.go). data is the event's payload
+// (business/Task AssignedEventData). Assigned to a person, it does nothing.
+func HandOffAssignment(ctx context.Context, data map[string]interface{}) {
 	if svc := ai.GetService(); svc == nil || !svc.IsEnabled() {
 		return
 	}
@@ -110,28 +119,41 @@ func handleTaskAssignedForAgent(ctx context.Context, eventType string, data map[
 	if agent == nil {
 		return // assigned to a human; nothing to do
 	}
-	prompt := synthAssignmentPrompt(data)
-	owner := agent.CreatedBy
-	t := &model.AgentTask{
-		AgentId:    agent.Id,
-		SourceType: model.TaskSourceAssignment,
-		SourceId:   strings.TrimSpace(taskID),
-		// Nobody's words to keep (assigning a task asks for the task), and the
-		// trailer that says so, which the worker takes off (agentAskerWords.go).
-		Prompt:      withAskerWordsTrailer(prompt, nil),
-		RunAsUserId: &owner,
-	}
 	// The person who assigned it is who started it: the audit says so, it is
 	// who hears when the agent needs a decision or has finished, and it is who
-	// the work is for. The agent's tools execute as its sponsor (RunAsUserId),
-	// and reach only what the assigner can reach as well.
+	// the work is for.
 	//
 	// Not a task filed from outside (writtenOutside): a public form files a
 	// visitor's words as the form's owner, who asked for none of it. That job
 	// records no asker, so it can still answer on the task, and every tool that
 	// needs someone's reach refuses (jobRequester).
+	var startedBy *uuid.UUID
 	if by, perr := uuid.Parse(strings.TrimSpace(fmt.Sprint(data["assigned_by"]))); perr == nil && by != uuid.Nil && !writtenOutside(ctx) {
-		t.TriggeredBy = &by
+		startedBy = &by
+	}
+	if _, _, err := queueTaskWork(ctx, agent, taskID, synthAssignmentPrompt(data), startedBy); err != nil {
+		helpers.LogErrorWithContext(ctx, "agentAssignment: enqueue failed (agent=%s task=%s): %v", agent.Id, taskID, err)
+	}
+}
+
+// queueTaskWork queues work on a task for an AI teammate: what assigning it
+// the task does, and what a rule asking it about the task does. The agent's
+// tools execute as its sponsor (RunAsUserId) and reach only what startedBy
+// can reach as well; startedBy is who hears when it needs a decision or has
+// finished. An agent keeps one open job a task: with one open already, it
+// returns that job, not created.
+func queueTaskWork(ctx context.Context, agent *model.AiAgent, taskID, prompt string, startedBy *uuid.UUID) (uuid.UUID, bool, error) {
+	owner := agent.CreatedBy
+	t := &model.AgentTask{
+		AgentId:    agent.Id,
+		SourceType: model.TaskSourceAssignment,
+		SourceId:   strings.TrimSpace(taskID),
+		// Nobody's words to keep (the task, or the rule's question, is the
+		// ask), and the trailer that says so, which the worker takes off
+		// (agentAskerWords.go).
+		Prompt:      withAskerWordsTrailer(prompt, nil),
+		RunAsUserId: &owner,
+		TriggeredBy: startedBy,
 	}
 	// Handed over through an API token: the job keeps that, so the work is held
 	// to a member's powers when a worker runs it (askedForJob). The surface is the
@@ -139,19 +161,19 @@ func handleTaskAssignedForAgent(ctx context.Context, eventType string, data map[
 	if helpers.ActsThroughToken(ctx) {
 		t.Surface, _ = EncodeSurface(askedThrough(ctx, Surface{Kind: SurfaceTask}))
 	}
-	id, created, eerr := model.EnqueueAgentTask(ctx, t)
-	if eerr != nil {
-		helpers.LogErrorWithContext(ctx, "agentAssignment: enqueue failed (agent=%s task=%s): %v", agent.Id, taskID, eerr)
-		return
+	id, created, err := model.EnqueueAgentTask(ctx, t)
+	if err != nil {
+		return uuid.Nil, false, err
 	}
 	if created {
 		helpers.LogInfoWithContext(ctx, "agentAssignment: queued agent task %s (agent=%s task=%s)", id, agent.Id, taskID)
 	}
-	// Assigning work to a teammate should look immediate: claim it now rather
+	// Work given to a teammate should look immediate: claim it now rather
 	// than waiting out the worker's fallback tick, and announce it so the task
 	// shows its AI teammate at work straight away.
 	WakeAgentTaskWorker()
 	publishAgentWorkChanged(ctx, id)
+	return id, created, nil
 }
 
 // handleTaskCommentForAgent resumes/continues an AI teammate's work on a task
@@ -210,18 +232,44 @@ func synthFollowupPrompt(body string) string {
 // tools, and an instruction to do the work and summarize. The summary becomes
 // the status comment posted back to the task.
 func synthAssignmentPrompt(data map[string]interface{}) string {
-	name, _ := data["name"].(string)
-	desc, _ := data["description"].(string)
-	taskID, _ := data["task_id"].(string)
-	projectID, _ := data["project_id"].(string)
 	assignedBy, _ := data["assigned_by_name"].(string)
-
 	var b strings.Builder
 	b.WriteString("You have been assigned a task to work on")
 	if strings.TrimSpace(assignedBy) != "" {
 		b.WriteString(" by " + strings.TrimSpace(assignedBy))
 	}
 	b.WriteString(".\n\n")
+	b.WriteString(taskBrief(data))
+	// "Check the thing itself" is from the demo: a teammate wrote "added them
+	// under Decisions", the doc had no such steps, and the agent took the
+	// message's word, answering "No new action is required" without opening
+	// the doc or saying why.
+	b.WriteString("\nUse your tools as needed to actually do the work this task asks for. " +
+		"Before deciding something is already done, check the thing itself (read the doc, list the task), not only what someone said about it. " +
+		"When you are done, write a concise summary of what you did, or what you found and where if nothing needed doing, and anything you could not complete or that needs a human. " +
+		"Your summary will be posted as a comment on the task so the team can see your progress.")
+	return b.String()
+}
+
+// synthRuleQuestionPrompt is the run input for a project rule's question about
+// a task: the question, the task's brief, and an ask to answer it on the task.
+func synthRuleQuestionPrompt(question string, data map[string]interface{}) string {
+	var b strings.Builder
+	b.WriteString("A rule in this task's project asks you about the task:\n\"\"\"\n" + promptText(question) + "\n\"\"\"\n\n")
+	b.WriteString(taskBrief(data))
+	b.WriteString("\nRead what you need with your tools, then answer the question in a few short lines. " +
+		"Don't change the task unless the question asks you to. Your answer will be posted as a comment on the task.")
+	return b.String()
+}
+
+// taskBrief is a task as an AI teammate's run input names it: its name, its
+// description and what that links to, and its ids.
+func taskBrief(data map[string]interface{}) string {
+	name, _ := data["name"].(string)
+	desc, _ := data["description"].(string)
+	taskID, _ := data["task_id"].(string)
+	projectID, _ := data["project_id"].(string)
+	var b strings.Builder
 	if strings.TrimSpace(name) != "" {
 		b.WriteString("Task: " + strings.TrimSpace(name) + "\n")
 	}
@@ -240,14 +288,6 @@ func synthAssignmentPrompt(data map[string]interface{}) string {
 	if strings.TrimSpace(projectID) != "" {
 		b.WriteString(fmt.Sprintf("project_uuid: %s\n", strings.TrimSpace(projectID)))
 	}
-	// "Check the thing itself" is from the demo: a teammate wrote "added them
-	// under Decisions", the doc had no such steps, and the agent took the
-	// message's word, answering "No new action is required" without opening
-	// the doc or saying why.
-	b.WriteString("\nUse your tools as needed to actually do the work this task asks for. " +
-		"Before deciding something is already done, check the thing itself (read the doc, list the task), not only what someone said about it. " +
-		"When you are done, write a concise summary of what you did, or what you found and where if nothing needed doing, and anything you could not complete or that needs a human. " +
-		"Your summary will be posted as a comment on the task so the team can see your progress.")
 	return b.String()
 }
 

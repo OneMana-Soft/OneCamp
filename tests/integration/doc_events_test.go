@@ -71,17 +71,7 @@ func TestResourceFollowsMigrationUpDownUp(t *testing.T) {
 	env := integration.SetupEnv(t)
 	upName, up := followsMigration(t, "up")
 	_, down := followsMigration(t, "down")
-	var sqlOnly []string
-	for _, line := range strings.Split(up, "\n") {
-		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
-			sqlOnly = append(sqlOnly, line)
-		}
-	}
-	for _, banned := range []string{"gen_random_uuid", "uuid_generate"} {
-		if strings.Contains(strings.Join(sqlOnly, "\n"), banned) {
-			t.Fatalf("%s uses %s; Postgres 12 has neither by default, make ids in Go", upName, banned)
-		}
-	}
+	makesNoIDs(t, upName, up)
 	tables := func() int {
 		var n int
 		if err := env.PG.QueryRow(`SELECT COUNT(*) FROM information_schema.tables

@@ -37,9 +37,11 @@ func boardCommentUUID(boardUUID, commentID string) uuid.UUID {
 }
 
 // CreateBoard creates a board owned by createdByUser, who is also added as an
-// editor (so the creator has edit access). Mirrors business/Doc.CreateDoc but
-// without OpenSearch/AI-embed (boards are not text-indexed in v1).
-func CreateBoard(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, input *adapter.InputCreateBoard) (dgraphBoard *dgraphStruct.DgraphBoard, err error) {
+// editor (so the creator has edit access), and shared to edit with editors:
+// people the caller read on the server (a call's conversation), never a list
+// a client sent. Mirrors business/Doc.CreateDoc but without OpenSearch/AI-embed
+// (boards are not text-indexed in v1).
+func CreateBoard(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, input *adapter.InputCreateBoard, editors ...*dgraphStruct.DgraphUser) (dgraphBoard *dgraphStruct.DgraphBoard, err error) {
 	newBoardUUID := uuid.New()
 	currentTime := time.Now()
 	zeroUnixTime := time.Time{}
@@ -55,6 +57,13 @@ func CreateBoard(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, in
 		title = "Untitled board"
 	}
 
+	editing := []*dgraphStruct.DgraphUser{{Uid: createdByUser.Uid}}
+	editingUUIDs := []string{createdByUser.Uuid}
+	for _, e := range editors {
+		editing = append(editing, &dgraphStruct.DgraphUser{Uid: e.Uid})
+		editingUUIDs = append(editingUUIDs, e.Uuid)
+	}
+
 	dgraphBoard = &dgraphStruct.DgraphBoard{
 		DType: []string{"Board"},
 		Uuid:  newBoardUUID.String(),
@@ -62,13 +71,11 @@ func CreateBoard(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, in
 		CreatedBy: &dgraphStruct.DgraphUser{
 			Uid: createdByUser.Uid,
 		},
-		IsPrivate: &isPrivate,
-		EditingUser: []*dgraphStruct.DgraphUser{{
-			Uid: createdByUser.Uid,
-		}},
-		CreatedAt: &currentTime,
-		UpdatedAt: &currentTime,
-		DeletedAt: &zeroUnixTime,
+		IsPrivate:   &isPrivate,
+		EditingUser: editing,
+		CreatedAt:   &currentTime,
+		UpdatedAt:   &currentTime,
+		DeletedAt:   &zeroUnixTime,
 	}
 
 	_, err = domain.CreateOrUpdateDgraphBoard(ctx, dgraphBoard)
@@ -77,8 +84,8 @@ func CreateBoard(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, in
 		return
 	}
 
-	// Index in OpenSearch for global search (async, best-effort). The creator
-	// is also the sole editor at creation time.
+	// Index in OpenSearch for global search (async, best-effort), with the
+	// same editors.
 	helpers.GoSafeNamed("openSearchBoardModels.CreateBoardInOpenSearch", func() {
 		openSearchBoardModels.CreateBoardInOpenSearch(context.Background(), &openSearchStruct.OpenSearchBoard{
 			Uuid:                   newBoardUUID.String(),
@@ -87,7 +94,7 @@ func CreateBoard(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, in
 			BoardCreatedByFullName: createdByUser.DisplayName(),
 			BoardCreatedByProfile:  createdByUser.ProfileKey,
 			BoardPrivate:           isPrivate,
-			BoardEditingUsers:      []string{createdByUser.Uuid},
+			BoardEditingUsers:      editingUUIDs,
 			BoardCreatedAt:         currentTime.Unix(),
 			BoardUpdatedAt:         currentTime.Unix(),
 		})
@@ -168,8 +175,12 @@ func UpdateBoard(ctx context.Context, input *adapter.InputUpdateBoard) (err erro
 		}
 		go openSearchBoardModels.UpdateBoardFieldsInOpenSearch(context.Background(), input.BoardId, fields)
 	}
-	// And its comments' entries, which carry a copy of its privacy.
-	if input.IsPrivate != nil {
+	// Its comments' entries carry a copy of its privacy. Made private, search
+	// stops granting it before this returns.
+	switch {
+	case input.IsPrivate != nil && *input.IsPrivate:
+		SettleBoardSearch(ctx, input.BoardId)
+	case input.IsPrivate != nil:
 		go syncBoardCommentSearch(context.Background(), input.BoardId, nil)
 	}
 	return
@@ -260,18 +271,10 @@ func DeleteBoard(ctx context.Context, boardUUID string) (err error) {
 	// Deleted, it opens to nobody: every live socket on it is closed, and the
 	// reconnect is refused (CanRead reads the deletion).
 	collab.ReauthBoardLater(boardUUID, nil)
-	go openSearchBoardModels.DeleteBoardInOpenSearch(context.Background(), boardUUID, currentTime.Unix())
-
-	// Cascade the delete to board comments mirrored for search + AI so they stop
-	// surfacing once the board is gone. The Dgraph comments drop from activity
-	// automatically via the board_deleted_at filter on the comment_board edge.
-	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
-		[]string{"comment_board_id"},
-		boardUUID,
-		currentTime.Unix(),
-		[]string{"comments"},
-		"cascade",
-	)
+	// The board's entry and its comments' are marked deleted, and search sees
+	// it, before the delete answers (docs C2-1); the Dgraph comments drop from
+	// activity via the board_deleted_at filter on the comment_board edge.
+	settleBoardDelete(ctx, boardUUID, currentTime.Unix())
 	helpers.GoSafeNamed("globalSearchDomain.SyncCascadingDeletionInOpenSearch", func() {
 		globalSearchDomain.SyncCascadingDeletionInOpenSearch(
 			[]string{"board_uuid"},
@@ -344,31 +347,8 @@ func UpdateBoardPermissions(ctx context.Context, input adapter.InputUpdateBoardP
 
 	// Sync the search index's access lists so shared boards are findable by the
 	// right people (and removed users stop seeing them in search).
-	helpers.GoSafeNamed("business/Board/boardBusiness:UpdateBoardPermissions", func() {
-		perms, perr := domain.GetBoardPermissions(context.Background(), input.BoardId)
-		if perr != nil || perms == nil {
-			return
-		}
-		readers := make([]string, 0, len(perms.ReadingUser))
-		for _, u := range perms.ReadingUser {
-			readers = append(readers, u.Uuid)
-		}
-		editors := make([]string, 0, len(perms.EditingUser))
-		for _, u := range perms.EditingUser {
-			editors = append(editors, u.Uuid)
-		}
-		commenters := make([]string, 0, len(perms.CommentingUser))
-		for _, u := range perms.CommentingUser {
-			commenters = append(commenters, u.Uuid)
-		}
-		openSearchBoardModels.UpdateBoardFieldsInOpenSearch(context.Background(), input.BoardId, map[string]interface{}{
-			"board_reading_users":    readers,
-			"board_editing_users":    editors,
-			"board_commenting_users": commenters,
-		})
-		// And its comments' entries, which carry a copy of its sharing.
-		syncBoardCommentSearch(context.Background(), input.BoardId, perms)
-	})
+	// Search stops granting the board to whoever lost it before this returns.
+	SettleBoardSearch(ctx, input.BoardId)
 	return nil
 }
 
@@ -402,15 +382,16 @@ func SearchUsersForBoard(ctx context.Context, userDgraphUUID string, viewerEmail
 }
 
 // GetBoardList returns the boards the user can access (owned or shared), with
-// optional title search and pagination.
-func GetBoardList(ctx context.Context, userUID string, search string, first int, offset int) (list *dgraphStruct.DgraphBoardList, err error) {
+// optional title search and pagination; with editable, only the boards they
+// may edit (CanEdit).
+func GetBoardList(ctx context.Context, userUID string, search string, first int, offset int, editable bool) (list *dgraphStruct.DgraphBoardList, err error) {
 	if first <= 0 {
 		first = 30
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	list, err = domain.GetDgraphBoardList(ctx, userUID, search, first, offset)
+	list, err = domain.GetDgraphBoardList(ctx, userUID, search, first, offset, editable)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetBoardList Failed to get board list err: %+v", err)
 		return

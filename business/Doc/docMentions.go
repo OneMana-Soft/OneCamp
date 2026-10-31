@@ -4,9 +4,10 @@ package businness
 // mentions.
 //
 // PEOPLE. An @mention in the body (<span data-type="mention"
-// data-id="<user uuid>@<graph uid>">) tells that person once: the doc keeps who
-// its body mentions (resource_mentions), and a save emits doc.mentioned only
-// for the people it newly mentions. A repeated save, or a mention moved around,
+// data-id="<user uuid>@<graph uid>">, or the uuid alone, as an import writes
+// it) tells that person once: the doc keeps who its body mentions
+// (resource_mentions), and a save emits doc.mentioned only for the people it
+// newly mentions. A repeated save, or a mention moved around,
 // tells nobody more; one removed and put back the same day doesn't either (the
 // notice is keyed by doc, person and day). Someone editing the doc in that save
 // isn't told of a mention of themselves. Whether the person may read the doc,
@@ -19,7 +20,13 @@ package businness
 //     to be kept (migration 344). resource_mentions started empty, so without
 //     this an upgrade's first save of each existing doc told everyone its body
 //     already mentioned, by push and by email. A doc made since is kept from
-//     its first save, and that save tells as any other.
+//     its first save, and that save tells as any other;
+//   - a quiet save (Change.Quiet): a copy's body, an import's. Nobody wrote
+//     its mentions just now: they were written in the page it copies, or in
+//     the tool it came from. The first edit by a person after it tells only
+//     whom that edit adds. Such a body's mentions are kept before it is
+//     seeded (KeepCopiedMentions), so its save tells nobody of them even when
+//     it comes back loud.
 //
 // DOCS. A link to another doc (a +doc chip, data-id="doc:<uuid>", or a link to
 // /app/doc/<uuid>) is kept as a doc_mentions edge, the backlinks' source.
@@ -124,11 +131,12 @@ func mentionsSaved(ctx context.Context, c Change) {
 }
 
 // whoToTell is who a save's mentions tell: the people it newly mentions, but
-// nobody whose edit it holds. Nobody at all for a save holding nobody's edit,
-// or for a doc's first keeping when the doc was made before docs' mentions
-// were kept, or isn't known to have been made since (the file comment). Pure.
+// nobody whose edit it holds. Nobody at all for a quiet save, for a save
+// holding nobody's edit, or for a doc's first keeping when the doc was made
+// before docs' mentions were kept, or isn't known to have been made since (the
+// file comment). Pure.
 func whoToTell(c Change, kept followModels.MentionSync, doc *dgraphStruct.DgraphDoc) []string {
-	if len(c.Contributors) == 0 && len(c.Agents) == 0 {
+	if c.Quiet || (len(c.Contributors) == 0 && len(c.Agents) == 0) {
 		return nil
 	}
 	if kept.First && !madeSince(doc, kept.Since) {

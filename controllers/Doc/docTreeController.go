@@ -12,17 +12,33 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	business "github.com/akashc777/OneCamp/business/Doc"
 	treeBusiness "github.com/akashc777/OneCamp/business/Tree"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/services/collab"
 	"github.com/go-chi/chi/v5"
 )
 
 func docRes(id string) accessBusiness.Resource {
 	return accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: id}
+}
+
+// moverOf is the person changing the tree, for the body edits that follow
+// (business/Doc's sub-page blocks): the name they're written in, and whether
+// the person may edit a page's body, as the Access Resolver says.
+func moverOf(who accessBusiness.Subject) business.Mover {
+	return business.Mover{
+		By:  collab.By{UserUUID: who.UserUUID, AgentUUID: who.AgentUUID},
+		UID: who.UserUID,
+		MayEdit: func(ctx context.Context, docUUID string) bool {
+			_, err := accessBusiness.Open(ctx, who, docRes(docUUID), accessBusiness.LevelEdit)
+			return err == nil
+		},
+	}
 }
 
 func badRequest(w http.ResponseWriter, msg string) {
@@ -56,6 +72,11 @@ func treeFailed(w http.ResponseWriter, r *http.Request, where string, err error)
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "demo", "msg": helpers.DemoSeededMsg})
 	case errors.Is(err, treeBusiness.ErrCycle):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "cycle", "msg": "A page can't go inside itself or one of its own subpages."})
+	case errors.Is(err, treeBusiness.ErrLeaf):
+		// Only a page or a folder holds anything (docs F1, D-30).
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "cannot_hold_items", "msg": "Only a page or a folder can hold pages and files."})
+	case errors.Is(err, business.ErrNotAPage):
+		notAPage(w)
 	case errors.Is(err, treeBusiness.ErrTooDeep):
 		helpers.WriteJSON(w, http.StatusUnprocessableEntity, helpers.Envolope{"code": "too_deep", "msg": "Pages can only go 32 levels deep."})
 	case errors.Is(err, business.ErrTooMany):
@@ -64,6 +85,8 @@ func treeFailed(w http.ResponseWriter, r *http.Request, where string, err error)
 		badRequest(w, "The page to go after isn't there.")
 	case errors.Is(err, business.ErrNotInTrash):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "not_in_trash", "msg": "That doc isn't in the trash."})
+	case errors.Is(err, business.ErrNotUnder):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "not_under", "msg": "That page isn't inside this one any more."})
 	case errors.Is(err, business.ErrNoTemplate):
 		badRequest(w, "There's no such template.")
 	case errors.Is(err, treeBusiness.ErrBusy):
@@ -76,33 +99,67 @@ func treeFailed(w http.ResponseWriter, r *http.Request, where string, err error)
 
 // tooManyPages answers a change to a page and everything under it when there
 // is more under it than one change takes (business/Tree's ErrTooMany): it is
-// refused whole, never made part of the way.
+// refused whole, never made part of the way. The caps count every node, a
+// folder's files and links too (docs F1), so the answer names them.
 func tooManyPages(w http.ResponseWriter) {
-	helpers.WriteJSON(w, http.StatusUnprocessableEntity, helpers.Envolope{"code": "too_many", "msg": "There are too many pages under this one to do that at once."})
+	helpers.WriteJSON(w, http.StatusUnprocessableEntity, helpers.Envolope{"code": "too_many", "msg": "There are too many pages and files under this one to do that at once."})
+}
+
+// notAPage answers something only a page does (the editor's session, a save)
+// asked of a folder, a file or a link (docs F1): 409, which the
+// collaboration service takes as a refusal, never retried.
+func notAPage(w http.ResponseWriter) {
+	helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "not_a_page", "msg": "That isn't a page."})
 }
 
 // pageLimit reads a page size: 1 to 100, 30 when not given.
 func pageLimit(r *http.Request) int { return helpers.LimitParam(r.URL.Query(), 30, 100) }
 
 // TreeNode is a page as the tree sends it: the tree's fields, and the doc's
-// own that a row shows.
+// own that a row shows. kind is the tree's ("doc"); a node that isn't a page
+// says what it is (node_kind: folder, file or link, docs F1), with its colour,
+// a link's address and a file's facts (its newest version). A page carries
+// none of them. updated_by is who made the change at updated_at (the last
+// editor, docs F1: a row's "Maya · 3h ago"), absent before anyone has; these
+// rows are a member's, never a guest's or a published page's.
 type TreeNode struct {
 	treeBusiness.Node
-	Private   *bool  `json:"private,omitempty"`
-	UpdatedAt string `json:"updated_at,omitempty"`
+	Private   *bool               `json:"private,omitempty"`
+	UpdatedAt string              `json:"updated_at,omitempty"`
+	UpdatedBy *business.Person    `json:"updated_by,omitempty"`
+	NodeKind  string              `json:"node_kind,omitempty"`
+	Color     string              `json:"color,omitempty"`
+	LinkURL   string              `json:"link_url,omitempty"`
+	File      *business.FileFacts `json:"file,omitempty"`
 }
 
-func treeNodes(nodes []treeBusiness.Node) []TreeNode {
+// treeNodes is nodes as the tree sends them, each file with its facts from
+// files (business.FileFactsOf, by uuid).
+func treeNodes(nodes []treeBusiness.Node, files map[string]*business.FileFacts) []TreeNode {
 	out := make([]TreeNode, 0, len(nodes))
 	for _, n := range nodes {
 		t := TreeNode{Node: n}
 		if d, ok := n.Data.(*dgraphStruct.DgraphDoc); ok && d != nil {
 			t.Private = d.IsPrivate
+			t.NodeKind, t.Color, t.LinkURL = d.NodeKind, d.Color, d.LinkURL
+			t.File = files[strings.ToLower(d.Uuid)]
 			if d.UpdatedAt != nil {
 				t.UpdatedAt = d.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
 			}
+			t.UpdatedBy = business.PersonOf(d.UpdatedBy)
 		}
 		out = append(out, t)
+	}
+	return out
+}
+
+// docsOf is the docs a tree's nodes read.
+func docsOf(nodes []treeBusiness.Node) []*dgraphStruct.DgraphDoc {
+	out := make([]*dgraphStruct.DgraphDoc, 0, len(nodes))
+	for _, n := range nodes {
+		if d, ok := n.Data.(*dgraphStruct.DgraphDoc); ok && d != nil {
+			out = append(out, d)
+		}
 	}
 	return out
 }
@@ -132,8 +189,14 @@ func GetDocChildren(w http.ResponseWriter, r *http.Request) {
 		treeFailed(w, r, "GetDocChildren", err)
 		return
 	}
+	// The level's files' facts, in one read for them all (docs F1).
+	files, err := business.FileFactsOf(ctx, docsOf(page.Nodes))
+	if err != nil {
+		treeFailed(w, r, "GetDocChildren", err)
+		return
+	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": helpers.Envolope{
-		"parent": parent, "space": q.Get("space"), "nodes": treeNodes(page.Nodes),
+		"parent": parent, "space": q.Get("space"), "nodes": treeNodes(page.Nodes, files),
 		"hidden": page.Hidden, "count": page.Count, "next_cursor": page.Cursor,
 	}})
 }
@@ -164,7 +227,8 @@ func GetDocAncestors(w http.ResponseWriter, r *http.Request) {
 	if nodes == nil {
 		nodes = []treeBusiness.Node{}
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": helpers.Envolope{"ancestors": treeNodes(nodes), "truncated": truncated}})
+	// A path holds pages and folders only: no file facts to read.
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": helpers.Envolope{"ancestors": treeNodes(nodes, nil), "truncated": truncated}})
 }
 
 // MoveRequest is where a page goes: under parent_uuid (none: the top of a
@@ -258,7 +322,8 @@ func spaceFor(ctx context.Context, who accessBusiness.Subject, m MoveRequest) (k
 // A move into another space, or out of one, changes who can open the page and
 // the pages under it: it needs full access to each of them, and being in the
 // space it goes into (or a workspace admin), and is followed as a change to
-// their sharing, its owner told (clearSpaceMove).
+// their sharing, its owner told (clearSpaceMove). The page's block follows it,
+// out of its old parent's body and onto the end of its new one's (FollowMove).
 func MoveDoc(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user, who := accessBusiness.RequestSubject(r)
@@ -303,6 +368,7 @@ func MoveDoc(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	business.EmitMoved(ctx, m.DocUUID, m.ParentUUID, who.UserUUID, space)
+	business.FollowMove(ctx, m.DocUUID, moved.From, m.ParentUUID, moverOf(who))
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": helpers.Envolope{
 		"doc_uuid": m.DocUUID, "parent_uuid": m.ParentUUID, "space": m.Space, "access": access,
 	}})
@@ -415,6 +481,38 @@ func CreateDocInTree(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "That isn't a new doc.")
 		return
 	}
+	// A folder or a link (docs F1, the F1a/F1b contract 8); a file comes
+	// through POST /doc/files.
+	switch in.Kind {
+	case "":
+	case "folder":
+		in.NodeKind = business.NodeFolder
+	case "link":
+		in.NodeKind = business.NodeLink
+	default:
+		badRequest(w, "A new doc is a page, a folder or a link.")
+		return
+	}
+	switch {
+	case in.NodeKind == business.NodeLink:
+		link, err := business.CheckLinkURL(in.LinkURL)
+		if err != nil {
+			badRequest(w, "A link is a public https address.")
+			return
+		}
+		in.LinkURL = link
+		// Called by its address until its preview names it (nameLinkLater).
+		if strings.TrimSpace(in.Title) == "" {
+			in.Title = link
+		}
+	case in.LinkURL != "":
+		badRequest(w, "Only a link has an address.")
+		return
+	}
+	if in.NodeKind != "" && in.TemplateID != "" {
+		badRequest(w, "A template makes a page.")
+		return
+	}
 	for _, id := range []string{in.ParentUUID, in.AfterUUID} {
 		if id != "" && !helpers.IsCanonicalUUID(id) {
 			badRequest(w, "That isn't a doc.")
@@ -440,7 +538,7 @@ func CreateDocInTree(w http.ResponseWriter, r *http.Request) {
 		}
 		parent = rows[0]
 	}
-	doc, err := business.CreateDocInTree(ctx, &user.UserDgraphInfo, in, parent)
+	doc, err := makeDoc(ctx, &user.UserDgraphInfo, in, parent)
 	if err != nil {
 		treeFailed(w, r, "CreateDocInTree", err)
 		return
@@ -449,6 +547,10 @@ func CreateDocInTree(w http.ResponseWriter, r *http.Request) {
 		if err := accessBusiness.Rules.CopyOnCreate(ctx, who, docRes(parent.Uuid), docRes(doc.Uuid)); err != nil {
 			helpers.LogErrorWithContext(ctx, "controllers/CreateDocInTree: %s didn't take its parent's sharing: %v", doc.Uuid, err)
 		}
+		business.PlaceInParent(ctx, in, parent, doc, moverOf(who).By)
+	}
+	if business.IsLink(doc) && doc.Title == doc.LinkURL {
+		nameLinkLater(ctx, who.UserUUID, doc.Uuid, doc.LinkURL)
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "created doc successfully!", "data": doc})
 }
@@ -457,14 +559,17 @@ func CreateDocInTree(w http.ResponseWriter, r *http.Request) {
 // the trash as one delete (POST /doc/delete, and /doc/deleteDoc): for someone
 // who may change it. A page under it they can't open stays, moving up to its
 // parent (kept counts them). The answer's batch_id undoes it (POST
-// /doc/restore).
+// /doc/restore). With parent_uuid, only while the page is that page's child
+// (its sub-page block deleted from that page's body, docs C7a): otherwise 409
+// not_under, and nothing goes.
 func DeleteDocTree(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user, who := accessBusiness.RequestSubject(r)
 	var in struct {
-		DocUUID string `json:"doc_uuid"`
+		DocUUID    string `json:"doc_uuid"`
+		ParentUUID string `json:"parent_uuid"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || !helpers.IsCanonicalUUID(in.DocUUID) {
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || !helpers.IsCanonicalUUID(in.DocUUID) || (in.ParentUUID != "" && !helpers.IsCanonicalUUID(in.ParentUUID)) {
 		badRequest(w, "Say which doc to delete.")
 		return
 	}
@@ -472,7 +577,13 @@ func DeleteDocTree(w http.ResponseWriter, r *http.Request) {
 		treeFailed(w, r, "DeleteDocTree", err)
 		return
 	}
-	res, err := business.TrashSubtree(ctx, in.DocUUID, who.UserUID, who.UserUUID, user.UserPostgresInfo.EmailID)
+	var res *business.TrashResult
+	var err error
+	if in.ParentUUID != "" {
+		res, err = business.TrashChild(ctx, in.DocUUID, in.ParentUUID, who.UserUID, who.UserUUID, user.UserPostgresInfo.EmailID)
+	} else {
+		res, err = business.TrashSubtree(ctx, in.DocUUID, who.UserUID, who.UserUUID, user.UserPostgresInfo.EmailID)
+	}
 	if err != nil {
 		treeFailed(w, r, "DeleteDocTree", err)
 		return
@@ -558,6 +669,8 @@ func DuplicateDoc(w http.ResponseWriter, r *http.Request) {
 			helpers.LogErrorWithContext(ctx, "controllers/DuplicateDoc: the copies of %s didn't all take their parent's sharing: %v", in.DocUUID, err)
 		}
 	}
+	// The copied files' search entries, once they have their sharing.
+	indexFiles(ctx, dup.Files, "")
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Duplicated.", "data": dup})
 }
 

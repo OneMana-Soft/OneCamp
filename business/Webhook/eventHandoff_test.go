@@ -9,6 +9,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	redisInit "github.com/akashc777/OneCamp/initializers/redis"
+	"github.com/google/uuid"
 )
 
 // What a listener reads from the dispatching context survives the crossing:
@@ -32,6 +33,49 @@ func TestHandoffKeepsWhereAnEventCameFrom(t *testing.T) {
 	plain := handoffOrigin{}.context()
 	if helpers.IsGitHubOrigin(plain) || helpers.IsPublicSubmission(plain) || helpers.IsAgentWrite(plain) {
 		t.Fatal("a member's event gained an origin on the way")
+	}
+}
+
+// A follow-up to the A4 cost fix (CR-9): the mark on a task a batch just made
+// (helpers.WithOpenTasks) didn't cross, so a split install's workers read each
+// created task's restriction twice. The event's own task's mark crosses, and
+// holds only while the entry is fresh: a worker that takes it later reads the
+// restriction, which may have been set while the entry waited.
+func TestABatchsTaskCrossesOpenWhileItsEntryIsFresh(t *testing.T) {
+	made, other := uuid.New(), uuid.New()
+	batch := helpers.WithOpenTasks(context.Background(), made, other)
+	at := time.Now().UTC()
+	cross := func(ctx context.Context, data map[string]interface{}) handedOffEvent {
+		t.Helper()
+		b, err := json.Marshal(handedOffEvent{V: 1, Kind: "task.created", At: at, OpenTask: openTaskOf(ctx, data), Data: data})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back handedOffEvent
+		if err := json.Unmarshal(b, &back); err != nil {
+			t.Fatal(err)
+		}
+		return back
+	}
+
+	ev := cross(batch, map[string]interface{}{"task_id": made.String()})
+	if !helpers.TasksOpen(ev.context(at.Add(time.Second)), made.String()) {
+		t.Error("a fresh entry's task isn't marked open, so the workers read its restriction again")
+	}
+	if helpers.TasksOpen(ev.context(at.Add(time.Second)), other.String()) {
+		t.Error("another task of the batch crossed with this event")
+	}
+	if helpers.TasksOpen(ev.context(at.Add(handoffOpenFor+time.Second)), made.String()) {
+		t.Error("an entry that waited past handoffOpenFor still marks its task open")
+	}
+	for name, e := range map[string]handedOffEvent{
+		"a task the batch didn't make": cross(batch, map[string]interface{}{"task_id": uuid.NewString()}),
+		"an event that names no task":  cross(batch, map[string]interface{}{"post_id": "p1"}),
+		"an event of no batch":         cross(context.Background(), map[string]interface{}{"task_id": made.String()}),
+	} {
+		if e.OpenTask != "" || helpers.TasksOpen(e.context(at), made.String()) {
+			t.Errorf("%s crossed as open (%q)", name, e.OpenTask)
+		}
 	}
 }
 

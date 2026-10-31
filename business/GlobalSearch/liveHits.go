@@ -80,16 +80,3 @@ func keepLiveHits(ctx context.Context, hits []*openSearchStruct.GlobalSearchOpen
 	}
 	return kept
 }
-
-// page cuts hits to a page and checks it. HasMore is decided on what the
-// index returned, before anything is dropped, so losing a stale hit never
-// makes a page claim to be the last.
-func page(ctx context.Context, hits []*openSearchStruct.GlobalSearchOpenSearchResp, size int) GlobalSearchPagination {
-	var p GlobalSearchPagination
-	p.HasMore = len(hits) > size
-	if p.HasMore {
-		hits = hits[:size]
-	}
-	p.Page = keepLiveHits(ctx, hits)
-	return p
-}

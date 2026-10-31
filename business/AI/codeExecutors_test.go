@@ -3,8 +3,10 @@ package business
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -20,8 +22,13 @@ func TestCodeToolsReadOnlyRepositoriesTheReadersProjectsLink(t *testing.T) {
 	in := map[string][]uuid.UUID{"sam": {web}, "ravi": {billing}, "ana": {web, billing}}
 	prevPerson, prevProfile, prevLinks := lookupPerson, lookupPersonProfile, projectsLinking
 	t.Cleanup(func() { lookupPerson, lookupPersonProfile, projectsLinking = prevPerson, prevProfile, prevLinks })
+	gone := time.Now()
 	lookupPerson = func(_ context.Context, id string) (*dgraphStruct.DgraphUser, error) {
-		return &dgraphStruct.DgraphUser{Uid: "0x" + id, Uuid: id}, nil
+		u := &dgraphStruct.DgraphUser{Uid: "0x" + id, Uuid: id}
+		if id == "dee" {
+			u.DeletedAt = &gone
+		}
+		return u, nil
 	}
 	lookupPersonProfile = func(_ context.Context, id string) (*dgraphStruct.DgraphUser, error) {
 		profile := &dgraphStruct.DgraphUser{Uuid: id}
@@ -71,6 +78,10 @@ func TestCodeToolsReadOnlyRepositoriesTheReadersProjectsLink(t *testing.T) {
 	ran = 0
 	if _, _, err := tool(context.Background(), ai.ProposedAction{Params: map[string]string{"owner": "acme", "repo": "down"}}, "ana"); !errors.Is(err, errRepoUnchecked) || ran != 0 {
 		t.Errorf("links that couldn't be read: %v, the tool ran %d times; want %q and never, without the store's words", err, ran, errRepoUnchecked)
+	}
+	// An asker who was deactivated is told so, not to try again.
+	if _, _, err := tool(asking("dee", "ana"), ai.ProposedAction{Params: map[string]string{"owner": "acme", "repo": "web"}}, "ana"); err == nil || errors.Is(err, errRepoUnchecked) || !strings.Contains(err.Error(), "deactivated") || ran != 0 {
+		t.Errorf("asked by someone deactivated: %v, the tool ran %d times; want their own refusal, and never", err, ran)
 	}
 	// A call naming no repository is the tool's to answer: it says what it needs.
 	if _, _, err := tool(context.Background(), ai.ProposedAction{Params: map[string]string{"owner": "acme"}}, "ana"); err != nil || ran != 1 {
@@ -133,3 +144,31 @@ func TestIsGitHubUnavailable(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// A caller judging many repositories, as an agent run's prompt does, reads the
+// views once: a run nobody else asked for (a schedule, an event) keeps no memo
+// of its own, so a read per repository was a graph read per repository.
+func TestARepoReaderReadsTheViewsOnce(t *testing.T) {
+	web := uuid.New()
+	prevPerson, prevProfile := lookupPerson, lookupPersonProfile
+	t.Cleanup(func() { lookupPerson, lookupPersonProfile = prevPerson, prevProfile })
+	reads := 0
+	lookupPerson = func(_ context.Context, id string) (*dgraphStruct.DgraphUser, error) {
+		return &dgraphStruct.DgraphUser{Uid: "0x" + id, Uuid: id}, nil
+	}
+	lookupPersonProfile = func(_ context.Context, id string) (*dgraphStruct.DgraphUser, error) {
+		reads++
+		return &dgraphStruct.DgraphUser{Uuid: id, Projects: []*dgraphStruct.DgraphProject{{Uuid: web.String()}}}, nil
+	}
+	readsFor, err := RepoReader(context.Background(), "ana")
+	if err != nil {
+		t.Fatal(err)
+	}
+	judged := []bool{readsFor([]uuid.UUID{web}), readsFor([]uuid.UUID{uuid.New()}), readsFor([]uuid.UUID{uuid.New(), web})}
+	if reads != 1 {
+		t.Errorf("judging 3 repositories read the reader's view %d times, want once", reads)
+	}
+	if want := []bool{true, false, true}; !reflect.DeepEqual(judged, want) {
+		t.Errorf("judged %v, want %v: read for someone in a project linking it, and only then", judged, want)
+	}
+}

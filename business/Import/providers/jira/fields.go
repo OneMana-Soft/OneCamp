@@ -67,14 +67,37 @@ func kindOf(m jiraFieldMeta) string {
 	return ""
 }
 
-// siteFields is a site's custom fields that OneCamp has a kind for, by id.
-type siteFields map[string]jiraFieldMeta
+// sprintFieldType is the schema of Jira Software's Sprint field, which holds
+// the sprints an issue has been in (sprints.go). A site has one, locked.
+const sprintFieldType = "com.pyxis.greenhopper.jira:gh-sprint"
+
+// siteFields is what an import reads once of a site's custom fields: those
+// OneCamp has a kind for, by id, and the Sprint field's id ("" on a site
+// without Jira Software).
+type siteFields struct {
+	kinds  map[string]jiraFieldMeta
+	sprint string
+}
+
+// fieldsOf sorts a site's field list (GET /rest/api/3/field) into those.
+// Pure.
+func fieldsOf(metas []jiraFieldMeta) siteFields {
+	fields := siteFields{kinds: map[string]jiraFieldMeta{}}
+	for _, m := range metas {
+		if kindOf(m) != "" {
+			fields.kinds[m.ID] = m
+		} else if m.Custom && m.Schema != nil && m.Schema.Custom == sprintFieldType {
+			fields.sprint = m.ID
+		}
+	}
+	return fields
+}
 
 // customFields is the site's custom fields OneCamp can bring across, read
 // once for each import. A token that may not read the list (401, 403, 404)
-// is said once, and the import goes on without custom fields; anything else
-// (Jira asking to slow down, a server error, a timeout) is the chunk's to
-// try again.
+// is said once, and the import goes on without custom fields or sprints;
+// anything else (Jira asking to slow down, a server error, a timeout) is the
+// chunk's to try again.
 func (p *Provider) customFields(ctx context.Context, j *importModels.Job, tok, site string) (siteFields, error) {
 	p.mu.Lock()
 	cached, ok := p.fieldsCache[j.Id]
@@ -83,20 +106,15 @@ func (p *Provider) customFields(ctx context.Context, j *importModels.Job, tok, s
 		return cached, nil
 	}
 	var metas []jiraFieldMeta
-	fields := siteFields{}
 	if err := p.getJSON(ctx, tok, site+"/rest/api/3/field", &metas); err != nil {
-		var status *statusError
+		var status *importProvider.StatusError
 		if !errors.As(err, &status) || (status.Code != 401 && status.Code != 403 && status.Code != 404) {
-			return nil, err // slow down, a server error or a timeout: the chunk tries again
+			return siteFields{}, err // slow down, a server error or a timeout: the chunk tries again
 		}
 		importModels.LogImportError(ctx, j.Id, nil, importModels.EntityField, "jira-fields", importModels.SeverityWarning, "FIELDS_UNREADABLE",
-			"Jira's list of custom fields couldn't be read with this token, so custom fields weren't brought across: "+err.Error(), nil)
+			"Jira's list of custom fields couldn't be read with this token, so custom fields and sprints weren't brought across: "+err.Error(), nil)
 	}
-	for _, m := range metas {
-		if kindOf(m) != "" {
-			fields[m.ID] = m
-		}
-	}
+	fields := fieldsOf(metas)
 	p.mu.Lock()
 	p.fieldsCache[j.Id] = fields
 	p.mu.Unlock()
@@ -112,7 +130,7 @@ func issueFieldValues(custom map[string]json.RawMessage, fields siteFields) []im
 	sort.Strings(ids)
 	var out []importProvider.SourceFieldValue
 	for _, id := range ids {
-		m, ok := fields[id]
+		m, ok := fields.kinds[id]
 		if !ok {
 			continue
 		}

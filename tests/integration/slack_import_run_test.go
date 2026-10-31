@@ -207,6 +207,7 @@ func leaseFree(job uuid.UUID) bool {
 func TestARollbackWaitsForTheRunToEnd(t *testing.T) {
 	ctx := context.Background()
 	e := newRaceEnv(t, nil)
+	e.inTheGraph(t)
 	integration.SetupRedis(t)
 	integration.StubMqttClient(t)
 
@@ -279,6 +280,7 @@ func TestARollbackWaitsForTheRunToEnd(t *testing.T) {
 // that comes after the import's tasks or messages, and its files.
 func TestARollbackThatFailsTakesNothingAway(t *testing.T) {
 	e := newRaceEnv(t, nil)
+	e.inTheGraph(t)
 	integration.SetupRedis(t)
 	integration.StubMqttClient(t)
 	if _, err := e.PG.Exec(`CREATE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the disk is full'; END $$`); err != nil {
@@ -355,14 +357,23 @@ func slackImportMade(t *testing.T, e *raceEnv, job uuid.UUID, workspace string) 
 		kind, source string
 		id           uuid.UUID
 	}{{slackModels.EntityUser, "U1", ana}, {slackModels.EntityChannel, "C1", channel}, {slackModels.EntityMessage, "1700000000.000100", post}} {
-		if err := slackModels.UpsertIdMappingWithOwnership(ctx, job, m.kind, m.source, m.id, nil, nil, true); err != nil {
-			t.Fatal(err)
-		}
-		if err := slackModels.UpsertWorkspaceMapping(ctx, workspace, m.kind, m.source, m.id, job); err != nil {
+		if err := slackModels.RecordCreated(ctx, job, m.kind, m.source, m.id, nil, nil, workspace); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return map[string]uuid.UUID{"posts": post, "channels": channel, "users": ana, "attachments": file}
+}
+
+// inTheGraph gives the test a graph holding the admin who runs its imports:
+// a task import's rollback also takes what it made off the graph and search,
+// reading it as whoever ran the import (business/Import unmakeImported).
+// What importMade records is in Postgres alone, as it is for an import whose
+// run never reached the graph.
+func (e *raceEnv) inTheGraph(t *testing.T) {
+	t.Helper()
+	integration.SetupDgraph(t).Mutate(t, []map[string]any{
+		{"uid": "_:admin", "dgraph.type": "User", "user_uuid": e.admin.String(), "user_name": "admin"},
+	})
 }
 
 // importMade records, as the task importers record them, what an import made:
@@ -409,10 +420,7 @@ func importMade(t *testing.T, e *raceEnv, job uuid.UUID, provider, workspace str
 		{importModels.EntitySubtask, "K-2", subtask, &parent}, {importModels.EntityComment, "C-1", comment, &parent},
 		{importModels.EntityField, "F-1", field, nil},
 	} {
-		if err := importModels.UpsertIdMappingWithOwnership(ctx, job, m.kind, m.source, m.id, m.parent, nil, true); err != nil {
-			t.Fatal(err)
-		}
-		if err := importModels.UpsertWorkspaceMapping(ctx, provider, workspace, m.kind, m.source, m.id, job); err != nil {
+		if err := importModels.RecordMapping(ctx, job, provider, workspace, m.kind, m.source, m.id, m.parent, nil, true); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -422,7 +430,8 @@ func importMade(t *testing.T, e *raceEnv, job uuid.UUID, provider, workspace str
 
 // rollbackState is an import's status, whether its file is still staged, and
 // what it made (by table, as importMade and slackImportMade return it) that
-// is still there.
+// is still there: not marked deleted. A field a rollback took away must still
+// be there, marked, so it can come back (V-78): a field that is gone fails.
 func (e *raceEnv) rollbackState(t *testing.T, job uuid.UUID, made map[string]uuid.UUID) (status string, staged bool, kept []string) {
 	t.Helper()
 	if err := e.PG.QueryRow(`SELECT status, raw_object_key IS NOT NULL FROM import_jobs WHERE id = $1`, job).Scan(&status, &staged); err != nil {
@@ -430,16 +439,22 @@ func (e *raceEnv) rollbackState(t *testing.T, job uuid.UUID, made map[string]uui
 	}
 	for key, id := range made {
 		table, _, _ := strings.Cut(key, ":")
-		there := "deleted_at IS NULL"
-		if table == "task_fields" {
-			there = "TRUE" // a field is deleted, not marked
-		}
 		var n int
-		if err := e.PG.QueryRow(`SELECT count(*) FROM `+table+` WHERE id = $1 AND `+there, id).Scan(&n); err != nil {
+		if err := e.PG.QueryRow(`SELECT count(*) FROM `+table+` WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		if n > 0 {
 			kept = append(kept, key)
+			continue
+		}
+		if table == "task_fields" {
+			var marked int
+			if err := e.PG.QueryRow(`SELECT count(*) FROM task_fields WHERE id = $1 AND deleted_at IS NOT NULL`, id).Scan(&marked); err != nil {
+				t.Fatal(err)
+			}
+			if marked != 1 {
+				t.Errorf("%s: taken away and gone, not marked deleted: it can't come back", key)
+			}
 		}
 	}
 	slices.Sort(kept)

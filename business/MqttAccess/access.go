@@ -130,7 +130,7 @@ func (s sources) allowed(ctx context.Context, req Request) bool {
 		return answer(ctx, req, func() (bool, error) { return s.readsDoc(ctx, userUUID, id) })
 	case helpers.MqttKindBoard:
 		return answer(ctx, req, func() (bool, error) { return s.readsBoard(ctx, userUUID, id) })
-	case helpers.MqttKindTable:
+	case helpers.MqttKindTable, helpers.MqttKindHere:
 		return answer(ctx, req, func() (bool, error) { return s.viewsTable(ctx, user, thing) })
 	}
 	return false

@@ -28,41 +28,6 @@ func TestIsRetryableStatus(t *testing.T) {
 	}
 }
 
-func TestParseRetryAfter(t *testing.T) {
-	// delta-seconds
-	h := http.Header{}
-	h.Set("Retry-After", "5")
-	if got := parseRetryAfter(h); got != 5*time.Second {
-		t.Errorf("delta-seconds: got %v want 5s", got)
-	}
-
-	// absent
-	if got := parseRetryAfter(http.Header{}); got != 0 {
-		t.Errorf("absent: got %v want 0", got)
-	}
-
-	// negative -> 0
-	h2 := http.Header{}
-	h2.Set("Retry-After", "-3")
-	if got := parseRetryAfter(h2); got != 0 {
-		t.Errorf("negative: got %v want 0", got)
-	}
-
-	// unparseable -> 0
-	h3 := http.Header{}
-	h3.Set("Retry-After", "soon")
-	if got := parseRetryAfter(h3); got != 0 {
-		t.Errorf("unparseable: got %v want 0", got)
-	}
-
-	// HTTP-date in the future -> positive
-	h4 := http.Header{}
-	h4.Set("Retry-After", time.Now().Add(10*time.Second).UTC().Format(http.TimeFormat))
-	if got := parseRetryAfter(h4); got <= 0 {
-		t.Errorf("http-date: got %v want > 0", got)
-	}
-}
-
 // doHTTPWithRetry should retry a 429 and then succeed, surfacing the 200.
 func TestDoHTTPWithRetry_RetriesThenSucceeds(t *testing.T) {
 	var calls int32

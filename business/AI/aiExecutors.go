@@ -118,7 +118,7 @@ func executeSendMessage(ctx context.Context, action ai.ProposedAction, userUUID 
 	if err != nil || dgraphChannel == nil || dgraphChannel.Uuid == "" {
 		return "", nil, fmt.Errorf("channel not found or you don't have access")
 	}
-	if dgraphChannel.DeletedAt != nil && !dgraphChannel.DeletedAt.IsZero() {
+	if helpers.IsSoftDeleted(dgraphChannel.DeletedAt) {
 		return "", nil, fmt.Errorf("channel not found or you don't have access")
 	}
 	if dgraphChannel.IsMember == 0 {
@@ -412,21 +412,23 @@ func executeCreateTask(ctx context.Context, action ai.ProposedAction, userUUID s
 	}
 
 	// Create the task
-	_, err = taskBusiness.CreateTask(ctx, projectParsedUUID, userInfo, dgraphProject, assigneeDgraph, taskInput, nil)
+	taskID, err := taskBusiness.CreateTask(ctx, projectParsedUUID, userInfo, dgraphProject, assigneeDgraph, taskInput, nil)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create task: %w", err)
 	}
+	key := taskKeys.KeyOf(ctx, taskID)
+	called := taskKeys.Named(key, `"`+taskName+`"`)
 
 	projectName := dgraphProject.Name
 	if projectName == "" {
 		projectName = projectUUID
 	}
 
-	msg := fmt.Sprintf("✅ Task \"%s\" created in project %s (priority: %s)", taskName, projectName, priority)
+	msg := fmt.Sprintf("✅ Task %s created in project %s (priority: %s)", called, projectName, priority)
 	if assigneeDgraph != nil {
-		msg = fmt.Sprintf("✅ Task \"%s\" created in project %s (priority: %s), assigned to %s", taskName, projectName, priority, assigneeDgraph.UserName)
+		msg += ", assigned to " + assigneeDgraph.UserName
 	}
-	return msg, nil, nil
+	return msg, map[string]string{"tool": "create_task", "task_uuid": taskID.String(), "key": key}, nil
 }
 
 // normalizeTaskPriority maps whatever the model emits for a task priority onto
@@ -585,6 +587,20 @@ func loadTaskForUpdate(ctx context.Context, taskUUIDStr, userUUID string) (*user
 	return userInfo, dgraphTask, nil
 }
 
+// taskCalled is how a tool's answer names the task it acted on, with its key
+// first when its project has one (Q4-12 "Write the launch post"), and the
+// key for the answer's data.
+func taskCalled(ctx context.Context, task *dgraphStruct.DgraphTask) (called, key string) {
+	name := task.Name
+	if name == "" {
+		name = task.Uuid
+	}
+	if id, err := uuid.Parse(task.Uuid); err == nil {
+		key = taskKeys.KeyOf(ctx, id)
+	}
+	return taskKeys.Named(key, `"`+name+`"`), key
+}
+
 // executeUpdateTaskStatus moves a task to a new status: a built-in one (todo,
 // inProgress, inReview, done, backlog, canceled) or one of its project's own,
 // by name.
@@ -611,18 +627,16 @@ func executeUpdateTaskStatus(ctx context.Context, action ai.ProposedAction, user
 		}
 		return "", nil, fmt.Errorf("failed to update task status: %w", err)
 	}
-	name := dgraphTask.Name
-	if name == "" {
-		name = taskUUIDStr
-	}
+	called, key := taskCalled(ctx, dgraphTask)
 	// Action data lets the FE patch the task in the visible list immediately,
 	// so the status flips without a page refresh.
 	actionData := map[string]string{
 		"tool":      "update_task_status",
 		"task_uuid": taskUUIDStr,
+		"key":       key,
 		"status":    status,
 	}
-	return fmt.Sprintf("✅ Moved task \"%s\" to %s", name, status), actionData, nil
+	return fmt.Sprintf("✅ Moved task %s to %s", called, status), actionData, nil
 }
 
 // executeAssignTask sets (or, with an empty assignee, clears) a task's assignee.
@@ -654,20 +668,18 @@ func executeAssignTask(ctx context.Context, action ai.ProposedAction, userUUID s
 	if err := taskBusiness.UpdateTaskAssigneeByTaskUUID(ctx, taskUUID, newAssignee, oldAssigneeUID, dgraphTask.Uid, dgraphTask, &userInfo.UserDgraphInfo); err != nil {
 		return "", nil, fmt.Errorf("failed to update task assignee: %w", err)
 	}
-	name := dgraphTask.Name
-	if name == "" {
-		name = taskUUIDStr
-	}
+	called, key := taskCalled(ctx, dgraphTask)
 	actionData := map[string]string{
 		"tool":      "assign_task",
 		"task_uuid": taskUUIDStr,
+		"key":       key,
 	}
 	if newAssignee != nil {
 		actionData["assignee_uuid"] = newAssignee.Uuid
 		actionData["assignee_name"] = newAssignee.UserName
 		actionData["assignee_full_name"] = newAssignee.UserFullName
 	}
-	return fmt.Sprintf("✅ Assigned task \"%s\" to %s", name, assigneeName), actionData, nil
+	return fmt.Sprintf("✅ Assigned task %s to %s", called, assigneeName), actionData, nil
 }
 
 // executeSetTaskDueDate sets a task's due date (RFC3339; empty clears it).
@@ -694,19 +706,17 @@ func executeSetTaskDueDate(ctx context.Context, action ai.ProposedAction, userUU
 	if err := taskBusiness.UpdateTaskDueDateByTaskUUID(ctx, taskUUID, &due, dgraphTask, &userInfo.UserDgraphInfo); err != nil {
 		return "", nil, fmt.Errorf("failed to update due date: %w", err)
 	}
-	name := dgraphTask.Name
-	if name == "" {
-		name = taskUUIDStr
-	}
+	called, key := taskCalled(ctx, dgraphTask)
 	actionData := map[string]string{
 		"tool":      "set_task_due_date",
 		"task_uuid": taskUUIDStr,
+		"key":       key,
 		"due_date":  dueStr,
 	}
 	if dueStr == "" {
-		return fmt.Sprintf("✅ Cleared the due date on task \"%s\"", name), actionData, nil
+		return fmt.Sprintf("✅ Cleared the due date on task %s", called), actionData, nil
 	}
-	return fmt.Sprintf("✅ Set task \"%s\" due %s", name, due.Format("Jan 2, 2006 15:04 MST")), actionData, nil
+	return fmt.Sprintf("✅ Set task %s due %s", called, due.Format("Jan 2, 2006 15:04 MST")), actionData, nil
 }
 
 // executeCreateDoc creates a new document using the Doc business layer. When a

@@ -49,6 +49,12 @@ import (
 // zipTree is the files under dir as a zip, at their paths below it.
 func zipTree(t *testing.T, dir string) []byte {
 	t.Helper()
+	return zipTreeWhere(t, dir, func(string) bool { return true })
+}
+
+// zipTreeWhere is zipTree of the files keep keeps, by their paths below dir.
+func zipTreeWhere(t *testing.T, dir string, keep func(rel string) bool) []byte {
+	t.Helper()
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -56,7 +62,7 @@ func zipTree(t *testing.T, dir string) []byte {
 			return err
 		}
 		rel, err := filepath.Rel(dir, path)
-		if err != nil {
+		if err != nil || !keep(filepath.ToSlash(rel)) {
 			return err
 		}
 		body, err := os.ReadFile(path)

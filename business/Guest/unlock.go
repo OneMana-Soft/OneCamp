@@ -10,8 +10,9 @@ package business
 // its own grant and no other, of any kind.
 //
 // A password is tried at most unlockTriesPerWindow times from one address
-// for one grant in the limit's window (UnlockTryAllowed), whichever kind's
-// address it was tried at.
+// for one grant in the limit's window, whichever kind's address it was tried
+// at, and the grant has a ceiling over every address together
+// (UnlockTryAllowed).
 
 import (
 	"context"
@@ -28,15 +29,24 @@ import (
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 )
 
-// unlockTriesPerWindow is password tries per address and grant in
-// registry.PublishUnlockRate's fifteen-minute window.
-const unlockTriesPerWindow = 10
+// Password tries in the limits' fifteen-minute window: unlockTriesPerWindow
+// per address and grant, and unlockTriesPerGrant at one grant from every
+// address together (audit A8). Past that ceiling the grant isn't shut, or a
+// stranger could keep its real visitors out: each address gets
+// unlockTriesPastCeiling more, so a guess spread over many addresses slows
+// tenfold while a visitor who knows the password still gets in.
+const (
+	unlockTriesPerWindow   = 10
+	unlockTriesPerGrant    = 100
+	unlockTriesPastCeiling = 1
+)
 
-// Seams for tests: the signing secret and the tries' counter.
+// Seams for tests: the signing secret and the tries' counter (one try under
+// a limit's key, within its count).
 var (
 	unlockSecret = func() string { return os.Getenv("JWT_SECRET") }
-	triesAllowed = func(ctx context.Context, ip, grant string) bool {
-		return redisStore.AllowFixedWindowOrLocal(ctx, registry.PublishUnlockRate, []string{ip, grant}, unlockTriesPerWindow).Allowed
+	triesAllowed = func(ctx context.Context, spec registry.Spec, args []string, limit int) bool {
+		return redisStore.AllowFixedWindowOrLocal(ctx, spec, args, limit).Allowed
 	}
 )
 
@@ -104,10 +114,18 @@ func Unlocks(token string, g *guestModel.GuestGrant, now time.Time) bool {
 }
 
 // UnlockTryAllowed counts one password try at g from ip (helpers.RateKeyIP's
-// key), and reports whether it may be tried.
+// key), and reports whether it may be tried. The address's own tries come
+// first, so an address past them never counts against the grant.
 func UnlockTryAllowed(ctx context.Context, ip string, g *guestModel.GuestGrant) bool {
 	if g == nil {
 		return false
 	}
-	return triesAllowed(ctx, ip, g.Id.String())
+	grant := g.Id.String()
+	if !triesAllowed(ctx, registry.PublishUnlockRate, []string{ip, grant}, unlockTriesPerWindow) {
+		return false
+	}
+	if triesAllowed(ctx, registry.PublishUnlockGrantRate, []string{grant}, unlockTriesPerGrant) {
+		return true
+	}
+	return triesAllowed(ctx, registry.PublishUnlockSlowRate, []string{ip, grant}, unlockTriesPastCeiling)
 }

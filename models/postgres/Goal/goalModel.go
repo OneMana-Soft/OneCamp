@@ -8,6 +8,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -369,7 +370,7 @@ func Links(goalIDs []uuid.UUID) (map[uuid.UUID][]uuid.UUID, error) {
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `
 		SELECT goal_id, project_uuid FROM goal_projects WHERE goal_id = ANY($1::uuid[]) ORDER BY added_at, project_uuid`,
-		pq.Array(uuidStrings(goalIDs)))
+		pq.Array(helpers.UUIDStrings(goalIDs)))
 	if err != nil {
 		return nil, err
 	}
@@ -382,14 +383,6 @@ func Links(goalIDs []uuid.UUID) (map[uuid.UUID][]uuid.UUID, error) {
 		out[g] = append(out[g], p)
 	}
 	return out, rows.Err()
-}
-
-func uuidStrings(ids []uuid.UUID) []string {
-	out := make([]string, len(ids))
-	for i, id := range ids {
-		out[i] = id.String()
-	}
-	return out
 }
 
 // AddCheckIn stores a check-in, posted now unless c.CreatedAt says when (an
@@ -512,7 +505,7 @@ func LatestCheckIns(goalIDs []uuid.UUID) (map[uuid.UUID]CheckIn, error) {
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `
 		SELECT DISTINCT ON (goal_id) `+checkInColumns+` FROM goal_checkins
 		 WHERE goal_id = ANY($1::uuid[]) AND deleted_at IS NULL
-		 ORDER BY goal_id, created_at DESC`, pq.Array(uuidStrings(goalIDs)))
+		 ORDER BY goal_id, created_at DESC`, pq.Array(helpers.UUIDStrings(goalIDs)))
 	if err != nil {
 		return nil, err
 	}

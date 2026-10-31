@@ -3,29 +3,18 @@ package business
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"path/filepath"
-	"strings"
 	"time"
 
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	attachmentDomain "github.com/akashc777/OneCamp/domain/Attachment"
-	commentDomain "github.com/akashc777/OneCamp/domain/Comment"
-	taskDomain "github.com/akashc777/OneCamp/domain/Task"
-	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/helpers/avscan"
-	"github.com/akashc777/OneCamp/helpers/uploadsafe"
-	minioInit "github.com/akashc777/OneCamp/initializers/minioInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
-	"github.com/minio/minio-go/v7"
 )
 
 // Default per-file size cap (1 GB). Operators bump via env if needed.
@@ -62,13 +51,19 @@ func processAttachmentChunk(ctx context.Context, prov importProvider.Provider,
 		maxBytes = int64(v)
 	}
 
-	// Idempotent: did we already create an attachment for this file?
-	if existing, _ := importModels.LookupIdMapping(ctx, job.Id,
-		importModels.EntityFile, meta.FileID); existing != uuid.Nil {
-		return importModels.FinishChunk(ctx, chunk.Id, 1, nil)
+	// A file the import has recorded is kept already: a chunk runs again
+	// only when its link or its finish didn't land, so it is linked again
+	// from the record, never fetched and kept twice. One recorded as a
+	// placeholder was never kept.
+	rec, err := fileRecordOf(ctx, job.Id, meta.FileID)
+	if err != nil {
+		return err
+	}
+	if rec != nil && rec.Placeholder {
+		return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
 	}
 
-	if meta.Size > 0 && meta.Size > maxBytes {
+	if rec == nil && meta.Size > 0 && meta.Size > maxBytes {
 		importModels.LogImportError(ctx, job.Id, &chunk.Id,
 			importModels.EntityFile, meta.FileID,
 			importModels.SeverityWarning, "FILE_TOO_LARGE",
@@ -83,7 +78,80 @@ func processAttachmentChunk(ctx context.Context, prov importProvider.Provider,
 		return fmt.Errorf("resolve parent: %w", err)
 	}
 
-	// Build the SourceAttachment for FetchAttachment.
+	if rec == nil {
+		if rec, err = keepFile(ctx, prov, job, opts, chunk, meta, parentInfo, importingUser, maxBytes); err != nil || rec == nil {
+			return err
+		}
+	}
+
+	dgAtt := keptFileNode(rec, time.Now(), importingUser.UserDgraphInfo.Uid)
+	if err := linkKeptFile(ctx, parentInfo, dgAtt, importingUser); err != nil {
+		return fmt.Errorf("link file %s: %w", rec.ID, err)
+	}
+	return importModels.FinishChunk(ctx, chunk.Id, 1, nil)
+}
+
+// keptFileNode is the graph node of a file an import kept, as its record
+// describes it, kept at by maker: the maker's own graph node's uid, or ""
+// when they have none, and then the node names no maker.
+func keptFileNode(rec *fileRecord, at time.Time, maker string) *dgraphStruct.DgraphAttachment {
+	node := &dgraphStruct.DgraphAttachment{
+		Uuid:      rec.ID.String(),
+		FileName:  rec.Name,
+		ObjectKey: rec.ObjKey,
+		Type:      attachmentBusiness.KindOf(rec.Name),
+		RawType:   rec.ContentType,
+		Size:      int(rec.Size),
+		CreatedAt: &at,
+		DType:     []string{"Attachment"},
+	}
+	if maker != "" {
+		node.CreatedBy = &dgraphStruct.DgraphUser{Uid: maker}
+	}
+	return node
+}
+
+// fileRecord is the import's record of a source file (its id map row's
+// metadata): one it kept, or a placeholder for one it couldn't.
+type fileRecord struct {
+	ID          uuid.UUID `json:"-"`
+	Name        string    `json:"name,omitempty"`
+	ObjKey      string    `json:"obj_key,omitempty"`
+	Size        int64     `json:"size,omitempty"`
+	ContentType string    `json:"content_type,omitempty"`
+	ParentKind  string    `json:"parent_kind,omitempty"`
+	ParentUUID  string    `json:"parent_uuid,omitempty"`
+	Placeholder bool      `json:"placeholder,omitempty"`
+}
+
+// fileRecordOf is the import's record of the source file fileID: nil when
+// it has none.
+func fileRecordOf(ctx context.Context, importID uuid.UUID, fileID string) (*fileRecord, error) {
+	id, err := importModels.LookupIdMapping(ctx, importID, importModels.EntityFile, fileID)
+	if err != nil || id == uuid.Nil {
+		return nil, err
+	}
+	raw, err := importModels.GetIdMapMetadata(ctx, importID, importModels.EntityFile, fileID)
+	if err != nil {
+		return nil, err
+	}
+	rec := &fileRecord{ID: id}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, rec); err != nil {
+			return nil, fmt.Errorf("read file %s's record: %w", fileID, err)
+		}
+	}
+	return rec, nil
+}
+
+// keepFile fetches the source's file and keeps it as a file of its place
+// (storeFile), then records it before anything links it, so a chunk that
+// runs again finds it kept. It answers nil, with the chunk finished, for a
+// file it doesn't keep: gone, empty or infected (a placeholder is recorded),
+// or past the cap.
+func keepFile(ctx context.Context, prov importProvider.Provider, job *importModels.Job, opts importProvider.JobOptions,
+	chunk *importModels.Chunk, meta *attachmentMeta, parentInfo *attachmentParentInfo, importingUser *userModels.UserInfo,
+	maxBytes int64) (*fileRecord, error) {
 	att := importProvider.SourceAttachment{
 		SourceID: meta.FileID,
 		Name:     meta.Name,
@@ -96,175 +164,66 @@ func processAttachmentChunk(ctx context.Context, prov importProvider.Provider,
 			SourceID: meta.ParentID,
 		},
 	}
-
-	bucket := helpers.UserUploadBucket()
-	attachmentUUID := uuid.New()
-	sanitizedName := helpers.SanitizeUploadFileName(meta.Name)
-	objKey := fmt.Sprintf("%s/%s_%s",
-		importingUser.UserPostgresInfo.Id, attachmentUUID, sanitizedName)
-	fullObjName := fmt.Sprintf("userFileUpload/%s", objKey)
-
-	// Download via the provider's FetchAttachment so OAuth-bearer
-	// providers can attach Authorization headers.
-	// Stream the provider's bytes through an io.Pipe into MinIO. The
-	// producer goroutine writes to pw; PutObject reads from pr. If
-	// PutObject returns an error mid-stream we MUST drain pr so the
-	// producer doesn't block on its next Write — otherwise the
-	// goroutine leaks for the lifetime of the process.
-	pr, pw := io.Pipe()
-	var (
-		fetchMime string
-		fetchSize int64
-		fetchErr  error
-	)
-	doneCh := make(chan struct{})
-	helpers.GoSafeNamed("business/Import/attachment_worker:processAttachmentChunk", func() {
-		defer close(doneCh)
-		fetchMime, fetchSize, fetchErr = prov.FetchAttachment(ctx, job, opts, att, pw)
-		// Always close (or close-with-error) so PutObject's read side
-		// returns. Without this the orchestrator can hang forever if
-		// the provider implementation forgets to close on the happy path.
-		if fetchErr != nil {
-			_ = pw.CloseWithError(fetchErr)
-		} else {
-			_ = pw.Close()
-		}
-	})
-
-	contentType := meta.Mime
-	if contentType == "" {
-		contentType = helpers.GuessContentTypeFromName(meta.Name)
-	}
-	// Coerce dangerous types and force attachment disposition. This
-	// is the same defence applied on the Slack import path: a malicious
-	// provider could serve text/html or image/svg+xml that browsers
-	// render inline. uploadsafe.SafeContentType strips dangerous types
-	// to application/octet-stream; BuildDisposition forces download.
-	contentType = uploadsafe.SafeContentType(contentType, filepath.Ext(meta.Name))
-	disposition := uploadsafe.BuildDisposition(sanitizedName)
-
-	uploadInfo, scanResult, err := attachmentBusiness.SafeUploadToMinio(ctx,
-		io.LimitReader(pr, maxBytes+1),
-		attachmentBusiness.SafeUploadOptions{
-			Bucket:             bucket,
-			ObjectName:         fullObjName,
-			ContentType:        contentType,
-			ContentDisposition: disposition,
-			Size:               -1,
-		})
-
+	stored, err := storeFile(ctx, prov, job, opts, att, parentInfo.SrcKey, parentInfo.SrcValue, importingUser.UserPostgresInfo.Id, maxBytes)
 	if err != nil {
-		// PutObject failed (network, MinIO error, ctx cancelled). The
-		// producer might still be writing; close the read side with an
-		// error so its Write returns immediately and the goroutine exits.
-		_ = pr.CloseWithError(err)
-	}
-	<-doneCh
-	if fetchErr != nil {
-		// Clean up the partial upload (it may or may not exist).
-		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucket, fullObjName, minio.RemoveObjectOptions{})
-		if errors.Is(fetchErr, importProvider.ErrAttachmentGone) {
-			importModels.LogImportError(ctx, job.Id, &chunk.Id,
-				importModels.EntityFile, meta.FileID,
-				importModels.SeverityWarning, "FILE_GONE",
-				"provider reported attachment gone (404/410); placeholder created",
-				mustMarshal(map[string]any{"url": meta.URL}))
-			ph := uuid.New()
-			_ = importModels.UpsertIdMapping(ctx, job.Id, importModels.EntityFile,
-				meta.FileID, ph, nil,
-				mustMarshal(map[string]any{"placeholder": true, "reason": "gone"}))
-			return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
-		}
-		if rl, isRL := importProvider.IsRateLimited(fetchErr); isRL {
+		if rl, isRL := importProvider.IsRateLimited(err); isRL {
 			// Napped, not slept out: a worker asleep past five minutes has
 			// its claim on the chunk taken for a stuck one.
-			waitOutRateLimit(ctx, job, fetchErr, rl)
+			waitOutRateLimit(ctx, job, err, rl)
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return nil, ctx.Err()
 			}
 			_ = importModels.ResetChunkForRetry(ctx, chunk.Id, "provider rate-limited")
-			return errReaperOnly
+			return nil, errReaperOnly
 		}
-		return fmt.Errorf("FetchAttachment: %w", fetchErr)
+		return nil, fmt.Errorf("FetchAttachment: %w", err)
 	}
-	if err != nil {
-		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucket, fullObjName, minio.RemoveObjectOptions{})
-		return fmt.Errorf("minio put: %w", err)
-	}
-
-	// AV verdict handling. Infected → drop the file with a placeholder
-	// row in id_map so retries don't re-fetch.
-	if scanResult.Verdict == avscan.VerdictInfected {
-		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucket, fullObjName, minio.RemoveObjectOptions{})
+	switch stored.Outcome {
+	case fileGone, fileEmpty:
+		code, said := "FILE_GONE", "provider reported attachment gone (404/410); placeholder created"
+		if stored.Outcome == fileEmpty {
+			code, said = "FILE_EMPTY", fmt.Sprintf("%s is empty, so there's nothing to keep; placeholder created", meta.Name)
+		}
+		importModels.LogImportError(ctx, job.Id, &chunk.Id,
+			importModels.EntityFile, meta.FileID,
+			importModels.SeverityWarning, code, said,
+			mustMarshal(map[string]any{"url": meta.URL}))
+		if err := importModels.UpsertIdMapping(ctx, job.Id, importModels.EntityFile,
+			meta.FileID, uuid.New(), nil,
+			mustMarshal(map[string]any{"placeholder": true, "reason": stored.Outcome})); err != nil {
+			return nil, err
+		}
+		return nil, importModels.FinishChunk(ctx, chunk.Id, 0, nil)
+	case fileInfected:
+		// Infected: dropped, with a placeholder in the id map so retries
+		// don't fetch it again.
 		importModels.LogImportError(ctx, job.Id, &chunk.Id,
 			importModels.EntityFile, meta.FileID,
 			importModels.SeverityError, "FILE_INFECTED",
-			fmt.Sprintf("AV scan detected %s in %s; file dropped", scanResult.Signature, meta.Name),
+			fmt.Sprintf("AV scan detected %s in %s; file dropped", stored.Signature, meta.Name),
 			mustMarshal(map[string]any{
-				"signature": scanResult.Signature, "name": meta.Name, "url": meta.URL,
+				"signature": stored.Signature, "name": meta.Name, "url": meta.URL,
 			}))
-		ph := uuid.New()
-		_ = importModels.UpsertIdMapping(ctx, job.Id, importModels.EntityFile, meta.FileID,
-			ph, nil, mustMarshal(map[string]any{
-				"placeholder": true, "reason": "av_infected", "signature": scanResult.Signature,
-			}))
-		return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
-	}
-
-	if uploadInfo.Size > maxBytes {
-		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucket, fullObjName, minio.RemoveObjectOptions{})
+		if err := importModels.UpsertIdMapping(ctx, job.Id, importModels.EntityFile, meta.FileID,
+			uuid.New(), nil, mustMarshal(map[string]any{
+				"placeholder": true, "reason": "av_infected", "signature": stored.Signature,
+			})); err != nil {
+			return nil, err
+		}
+		return nil, importModels.FinishChunk(ctx, chunk.Id, 0, nil)
+	case fileTooLarge:
 		importModels.LogImportError(ctx, job.Id, &chunk.Id,
 			importModels.EntityFile, meta.FileID,
 			importModels.SeverityWarning, "FILE_TOO_LARGE_STREAM",
 			fmt.Sprintf("file %s exceeded cap during stream", meta.Name), nil)
-		return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
+		return nil, importModels.FinishChunk(ctx, chunk.Id, 0, nil)
 	}
-	_ = fetchSize // size from MinIO is authoritative
-	if fetchMime != "" {
-		contentType = fetchMime
+	rec := &fileRecord{ID: stored.ID, Name: meta.Name, ObjKey: stored.ObjKey, Size: stored.Size, ContentType: stored.ContentType,
+		ParentKind: parentInfo.Kind, ParentUUID: parentInfo.ParentUUID.String()}
+	if err := importModels.UpsertIdMapping(ctx, job.Id, importModels.EntityFile, meta.FileID, rec.ID, nil, mustMarshal(rec)); err != nil {
+		return nil, err
 	}
-
-	// PG attachments row.
-	if err := attachmentBusiness.CreateAttachment(ctx, attachmentUUID, objKey,
-		importingUser.UserPostgresInfo.Id, parentInfo.SrcKey, parentInfo.SrcValue); err != nil {
-		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucket, fullObjName, minio.RemoveObjectOptions{})
-		return fmt.Errorf("create attachment row: %w", err)
-	}
-
-	// Dgraph attachment node + parent edge.
-	createdAt := time.Now()
-	dgAtt := &dgraphStruct.DgraphAttachment{
-		Uuid:      attachmentUUID.String(),
-		FileName:  meta.Name,
-		ObjectKey: objKey,
-		Type:      classifyAttachmentByName(meta.Name),
-		RawType:   contentType,
-		Size:      int(uploadInfo.Size),
-		CreatedAt: &createdAt,
-		CreatedBy: &dgraphStruct.DgraphUser{Uuid: importingUser.UserDgraphInfo.Uuid},
-		DType:     []string{"Attachment"},
-	}
-	if _, err := attachmentDomain.BulkAddAttachmentsToDgraph(ctx,
-		[]*dgraphStruct.DgraphAttachment{dgAtt}); err != nil {
-		helpers.LogWarnWithContext(ctx,
-			"Import attachment %s: dgraph node write failed: %+v", attachmentUUID, err)
-	}
-
-	// Parent edge + OpenSearch doc.
-	if err := retrofitAttachmentToParent(ctx, parentInfo, dgAtt, importingUser); err != nil {
-		helpers.LogWarnWithContext(ctx,
-			"Import attachment %s: parent retrofit failed: %+v", attachmentUUID, err)
-	}
-
-	return importModels.UpsertIdMappingThenFinish(ctx, job.Id, chunk.Id,
-		importModels.EntityFile, meta.FileID, attachmentUUID,
-		mustMarshal(map[string]any{
-			"name":        meta.Name,
-			"obj_key":     objKey,
-			"size":        uploadInfo.Size,
-			"parent_kind": parentInfo.Kind,
-			"parent_uuid": parentInfo.ParentUUID.String(),
-		}))
+	return rec, nil
 }
 
 // attachmentMeta is the parsed form of the chunk's object_key.
@@ -371,85 +330,46 @@ func resolveAttachmentParent(ctx context.Context, job *importModels.Job,
 	return out, nil
 }
 
-// retrofitAttachmentToParent stitches the imported attachment to its
-// parent in Dgraph and writes the OpenSearch index entry. Best-effort:
-// the file is in MinIO and PG already.
-func retrofitAttachmentToParent(ctx context.Context, p *attachmentParentInfo,
-	dgAtt *dgraphStruct.DgraphAttachment, importingUser *userModels.UserInfo) error {
+// linkFile is the one link of a file to its task or comment in the graph. A
+// seam for tests.
+var linkFile = attachmentDomain.LinkFile
 
+// writeFileNode writes a project's kept file's node alone, by its uuid; a seam
+// for tests.
+var writeFileNode = attachmentDomain.WriteFileNode
+
+// linkKeptFile puts a kept file in the graph as its place shows it: linked
+// under its task or comment (linkFile, which writes the file's node too), or,
+// a project's, the node alone; then writes its search entry. Each graph write
+// can run again, and one that fails is answered, so the chunk runs again.
+func linkKeptFile(ctx context.Context, p *attachmentParentInfo,
+	dgAtt *dgraphStruct.DgraphAttachment, importingUser *userModels.UserInfo) error {
+	osAtt := &openSearchStruct.OpenSearchAttachment{
+		Uuid:                     dgAtt.Uuid,
+		AttachmentByUserUuid:     importingUser.UserDgraphInfo.Uuid,
+		AttachmentByUserFullName: importingUser.UserDgraphInfo.DisplayName(),
+		AttachmentFileName:       dgAtt.FileName,
+		AttachmentObjKey:         dgAtt.ObjectKey,
+		AttachmentCreatedAt:      safeUnix(dgAtt.CreatedAt),
+	}
 	switch p.Kind {
 	case "task":
-		// Add the attachment edge from Task → Attachment via a per-uuid
-		// upsert. We don't have a domain helper for this single edge,
-		// so use a small Dgraph mutation through the existing
-		// CreateOrUpdateDgraphTask.
-		dgTask := &dgraphStruct.DgraphTask{
-			Uid:         "uid(ta)",
-			Uuid:        p.TaskUUID.String(),
-			Attachments: []*dgraphStruct.DgraphAttachment{dgAtt},
+		if err := linkFile(ctx, "task", p.TaskUUID.String(), dgAtt); err != nil {
+			return err
 		}
-		_ = dgTask
-		// Reuse CreateOrUpdateDgraphTask via the low-level helper that
-		// supports query+upsert. We do this by constructing a DgraphTask
-		// with the existing uuid and the new attachment, and calling
-		// the canonical creator. The mutation appends to the @reverse
-		// edge cleanly because edges in dgraph are sets.
-		//
-		// We use the task domain helper to keep the upsert query cached.
-		if _, err := taskDomain.CreateOrUpdateDgraphTask(ctx, dgTask); err != nil {
-			helpers.LogWarnWithContext(ctx,
-				"retrofit task attachment dgraph: %+v", err)
-		}
-
-		osAtt := &openSearchStruct.OpenSearchAttachment{
-			Uuid:                     dgAtt.Uuid,
-			AttachmentByUserUuid:     importingUser.UserDgraphInfo.Uuid,
-			AttachmentByUserFullName: importingUser.UserDgraphInfo.DisplayName(),
-			AttachmentFileName:       dgAtt.FileName,
-			AttachmentObjKey:         dgAtt.ObjectKey,
-			AttachmentTaskUuid:       p.TaskUUID.String(),
-			AttachmentProjectUuid:    p.ProjectUUID.String(),
-			AttachmentCreatedAt:      safeUnix(dgAtt.CreatedAt),
-		}
-		goSafe(ctx, "attachment_opensearch", func() { attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAtt) })
-
+		osAtt.AttachmentTaskUuid, osAtt.AttachmentProjectUuid = p.TaskUUID.String(), p.ProjectUUID.String()
 	case "comment":
-		dgComment := &dgraphStruct.DgraphComment{
-			Uid:         "uid(co)",
-			Uuid:        p.ParentUUID.String(),
-			Attachments: []*dgraphStruct.DgraphAttachment{dgAtt},
+		if err := linkFile(ctx, "comment", p.ParentUUID.String(), dgAtt); err != nil {
+			return err
 		}
-		// Reuse the comment update helper which writes the comment node
-		// and resets mentions; the attachment edge is appended cleanly.
-		if err := commentDomain.UpdateDgraphCommentAndResetMentions(ctx, dgComment, p.ParentUUID.String()); err != nil {
-			helpers.LogWarnWithContext(ctx,
-				"retrofit comment attachment dgraph: %+v", err)
-		}
-
-		osAtt := &openSearchStruct.OpenSearchAttachment{
-			Uuid:                     dgAtt.Uuid,
-			AttachmentByUserUuid:     importingUser.UserDgraphInfo.Uuid,
-			AttachmentByUserFullName: importingUser.UserDgraphInfo.DisplayName(),
-			AttachmentFileName:       dgAtt.FileName,
-			AttachmentObjKey:         dgAtt.ObjectKey,
-			AttachmentCommentUuid:    p.ParentUUID.String(),
-			AttachmentTaskUuid:       p.TaskUUID.String(),
-			AttachmentCreatedAt:      safeUnix(dgAtt.CreatedAt),
-		}
-		goSafe(ctx, "attachment_opensearch", func() { attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAtt) })
-
+		osAtt.AttachmentCommentUuid, osAtt.AttachmentTaskUuid = p.ParentUUID.String(), p.TaskUUID.String()
 	case "project":
-		osAtt := &openSearchStruct.OpenSearchAttachment{
-			Uuid:                     dgAtt.Uuid,
-			AttachmentByUserUuid:     importingUser.UserDgraphInfo.Uuid,
-			AttachmentByUserFullName: importingUser.UserDgraphInfo.DisplayName(),
-			AttachmentFileName:       dgAtt.FileName,
-			AttachmentObjKey:         dgAtt.ObjectKey,
-			AttachmentProjectUuid:    p.ProjectUUID.String(),
-			AttachmentCreatedAt:      safeUnix(dgAtt.CreatedAt),
+		if err := writeFileNode(ctx, dgAtt); err != nil {
+			return err
 		}
-		goSafe(ctx, "attachment_opensearch", func() { attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAtt) })
+		osAtt.AttachmentProjectUuid = p.ProjectUUID.String()
 	}
+	goSafe(ctx, "attachment_opensearch", func() { attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAtt) })
 	return nil
 }
 
@@ -459,22 +379,6 @@ func retrofitAttachmentToParent(ctx context.Context, p *attachmentParentInfo,
 // package can't import this one. The legacy reference is left here as
 // a doc breadcrumb.
 //
-// classifyAttachmentByName mirrors the slack file_worker logic.
-func classifyAttachmentByName(name string) string {
-	ext := strings.ToLower(filepath.Ext(name))
-	switch ext {
-	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
-		return "image"
-	case ".pdf", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".csv":
-		return "document"
-	case ".mp3", ".wav", ".ogg", ".m4a", ".weba":
-		return "audio"
-	case ".mp4", ".mov", ".webm", ".avi", ".mkv":
-		return "video"
-	default:
-		return "other"
-	}
-}
 
 func safeUnix(t *time.Time) int64 {
 	if t == nil {

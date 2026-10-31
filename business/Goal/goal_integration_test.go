@@ -254,6 +254,30 @@ func TestGoals(t *testing.T) {
 	if _, err := Edit(ctx, stranger, topID, in("Mine now", goalModel.MeasureSubgoals), now); !errors.Is(err, ErrNotYours) {
 		t.Fatalf("a stranger can't edit: %v", err)
 	}
+	g1ID, g2ID := uuid.MustParse(g1.Id), uuid.MustParse(g2.Id)
+	if err := LinkProject(ctx, stranger, g1ID, theirs, now); !errors.Is(err, ErrNotYours) {
+		t.Errorf("a stranger can't add a project to it: %v", err)
+	}
+	if err := UnlinkProject(stranger, g1ID, mine); !errors.Is(err, ErrNotYours) {
+		t.Errorf("a stranger can't take a project off it: %v", err)
+	}
+	jonas := &userModels.UserInfo{}
+	jonas.UserPostgresInfo.Id = other
+	if _, err := PostCheckIn(ctx, jonas, stranger, g2ID, CheckInInput{Health: updateModel.OffTrack, Body: "Mine now"}, now); !errors.Is(err, ErrNotYours) {
+		t.Errorf("a stranger can't check in on it: %v", err)
+	}
+	if _, err := EditCheckIn(ctx, stranger, g2ID, posted.CheckIn.Id, updateModel.OffTrack, "Mine now"); !errors.Is(err, ErrCheckInNotYours) {
+		t.Errorf("a stranger can't edit Maya's check-in: %v", err)
+	}
+	if err := DeleteCheckIn(stranger, g2ID, posted.CheckIn.Id); !errors.Is(err, ErrCheckInNotYours) {
+		t.Errorf("a stranger can't delete Maya's check-in: %v", err)
+	}
+	if err := Reopen(stranger, g2ID); !errors.Is(err, ErrNotYours) {
+		t.Errorf("a stranger can't reopen it: %v", err)
+	}
+	if err := Delete(stranger, topID); !errors.Is(err, ErrNotYours) {
+		t.Errorf("a stranger can't delete it: %v", err)
+	}
 	stranger.IsAdmin = true
 	if _, err := Edit(ctx, stranger, topID, in("Grow revenue 40%", goalModel.MeasureSubgoals), now); err != nil {
 		t.Fatalf("a workspace admin can: %v", err)

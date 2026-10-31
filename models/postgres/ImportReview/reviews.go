@@ -1,9 +1,11 @@
 // Package models keeps the reviews of people old Todoist and Notion imports
-// made members of their projects (import_member_reviews, migration 510).
+// made members of their projects, and the clients old Basecamp imports did
+// (import_member_reviews, migrations 510 and 511).
 package models
 
 import (
 	"context"
+	"database/sql"
 	"slices"
 	"time"
 
@@ -20,17 +22,25 @@ const (
 	OutcomeKept    = "kept"
 )
 
+// ReasonBasecampClient is why a person is listed whom an old Basecamp import
+// made a member of a project though Basecamp keeps them out of its projects:
+// a client (migration 511's reason).
+const ReasonBasecampClient = "basecamp_client"
+
 // Candidate is a person an old import made a member of one of its projects,
-// before anyone checks that they are still in it.
+// before anyone checks that they are still in it, and why they are listed:
+// "" for everyone such an import added, or ReasonBasecampClient.
 type Candidate struct {
 	ImportID    uuid.UUID
 	Provider    string
 	ProjectUUID uuid.UUID
 	UserID      uuid.UUID
+	Reason      string
 }
 
 // Review is one person still in one project an old import made them a member
-// of, and what an admin decided ("" until one does).
+// of, why they are listed (Reason, as a Candidate's), and what an admin
+// decided ("" until one does).
 type Review struct {
 	ID          uuid.UUID  `json:"id"`
 	ImportID    uuid.UUID  `json:"import_id"`
@@ -39,54 +49,83 @@ type Review struct {
 	ProjectName string     `json:"project_name"`
 	UserID      uuid.UUID  `json:"user_uuid"`
 	UserName    string     `json:"user_name"`
+	Reason      string     `json:"reason,omitempty"`
 	Outcome     string     `json:"outcome,omitempty"`
 	DecidedBy   *uuid.UUID `json:"decided_by,omitempty"`
 	DecidedAt   *time.Time `json:"decided_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 }
 
+// candidatesOf is each person an import matched with each project it made or
+// mapped, leaving out whoever ran the import and the project's creator (who
+// can't be taken off it): what Candidates and CandidatesIn read.
+const candidatesOf = `
+	SELECT DISTINCT j.id, j.provider, pm.onecamp_uuid, um.onecamp_uuid
+	FROM import_jobs j
+	JOIN import_id_map pm ON pm.import_id = j.id AND pm.entity_type = 'project'
+	JOIN projects p ON p.id = pm.onecamp_uuid
+	JOIN import_id_map um ON um.import_id = j.id AND um.entity_type = 'user'
+	JOIN users u ON u.id = um.onecamp_uuid
+	WHERE um.onecamp_uuid IS DISTINCT FROM j.triggered_by
+	  AND um.onecamp_uuid IS DISTINCT FROM p.created_by`
+
+func scanCandidate(r pgexec.Row) (Candidate, error) {
+	var c Candidate
+	err := r.Scan(&c.ImportID, &c.Provider, &c.ProjectUUID, &c.UserID)
+	return c, err
+}
+
 // Candidates reads, for the providers' imports, each person an import matched
-// with each live project it made or mapped, leaving out whoever ran the
-// import and the project's creator (who can't be taken off it). With
+// with each live project it made or mapped (candidatesOf). With
 // firstRunBefore set, only the imports whose first run started before it:
 // those the importers ran before their fix (one never run, by when it was
 // made). Nil counts every import.
 func Candidates(ctx context.Context, providers []string, firstRunBefore *time.Time) ([]Candidate, error) {
-	return pgexec.Query(ctx, `
-		SELECT DISTINCT j.id, j.provider, pm.onecamp_uuid, um.onecamp_uuid
-		FROM import_jobs j
-		JOIN import_id_map pm ON pm.import_id = j.id AND pm.entity_type = 'project'
-		JOIN projects p ON p.id = pm.onecamp_uuid AND p.deleted_at IS NULL
-		JOIN import_id_map um ON um.import_id = j.id AND um.entity_type = 'user'
-		JOIN users u ON u.id = um.onecamp_uuid
-		WHERE j.provider = ANY($1)
+	return pgexec.Query(ctx, candidatesOf+`
+		  AND p.deleted_at IS NULL
+		  AND j.provider = ANY($1)
 		  AND ($2::timestamptz IS NULL OR COALESCE(j.started_at, j.created_at) < $2)
-		  AND um.onecamp_uuid IS DISTINCT FROM j.triggered_by
-		  AND um.onecamp_uuid IS DISTINCT FROM p.created_by
-		ORDER BY j.id, pm.onecamp_uuid, um.onecamp_uuid`,
-		func(r pgexec.Row) (Candidate, error) {
-			var c Candidate
-			err := r.Scan(&c.ImportID, &c.Provider, &c.ProjectUUID, &c.UserID)
-			return c, err
-		}, pq.Array(providers), firstRunBefore)
+		ORDER BY j.id, pm.onecamp_uuid, um.onecamp_uuid`, scanCandidate, pq.Array(providers), firstRunBefore)
 }
 
-// addBatch is how many reviews one INSERT writes: at four binds a review, a
+// CandidatesIn reads, of one import, each of users it matched with each
+// project it made or mapped (candidatesOf), archived ones too: restoring a
+// project brings its people back into it.
+func CandidatesIn(ctx context.Context, importID uuid.UUID, users []uuid.UUID) ([]Candidate, error) {
+	return pgexec.Query(ctx, candidatesOf+`
+		  AND j.id = $1 AND um.onecamp_uuid = ANY($2::uuid[])
+		ORDER BY pm.onecamp_uuid, um.onecamp_uuid`, scanCandidate, importID, pq.Array(helpers.UUIDStrings(users)))
+}
+
+// AddedBy reads, of some imports, everyone each matched with each project it
+// made or mapped (candidatesOf), archived ones too: whom an import of people
+// that can't be re-checked lists, in one read for them all.
+func AddedBy(ctx context.Context, importIDs []uuid.UUID) ([]Candidate, error) {
+	return pgexec.Query(ctx, candidatesOf+`
+		  AND j.id = ANY($1::uuid[])
+		ORDER BY j.id, pm.onecamp_uuid, um.onecamp_uuid`, scanCandidate, pq.Array(helpers.UUIDStrings(importIDs)))
+}
+
+// addBatch is how many reviews one INSERT writes: at five binds a review, a
 // batch stays far under Postgres's 65,535 binds in a statement.
 const addBatch = 1000
 
 // Add records a review for each candidate, once per person and project, in
-// batches: a second pass, or a second server starting at once, adds nothing.
-// It answers how many were new.
+// batches: a second pass, or a second server starting at once, adds nothing
+// new. A candidate with a reason flags an undecided review listed without
+// one (a re-check finding a Basecamp client among everyone an import added);
+// a review an admin decided stays as they left it. It answers how many
+// reviews were new or flagged.
 func Add(ctx context.Context, cs []Candidate) (int64, error) {
 	var added int64
-	for batch := range slices.Chunk(cs, addBatch) {
-		args := make([]any, 0, len(batch)*4)
+	for batch := range slices.Chunk(onePerPlace(cs), addBatch) {
+		args := make([]any, 0, len(batch)*5)
 		for _, c := range batch {
-			args = append(args, c.ImportID, c.Provider, c.ProjectUUID, c.UserID)
+			args = append(args, c.ImportID, c.Provider, c.ProjectUUID, c.UserID, sql.NullString{String: c.Reason, Valid: c.Reason != ""})
 		}
-		n, err := pgexec.Exec(ctx, `INSERT INTO import_member_reviews (import_id, provider, project_uuid, user_id) VALUES `+
-			helpers.RowPlaceholders(len(batch), 4)+` ON CONFLICT (project_uuid, user_id) DO NOTHING`, args...)
+		n, err := pgexec.Exec(ctx, `INSERT INTO import_member_reviews (import_id, provider, project_uuid, user_id, reason) VALUES `+
+			helpers.RowPlaceholders(len(batch), 5)+` ON CONFLICT (project_uuid, user_id) DO UPDATE SET reason = EXCLUDED.reason
+			WHERE import_member_reviews.reason IS NULL AND import_member_reviews.outcome IS NULL AND EXCLUDED.reason IS NOT NULL`, args...)
 		added += n
 		if err != nil {
 			return added, err
@@ -95,8 +134,41 @@ func Add(ctx context.Context, cs []Candidate) (int64, error) {
 	return added, nil
 }
 
+// onePerPlace is cs with one candidate per person and project, one with a
+// reason over one without: one statement may not both insert a review and
+// flag it. Pure.
+func onePerPlace(cs []Candidate) []Candidate {
+	type place struct{ project, user uuid.UUID }
+	at := make(map[place]int, len(cs))
+	out := make([]Candidate, 0, len(cs))
+	for _, c := range cs {
+		k := place{c.ProjectUUID, c.UserID}
+		i, seen := at[k]
+		switch {
+		case !seen:
+			at[k] = len(out)
+			out = append(out, c)
+		case out[i].Reason == "":
+			out[i] = c
+		}
+	}
+	return out
+}
+
+// DropGuesses deletes an import's undecided reviews listed without a reason
+// (everyone the import added) of users its source has since shown to belong
+// in its projects, and answers how many.
+func DropGuesses(ctx context.Context, importID uuid.UUID, users []uuid.UUID) (int64, error) {
+	if len(users) == 0 {
+		return 0, nil
+	}
+	return pgexec.Exec(ctx, `DELETE FROM import_member_reviews
+		WHERE import_id = $1 AND user_id = ANY($2::uuid[]) AND reason IS NULL AND outcome IS NULL`, importID, pq.Array(helpers.UUIDStrings(users)))
+}
+
 const reviewColumns = `r.id, r.import_id, r.provider, r.project_uuid, COALESCE(p.project_name, ''), r.user_id,
-	COALESCE(NULLIF(u.display_name, ''), u.username, ''), COALESCE(r.outcome, ''), r.decided_by, r.decided_at, r.created_at
+	COALESCE(NULLIF(u.display_name, ''), u.username, ''), COALESCE(r.reason, ''), COALESCE(r.outcome, ''), r.decided_by, r.decided_at,
+	r.created_at
 	FROM import_member_reviews r
 	LEFT JOIN projects p ON p.id = r.project_uuid
 	LEFT JOIN users u ON u.id = r.user_id`
@@ -104,7 +176,7 @@ const reviewColumns = `r.id, r.import_id, r.provider, r.project_uuid, COALESCE(p
 func scanReview(row pgexec.Row) (Review, error) {
 	var r Review
 	err := row.Scan(&r.ID, &r.ImportID, &r.Provider, &r.ProjectUUID, &r.ProjectName, &r.UserID, &r.UserName,
-		&r.Outcome, &r.DecidedBy, &r.DecidedAt, &r.CreatedAt)
+		&r.Reason, &r.Outcome, &r.DecidedBy, &r.DecidedAt, &r.CreatedAt)
 	return r, err
 }
 

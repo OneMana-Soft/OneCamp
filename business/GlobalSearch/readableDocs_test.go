@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	liveness "github.com/akashc777/OneCamp/domain/Liveness"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
@@ -115,7 +116,7 @@ func TestUnifiedSearchChecksEveryDocHitWithTheGraph(t *testing.T) {
 		return map[string]bool{unreadableDoc: false}, nil
 	})
 
-	p, err := GetUnifiedGlobalSearch(context.Background(), "me", "me@example.test", nil, nil, nil, "salaries")
+	p, err := GetUnifiedGlobalSearch(context.Background(), accessBusiness.Subject{UserUUID: "me"}, "me@example.test", nil, nil, nil, "salaries")
 	if err != nil {
 		t.Fatal(err)
 	}

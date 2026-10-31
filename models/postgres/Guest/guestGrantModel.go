@@ -25,6 +25,9 @@ import (
 // Resource types and capabilities.
 const (
 	ResourceMeeting = "meeting"
+	// ResourceCall is one call's invite (HU13): its resource id is the call
+	// (business/CallState's session), and it opens that call alone.
+	ResourceCall    = "call"
 	ResourceDoc     = "doc"
 	ResourceBoard   = "board"
 	ResourceTable   = "table"
@@ -84,10 +87,34 @@ func IsStanding(g *GuestGrant) bool {
 	return g != nil && g.ResourceType == ResourceMeeting && g.Slug != nil
 }
 
+// StandingOf is a resource's standing link among its links (a personal
+// room's, nil for none), and the others in their order: what a room's host
+// is shown, and which links "turn off the earlier links" may turn off. Pure.
+func StandingOf(links []*GuestGrant) (*GuestGrant, []*GuestGrant) {
+	var standing *GuestGrant
+	others := make([]*GuestGrant, 0, len(links))
+	for _, g := range links {
+		if IsStanding(g) {
+			if standing == nil {
+				standing = g
+			}
+			continue
+		}
+		others = append(others, g)
+	}
+	return standing, others
+}
+
 // liveSQL is the one SQL predicate for a live grant, the cap as parameter n:
 // not revoked, not past its own expiry, and, unless standing or there is no
 // cap, made less than the cap's days ago. business/Guest grantExpired is its
 // Go side.
+// LiveGrantsSQL is a subquery of the live grants' ids, the link cap its $n:
+// for the rows of another table that hang off a grant (call_admissions).
+func LiveGrantsSQL(n int) string {
+	return `SELECT id FROM guest_grants WHERE ` + liveSQL(n)
+}
+
 func liveSQL(n int) string {
 	p := fmt.Sprintf("$%d::int", n)
 	return `revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) AND (` + p + ` = 0 OR ` + StandingSQL +
@@ -137,13 +164,15 @@ func scanGrant(s scanner) (*GuestGrant, error) {
 
 // CreateGrant inserts a new grant (token hash + scope) and returns its id.
 // expiresAt nil creates a grant that lasts until it is revoked.
+//
+// It runs through pgexec, so inside pgexec.InTx it is part of that
+// transaction: a personal room's link is made and published at its address
+// in one (business/Guest NewRoom).
 func CreateGrant(ctx context.Context, tokenHash []byte, resourceType, resourceID, capability string, createdBy uuid.UUID, expiresAt *time.Time) (uuid.UUID, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
 	id := uuid.New()
 	const q = `INSERT INTO guest_grants (id, token_hash, resource_type, resource_id, capability, created_by, expires_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)`
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, tokenHash, resourceType, resourceID, capability, createdBy, expiresAt)
+	_, err := pgexec.Exec(ctx, q, id, tokenHash, resourceType, resourceID, capability, createdBy, expiresAt)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Guest/CreateGrant err: %+v", err)
 		return uuid.Nil, err
@@ -170,12 +199,13 @@ func GetActiveByHash(ctx context.Context, tokenHash []byte) (*GuestGrant, error)
 }
 
 // GetByID returns a grant by id regardless of state (admin lookup).
+//
+// Inside pgexec.InTx it reads that transaction's rows: a room's link is
+// published in the transaction that made it.
 func GetByID(ctx context.Context, id uuid.UUID) (*GuestGrant, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
 	const q = `SELECT ` + grantColumns + ` FROM guest_grants WHERE id=$1`
-	g, err := scanGrant(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id))
-	if errors.Is(err, sql.ErrNoRows) {
+	g, ok, err := pgexec.QueryOne(ctx, q, grantRow, id)
+	if err == nil && !ok {
 		return nil, nil
 	}
 	if err != nil {
@@ -206,17 +236,16 @@ func Revoke(ctx context.Context, id uuid.UUID) error {
 
 // RevokeLiveForResource turns off every live grant to one resource (revoked
 // as Revoke does; expired ones are left as they are) and answers how many.
+// Inside pgexec.InTx it is part of that transaction: a personal room's links
+// end with its meeting (business/CallRoom Close).
 func RevokeLiveForResource(ctx context.Context, resourceType, resourceID string) (int64, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
 	q := `UPDATE guest_grants SET revoked_at=NOW()
 		WHERE resource_type = $1 AND resource_id = $2 AND ` + liveSQL(3)
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, resourceType, resourceID, LinkCapDays(ctx))
+	n, err := pgexec.Exec(ctx, q, resourceType, resourceID, LinkCapDays(ctx))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Guest/RevokeLiveForResource err: %+v", err)
 		return 0, err
 	}
-	n, _ := res.RowsAffected()
 	return n, nil
 }
 
@@ -308,25 +337,44 @@ func WithActiveGrants(ctx context.Context, resourceType string, ids []string) (m
 
 // ListActiveForResource is the live grants to one resource, newest first.
 func ListActiveForResource(ctx context.Context, resourceType, resourceID string) ([]*GuestGrant, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
 	q := `SELECT ` + grantColumns + ` FROM guest_grants
 		WHERE resource_type = $1 AND resource_id = $2 AND ` + liveSQL(3) + `
 		ORDER BY created_at DESC LIMIT 100`
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, resourceType, resourceID, LinkCapDays(ctx))
+	out, err := pgexec.Query(ctx, q, grantRow, resourceType, resourceID, LinkCapDays(ctx))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []*GuestGrant{}
-	for rows.Next() {
-		g, err := scanGrant(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, g)
+	if out == nil {
+		out = []*GuestGrant{}
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+// AddressesOf is the address of each room's live standing link, by room, in
+// one read: what a page of calendar events shows of their calls (calendar
+// B11). A room with none is left out.
+func AddressesOf(ctx context.Context, rooms []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(rooms) == 0 {
+		return out, nil
+	}
+	q := `SELECT ` + grantColumns + ` FROM guest_grants
+		WHERE resource_type = $1 AND resource_id = ANY($2) AND ` + StandingSQL + ` AND ` + liveSQL(3)
+	links, err := pgexec.Query(ctx, q, grantRow, ResourceMeeting, rooms, LinkCapDays(ctx))
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range links {
+		out[g.ResourceID] = *g.Slug
+	}
+	return out, nil
+}
+
+// ListLiveStanding is every live standing link (a personal room's), for
+// putting their guests out of the rooms' calls when rooms are turned off.
+func ListLiveStanding(ctx context.Context) ([]*GuestGrant, error) {
+	q := `SELECT ` + grantColumns + ` FROM guest_grants WHERE ` + StandingSQL + ` AND ` + liveSQL(1)
+	return pgexec.Query(ctx, q, grantRow, LinkCapDays(ctx))
 }
 
 // GetLiveBySlug is the grant a published address names: nobody revoked it.
@@ -361,22 +409,13 @@ type Publication struct {
 
 // Publish publishes a live grant at an address, and takes the address off
 // any other live grant to the same resource: a doc has one published page.
-// ErrSlugTaken when another resource's live grant has the address.
+// ErrSlugTaken when another resource's live grant has the address. Its two
+// statements are one transaction (pgexec.InTx), or part of the caller's.
 func Publish(ctx context.Context, id uuid.UUID, p Publication) (*GuestGrant, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	tx, err := postgresInit.DBConn.SqlDB.BeginTx(dbctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback() }()
 	const others = `UPDATE guest_grants SET slug = NULL, indexable = false, allow_copies = false, password_hash = NULL,
 		unlock_version = unlock_version + 1, published_at = NULL, published_by = NULL
 		WHERE id <> $1 AND slug IS NOT NULL AND revoked_at IS NULL
 		  AND (resource_type, resource_id) = (SELECT resource_type, resource_id FROM guest_grants WHERE id = $1)`
-	if _, err := tx.ExecContext(dbctx, others, id); err != nil {
-		return nil, err
-	}
 	bump := 0
 	if p.NewUnlock {
 		bump = 1
@@ -384,21 +423,36 @@ func Publish(ctx context.Context, id uuid.UUID, p Publication) (*GuestGrant, err
 	const q = `UPDATE guest_grants SET slug = $2, indexable = $3, allow_copies = $4, password_hash = $5,
 		unlock_version = unlock_version + $6, published_at = COALESCE(published_at, NOW()), published_by = COALESCE(published_by, $7)
 		WHERE id = $1 AND revoked_at IS NULL RETURNING ` + grantColumns
-	g, err := scanGrant(tx.QueryRowContext(dbctx, q, id, p.Slug, p.Indexable, p.AllowCopies, p.PasswordHash, bump, p.PublishedBy))
-	var pqErr *pq.Error
+	var g *GuestGrant
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		if _, err := pgexec.Exec(ctx, others, id); err != nil {
+			return err
+		}
+		got, ok, err := pgexec.QueryOne(ctx, q, grantRow,
+			id, p.Slug, p.Indexable, p.AllowCopies, p.PasswordHash, bump, p.PublishedBy)
+		if ok {
+			g = got
+		}
+		return err
+	})
 	switch {
-	case errors.As(err, &pqErr) && pqErr.Code == "23505":
+	case helpers.IsUniqueViolation(err):
 		return nil, ErrSlugTaken
-	case errors.Is(err, sql.ErrNoRows):
-		return nil, nil
 	case err != nil:
 		helpers.LogErrorWithContext(ctx, "models/Guest/Publish err: %+v", err)
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
 	return g, nil
+}
+
+// SlugFree reports whether address slug is free for a grant to resource
+// (resourceType, resourceID): no live grant to another resource has it.
+// Asked before publishing inside a transaction, which a taken address would
+// end (a personal room's name, then its name with letters).
+func SlugFree(ctx context.Context, slug, resourceType, resourceID string) (bool, error) {
+	taken, err := pgexec.Scalar[bool](ctx, `SELECT EXISTS (SELECT 1 FROM guest_grants WHERE slug = $1 AND revoked_at IS NULL AND (resource_type, resource_id) <> ($2, $3))`,
+		slug, resourceType, resourceID)
+	return !taken, err
 }
 
 // Unpublish takes a grant's address away, and its page with it; the link's

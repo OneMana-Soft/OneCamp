@@ -22,43 +22,38 @@ package business
 // see it who were matched by email, each on its own: HR-4 by Rae and Al, not
 // by Cy for having made it; HR-6 by Sol, not by HR-4's people; HR-8 and HR-7
 // by Ada alone. Nobody else sees them, or HR-4's comment, through the task,
-// the board, search and its hit count, the task list, or a notice. The
+// the board, search and its hit count, the task list's CSV, or a notice. The
 // open one shows everywhere, with the comment everyone may read; the two Jira
 // keeps from some stay there, for everyone. The report says each task came in
 // restricted, why, and who wasn't let in, and how many of HR-5's comments
-// stayed in Jira, without a name or a comment's text.
+// stayed in Jira, without a name or a comment's text. HR-4's file and its
+// comment's open, and are found, only for HR-4's people; HR-5's for everyone;
+// the file of a comment Jira keeps stays in Jira with it. HR-4 shows its file,
+// and a file an older import left unlinked from its task in the graph still
+// opens only for the task's readers.
 // Run: PKGS=./business/Import/ integ_rel.sh <wt> <log> '^TestATaskItsSourceRestrictsComesInRestricted$'
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	MQTT "github.com/eclipse/paho.mqtt.golang"
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
-	globalSearchController "github.com/akashc777/OneCamp/controllers/GlobalSearch"
 	projectController "github.com/akashc777/OneCamp/controllers/Project"
 	taskController "github.com/akashc777/OneCamp/controllers/Task"
-	userDomain "github.com/akashc777/OneCamp/domain/User"
-	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/firebaseInit"
-	"github.com/akashc777/OneCamp/initializers/opensearchInit"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	userController "github.com/akashc777/OneCamp/controllers/User"
+	"github.com/akashc777/OneCamp/models/dgexec"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
-	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
@@ -74,8 +69,10 @@ const keptLevel = "an issue security level"
 func (keptProvider) IterTasksOfProject(context.Context, *importModels.Job, importProvider.JobOptions, string) (<-chan importProvider.SourceTask, <-chan error) {
 	return keptStream(
 		importProvider.SourceTask{SourceID: "HR-4", ProjectSourceID: "HR", Name: "Zephyr pay bands", Description: "<p>Zephyr raises for the leads</p>",
-			Status: "To Do", CreatedBy: "u-cy", AssigneeIds: []string{"u-al"}, Restricted: keptLevel, Audience: []string{"u-rae"}, CommentCount: 1},
-		importProvider.SourceTask{SourceID: "HR-5", ProjectSourceID: "HR", Name: "Zephyr desk move", Status: "To Do", CreatedBy: "u-ben"},
+			Status: "To Do", CreatedBy: "u-cy", AssigneeIds: []string{"u-al"}, Restricted: keptLevel, Audience: []string{"u-rae"}, CommentCount: 1,
+			AttachmentRefs: keptFile("f-41", "ibis-offer-letters.pdf", "task", "HR-4")},
+		importProvider.SourceTask{SourceID: "HR-5", ProjectSourceID: "HR", Name: "Zephyr desk move", Status: "To Do", CreatedBy: "u-ben",
+			AttachmentRefs: keptFile("f-51", "ibis-desk-map.txt", "task", "HR-5")},
 		importProvider.SourceTask{SourceID: "HR-7", ProjectSourceID: "HR", Name: "Zephyr audit findings", Status: "To Do",
 			CreatedBy: "u-nia", AssigneeIds: []string{"u-ned"}, Restricted: keptLevel, Audience: []string{"u-nia"}},
 		importProvider.SourceTask{SourceID: "__sub__:HR-4", ParentTaskID: "HR-4"},
@@ -96,17 +93,33 @@ func (keptProvider) IterCommentsOfTask(_ context.Context, _ *importModels.Job, _
 	out, errs := make(chan importProvider.SourceComment, 3), make(chan error)
 	switch task {
 	case "HR-4":
-		out <- importProvider.SourceComment{SourceID: "c-41", TaskSourceID: "HR-4", Body: "<p>Quokka bonus pool for the leads</p>", AuthorSourceID: "u-rae"}
+		out <- importProvider.SourceComment{SourceID: "c-41", TaskSourceID: "HR-4", Body: "<p>Quokka bonus pool for the leads</p>", AuthorSourceID: "u-rae",
+			AttachmentRefs: keptFile("f-42", "ibis-raise-table.csv", "comment", "c-41")}
 	case "HR-5":
 		out <- importProvider.SourceComment{SourceID: "c-51", TaskSourceID: "HR-5", Body: "<p>Quokka desks arrive Monday</p>", AuthorSourceID: "u-ben"}
 		out <- importProvider.SourceComment{SourceID: "c-52", TaskSourceID: "HR-5", Body: "<p>Quokka salaries of the movers</p>", AuthorSourceID: "u-rae",
-			Restricted: "a project role or group"}
+			Restricted: "a project role or group", AttachmentRefs: keptFile("f-52", "ibis-mover-salaries.csv", "comment", "c-52")}
 		out <- importProvider.SourceComment{SourceID: "c-53", TaskSourceID: "HR-5", Body: "<p>Quokka vendor quote is 40k</p>", AuthorSourceID: "u-rae",
 			Restricted: "an internal note"}
 	}
 	close(out)
 	close(errs)
 	return out, errs
+}
+
+// keptFile is one file Jira holds on an issue or a comment, with the content
+// address Jira gives every attachment (FetchAttachment here doesn't read it,
+// but a file chunk without one is refused).
+func keptFile(id, name, kind, parent string) []importProvider.SourceAttachment {
+	return []importProvider.SourceAttachment{{SourceID: id, Name: name, Mime: "text/plain", Size: int64(len(name)),
+		URL:    "https://acme.atlassian.net/rest/api/3/attachment/content/" + id,
+		Parent: importProvider.SourceRef{Kind: kind, SourceID: parent}}}
+}
+
+// FetchAttachment hands over a file's bytes: its name.
+func (keptProvider) FetchAttachment(_ context.Context, _ *importModels.Job, _ importProvider.JobOptions, att importProvider.SourceAttachment, dest io.Writer) (string, int64, error) {
+	n, err := io.WriteString(dest, att.Name)
+	return att.Mime, int64(n), err
 }
 
 func keptStream(tasks ...importProvider.SourceTask) (<-chan importProvider.SourceTask, <-chan error) {
@@ -119,50 +132,10 @@ func keptStream(tasks ...importProvider.SourceTask) (<-chan importProvider.Sourc
 	return out, errs
 }
 
-// keptBroker keeps every realtime message the server publishes.
-type keptBroker struct {
-	MQTT.Client
-	mu  sync.Mutex
-	got []string
-}
-
-func (b *keptBroker) Publish(topic string, _ byte, _ bool, payload interface{}) MQTT.Token {
-	p, _ := payload.([]byte)
-	b.mu.Lock()
-	b.got = append(b.got, topic+" "+string(p))
-	b.mu.Unlock()
-	return keptToken{}
-}
-
-type keptToken struct{}
-
-func (keptToken) Wait() bool                     { return true }
-func (keptToken) WaitTimeout(time.Duration) bool { return true }
-func (keptToken) Done() <-chan struct{}          { c := make(chan struct{}); close(c); return c }
-func (keptToken) Error() error                   { return nil }
-
 func TestATaskItsSourceRestrictsComesInRestricted(t *testing.T) {
 	ctx := context.Background()
-	env := integration.SetupEnv(t)
-	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
-		t.Fatal(err)
-	}
-	integration.SetupRedis(t)
-	broker := &keptBroker{}
-	integration.UseMqttClient(t, broker)
-	var pushMu sync.Mutex
-	var pushes []string
-	t.Cleanup(firebaseInit.ObservePushesForTest(func(data map[string]string, _ []string) {
-		raw, _ := json.Marshal(data)
-		pushMu.Lock()
-		pushes = append(pushes, string(raw))
-		pushMu.Unlock()
-	}))
-	dg := integration.SetupDgraph(t)
-	search := integration.SetupOpenSearch(t)
-	if err := opensearchInit.ConnectOpenSearch(&opensearchInit.OpenSearchConfig{Host: search.URL}); err != nil {
-		t.Fatalf("create the indices: %v", err)
-	}
+	world := seenWorld(t)
+	env, dg := world.env, world.dg
 
 	// Ada runs the workspace and the project; the rest are its members.
 	names := []string{"ada", "ben", "rae", "al", "cy", "sol", "nia", "ned"}
@@ -283,33 +256,9 @@ func TestATaskItsSourceRestrictsComesInRestricted(t *testing.T) {
 		}
 	}
 
-	// as is who, signed in, as the first middleware leaves a request.
-	as := func(who string) context.Context {
-		t.Helper()
-		pg, err := userDomain.GetActiveUserWithAdminFlagByUserUUID(ctx, people[who])
-		if err != nil || pg == nil {
-			t.Fatalf("load %s: %v", who, err)
-		}
-		gr, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, people[who].String())
-		if err != nil || gr == nil {
-			t.Fatalf("load %s's profile: %v", who, err)
-		}
-		return taskread.Install(context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}))
-	}
 	call := func(who string, h http.HandlerFunc, params map[string]string, query string, body any) (int, string) {
 		t.Helper()
-		var rd io.Reader = http.NoBody
-		if body != nil {
-			raw, _ := json.Marshal(body)
-			rd = bytes.NewReader(raw)
-		}
-		rc := chi.NewRouteContext()
-		for k, v := range params {
-			rc.URLParams.Add(k, v)
-		}
-		rec := httptest.NewRecorder()
-		h(rec, httptest.NewRequest(http.MethodPost, "/"+query, rd).WithContext(context.WithValue(as(who), chi.RouteCtxKey, rc)))
-		return rec.Code, rec.Body.String()
+		return callAs(t, ctx, people[who], h, params, query, body)
 	}
 	// Who may see each restricted one, and what tells of it.
 	may := map[string][]string{"HR-4": {"ada", "rae", "al"}, "HR-6": {"ada", "sol"}, "HR-7": {"ada"}, "HR-8": {"ada"}}
@@ -326,51 +275,33 @@ func TestATaskItsSourceRestrictsComesInRestricted(t *testing.T) {
 	}
 	searchHits := func(who, text string) (string, int) {
 		t.Helper()
-		_, out := call(who, globalSearchController.GetUnifiedGlobalSearch, nil, "", map[string]string{"global_search_text": text})
-		var page struct {
-			Data struct {
-				Page []json.RawMessage `json:"page"`
-			} `json:"data"`
-		}
-		_ = json.Unmarshal([]byte(out), &page)
-		return out, len(page.Data.Page)
+		return searchAs(t, ctx, people[who], text)
 	}
-	// commentsHeld is how many comment entries search holds for the tasks.
-	commentsHeld := func(tasks ...string) int {
+	// Search is written off the import: what came across is in it once Ada,
+	// who may see all of it, finds it.
+	adaFinds := func(text string, want int) {
 		t.Helper()
-		q, _ := json.Marshal(map[string]any{"query": map[string]any{"terms": map[string]any{"comment_task_id": tasks}}})
-		resp, err := opensearchInit.OpenSearchClient.Indices.Count(ctx, &opensearchapi.IndicesCountReq{Indices: []string{"comments"}, Body: bytes.NewReader(q)})
-		if err != nil {
-			t.Fatalf("count the comments search holds: %v", err)
-		}
-		return resp.Count
-	}
-	// Search is written off the import; it has the five issues once Ada
-	// finds them, and holds the two comments that came across.
-	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(250 * time.Millisecond) {
-		_, n := searchHits("ada", "zephyr")
-		held := commentsHeld(made["HR-4"], made["HR-5"])
-		if n == 5 && held == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			out, _ := searchHits("ada", "zephyr")
-			t.Fatalf("Ada's search for zephyr found %d of 5, and search holds %d of the 2 comments: %s", n, held, out)
+		for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(250 * time.Millisecond) {
+			if _, n := searchHits("ada", text); n == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				out, n := searchHits("ada", text)
+				t.Fatalf("Ada's search for %s found %d of %d: %s", text, n, want, out)
+			}
 		}
 	}
+	adaFinds("zephyr", 5) // the five issues
+	adaFinds("quokka", 2) // the two comments that came across
 
 	projectParams := map[string]string{"project_uuid": project.String()}
-	// listOf is who's task list (this line has no CSV of it). Anything
-	// else, a refusal among them, fails here, so it can't pass a leg that a
-	// task stays out of it.
-	listOf := func(who string) string {
+	// csvOf is who's task-list CSV. Anything else, a refusal among them,
+	// fails here, so it can't pass a leg that a task stays out of it.
+	csvOf := func(who string) string {
 		t.Helper()
-		code, out := call(who, projectController.GetProjectTaskList, projectParams, "?getAll=1", nil)
-		var answer struct {
-			Data json.RawMessage `json:"data"`
-		}
-		if code != http.StatusOK || json.Unmarshal([]byte(out), &answer) != nil || len(answer.Data) == 0 {
-			t.Errorf("%s's task list isn't one (%d):\n%s", who, code, out)
+		code, out := call(who, projectController.GetProjectTaskList, projectParams, "?format=csv", nil)
+		if head, _, _ := strings.Cut(out, "\n"); code != http.StatusOK || !strings.Contains(head, "Key,Title,") {
+			t.Errorf("%s's task list CSV isn't one (%d):\n%s", who, code, out)
 		}
 		return out
 	}
@@ -382,10 +313,9 @@ func TestATaskItsSourceRestrictsComesInRestricted(t *testing.T) {
 				t.Errorf("%s as %s (%d), want seen %v:\n%s", task, who, code, sees, out)
 			}
 		}
-		// The board, the task list and search tell nobody else of any (this
-		// line has no CSV of the list).
+		// The board, the CSV and search tell nobody else of any.
 		_, board := call(who, projectController.GetProjectTaskListForKanban, projectParams, "?getAll=1", nil)
-		list := listOf(who)
+		csv := csvOf(who)
 		zephyr, hits := searchHits(who, "zephyr")
 		quokka, comments := searchHits(who, "quokka")
 		want := 1 // the open one
@@ -394,7 +324,7 @@ func TestATaskItsSourceRestrictsComesInRestricted(t *testing.T) {
 				want++
 				continue
 			}
-			for surface, out := range map[string]string{"the board": board, "the task list": list, "search": zephyr + quokka} {
+			for surface, out := range map[string]string{"the board": board, "the task list's CSV": csv, "search": zephyr + quokka} {
 				if tells(out, task) {
 					t.Errorf("%s tells %s of %s:\n%s", surface, who, task, out)
 				}
@@ -403,9 +333,12 @@ func TestATaskItsSourceRestrictsComesInRestricted(t *testing.T) {
 		if hits != want {
 			t.Errorf("%s's search counts %d hits; want %d", who, hits, want)
 		}
-		// Search finds no imported comment on this line: their entries name no project (v2.76.0 adds it, under the hidden-task filter).
-		if comments != 0 {
-			t.Errorf("%s's search counts %d comments; want none", who, comments)
+		wantComments := 1 // HR-5's open one
+		if slices.Contains(may["HR-4"], who) {
+			wantComments++ // HR-4's
+		}
+		if comments != wantComments {
+			t.Errorf("%s's search counts %d comments; want %d", who, comments, wantComments)
 		}
 		// The comments Jira keeps from some came across for nobody.
 		_, hr5 := call(who, taskController.GetTaskInfo, map[string]string{"task_uuid": made["HR-5"]}, "", nil)
@@ -417,15 +350,15 @@ func TestATaskItsSourceRestrictsComesInRestricted(t *testing.T) {
 		if !strings.Contains(hr5, "desks arrive") {
 			t.Errorf("HR-5's open comment didn't come across for %s:\n%s", who, hr5)
 		}
-		for surface, out := range map[string]string{"the board": board, "the task list": list} {
+		for surface, out := range map[string]string{"the board": board, "the task list's CSV": csv} {
 			if !strings.Contains(strings.ToLower(out), "desk move") {
 				t.Errorf("%s leaves the open task out for %s:\n%s", surface, who, out)
 			}
 		}
 	}
 	for _, who := range []string{"rae", "al"} {
-		if out := listOf(who); !strings.Contains(out, "Zephyr pay bands") {
-			t.Errorf("the task list leaves HR-4 out for %s:\n%s", who, out)
+		if out := csvOf(who); !strings.Contains(out, "Zephyr pay bands") {
+			t.Errorf("the CSV leaves HR-4 out for %s:\n%s", who, out)
 		}
 	}
 
@@ -441,20 +374,16 @@ func TestATaskItsSourceRestrictsComesInRestricted(t *testing.T) {
 		}
 		return false
 	}
-	broker.mu.Lock()
-	for _, m := range broker.got {
+	for _, m := range world.live() {
 		if restricted(m) {
 			t.Errorf("a live message tells of restricted work: %s", m)
 		}
 	}
-	broker.mu.Unlock()
-	pushMu.Lock()
-	for _, p := range pushes {
+	for _, p := range world.pushed() {
 		if restricted(p) {
 			t.Errorf("a push tells of restricted work: %s", p)
 		}
 	}
-	pushMu.Unlock()
 	var emailed int
 	if err := env.PG.QueryRow(`SELECT count(*) FROM notification_email_queue`).Scan(&emailed); err != nil || emailed != 0 {
 		t.Errorf("%d emails were queued (%v)", emailed, err)
@@ -533,6 +462,133 @@ func TestATaskItsSourceRestrictsComesInRestricted(t *testing.T) {
 	for _, w := range []string{`{"as":"assignee","source_id":"u-ned"}`, `{"as":"audience","source_id":"u-nia"}`, `{"as":"creator","source_id":"u-nia"}`} {
 		if !strings.Contains(strings.ReplaceAll(string(md), " ", ""), w) {
 			t.Errorf("HR-7's record doesn't keep %s: %s", w, md)
+		}
+	}
+
+	// The files come across last, as the attachment stage takes them after
+	// the issues and their comments: HR-4's and its comment's, the open
+	// HR-5's, and not the one on the comment Jira keeps to a role, which
+	// stays in Jira with it. HR-4's reach only HR-4's readers, through search
+	// and through the file route, which answers anyone else as it answers a
+	// file that isn't there; HR-5's reaches everyone. Search finds an imported
+	// comment's file for nobody yet, its task's readers included: its entry
+	// names no project (PROJ-LEAD-33 took it to main, 25 Oct).
+	integration.SetupMinio(t, "import-kept-files")
+	rows, err := env.PG.Query(`SELECT id, object_key, channel_slack_id FROM import_chunks WHERE import_id = $1 AND chunk_type = $2`, job.Id, importModels.ChunkAttachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored []*importModels.Chunk
+	for rows.Next() {
+		c := &importModels.Chunk{ImportId: job.Id, ChunkType: importModels.ChunkAttachment, Status: importModels.ChunkStatusInProgress, MaxAttempts: 3}
+		if err := rows.Scan(&c.Id, &c.ObjectKey, &c.ParentSourceId); err != nil {
+			t.Fatal(err)
+		}
+		stored = append(stored, c)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The graph refuses HR-4's file's first link: its chunk fails, and runs
+	// again.
+	linkNow, refused := linkFile, 0
+	t.Cleanup(func() { linkFile = linkNow })
+	linkFile = func(ctx context.Context, kind, holder string, file *dgraphStruct.DgraphAttachment) error {
+		if holder == made["HR-4"] && refused == 0 {
+			refused++
+			return errors.New("the graph is away")
+		}
+		return linkNow(ctx, kind, holder, file)
+	}
+	for _, c := range stored {
+		err := processAttachmentChunk(work, keptProvider{}, job, importProvider.JobOptions{}, c, importer)
+		if err != nil && strings.Contains(err.Error(), "the graph is away") {
+			err = processAttachmentChunk(work, keptProvider{}, job, importProvider.JobOptions{}, c, importer)
+		}
+		if err != nil {
+			t.Fatalf("the file chunk %s: %v", *c.ObjectKey, err)
+		}
+	}
+	if refused != 1 {
+		t.Fatalf("HR-4's file's link was refused %d times; want once", refused)
+	}
+	fileIds, err := importModels.IdMapOf(ctx, job.Id, importModels.EntityFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := map[string]string{}
+	for src, id := range fileIds {
+		file[src[strings.LastIndex(src, ":")+1:]] = id.String()
+	}
+	if len(file) != 3 || file["f-41"] == "" || file["f-42"] == "" || file["f-51"] == "" {
+		t.Fatalf("the files that came across: %v; want HR-4's, its comment's and HR-5's, and not the kept comment's", file)
+	}
+	// HR-4's file, though its chunk ran twice, was kept once, is one node in
+	// the graph, made by Ada's own node, and HR-4 lists it once.
+	var hr4Files int
+	if err := env.PG.QueryRow(`SELECT COUNT(*) FROM attachments WHERE src_value = $1`, made["HR-4"]).Scan(&hr4Files); err != nil || hr4Files != 1 {
+		t.Errorf("HR-4's files kept: %d (%v); want its one file kept once", hr4Files, err)
+	}
+	linked, err := dgexec.Read[struct {
+		Nodes []struct {
+			By struct {
+				Uid string `json:"uid"`
+			} `json:"attachment_created_by"`
+		} `json:"nodes"`
+		Task []struct {
+			Files int `json:"files"`
+		} `json:"task"`
+	}](ctx, `query Kept($file: string, $task: string) {
+		nodes(func: eq(attachment_uuid, $file)) { attachment_created_by { uid } }
+		task(func: eq(task_uuid, $task)) { files: count(task_attachments @filter(eq(attachment_uuid, $file))) }
+	}`, map[string]string{"$file": file["f-41"], "$task": made["HR-4"]})
+	if err != nil || len(linked.Nodes) != 1 || linked.Nodes[0].By.Uid != importer.UserDgraphInfo.Uid || len(linked.Task) != 1 || linked.Task[0].Files != 1 {
+		t.Errorf("HR-4's file in the graph: %+v (%v); want one node, made by Ada's (%s), listed once by HR-4", linked, err, importer.UserDgraphInfo.Uid)
+	}
+	adaFinds("ibis", 2) // HR-4's file and HR-5's
+	fileNames := map[string]string{"f-41": "ibis-offer-letters", "f-42": "ibis-raise-table", "f-51": "ibis-desk-map"}
+	for _, who := range names {
+		reads := slices.Contains(may["HR-4"], who)
+		for f, name := range fileNames {
+			want := reads || f == "f-51"
+			code, out := call(who, userController.GetProjectFile, map[string]string{"project_uuid": project.String(), "obj_uuid": file[f]}, "", nil)
+			if want != (code == http.StatusOK) || (!want && code != http.StatusNotFound) {
+				t.Errorf("%s asks for %s (%d), want it opened %v:\n%s", who, name, code, want, out)
+			}
+		}
+		out, hits := searchHits(who, "ibis")
+		want := 1 // HR-5's
+		if reads {
+			want = 2
+		}
+		if hits != want {
+			t.Errorf("%s's search for the files counts %d hits; want %d:\n%s", who, hits, want, out)
+		}
+		for _, kept := range []string{"offer-letters", "raise-table", "mover-salaries"} {
+			if (!reads || kept == "mover-salaries") && strings.Contains(out, kept) {
+				t.Errorf("search tells %s of %s:\n%s", who, kept, out)
+			}
+		}
+	}
+	// The import links a task's file to the task in the graph, as an upload
+	// does, so the task shows it to its readers.
+	if _, out := call("ada", taskController.GetTaskInfo, map[string]string{"task_uuid": made["HR-4"]}, "", nil); !strings.Contains(out, "ibis-offer-letters") {
+		t.Errorf("HR-4 doesn't show Ada its file:\n%s", out)
+	}
+	// An older import's task file has no such link: the file route goes by
+	// the import's row, so the members HR-4 is kept from still get what a
+	// file that isn't there gets, and its readers still open it.
+	if _, err := dgexec.Mutate(ctx, `query Unlink($task: string, $file: string) {
+		task as var(func: eq(task_uuid, $task))
+		file as var(func: eq(attachment_uuid, $file))
+	}`, map[string]string{"$task": made["HR-4"], "$file": file["f-41"]}, dgexec.Mutation{DelNQuads: "uid(task) <task_attachments> uid(file) ."}); err != nil {
+		t.Fatal(err)
+	}
+	for _, who := range names {
+		want := slices.Contains(may["HR-4"], who)
+		code, out := call(who, userController.GetProjectFile, map[string]string{"project_uuid": project.String(), "obj_uuid": file["f-41"]}, "", nil)
+		if want != (code == http.StatusOK) || (!want && code != http.StatusNotFound) {
+			t.Errorf("%s asks for ibis-offer-letters, unlinked from HR-4 (%d), want it opened %v:\n%s", who, code, want, out)
 		}
 	}
 }

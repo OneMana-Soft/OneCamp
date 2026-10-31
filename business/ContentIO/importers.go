@@ -10,6 +10,8 @@ import (
 	contentcodec "github.com/akashc777/OneCamp/business/ContentCodec"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/unicode"
 )
 
 // The single-file importers: Markdown, plain text, HTML. Word files are in
@@ -52,25 +54,27 @@ func readText(r io.Reader) (string, error) {
 	return DecodeText(data), nil
 }
 
-// DecodeText is a file's bytes as text, whatever it was saved in: by its
-// byte-order mark (UTF-8 or UTF-16, as Windows' Notepad saves "Unicode"), as
-// UTF-8 when it is, by the character set an HTML page declares, and otherwise
-// as Windows-1252, the usual other encoding of a text file.
+// DecodeText is a file's bytes as text, whatever it was saved in
+// (textEncoding).
 func DecodeText(data []byte) string {
-	e, _, certain := charset.DetermineEncoding(data, "")
-	if !certain && utf8.Valid(data) {
-		return strings.TrimPrefix(string(data), "\uFEFF")
-	}
-	if !certain {
-		// No byte-order mark, and not UTF-8: the charset a page declares, or
-		// Windows-1252.
-		e, _, _ = charset.DetermineEncoding(data, "text/html")
-	}
-	text, err := e.NewDecoder().Bytes(data)
+	text, err := textEncoding(data).NewDecoder().Bytes(data)
 	if err != nil {
 		return strings.ToValidUTF8(string(data), "\uFFFD")
 	}
 	return strings.TrimPrefix(string(text), "\uFEFF")
+}
+
+// textEncoding is what text was saved in, told from all of it or its head
+// (a sheet's text is read a row at a time): its byte-order mark's encoding
+// (UTF-8, or UTF-16 as Windows' Notepad saves "Unicode"), UTF-8 when it is
+// valid UTF-8, the character set an HTML page declares, and otherwise
+// Windows-1252, the usual other encoding of a text file. Pure.
+func textEncoding(text []byte) encoding.Encoding {
+	e, _, certain := charset.DetermineEncoding(text, "")
+	if !certain && utf8.Valid(text) {
+		return unicode.UTF8
+	}
+	return e
 }
 
 // fileTitle is a title from a file's name: its base name without the

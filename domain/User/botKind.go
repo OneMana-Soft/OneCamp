@@ -32,6 +32,11 @@ const (
 	CheckInBotUsername = "checkin"
 	// CheckInBotEmail keys that principal's row.
 	CheckInBotEmail = CheckInBotUsername + BotEmailDomain
+	// UpgradeRepairBotUsername is the principal an upgrade's repairs act as,
+	// so what one changes (a line in a task's history) is never a person's.
+	UpgradeRepairBotUsername = "upgrade-repair"
+	// UpgradeRepairBotEmail keys that principal's row.
+	UpgradeRepairBotEmail = UpgradeRepairBotUsername + BotEmailDomain
 )
 
 // BotKind names what a bot principal actually IS.
@@ -67,6 +72,9 @@ const (
 	// BotKindCheckIn asks channels' check-ins on their schedule. It has no AI:
 	// each question is one a channel's moderators set up.
 	BotKindCheckIn BotKind = "checkin"
+	// BotKindRepair is the principal an upgrade's repairs act as. It has no
+	// AI: it acts only when a release repairs what an older one left.
+	BotKindRepair BotKind = "repair"
 	// BotKindUnknown is a bot this build does not recognise. Returned rather
 	// than guessing, so a caller shows neutral copy instead of the assistant's.
 	BotKindUnknown BotKind = "bot"
@@ -97,6 +105,8 @@ func ClassifyBot(email string) BotKind {
 		return BotKindGuest
 	case email == CheckInBotEmail:
 		return BotKindCheckIn
+	case email == UpgradeRepairBotEmail:
+		return BotKindRepair
 	case strings.HasPrefix(email, AgentBotPrefix):
 		return BotKindAgent
 	default:

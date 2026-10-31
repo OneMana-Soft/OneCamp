@@ -57,6 +57,7 @@ type Fixture struct {
 	DeepDoc       string   // doc_uuid of the deepest page, DocDepth below the top
 	BacklinkedDoc string   // doc_uuid of the doc Backlinks docs mention
 	RefPost       string   // post_uuid of a post whose body links the backlinked doc and a task (refers_to)
+	Folder        string   // doc_uuid of the folder at the top of SpaceProject's space: FolderItems live items of every kind, and deleted ones
 	SpaceProject  string   // project_uuid whose space holds docs, the viewer a member
 	BoardProject  string   // project_uuid of the big board, the viewer a member
 	ChainHead     string   // task_uuid at the head of the long dependency chain
@@ -144,7 +145,7 @@ func Generate(ctx context.Context, t Tier, seed uint64, sink Sink) (*Fixture, er
 	}
 	f := &Fixture{Tier: t, Seed: seed, Counts: map[string]int{}}
 	g := &gen{f: f, w: newWriter(ctx, sink), r: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), t: t}
-	steps := []func(){g.people, g.teamsAndProjects, g.channels_, g.posts, g.conversations, g.chats, g.docs_, g.boards, g.tasks, g.memory, g.docPosts, g.refPosts, g.whoKnows}
+	steps := []func(){g.people, g.teamsAndProjects, g.channels_, g.posts, g.conversations, g.chats, g.docs_, g.boards, g.tasks, g.memory, g.docPosts, g.refPosts, g.whoKnows, g.folder}
 	for _, step := range steps {
 		step()
 		g.w.flush()
@@ -547,6 +548,7 @@ func (g *gen) chats() {
 			viewerConvs = append(viewerConvs, i)
 		}
 	}
+	newest := map[int]time.Time{}
 	for i := 0; i < t.Chats; i++ {
 		var di int
 		switch {
@@ -575,6 +577,9 @@ func (g *gen) chats() {
 		dmRef := w.ref(d.key)
 		w.edge(s, "chat_dm", dmRef)
 		w.edge(dmRef, "dm_chats", s)
+		if created.After(newest[di]) {
+			newest[di] = created
+		}
 		g.count("chats")
 		if g.pct(5) {
 			rk := key + "r"
@@ -587,6 +592,13 @@ func (g *gen) chats() {
 			g.count("reactions")
 		}
 		w.boundary()
+	}
+	// Each DM's last time, as every chat write stamps it (DG4).
+	for di, d := range g.dms {
+		if at, ok := newest[di]; ok {
+			w.at(w.ref(d.key), "dm_last_chat_at", at)
+			w.boundary()
+		}
 	}
 }
 
@@ -699,6 +711,9 @@ func (g *gen) docs_() {
 			}
 		}
 		g.docs = append(g.docs, d)
+		if d.owner == 0 && !d.deleted {
+			g.count("viewerDocs")
+		}
 		if i > 1 { // doc1's children are exactly DocParentChildren
 			bySpace[d.space] = append(bySpace[d.space], i)
 		}
@@ -977,6 +992,87 @@ func (g *gen) refPosts() {
 		w.boundary()
 	}
 	g.f.RefPost = id(g.f.Seed, "ref0")
+}
+
+// widestHop is the most targets a work graph hop takes along one edge from
+// one node (domain/WorkGraph's PathCap), in uid order.
+const widestHop = 25
+
+// folder (docs F1) writes a folder at the top of SpaceProject's space,
+// holding FolderItems live items: a folder with two files of its own first,
+// then a file, a link and a page in turn, every fifth node coloured; and
+// after every ten live items a deleted one, so the folder's count is seen to
+// leave them out. Its nodes are docs whose keys follow the docs_ ones.
+//
+// It is the last step and draws nothing from the random stream, so every
+// step before it writes what it wrote before folders existed. And it leaves
+// the reads measured beside it as they were: every node in it is the
+// viewer's, who owns more docs than a work graph hop takes (widestHop, the
+// "viewerDocs" count), and is written last, so its uids are the highest and
+// no capped hop from a person reaches it; nothing else points into it.
+func (g *gen) folder() {
+	t, w := g.t, g.w
+	space := g.projects[1].uuid
+	viewer := g.person(0)
+	next := t.Docs
+	n := 0 // nodes written: each one's time and position
+	doc := func(parent, kind, title string, deleted bool) string {
+		key := "doc" + strconv.Itoa(next)
+		next++
+		s := w.node(key, "Doc")
+		created := base.Add(span/2 + time.Duration(n)*time.Minute)
+		w.lit(s, "doc_uuid", id(g.f.Seed, key))
+		w.lit(s, "doc_title", title)
+		switch kind {
+		case "":
+			w.lit(s, "doc_snippet", "The first lines of the doc.")
+		case "link":
+			w.lit(s, "doc_node_kind", kind)
+			w.lit(s, "doc_link_url", fmt.Sprintf("https://example.com/folder/%d", n))
+		default:
+			w.lit(s, "doc_node_kind", kind)
+		}
+		if n%5 == 0 {
+			w.lit(s, "doc_color", helpers.CampHues[n/5%len(helpers.CampHues)])
+		}
+		w.boolean(s, "doc_private", false)
+		w.at(s, "doc_created_at", created)
+		w.at(s, "doc_updated_at", created)
+		w.deletedAt(s, "doc_deleted_at", deleted, created.Add(time.Hour))
+		w.lit(s, "doc_position", fmt.Sprintf("a%07d", n))
+		w.edge(s, "doc_created_by", viewer)
+		w.edge(s, "doc_owner", viewer)
+		if parent != "" {
+			w.edge(s, "doc_parent", w.ref(parent))
+		}
+		w.lit(s, "doc_space_kind", "project")
+		w.lit(s, "doc_space_uuid", space)
+		n++
+		w.boundary()
+		return key
+	}
+	top := doc("", "folder", "Contracts", false)
+	g.f.Folder = id(g.f.Seed, top)
+	g.count("folders")
+	kinds := []string{"", "file", "link"}
+	names := []string{"Page %d", "scan-%d.pdf", "Link %d"}
+	for i := 0; i < t.FolderItems; i++ {
+		if i == 0 {
+			sub := doc(top, "folder", "Signed", false)
+			doc(sub, "file", "signed-1.pdf", false)
+			doc(sub, "file", "signed-2.pdf", false)
+			g.count("folders")
+		} else {
+			k := i % len(kinds)
+			doc(top, kinds[k], fmt.Sprintf(names[k], i), false)
+		}
+		g.count("folderItems")
+		if i%10 == 9 {
+			k := i / 10 % len(kinds)
+			doc(top, kinds[k], fmt.Sprintf(names[k], i)+" (deleted)", true)
+			g.count("folderDeleted")
+		}
+	}
 }
 
 // whoKnows names Who knows' seeds (DG9): the first 80 docs, tasks and 40

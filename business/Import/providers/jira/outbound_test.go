@@ -16,7 +16,7 @@ import (
 // apiTokenAt is a Jira API-token connection to site, as the connect form
 // saves it.
 func apiTokenAt(site string) *importModels.Token {
-	md, _ := json.Marshal(map[string]string{"site_url": site, "email": "admin@example.com"})
+	md, _ := json.Marshal(tokenMeta{SiteURL: site, Email: "admin@example.com"})
 	return &importModels.Token{Provider: providerName, AccessToken: "api-token", Metadata: md}
 }
 

@@ -157,3 +157,50 @@ func CanReceiveDirectMessage(u *dgraphStruct.DgraphUser) Eligibility {
 
 	return Eligibility{Allowed: true, Reason: "recipient can receive messages"}
 }
+
+// CanBeAssigned reports whether a person may be given work or a place: made a task's
+// assignee, or added to a channel, a team, a project or a group conversation.
+//
+// THE HALF OF DEACTIVATION NOTHING ASKED. Deactivating someone writes their deletion
+// time and stops. Their memberships and assignments stay, on purpose, so reactivating
+// them gives everything back. What it must stop is NEW work and NEW places, and
+// nothing did: a task could be given to someone who would never see it, and nobody
+// was told.
+//
+// ONLY THEIR OWN DELETION TIME. Bots, agents and external identities are not refused
+// here. An agent is given tasks on purpose, and GitHub assigns the identities it brings
+// along. Whether a feature takes them at all is that feature's rule (a channel, a team
+// and a project refuse external people, as they always have). A bot or an agent is out
+// only when its own deletion time says so, like anyone else.
+func CanBeAssigned(u *dgraphStruct.DgraphUser) Eligibility {
+	if u == nil || strings.TrimSpace(u.Uid) == "" {
+		return Eligibility{Reason: "they could not be found"}
+	}
+	if helpers.IsSoftDeleted(u.DeletedAt) {
+		return Eligibility{Reason: "their account is deactivated"}
+	}
+	return Eligibility{Allowed: true, Reason: "their account can be given work"}
+}
+
+// What a person is being given, as Unassignable's refusal says it.
+const (
+	Assigned = "assigned" // a task
+	Added    = "added"    // a place: a channel, a team, a project or a group conversation
+)
+
+// Unassignable is CanBeAssigned's no in the words the person who asked reads, naming
+// whom they picked and what was asked (Assigned, Added): "Sam Rivera can't be
+// assigned: their account is deactivated." It is a conflict (helpers.Conflict), the
+// asker's to sort out by picking someone else, so every write that fails with it is
+// answered 409 with these words (helpers.WriteWriteFailure). nil when they can be.
+func Unassignable(u *dgraphStruct.DgraphUser, as string) error {
+	e := CanBeAssigned(u)
+	if e.Allowed {
+		return nil
+	}
+	who := u.DisplayName()
+	if who == "" {
+		who = "That person"
+	}
+	return helpers.Conflict(who+" can't be "+as+": "+e.Reason+".", nil)
+}

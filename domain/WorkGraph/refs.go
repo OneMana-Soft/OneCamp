@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 
+	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/models/dgexec"
@@ -28,11 +29,13 @@ import (
 // RefersTo is the predicate.
 const RefersTo = "refers_to"
 
-// RefTargets are the kinds a body links to; RefSources the kinds whose
-// bodies are read for links.
+// RefTargets are the kinds a body links to; RefSources the kinds that link
+// them: those whose bodies the graph holds and are read here (bodyOf), and a
+// meeting, whose notes Postgres holds and whose projection carries their
+// links (business/Refs nodes).
 var (
 	RefTargets = []Kind{KindDoc, KindTask, KindProject}
-	RefSources = []Kind{KindMessage, KindChat, KindComment, KindDoc}
+	RefSources = []Kind{KindMessage, KindChat, KindComment, KindDoc, KindTask, KindEvent}
 )
 
 // bodyOf is each source kind's body predicate.
@@ -41,6 +44,14 @@ var bodyOf = map[Kind]string{
 	KindChat:    "chat_body_text",
 	KindComment: "comment_text",
 	KindDoc:     "doc_body",
+	KindTask:    "task_description",
+}
+
+// sourceFilter keeps, of a kind's nodes, the ones whose bodies are read for
+// links: of the docs, the pages, since a folder, a file or a link has no body
+// (docs F1, domain/Doc's pageOnly).
+var sourceFilter = map[Kind]string{
+	KindDoc: docDomain.PageOnly,
 }
 
 // IsRefSource is whether k's bodies are read for links.
@@ -71,26 +82,43 @@ type sourceNode struct {
 }
 
 func (n sourceNode) source(k Kind) Source {
-	s := Source{Kind: k, UID: n.UID, UUID: strings.ToLower(n.UUID), Body: n.Body}
-	for _, t := range n.RefersTo {
+	return Source{Kind: k, UID: n.UID, UUID: strings.ToLower(n.UUID), Body: n.Body, Have: targetsOf(n.RefersTo, RefTargets)}
+}
+
+// targetsOf is an edge's targets as a read names them, of the kinds to: an
+// edge to something of no such kind any more (or never) is kept as a target
+// of no kind, so a write takes it off. Pure.
+func targetsOf(nodes []map[string]any, to []Kind) []Target {
+	var out []Target
+	for _, t := range nodes {
 		uid, _ := t["uid"].(string)
-		tk, id := kindOf(t, RefTargets)
-		if tk == "" || !helpers.IsDgraphUID(uid) {
-			// An edge to something that is no target any more (or never was):
-			// kept as a target of no kind, so the write takes it off.
-			if helpers.IsDgraphUID(uid) {
-				s.Have = append(s.Have, Target{UID: uid})
-			}
+		if !helpers.IsDgraphUID(uid) {
 			continue
 		}
-		s.Have = append(s.Have, Target{UID: uid, Ref: Ref{Kind: tk, UUID: id}})
+		tk, id := kindOf(t, to)
+		if tk == "" {
+			out = append(out, Target{UID: uid})
+			continue
+		}
+		out = append(out, Target{UID: uid, Ref: Ref{Kind: tk, UUID: id}})
 	}
-	return s
+	return out
 }
 
 // sourceFields is what a source read takes of each node.
 func sourceFields(k Kind) string {
 	return fmt.Sprintf("uid uuid: %s body: %s %s { uid %s }", specs[k].UUID, bodyOf[k], RefersTo, uuidPreds(RefTargets))
+}
+
+// sourceBlock is a source read's block, "s", rooted at root (a func and its
+// pagination) and held to the kind's sources (sourceFilter): every source read
+// goes through it.
+func sourceBlock(k Kind, root string) string {
+	filter := ""
+	if f := sourceFilter[k]; f != "" {
+		filter = " @filter(" + f + ")"
+	}
+	return fmt.Sprintf("s(func: %s)%s { %s }", root, filter, sourceFields(k))
 }
 
 // ReadSource reads one source by its uuid: nil when there is none. One query.
@@ -101,7 +129,7 @@ func ReadSource(ctx context.Context, k Kind, id string) (*Source, error) {
 	if !helpers.IsCanonicalUUID(id) {
 		return nil, nil
 	}
-	q := fmt.Sprintf("query s($id: string) {\n\ts(func: eq(%s, $id), first: 1) { %s }\n}", specs[k].UUID, sourceFields(k))
+	q := fmt.Sprintf("query s($id: string) {\n\t%s\n}", sourceBlock(k, "eq("+specs[k].UUID+", $id), first: 1"))
 	nodes, err := readSources(ctx, q, map[string]string{"$id": strings.ToLower(id)})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/WorkGraph ReadSource %s %s: %+v", k, id, err)
@@ -123,7 +151,7 @@ func ReadSourcesQuery(k Kind, after string, n int) string {
 	if after != "" {
 		page += ", after: " + after
 	}
-	return fmt.Sprintf("{\n\ts(func: has(%s), %s) { %s }\n}", specs[k].UUID, page, sourceFields(k))
+	return fmt.Sprintf("{\n\t%s\n}", sourceBlock(k, "has("+specs[k].UUID+"), "+page))
 }
 
 // ReadSources reads a page of k's sources: at most n, after the uid after.
@@ -159,7 +187,7 @@ func ReadSourcesByUUID(ctx context.Context, k Kind, ids []string) ([]Source, err
 	if list == "" {
 		return nil, nil
 	}
-	nodes, err := readSources(ctx, fmt.Sprintf("{\n\ts(func: eq(%s, [%s])) { %s }\n}", specs[k].UUID, list, sourceFields(k)), nil)
+	nodes, err := readSources(ctx, fmt.Sprintf("{\n\t%s\n}", sourceBlock(k, "eq("+specs[k].UUID+", ["+list+"])")), nil)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/WorkGraph ReadSourcesByUUID %s: %+v", k, err)
 		return nil, err
@@ -189,41 +217,45 @@ type Fix struct {
 // Empty is a fix that changes nothing.
 func (f Fix) Empty() bool { return len(f.Del) == 0 && len(f.Add) == 0 }
 
-// Diff is the fix that makes s's edges exactly want: each target wanted and
-// missing added, each edge not wanted (or to no target) taken off. Pure.
+// Diff is the fix that makes s's edges exactly want (diffEdges). Pure.
 func Diff(s Source, want []Ref) Fix {
+	del, add := diffEdges(s.Have, want)
+	return Fix{Source: s.UID, Del: del, Add: add}
+}
+
+// diffEdges is what makes the edges have exactly want: the uids of those to
+// take off (not wanted, to no target, or a second to one target) and the
+// refs to add, each sorted. Pure.
+func diffEdges(have []Target, want []Ref) (del []string, add []Ref) {
 	wanted := map[Ref]bool{}
 	for _, r := range want {
 		wanted[Ref{Kind: r.Kind, UUID: strings.ToLower(r.UUID)}] = true
 	}
-	f := Fix{Source: s.UID}
-	have := map[Ref]bool{}
-	for _, t := range s.Have {
-		if t.Ref.Kind == "" || !wanted[t.Ref] || have[t.Ref] {
-			f.Del = append(f.Del, t.UID)
+	kept := map[Ref]bool{}
+	for _, t := range have {
+		if t.Ref.Kind == "" || !wanted[t.Ref] || kept[t.Ref] {
+			del = append(del, t.UID)
 			continue
 		}
-		have[t.Ref] = true
+		kept[t.Ref] = true
 	}
 	for r := range wanted {
-		if !have[r] {
-			f.Add = append(f.Add, r)
+		if !kept[r] {
+			add = append(add, r)
 		}
 	}
-	sort.Slice(f.Add, func(i, j int) bool {
-		if f.Add[i].Kind != f.Add[j].Kind {
-			return f.Add[i].Kind < f.Add[j].Kind
+	sort.Slice(add, func(i, j int) bool {
+		if add[i].Kind != add[j].Kind {
+			return add[i].Kind < add[j].Kind
 		}
-		return f.Add[i].UUID < f.Add[j].UUID
+		return add[i].UUID < add[j].UUID
 	})
-	sort.Strings(f.Del)
-	return f
+	sort.Strings(del)
+	return del, add
 }
 
-// FixRequest is the one upsert that applies fixes: each added target found by
-// its kind's uuid in the query (a uuid that names nothing adds nothing), and
-// each removed edge named by the uids the sources' own edges had. Empty when
-// there is nothing to do.
+// FixRequest is the one upsert that applies fixes, each source named by its
+// uid (writeEdges). Empty when there is nothing to do.
 func FixRequest(fixes []Fix) (q, set, del string, err error) {
 	var qb, sb, db strings.Builder
 	for i, f := range fixes {
@@ -233,30 +265,45 @@ func FixRequest(fixes []Fix) (q, set, del string, err error) {
 		if !helpers.IsDgraphUID(f.Source) {
 			return "", "", "", fmt.Errorf("work graph: a fix for %q, which is no uid", f.Source)
 		}
-		for _, uid := range f.Del {
-			if !helpers.IsDgraphUID(uid) {
-				return "", "", "", fmt.Errorf("work graph: a removed edge to %q, which is no uid", uid)
-			}
-			fmt.Fprintf(&db, "<%s> <%s> <%s> .\n", f.Source, RefersTo, uid)
-		}
-		byKind := map[Kind][]string{}
-		for _, r := range f.Add {
-			byKind[r.Kind] = append(byKind[r.Kind], r.UUID)
-		}
-		for _, k := range RefTargets {
-			list := dgraphquery.UUIDList(byKind[k])
-			if list == "" {
-				continue
-			}
-			v := fmt.Sprintf("a%d_%s", i, k)
-			fmt.Fprintf(&qb, "\t%s as var(func: eq(%s, [%s]))\n", v, specs[k].UUID, list)
-			fmt.Fprintf(&sb, "<%s> <%s> uid(%s) .\n", f.Source, RefersTo, v)
+		if err := writeEdges(&qb, &sb, &db, "<"+f.Source+">", RefersTo, RefTargets, strconv.Itoa(i), f.Del, f.Add); err != nil {
+			return "", "", "", err
 		}
 	}
 	if qb.Len() > 0 {
 		q = "query {\n" + qb.String() + "}"
 	}
 	return q, sb.String(), db.String(), nil
+}
+
+// writeEdges writes a node's change along pred, the node named by subject (a
+// uid, <0x1>, or a variable, uid(n0)): each removed edge named by the uid the
+// node's own edge had, and each added target found by its kind's uuid in the
+// query, as a variable a<tag>_<kind> (a uuid that names nothing adds
+// nothing). A target of a kind pred doesn't lead to (to) is refused.
+func writeEdges(qb, sb, db *strings.Builder, subject, pred string, to []Kind, tag string, dels []string, adds []Ref) error {
+	for _, uid := range dels {
+		if !helpers.IsDgraphUID(uid) {
+			return fmt.Errorf("work graph: a removed edge to %q, which is no uid", uid)
+		}
+		fmt.Fprintf(db, "%s <%s> <%s> .\n", subject, pred, uid)
+	}
+	byKind := map[Kind][]string{}
+	for _, r := range adds {
+		if !hasKind(to, r.Kind) {
+			return fmt.Errorf("work graph: %s leads to no %s", pred, r.Kind)
+		}
+		byKind[r.Kind] = append(byKind[r.Kind], r.UUID)
+	}
+	for _, k := range to {
+		list := dgraphquery.UUIDList(byKind[k])
+		if list == "" {
+			continue
+		}
+		v := "a" + tag + "_" + string(k)
+		fmt.Fprintf(qb, "\t%s as var(func: eq(%s, [%s]))\n", v, specs[k].UUID, list)
+		fmt.Fprintf(sb, "%s <%s> uid(%s) .\n", subject, pred, v)
+	}
+	return nil
 }
 
 // WriteFixes applies fixes in one request. Nothing is sent when none changes

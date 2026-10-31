@@ -44,8 +44,9 @@ type CreateOrUpdateTaskCommentInput struct {
 	Attachments    []*dgraphStruct.DgraphAttachment `json:"task_comment_attachments,omitempty"`
 	SkipGitHubSync bool                             `json:"skip_github_sync,omitempty"`
 	// CreatedAt is a backfill's time for the comment and its files, which
-	// only the server sets (business/GitHub's sync); a request never sets it
-	// (TestACommentRequestNeverSetsItsTime, and helpers
+	// only the server sets (business/GitHub's sync). It is never read from a
+	// request: a member's comment would be written at any time it liked, and
+	// its files' nodes with it (helpers
 	// TestEveryAttachmentNodeTheServerWritesSaysWhenItWasWritten).
 	CreatedAt *time.Time `json:"-"`
 }

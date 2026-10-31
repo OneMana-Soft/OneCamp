@@ -19,14 +19,18 @@ package entityLinkBusiness
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	"github.com/akashc777/OneCamp/business/Access/level"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	domain "github.com/akashc777/OneCamp/domain/EntityLink"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -166,6 +170,7 @@ func ReadMany(ctx context.Context, who accessBusiness.Subject, refs []Ref) ([]En
 var (
 	readDocChips     = domain.DocChips
 	readTaskChips    = domain.TaskChips
+	layTaskKeys      = taskKeys.Lay
 	readProjectChips = domain.ProjectChips
 	readPeople       = userDomain.GetPeopleByUUIDs
 )
@@ -187,47 +192,103 @@ func askedAs(ids []string) map[string][]string {
 	return out
 }
 
-// readDocs decides every doc through the Access Resolver, then reads what the
-// chips show of the ones the reader may open.
+// nodeKindKey is the key a doc's data names the node under when it isn't a
+// page (docs F1): folder, file or link, domain/Doc's NodeFolder, NodeFile and
+// NodeLink. A page has none. Never "doc_node_kind": that is the predicate,
+// written through DgraphDoc alone.
+const nodeKindKey = "node_kind"
+
+// NodeKindOf is what a doc's data says the node is: folder, file or link,
+// and "" for a page or for anything that isn't a doc.
+func NodeKindOf(data map[string]any) string {
+	k, _ := data[nodeKindKey].(string)
+	return k
+}
+
+// readDocs reads the chips of every doc asked, then decides each doc, and each
+// chip's parent, through the Access Resolver in one batch: a chip shows only
+// docs the reader may open, and names a parent only when they may open that
+// too (a page shared out of a private folder must not reveal the folder). It
+// names the doc's project or team space only to a reader in that space, which
+// the doc's own decision says (its "space" reason), so a page shared out of a
+// private project doesn't reveal the project either. A chip says what the node
+// is when it isn't a page, and its colour when it has one, from the same read
+// (a link's address isn't a chip's: the link's own page opens it; its
+// provider's family is, so the panel marks it as the docs tree does). Reading
+// first keeps it to one chip read and one decision, as before.
 func readDocs(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]Entity, error) {
 	asked := askedAs(ids)
-	res := make([]accessBusiness.Resource, 0, len(asked))
+	lowers := make([]string, 0, len(asked))
 	for lower := range asked {
+		lowers = append(lowers, lower)
+	}
+	chips, err := readDocChips(ctx, lowers)
+	if err != nil {
+		return nil, err
+	}
+	res := make([]accessBusiness.Resource, 0, len(asked))
+	decide := map[string]bool{}
+	for _, lower := range lowers {
+		decide[lower] = true
 		res = append(res, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: lower})
+	}
+	for _, d := range chips {
+		if p := parentOf(d); p != "" && !decide[p] {
+			decide[p] = true
+			res = append(res, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: p})
+		}
 	}
 	decisions, err := accessBusiness.ResolveAll(ctx, who, res)
 	if err != nil {
 		return nil, err
 	}
+	opens, inSpace := map[string]bool{}, map[string]bool{}
 	out := map[string]Entity{}
-	var open []string
 	for r, d := range decisions {
+		lower := strings.ToLower(r.UUID)
 		switch {
 		case d.Level >= accessBusiness.LevelView:
-			open = append(open, r.UUID)
+			opens[lower] = true
+			inSpace[lower] = slices.Contains(d.Reasons, string(level.Space))
 		case d.Deleted && d.Was >= accessBusiness.LevelView:
-			for _, id := range asked[strings.ToLower(r.UUID)] {
+			for _, id := range asked[lower] {
 				out[id] = Entity{Access: AccessGone}
 			}
 		}
 	}
-	chips, err := readDocChips(ctx, open)
-	if err != nil {
-		return nil, err
-	}
 	for lower, d := range chips {
+		if !opens[lower] || len(asked[lower]) == 0 {
+			continue
+		}
 		data := map[string]any{"title": d.Title, "icon": d.Icon}
-		if d.Parent != nil && d.Parent.Uuid != "" {
+		if p := parentOf(d); p != "" && opens[p] {
 			data["parent_id"] = d.Parent.Uuid
 		}
-		if d.SpaceKind != "" && d.SpaceUUID != "" {
+		if d.SpaceKind != "" && d.SpaceUUID != "" && inSpace[lower] {
 			data["space_kind"], data["space_id"] = d.SpaceKind, d.SpaceUUID
+		}
+		if d.NodeKind != "" {
+			data[nodeKindKey] = d.NodeKind
+		}
+		if d.NodeKind == docDomain.NodeLink {
+			data["link_family"] = docDomain.LinkFamily(d.LinkURL)
+		}
+		if d.Color != "" {
+			data["color"] = d.Color
 		}
 		for _, id := range asked[lower] {
 			out[id] = Entity{Access: AccessOK, Title: d.Title, Data: data, Topic: helpers.GetMqttTopicForDoc(lower)}
 		}
 	}
 	return out, nil
+}
+
+// parentOf is a doc's parent's uuid in lower case; "" for a doc at the top.
+func parentOf(d *dgraphStruct.DgraphDoc) string {
+	if d == nil || d.Parent == nil {
+		return ""
+	}
+	return strings.ToLower(d.Parent.Uuid)
 }
 
 // readTasks reads tasks with the task view's rule for who may see each
@@ -239,6 +300,9 @@ func readTasks(ctx context.Context, who accessBusiness.Subject, ids []string) (m
 	if err != nil {
 		return nil, err
 	}
+	// A chip names a task by its key as the rest of the app does ("Q4-12"):
+	// one read for them all; a task the reader can't see keeps none.
+	layTaskKeys(ctx, tasks...)
 	var projects []*dgraphStruct.DgraphProject
 	for _, t := range tasks {
 		if t != nil && t.Project != nil {
@@ -297,6 +361,9 @@ func taskData(t *dgraphStruct.DgraphTask, canEdit bool) map[string]any {
 	}
 	if p := t.Project; p != nil && p.Uuid != "" {
 		data["project_id"], data["project_name"] = p.Uuid, p.Name
+	}
+	if t.Key != "" {
+		data["key"] = t.Key
 	}
 	return data
 }

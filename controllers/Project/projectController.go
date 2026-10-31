@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	approvalsBusiness "github.com/akashc777/OneCamp/business/Approvals"
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	templateBusiness "github.com/akashc777/OneCamp/business/ProjectTemplate"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
@@ -28,6 +31,7 @@ import (
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
+	"github.com/akashc777/OneCamp/helpers/uploadsafe"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -186,6 +190,8 @@ func GetDgraphProjectListByAdminDgraphUID(w http.ResponseWriter, r *http.Request
 
 	}
 
+	// Each with its key, so a new task's address can name its project by it.
+	taskKeys.LayProjects(ctx, dgraphProject...)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Updated project!", "data": dgraphProject})
 
 }
@@ -1044,12 +1050,6 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 
 	taskSearchStr := queryParams["taskSearchString"]
 
-	getAll, pageSize, pageIndex, err := helpers.ListPaging(queryParams)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
-		return
-	}
-
 	// One builder for every task list (domain/Task.TaskListFilter, PR1).
 	params := make([]taskDomain.TaskListParam, 0, len(filtersParam))
 	for _, p := range filtersParam {
@@ -1079,6 +1079,20 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to parse sorting query param",
 			"err": err,
 		})
+		return
+	}
+
+	if queryParams.Get("format") == "csv" {
+		exportTaskListCSV(w, r, dgraphProject.Name, business.TaskListExport{
+			ProjectUUID: projectUUIDString, ReaderUID: userInfo.UserDgraphInfo.Uid,
+			Filter: filterQuery, Sort: sortingQuery, Location: helpers.Location(queryParams.Get("tz")),
+		})
+		return
+	}
+
+	getAll, pageSize, pageIndex, err := helpers.ListPaging(queryParams)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 		return
 	}
 
@@ -1116,6 +1130,37 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 		"data":      dgraphProjectWithTasks,
 		"pageCount": pageCount,
 	})
+}
+
+// exportTaskListCSV answers the list as a CSV file (format=csv), its dates
+// in the time zone the app sends, named for the project and the day. Its
+// headers say how many tasks the list holds and how many rows the file has,
+// so the app can say when the file holds only the first ExportMax. A failure
+// once the file has started aborts the answer, so a cut file never passes
+// for a whole one.
+func exportTaskListCSV(w http.ResponseWriter, r *http.Request, projectName string, x business.TaskListExport) {
+	started := false
+	err := business.WriteTaskListCSV(r.Context(), x, func(total, rows int) io.Writer {
+		started = true
+		name := uploadsafe.SanitiseFileName(projectName, 80) + " tasks " + time.Now().In(x.Location).Format(time.DateOnly) + ".csv"
+		h := w.Header()
+		h.Set("Content-Type", "text/csv; charset=utf-8")
+		h.Set("Content-Disposition", uploadsafe.BuildDisposition(name))
+		h.Set("Cache-Control", "no-store")
+		h.Set("X-Total-Count", strconv.Itoa(total))
+		h.Set("X-Export-Rows", strconv.Itoa(rows))
+		w.WriteHeader(http.StatusOK)
+		return w
+	})
+	if err == nil {
+		return
+	}
+	if !started {
+		helpers.WriteReadFailure(w, r, err, "project's tasks", "controllers/GetProjectTaskList csv")
+		return
+	}
+	helpers.LogErrorWithContext(r.Context(), "controllers/GetProjectTaskList: the CSV of project %s stopped early: %+v", x.ProjectUUID, err)
+	panic(http.ErrAbortHandler)
 }
 
 func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
@@ -1184,8 +1229,11 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 		allTasks = append(allTasks, dgraphProjectWithTasks.TasksDone...)
 		// GitHub's facts are already on them (business.GetDgraphProjectTaskListForKanban; PR1, #24).
 		_ = taskFieldBusiness.MergeFieldValues(ctx, allTasks)
+		approvalsBusiness.MarkWaiting(ctx, allTasks)
 	}
 	decorate(ctx, &userInfo, dgraphProjectWithTasks)
+	// Which columns' rules let the reader move tasks in, for the board's New task.
+	approvalsBusiness.MoveInto(ctx, userInfo.UserDgraphInfo.Uuid, dgraphProjectWithTasks)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":  "Sucessful got task list",
@@ -1317,6 +1365,7 @@ func GetProjectBoardColumn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = taskFieldBusiness.MergeFieldValues(ctx, page.Cards)
+	approvalsBusiness.MarkWaiting(ctx, page.Cards)
 	// What the reader may do with each card, as the board says it.
 	view := &dgraphStruct.DgraphProject{Uuid: projectUUIDString, TasksTodo: page.Cards}
 	decorate(ctx, &userInfo, view)

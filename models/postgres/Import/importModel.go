@@ -36,7 +36,8 @@ import (
 )
 
 // Provider names — keep in sync with import_oauth_tokens' provider CHECK
-// (migrations 60, 187 and the Basecamp one).
+// (migrations 60 and 187, then Basecamp's, Airtable's and Miro's; the providers
+// package's TestTheTokenCheckAdmitsEveryProvider holds the last to every provider).
 const (
 	ProviderSlack    = "slack"
 	ProviderAsana    = "asana"
@@ -48,6 +49,14 @@ const (
 	ProviderClickUp  = "clickup"
 	ProviderMonday   = "monday"
 	ProviderBasecamp = "basecamp"
+	ProviderMiro     = "miro"
+	// ProviderAirtable is allowed in import_oauth_tokens by the Airtable provider's migration.
+	ProviderAirtable = "airtable"
+	// ProviderGoogleSheets is allowed in import_oauth_tokens by the Google Sheets provider's migration.
+	ProviderGoogleSheets = "gsheets"
+	// ProviderCSV is an uploaded CSV of tasks: it has no tokens, so the
+	// tokens' provider CHECK doesn't name it.
+	ProviderCSV = "csv"
 )
 
 // Job statuses. Aligned with the CHECK constraint in migration 60.
@@ -89,6 +98,11 @@ const (
 	// ChunkDocPages is a tree of pages that become docs; its parent source id
 	// is the tree's root page.
 	ChunkDocPages = "doc_pages"
+	// ChunkBoards is one board, which comes over drawn; its parent source id
+	// is the board's id.
+	ChunkBoards = "boards"
+	// ChunkTableBase is a base of tables; its parent source id is the base.
+	ChunkTableBase = "table_base"
 )
 
 // Chunk statuses.
@@ -118,6 +132,8 @@ const (
 	EntityField   = "task_field" // a project's custom field (business/Import/fields.go)
 	EntityDoc     = "doc"        // a page that became a doc
 	EntityTable   = "data_table" // a database that became a table
+	EntityBoard   = "board"      // a board that came over drawn
+	EntityCycle   = "cycle"      // a project's cycle (business/Import/cycles.go)
 )
 
 // Severity levels for error rows.
@@ -622,6 +638,72 @@ func ClearRawObjectKey(ctx context.Context, jobId uuid.UUID) error {
 	return err
 }
 
+// SlackWorkspace is a Slack workspace an admin's import brought in: the label
+// its imports go under, and its Slack team's id where the import noted it
+// (progress.slack_team).
+type SlackWorkspace struct {
+	Label string
+	Team  string
+}
+
+// SlackWorkspaces is every Slack workspace an admin's completed import
+// brought in, newest first. A member's own read (member_dms) is none.
+func SlackWorkspaces(ctx context.Context) ([]SlackWorkspace, error) {
+	return pgexec.Query(ctx, `
+		SELECT source_workspace_name, COALESCE(progress->>'slack_team', '')
+		FROM import_jobs
+		WHERE provider = 'slack' AND status = 'completed'
+		  AND COALESCE(options->>'member_dms', 'false') <> 'true'
+		ORDER BY completed_at DESC NULLS LAST
+		LIMIT 200`,
+		func(r pgexec.Row) (SlackWorkspace, error) {
+			var w SlackWorkspace
+			return w, r.Scan(&w.Label, &w.Team)
+		})
+}
+
+// MadeSince is which of the tasks (by uuid; sub-tasks too) an import made
+// at or after since, by lower-case uuid, as the import's own record says
+// when: a task an import makes keeps its source's dates. One an import only
+// matched to a task already here is no import's making. One read.
+func MadeSince(ctx context.Context, taskUUIDs []string, since time.Time) (map[string]bool, error) {
+	out := map[string]bool{}
+	ids := make([]string, 0, len(taskUUIDs))
+	for _, id := range taskUUIDs {
+		if parsed, err := uuid.Parse(id); err == nil {
+			ids = append(ids, parsed.String())
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	made, err := pgexec.Query(ctx, `
+		SELECT DISTINCT onecamp_uuid FROM import_id_map
+		WHERE onecamp_uuid = ANY($1::uuid[]) AND entity_type IN ($2, $3)
+		  AND created_by_this_import AND created_at >= $4`,
+		func(r pgexec.Row) (uuid.UUID, error) {
+			var id uuid.UUID
+			return id, r.Scan(&id)
+		}, pq.Array(ids), EntityTask, EntitySubtask, since)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range made {
+		out[id.String()] = true
+	}
+	return out, nil
+}
+
+// MemberReadUnderWay is whether member has a read of their own Slack
+// conversations not yet finished.
+func MemberReadUnderWay(ctx context.Context, member uuid.UUID) (bool, error) {
+	return pgexec.Scalar[bool](ctx, `
+		SELECT EXISTS (SELECT 1 FROM import_jobs
+		WHERE provider = 'slack' AND triggered_by = $1
+		  AND COALESCE(options->>'member_dms', 'false') = 'true'
+		  AND status IN ('pending', 'validating', 'planned', 'running', 'paused'))`, member)
+}
+
 // ─── Chunks ───────────────────────────────────────────────────────────
 
 // CreateChunks bulk-inserts chunks, idempotent on the logical key.
@@ -880,7 +962,10 @@ func UpsertIdMapping(ctx context.Context, importId uuid.UUID, entityType, source
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (import_id, entity_type, source_id) DO NOTHING`,
 		importId, entityType, sourceId, onecampUUID, parentSourceId, metadata)
-	return err
+	if err != nil {
+		return fmt.Errorf("remember %s %s: %w", entityType, sourceId, err)
+	}
+	return nil
 }
 
 // UpsertIdMappingWithOwnership is UpsertIdMapping plus the
@@ -919,13 +1004,15 @@ func LookupIdMapping(ctx context.Context, importId uuid.UUID, entityType, source
 }
 
 // PersonMatch is how a source's person came across: who they are here, their
-// name here, and whether they were matched by their address, in this import
-// or in the earlier import of the same source that first matched them. A
-// match by name alone isn't, nor a placeholder made for them.
+// name here, and whether they were matched by their address or are a
+// placeholder an import made for them, in this import or in the earlier
+// import of the same source that first matched them. A match by name alone
+// is neither, nor one whose first match is no longer known.
 type PersonMatch struct {
-	ID      uuid.UUID
-	Name    string
-	ByEmail bool
+	ID          uuid.UUID
+	Name        string
+	ByEmail     bool
+	Placeholder bool
 }
 
 // PeopleMatched is how each of these people (source ids) came across in the
@@ -943,7 +1030,8 @@ func PeopleMatched(ctx context.Context, importId uuid.UUID, provider, workspace 
 	}
 	rows, err := pgexec.Query(ctx, `
 		SELECT m.source_id, m.onecamp_uuid, COALESCE(NULLIF(u.display_name, ''), u.username, ''),
-		       COALESCE(COALESCE(o.metadata, m.metadata)->>'matched_by' = 'email', false)
+		       COALESCE(COALESCE(o.metadata, m.metadata)->>'matched_by' = 'email', false),
+		       COALESCE(COALESCE(o.metadata, m.metadata)->>'matched_by' = 'external', false)
 		FROM import_id_map m
 		LEFT JOIN import_workspace_id_map w
 		       ON m.metadata->>'matched_by' = 'workspace_map' AND w.provider = $3 AND w.source_workspace_name = $4
@@ -954,7 +1042,7 @@ func PeopleMatched(ctx context.Context, importId uuid.UUID, provider, workspace 
 		WHERE m.import_id = $1 AND m.entity_type = $5 AND m.source_id = ANY($2::text[])`,
 		func(r pgexec.Row) (row, error) {
 			var v row
-			err := r.Scan(&v.source, &v.match.ID, &v.match.Name, &v.match.ByEmail)
+			err := r.Scan(&v.source, &v.match.ID, &v.match.Name, &v.match.ByEmail, &v.match.Placeholder)
 			return v, err
 		}, importId, pq.Array(sourceIds), provider, workspace, EntityUser)
 	if err != nil {
@@ -1019,6 +1107,33 @@ func IdMappingsByTypeOwned(ctx context.Context, importId uuid.UUID, entityType s
 	return out, rows.Err()
 }
 
+// madeTables are the rows of the kinds a rollback marks deleted and then takes
+// off the graph and search (MadeAndDeleted).
+var madeTables = map[string]string{
+	EntitySubtask: "tasks",
+	EntityTask:    "tasks",
+	EntityProject: "projects",
+	EntityTeam:    "teams",
+}
+
+// MadeAndDeleted is what this import made of entityType whose row is marked
+// deleted: what its rollback's transaction took away (a project or team only
+// when nothing else was in it), for the rollback to take off the graph and
+// search too.
+func MadeAndDeleted(ctx context.Context, importId uuid.UUID, entityType string) ([]uuid.UUID, error) {
+	table, ok := madeTables[entityType]
+	if !ok {
+		return nil, fmt.Errorf("a rollback takes no %s off the graph", entityType)
+	}
+	return pgexec.Query(ctx, `
+		SELECT m.onecamp_uuid FROM import_id_map m JOIN `+table+` x ON x.id = m.onecamp_uuid
+		WHERE m.import_id = $1 AND m.entity_type = $2 AND m.created_by_this_import AND x.deleted_at IS NOT NULL`,
+		func(r pgexec.Row) (uuid.UUID, error) {
+			var id uuid.UUID
+			return id, r.Scan(&id)
+		}, importId, entityType)
+}
+
 // IdMapValue is a mapping and one value of its metadata.
 type IdMapValue struct {
 	SourceId    string
@@ -1033,11 +1148,47 @@ func IdMappingsWithMetadata(ctx context.Context, importId uuid.UUID, entityType,
 		SELECT source_id, onecamp_uuid, metadata->$3 FROM import_id_map
 		WHERE import_id = $1 AND entity_type = $2 AND metadata ? $3
 		ORDER BY source_id`,
-		func(r pgexec.Row) (IdMapValue, error) {
-			var v IdMapValue
-			err := r.Scan(&v.SourceId, &v.OnecampUUID, &v.Value)
-			return v, err
-		}, importId, entityType, key)
+		scanIdMapValue, importId, entityType, key)
+}
+
+// IdMappingsWithMetadataFor is IdMappingsWithMetadata for the source ids
+// given, in one read however many there are (a board's pictures).
+func IdMappingsWithMetadataFor(ctx context.Context, importId uuid.UUID, entityType, key string, sourceIds []string) ([]IdMapValue, error) {
+	return pgexec.Query(ctx, `
+		SELECT source_id, onecamp_uuid, metadata->$3 FROM import_id_map
+		WHERE import_id = $1 AND entity_type = $2 AND source_id = ANY($4) AND metadata ? $3
+		ORDER BY source_id`,
+		scanIdMapValue, importId, entityType, key, pq.Array(sourceIds))
+}
+
+func scanIdMapValue(r pgexec.Row) (IdMapValue, error) {
+	var v IdMapValue
+	err := r.Scan(&v.SourceId, &v.OnecampUUID, &v.Value)
+	return v, err
+}
+
+// KeptFile is a file an import kept, as the import recorded it (its mapping's
+// metadata), with who kept it and when, from its attachments row.
+type KeptFile struct {
+	Id        uuid.UUID
+	Record    json.RawMessage
+	CreatedBy uuid.NullUUID
+	CreatedAt time.Time
+}
+
+// KeptTaskFilesAfter is the next n files any import kept for a task and still
+// keeps (its attachments row isn't deleted), in id order after after.
+func KeptTaskFilesAfter(ctx context.Context, after uuid.UUID, n int) ([]KeptFile, error) {
+	return pgexec.Query(ctx, `
+		SELECT m.onecamp_uuid, m.metadata, a.created_by, a.created_at
+		FROM import_id_map m JOIN attachments a ON a.id = m.onecamp_uuid AND a.deleted_at IS NULL
+		WHERE m.entity_type = $1 AND m.onecamp_uuid > $2 AND m.metadata->>'parent_kind' = 'task'
+		ORDER BY m.onecamp_uuid
+		LIMIT $3`,
+		func(r pgexec.Row) (f KeptFile, err error) {
+			err = r.Scan(&f.Id, &f.Record, &f.CreatedBy, &f.CreatedAt)
+			return f, err
+		}, EntityFile, after, n)
 }
 
 // IdMapOf is this import's mappings of a kind, source id to OneCamp id, in one read.
@@ -1091,6 +1242,17 @@ func GetIdMapMetadata(ctx context.Context, importId uuid.UUID, entityType, sourc
 	return json.RawMessage(raw), nil
 }
 
+// SetIdMapMetadata replaces one mapping row's metadata: an entity recorded as
+// soon as it was made, before the long part of making it (a board, before its
+// pictures and its drawing), says so when that is done.
+func SetIdMapMetadata(ctx context.Context, importId uuid.UUID, entityType, sourceId string, metadata json.RawMessage) error {
+	_, err := pgexec.Exec(ctx, `
+		UPDATE import_id_map SET metadata = $4
+		WHERE import_id = $1 AND entity_type = $2 AND source_id = $3`,
+		importId, entityType, sourceId, metadata)
+	return err
+}
+
 // ─── Workspace map (cross-import dedup) ───────────────────────────────
 
 // LookupWorkspaceMapping returns the OneCamp UUID a previous import of
@@ -1112,73 +1274,28 @@ func LookupWorkspaceMapping(ctx context.Context, provider, workspace, entityType
 	return u, err
 }
 
-// LookupWorkspaceMappingsBatch (cross-import batch resolver) now lives in
-// domain/Import, which builds the source_id IN(...) set and calls
-// ExecSourceIdMap. Removed from the model to keep query assembly in the domain
-// layer.
-
-// UpsertWorkspaceMapping persists the cross-import mapping. Idempotent.
-func UpsertWorkspaceMapping(ctx context.Context, provider, workspace, entityType, sourceId string,
-	onecampUUID uuid.UUID, originImportId uuid.UUID) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		INSERT INTO import_workspace_id_map
-		    (provider, source_workspace_name, entity_type, source_id, onecamp_uuid, origin_import_id)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (provider, source_workspace_name, entity_type, source_id) DO NOTHING`,
-		provider, workspace, entityType, sourceId, onecampUUID, originImportId)
-	return err
+// LookupWorkspaceMappingsBatch is LookupWorkspaceMapping for many source ids
+// in one read, source id to OneCamp id.
+func LookupWorkspaceMappingsBatch(ctx context.Context, provider, workspace, entityType string, sourceIds []string) (map[string]uuid.UUID, error) {
+	if len(sourceIds) == 0 {
+		return map[string]uuid.UUID{}, nil
+	}
+	return pgexec.Pairs[string, uuid.UUID](ctx, `
+		SELECT source_id, onecamp_uuid FROM import_workspace_id_map
+		WHERE provider = $1 AND source_workspace_name = $2
+		  AND entity_type = $3 AND source_id = ANY($4)`,
+		provider, workspace, entityType, pq.Array(sourceIds))
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────
 
-// LogImportError persists a single error/warning/fatal entry.
+// LogImportError persists a single error/warning/fatal entry: one entry of
+// LogImportErrors, which a worker with many to write uses instead.
 // Best-effort; never blocks a worker on telemetry.
 func LogImportError(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID,
 	entityType, sourceId, severity, code, message string, errorContext json.RawMessage) {
-	if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
-		return // not connected (a provider's unit test): nowhere to keep it
-	}
-	message, errorContext = helpers.WithoutURLQueries(message), contextWithoutURLQueries(errorContext)
-	dbCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		INSERT INTO import_errors
-		    (import_id, chunk_id, entity_type, source_id, severity, code, message, context)
-		VALUES ($1, $2, NULLIF($3,''), NULLIF($4,''), $5, NULLIF($6,''), $7, $8)`,
-		importId, chunkId, entityType, sourceId, severity, code, message, errorContext)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/Import.LogImportError swallowed err: %+v", err)
-	}
-}
-
-// ImportError is one entry LogImportErrors writes.
-type ImportError struct {
-	EntityType, SourceID, Severity, Code, Message string
-	Context                                       json.RawMessage
-}
-
-// LogImportErrors is LogImportError for several entries in one statement.
-// Best-effort, as it is: a failure is logged, never a worker's.
-func LogImportErrors(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID, entries []ImportError) {
-	if len(entries) == 0 || postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
-		return
-	}
-	n := len(entries)
-	entity, source, severity, code, message, errContext := make([]string, n), make([]string, n), make([]string, n), make([]string, n), make([]string, n), make([]string, n)
-	for i, e := range entries {
-		entity[i], source[i], severity[i], code[i] = e.EntityType, e.SourceID, e.Severity, e.Code
-		message[i] = helpers.WithoutURLQueries(e.Message)
-		errContext[i] = string(contextWithoutURLQueries(e.Context))
-	}
-	if _, err := pgexec.Exec(ctx, `
-		INSERT INTO import_errors (import_id, chunk_id, entity_type, source_id, severity, code, message, context)
-		SELECT $1, $2, NULLIF(e.entity, ''), NULLIF(e.source, ''), e.severity, NULLIF(e.code, ''), e.message, NULLIF(e.context, '')::jsonb
-		FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[]) AS e(entity, source, severity, code, message, context)`,
-		importId, chunkId, pq.Array(entity), pq.Array(source), pq.Array(severity), pq.Array(code), pq.Array(message), pq.Array(errContext)); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/Import.LogImportErrors swallowed err: %+v", err)
-	}
+	LogImportErrors(ctx, importId, []ImportError{{ChunkID: chunkId, EntityType: entityType, SourceID: sourceId,
+		Severity: severity, Code: code, Message: message, Context: errorContext}})
 }
 
 // ListErrors returns up to limit error rows, optionally filtered by severity.
@@ -1373,43 +1490,6 @@ func GetPriorityMappings(ctx context.Context, importId uuid.UUID) (map[string]st
 // itself (e.g., backdating posts after creation).
 func Exec(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
 	return postgresInit.DBConn.SqlDB.ExecContext(ctx, query, args...)
-}
-
-// UpsertIdMappingThenFinish atomically writes the id_map row and marks
-// the chunk done. Used by single-item chunks (e.g. file workers).
-func UpsertIdMappingThenFinish(ctx context.Context, importId, chunkId uuid.UUID,
-	entityType, sourceId string, onecampUUID uuid.UUID, metadata json.RawMessage) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	tx, err := postgresInit.DBConn.SqlDB.BeginTx(dbCtx, nil)
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-	if _, err := tx.ExecContext(dbCtx, `
-		INSERT INTO import_id_map
-		    (import_id, entity_type, source_id, onecamp_uuid, metadata)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (import_id, entity_type, source_id) DO NOTHING`,
-		importId, entityType, sourceId, onecampUUID, metadata); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(dbCtx, `
-		UPDATE import_chunks
-		SET status='done', items_done=1, error=NULL, updated_at=NOW()
-		WHERE id=$1`, chunkId); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	committed = true
-	return nil
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────

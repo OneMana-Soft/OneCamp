@@ -2,64 +2,33 @@ package business
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
-	"math"
+	"time"
 
-	domain "github.com/akashc777/OneCamp/domain/GlobalSearch"
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	querySpec "github.com/akashc777/OneCamp/business/QuerySpec"
+	searchQuery "github.com/akashc777/OneCamp/business/SearchQuery"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 )
 
+// GlobalSearchPagination is a page of the search box's search, for the
+// callers that send its text as it was typed: the palette, the pickers,
+// /v1/search and the assistant's named search.
 type GlobalSearchPagination struct {
 	Page    []*openSearchStruct.GlobalSearchOpenSearchResp `json:"page,omitempty"`
 	HasMore bool                                           `json:"has_more"`
 	// Next is the cursor of the page after this one, while HasMore: what the
 	// search page's "Show more" sends back as after.
 	Next string `json:"next,omitempty"`
-}
-
-// ErrBadSearchCursor is a cursor this server didn't write.
-var ErrBadSearchCursor = errors.New("that isn't a search cursor")
-
-// encodeSearchCursor writes the sort values of a page's last hit (its score,
-// then its time) as an opaque cursor; "" when there are none.
-func encodeSearchCursor(sortValues []any) string {
-	if len(sortValues) == 0 {
-		return ""
-	}
-	raw, err := json.Marshal(sortValues)
-	if err != nil {
-		return ""
-	}
-	return base64.RawURLEncoding.EncodeToString(raw)
-}
-
-// DecodeSearchCursor reads a cursor encodeSearchCursor wrote: two finite
-// numbers, a score and a time. Anything else is ErrBadSearchCursor; the
-// values go into the query marshalled, never as text.
-func DecodeSearchCursor(cursor string) ([]float64, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(cursor)
-	if err != nil || len(raw) > 128 {
-		return nil, ErrBadSearchCursor
-	}
-	var values []float64
-	if err := json.Unmarshal(raw, &values); err != nil || len(values) != 2 {
-		return nil, ErrBadSearchCursor
-	}
-	for _, v := range values {
-		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return nil, ErrBadSearchCursor
-		}
-	}
-	return values, nil
+	// Totals are how many match in each kind; Total in all.
+	Totals map[string]int `json:"totals,omitempty"`
+	Total  int            `json:"total"`
 }
 
 // GetUnifiedGlobalSearch is the first page of the unified search.
-func GetUnifiedGlobalSearch(ctx context.Context, userUUID string, userEmail string, userChannels []*dgraphStruct.DgraphChannel, userProjects []*dgraphStruct.DgraphProject, userTeams []*dgraphStruct.DgraphTeam, searchText string) (searchPage GlobalSearchPagination, err error) {
-	return GetUnifiedGlobalSearchPage(ctx, userUUID, userEmail, userChannels, userProjects, userTeams, searchText, nil, Within{})
+func GetUnifiedGlobalSearch(ctx context.Context, who accessBusiness.Subject, userEmail string, userChannels []*dgraphStruct.DgraphChannel, userProjects []*dgraphStruct.DgraphProject, userTeams []*dgraphStruct.DgraphTeam, searchText string) (searchPage GlobalSearchPagination, err error) {
+	return GetUnifiedGlobalSearchPage(ctx, who, userEmail, userChannels, userProjects, userTeams, searchText, "", Within{})
 }
 
 // Within narrows a search to one conversation: a channel by its id, or a DM
@@ -71,64 +40,70 @@ type Within struct {
 	GroupingID  string
 }
 
+// ReachOf is what someone (who) reaches through membership, from the lists
+// their sign-in carries: their channels, projects and teams. Only the
+// projects they are in themselves: a project of a team they're in isn't
+// theirs to search unless they're in it too.
+func ReachOf(who accessBusiness.Subject, userEmail string, channels []*dgraphStruct.DgraphChannel, projects []*dgraphStruct.DgraphProject, teams []*dgraphStruct.DgraphTeam) Reach {
+	r := Reach{Who: who, UserUUID: who.UserUUID, Email: userEmail}
+	for _, ch := range channels {
+		if ch != nil && ch.Uuid != "" {
+			r.Channels = append(r.Channels, ch.Uuid)
+		}
+	}
+	seen := map[string]bool{}
+	for _, p := range projects {
+		if p != nil && p.Uuid != "" && !seen[p.Uuid] {
+			seen[p.Uuid] = true
+			r.Projects = append(r.Projects, p.Uuid)
+		}
+	}
+	for _, t := range teams {
+		if t != nil && t.Uuid != "" {
+			r.Teams = append(r.Teams, t.Uuid)
+		}
+	}
+	return r
+}
+
 // GetUnifiedGlobalSearchPage is a page of the unified search: the first with
 // no after, else the one after the cursor a page answered with (Next). The
-// search page counted its 20 hits as "20 results" and never asked for more.
-func GetUnifiedGlobalSearchPage(ctx context.Context, userUUID string, userEmail string, userChannels []*dgraphStruct.DgraphChannel, userProjects []*dgraphStruct.DgraphProject, userTeams []*dgraphStruct.DgraphTeam, searchText string, after []float64, within Within) (searchPage GlobalSearchPagination, err error) {
-	var channelUUIDs []string
-	for _, ch := range userChannels {
-		channelUUIDs = append(channelUUIDs, ch.Uuid)
+// text is read with the one grammar as a search (business/SearchQuery), so a
+// modifier typed here filters too, and anything it can't read is searched as
+// the words typed. who is the person searching, as the caller names them for
+// the Access Resolver (accessBusiness.RequestSubject for a request): a place
+// named in the text is found by it, so an asker built from a uuid alone, with
+// no graph uid, found no team.
+func GetUnifiedGlobalSearchPage(ctx context.Context, who accessBusiness.Subject, userEmail string, userChannels []*dgraphStruct.DgraphChannel, userProjects []*dgraphStruct.DgraphProject, userTeams []*dgraphStruct.DgraphTeam, searchText string, after string, within Within) (searchPage GlobalSearchPagination, err error) {
+	asker := searchQuery.Asker{Subject: who, Email: userEmail}
+	spec, issues := searchQuery.Build(ctx, asker, searchText, querySpec.Scope{Kind: querySpec.ScopeSearch}, searchQuery.ModeSearch)
+	if !searchQuery.Runs(issues) {
+		return GlobalSearchPagination{}, nil
 	}
-
-	// The person's own projects only. A project of a team they're in isn't
-	// theirs to read unless they're in it too, and its tasks, comments, files
-	// and name were found through the team.
-	projectUUIDMap := make(map[string]bool)
-	for _, proj := range userProjects {
-		projectUUIDMap[proj.Uuid] = true
-	}
-
-	var projectUUIDs []string
-	for uuid := range projectUUIDMap {
-		projectUUIDs = append(projectUUIDs, uuid)
-	}
-
-	var teamUUIDs []string
-	for _, team := range userTeams {
-		teamUUIDs = append(teamUUIDs, team.Uuid)
-	}
-
-	searchInfo, err := domain.GetUnifiedGlobalSearchFromOpenSearch(ctx, userUUID, userEmail, channelUUIDs, projectUUIDs, teamUUIDs, searchText, after, within.ChannelUUID, within.GroupingID)
-
+	spec.Filter = within.Narrow(spec.Filter)
+	result, err := Search(ctx, ReachOf(who, userEmail, userChannels, userProjects, userTeams), spec, Page{After: after, Now: time.Now()})
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetUnifiedGlobalSearch Failed to get unified search from opensearch err: %+v",
-			err)
-
-		return
+		return GlobalSearchPagination{}, err
 	}
+	return GlobalSearchPagination{Page: result.Page, HasMore: result.HasMore, Next: result.Next, Totals: result.Totals, Total: result.Total}, nil
+}
 
-	searchPage = page(ctx, searchInfo, domain.UNIFIED_SEARCH_COUNT)
-	// The next page starts after the last hit the index gave this one,
-	// whether or not a check below leaves it out.
-	if searchPage.HasMore {
-		searchPage.Next = encodeSearchCursor(searchInfo[domain.UNIFIED_SEARCH_COUNT-1].Sort)
+// Narrow is f narrowed to the one conversation, or f for the zero value.
+func (within Within) Narrow(f *querySpec.Filter) *querySpec.Filter {
+	var place querySpec.Value
+	switch {
+	case within.ChannelUUID != "":
+		place = querySpec.Value{ID: within.ChannelUUID, Type: "channel"}
+	case within.GroupingID != "":
+		place = querySpec.Value{ID: within.GroupingID, Type: placeConversation}
+	default:
+		return f
 	}
-	// After the page is cut: whether there is more is what the index said.
-	// The demo's people were left out before the cut, so a page of 21 hits
-	// with one of them in it lost its 21st and said there was no more.
-	searchPage.Page = demoPeopleHits(userEmail, searchPage.Page)
-	searchPage.Page = keepReadableDocHits(ctx, userUUID, searchPage.Page)
-	searchPage.Page = keepReadableBoardHits(ctx, userUUID, searchPage.Page)
-	searchPage.Page = keepReadableProjectFileHits(ctx, userUUID, userProjects, searchPage.Page)
-	// A search for exactly a task's key ("Q4-12") shows that task first, on
-	// the first page of a search of everything; every task hit carries its key.
-	if after == nil && within == (Within{}) {
-		searchPage.Page = withExactKey(exactKeyHit(ctx, searchText, projectUUIDMap), searchPage.Page)
+	in := querySpec.Filter{Field: "in", Operator: querySpec.OperatorIs, Values: []querySpec.Value{place}}
+	if f == nil {
+		return &in
 	}
-	keyTaskHits(ctx, searchPage.Page)
-
-	return
+	return &querySpec.Filter{Op: querySpec.OpAnd, Filters: []querySpec.Filter{*f, in}}
 }
 
 // demoPeopleHits returns hits without the people the public demo keeps from

@@ -126,7 +126,7 @@ func TestTheFilterHidesWhatTheRuleKeepsFromEachReader(t *testing.T) {
 	editWho = func(context.Context, string) string { return EditMembers }
 	viaToken = func(context.Context) bool { return false }
 
-	hidden, err := hiddenFor(context.Background(), me.String())
+	hid, err := hiddenFor(context.Background(), me.String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,20 +134,33 @@ func TestTheFilterHidesWhatTheRuleKeepsFromEachReader(t *testing.T) {
 		t.Fatalf("the rows are asked for the reader (%s), and the graph read as a read with no audience (%v)", askedFor, sawSystem)
 	}
 	want := map[string]bool{kept.String(): true, missing.String(): true, underKept.String(): true}
-	if trues(hidden) != len(want) || !hidden[kept.String()] || !hidden[missing.String()] || !hidden[underKept.String()] {
-		t.Fatalf("hidden: %v, want %v (a task the graph can't find stays hidden; a sub-task is let in with the task above it)", hidden, want)
+	if trues(hid) != len(want) || !hid[kept.String()] || !hid[missing.String()] || !hid[underKept.String()] {
+		t.Fatalf("hidden: %v, want %v (a task the graph can't find stays hidden; a sub-task is let in with the task above it)", hid, want)
 	}
 	// Every restricted task the reader may see is named false: it shows,
 	// with the lock (WA2b).
 	for _, id := range []uuid.UUID{mine, run, underMine, underGranted, granted} {
-		if v, ok := hidden[id.String()]; !ok || v {
-			t.Fatalf("%s: a restricted task the reader may see is named, as not hidden: %v", id, hidden)
+		if v, ok := hid[id.String()]; !ok || v {
+			t.Fatalf("%s: a restricted task the reader may see is named, as not hidden: %v", id, hid)
 		}
 	}
 	// The task one is restricted with is read once, even when it is no
 	// candidate.
 	if n := len(read); n != 8 {
 		t.Fatalf("read %d tasks for the decision, want the 7 candidates and the one above them that isn't: %v", n, read)
+	}
+
+	// With assignments not counted, the task given to me and the one
+	// restricted with it are hidden too; the project I run, and what the
+	// rows let me into, still show.
+	unassigned, err := hidden(context.Background(), me.String(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[uuid.UUID]bool{mine: true, underMine: true, kept: true, underKept: true, missing: true, run: false, underGranted: false, granted: false} {
+		if v, ok := unassigned[id.String()]; !ok || v != want {
+			t.Fatalf("%s with no assignment counting: hidden %v (named: %v), want %v; all: %v", id, v, ok, want, unassigned)
+		}
 	}
 
 	// Through a token, running the project is a member's place: hidden too.

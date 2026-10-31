@@ -26,10 +26,20 @@ import (
 // MeetingRoomPrefix).
 const meetingRoomPrefix = "meet-"
 
-// RefOfRoom answers what a room's call belongs to and its kind (huddle or
-// meeting), or false for a name no call uses. Pure.
+// RefOfRoom answers what a room's call belongs to and its kind (huddle,
+// meeting or breakout), or false for a name no call uses. A breakout room
+// belongs to what its parent call does. Pure.
 func RefOfRoom(room string) (Ref, string, bool) {
 	room = strings.TrimSpace(room)
+	if parent, _, ok := ParentOfBreakout(room); ok {
+		ref, _, _ := refOfCallRoom(parent)
+		return ref, model.KindBreakout, true
+	}
+	return refOfCallRoom(room)
+}
+
+// refOfCallRoom is RefOfRoom for a call's own room, never a breakout's. Pure.
+func refOfCallRoom(room string) (Ref, string, bool) {
 	if id, ok := strings.CutPrefix(room, meetingRoomPrefix); ok {
 		if id == "" {
 			return Ref{}, "", false
@@ -92,6 +102,9 @@ func RoomOf(ref Ref) string {
 // can recognise: until the index has been filled in from the graph (once,
 // after an upgrade), every group room is taken as ours, as it always was.
 func BelongsHere(ctx context.Context, room string) bool {
+	if parent, _, ok := ParentOfBreakout(room); ok {
+		room = parent
+	}
 	ref, _, ok := RefOfRoom(room)
 	if !ok {
 		return false

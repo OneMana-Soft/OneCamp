@@ -59,22 +59,22 @@ func TestReadAllReadsEveryPage(t *testing.T) {
 	}
 }
 
-// ReadAll gives at most readAllMax results: a list of exactly that many is
+// ReadAll gives at most ReadAllMax results: a list of exactly that many is
 // read whole, one more is too many, and no page reaches past the most.
 func TestReadAllStopsAtItsMost(t *testing.T) {
 	for _, size := range []int{ReadAllPage, 3000} {
 		var asked []Page
-		got, err := ReadAll(size, list(readAllMax, &asked))
-		if err != nil || len(got) != readAllMax {
-			t.Fatalf("size %d: a list of exactly %d gave %d results (%v)", size, readAllMax, len(got), err)
+		got, err := ReadAll(size, list(ReadAllMax, &asked))
+		if err != nil || len(got) != ReadAllMax {
+			t.Fatalf("size %d: a list of exactly %d gave %d results (%v)", size, ReadAllMax, len(got), err)
 		}
 		for _, p := range asked {
-			if p.Offset+p.First > readAllMax+1 {
+			if p.Offset+p.First > ReadAllMax+1 {
 				t.Fatalf("size %d: read %+v reaches past the most", size, p)
 			}
 		}
-		if _, err := ReadAll(size, list(readAllMax+1, new([]Page))); !errors.Is(err, ErrTooMany) {
-			t.Fatalf("size %d: a list of %d: err = %v, want ErrTooMany", size, readAllMax+1, err)
+		if _, err := ReadAll(size, list(ReadAllMax+1, new([]Page))); !errors.Is(err, ErrTooMany) {
+			t.Fatalf("size %d: a list of %d: err = %v, want ErrTooMany", size, ReadAllMax+1, err)
 		}
 	}
 }
@@ -112,5 +112,43 @@ func TestTotalOrder(t *testing.T) {
 		if got := TotalOrder(in, "task_uuid"); got != want {
 			t.Errorf("TotalOrder(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// EachPage hands the windows over in order, never an empty one, and stops at
+// its most, saying whether the list goes on past it; an error from each
+// stops the reading.
+func TestEachPageHandsEachWindowUpToItsMost(t *testing.T) {
+	for _, c := range []struct {
+		n, most int
+		more    bool
+	}{{0, 10, false}, {7, 10, false}, {8, 10, false}, {10, 10, false}, {11, 10, true}, {25, 10, true}} {
+		var asked []Page
+		var got []int
+		more, err := EachPage(4, c.most, list(c.n, &asked), func(w []int) error {
+			if len(w) == 0 {
+				t.Errorf("n=%d: an empty window", c.n)
+			}
+			got = append(got, w...)
+			return nil
+		})
+		if err != nil || more != c.more || len(got) != min(c.n, c.most) {
+			t.Fatalf("n=%d, most %d: %d results, more %v (%v)", c.n, c.most, len(got), more, err)
+		}
+		for i, v := range got {
+			if v != i {
+				t.Fatalf("n=%d: result %d is %d", c.n, i, v)
+			}
+		}
+		for _, p := range asked {
+			if p.Offset+p.First > c.most+1 {
+				t.Errorf("n=%d: read %+v reaches past the most", c.n, p)
+			}
+		}
+	}
+	stop := errors.New("stop")
+	var asked []Page
+	if _, err := EachPage(4, 100, list(20, &asked), func([]int) error { return stop }); !errors.Is(err, stop) || len(asked) != 1 {
+		t.Fatalf("each's error stops the reading: %v after %d reads", err, len(asked))
 	}
 }

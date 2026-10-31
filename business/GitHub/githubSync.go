@@ -945,11 +945,9 @@ func RefreshFromGitHub(ctx context.Context, taskUUID uuid.UUID, backfillComments
 	}
 
 	// 2. Fetch current task info from Dgraph (needed as baseline for comparisons)
-	// Use "0x1" (groot) as userUid to avoid Dgraph "ID can't be empty" error.
-	// Auth fields are not used in server-side refresh operations.
 	// The sync worker has no user: this read is the server refreshing its own
 	// record of a task, so it says so rather than passing a uid nobody owns.
-	dgraphTaskInfo, err := taskBusiness.GetDgraphTaskInfo(helpers.WithSystemRead(ctx), taskUUID.String(), "0x1")
+	dgraphTaskInfo, err := taskBusiness.GetDgraphTaskInfo(helpers.WithSystemRead(ctx), taskUUID.String(), "")
 	if err != nil || dgraphTaskInfo == nil {
 		_ = taskDomain.SetGitHubSyncStatus(ctx, taskUUID, "failed", strPtr("task not found in Dgraph"), 1)
 		return fmt.Errorf("task not found in Dgraph: %w", err)

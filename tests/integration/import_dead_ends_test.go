@@ -48,6 +48,7 @@ type stubProvider struct {
 
 func (s *stubProvider) Name() string                            { return "stubsource" }
 func (s *stubProvider) Capabilities() importProvider.Capability { return importProvider.CapProjects }
+func (s *stubProvider) DefaultStatusMap() map[string]string     { return nil }
 func (s *stubProvider) Validate(context.Context, *importModels.Job, importProvider.JobOptions) error {
 	return s.validateErr
 }

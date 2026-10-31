@@ -30,8 +30,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/opensearch-project/opensearch-go/v4"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	taskController "github.com/akashc777/OneCamp/controllers/Task"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -54,15 +52,7 @@ func TestATasksEmailsReachOnlyItsReaders(t *testing.T) {
 	dg := integration.SetupDgraph(t)
 	broker := &noticeBroker{}
 	integration.UseMqttClient(t, broker)
-	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"took":1,"errors":false,"items":[],"updated":0,"failures":[]}`)
-	}))
-	defer search.Close()
-	client, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{search.URL}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	integration.UseOpenSearchClient(t, client)
+	integration.AcceptingOpenSearch(t)
 	defer firebaseInit.ObservePushesForTest(func(map[string]string, []string) {})()
 
 	exec := func(q string, args ...any) {

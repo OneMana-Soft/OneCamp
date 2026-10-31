@@ -2,6 +2,7 @@ package business
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
@@ -29,10 +30,11 @@ func createLiveKitRoom(ctx context.Context, roomId string) (err error) {
 	return
 }
 
-// GenerateToken mints a member's call token. language is what the person
-// speaks (their browser's), for the server's transcriber; "" when unknown.
-func GenerateToken(ctx context.Context, roomId string, identity string, userName string, isAdmin bool, language string) (token string, err error) {
-	token, err = livekitInit.LiveKitService.GenerateToken(roomId, identity, userName, isAdmin, language)
+// GenerateToken mints a member's call token, letting them publish sources
+// (SourcesAtDoor). language is what the person speaks (their browser's), for
+// the server's transcriber; "" when unknown.
+func GenerateToken(ctx context.Context, roomId string, identity string, userName string, isAdmin bool, language string, sources []string) (token string, err error) {
+	token, err = livekitInit.LiveKitService.GenerateToken(roomId, identity, userName, isAdmin, language, sources)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -60,49 +62,65 @@ func CheckRoomExists(ctx context.Context, roomId string) (exists bool, err error
 	return
 }
 
-// IsCallActive reports whether a room has a live human call in progress
-// (≥1 non-agent participant connected). This is the correct signal for the
-// FE "call active" indicator — unlike CheckRoomExists it is NOT fooled by
-// the transcription agent lingering in an otherwise-empty room, nor by
-// LiveKit's post-call EmptyTimeout window during which the empty room
-// object still exists.
+// IsCallActive reports whether a call is going on in a conversation's room: a
+// person (livekitInit.IsPerson) is in one of the call's rooms. This is the
+// signal for the "call active" dot. Unlike CheckRoomExists it is NOT fooled by
+// the transcription agent, a recorder or a hidden watcher lingering in a room
+// nobody is in, nor by LiveKit's post-call EmptyTimeout window during which
+// the empty room object still exists.
 //
 // Use IsCallActive for any "should we show the call dot" decision. Reserve
 // CheckRoomExists for room-lifecycle logic (e.g. deciding whether to create
 // a new room vs reuse an existing one).
-func IsCallActive(ctx context.Context, roomId string) (active bool, err error) {
-	active, err = livekitInit.LiveKitService.RoomHasHumanParticipants(ctx, roomId)
+func IsCallActive(ctx context.Context, roomId string) (bool, error) {
+	active, err := livekitInit.LiveKitService.RoomHasHumanParticipants(ctx, roomId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/IsCallActive Failed to check human participants err: %+v",
 			err,
 		)
-		return
+		return false, err
 	}
-	return
+	return active || inBreakoutRooms(ctx, roomId), nil
 }
 
-// IsCallActiveExcluding is like IsCallActive but ignores the participant
-// with identity excludeIdentity. Used by the participant_left webhook so a
-// just-departed participant that LiveKit hasn't fully removed yet doesn't
-// keep the call falsely "active".
-func IsCallActiveExcluding(ctx context.Context, roomId string, excludeIdentity string) (active bool, err error) {
-	active, err = livekitInit.LiveKitService.RoomHasHumanParticipantsExcluding(ctx, roomId, excludeIdentity)
+// inBreakoutRooms reports whether a person is in one of the breakout rooms of
+// the call in a room. While a call's people are all in its breakout rooms, its
+// own room holds nobody, or only its recorder, or LiveKit has closed it: the
+// call goes on all the same. Call State says which rooms the call has
+// (callRooms), asked only when its own room has nobody in it. LiveKit lists
+// the breakout rooms at once, and the dot asks who is in them only until it
+// finds a person (RoomsHaveHumanParticipants). A room that can't be read
+// counts as nobody's, as the sidebar takes it.
+func inBreakoutRooms(ctx context.Context, room string) bool {
+	rooms, err := callRooms(ctx, room)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/IsCallActiveExcluding Failed to check human participants err: %+v",
-			err,
-		)
-		return
+		helpers.LogErrorWithContext(ctx, "business/IsCallActive could not read the rooms of the call in %s: %+v", room, err)
+		return false
 	}
-	return
+	breakouts := slices.DeleteFunc(slices.Clone(rooms), func(r string) bool { return r == room })
+	in, err := livekitInit.LiveKitService.RoomsHaveHumanParticipants(ctx, breakouts...)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/IsCallActive could not list the breakout rooms of the call in %s: %+v", room, err)
+		return false
+	}
+	return in
 }
 
-// HumanActiveRoomNames returns the set of room names that currently have a
-// live human call. Used by the sidebar hydration path to compute
-// call-active state for many conversations in a single pass.
+// HumanActiveRoomNames returns the own rooms of the calls going on now, for
+// the sidebar to light many conversations' dots in a single pass: a room with
+// a person in it, and the call's own room of a breakout room with a person in
+// it (callOwnRoom), as IsCallActive answers for one call.
 func HumanActiveRoomNames(ctx context.Context) (map[string]bool, error) {
-	return livekitInit.LiveKitService.HumanActiveRoomNames(ctx)
+	rooms, err := livekitInit.LiveKitService.HumanActiveRoomNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	active := make(map[string]bool, len(rooms))
+	for room := range rooms {
+		active[callOwnRoom(room)] = true
+	}
+	return active, nil
 }
 
 // DeleteRoom force-closes a LiveKit room (evicting any remaining
@@ -117,8 +135,9 @@ func DeleteRoom(ctx context.Context, roomId string) {
 }
 
 // IsAgentIdentity reports whether a participant identity belongs to the
-// non-human transcription agent. Used by webhook handlers to ignore the
-// agent's own join/leave events when deciding if a human call is active.
+// non-human transcription agent, where only an identity is known (a
+// transcript's speakers, a removal). Someone LiveKit lists is asked
+// livekitInit.IsPerson.
 func IsAgentIdentity(identity string) bool {
 	return livekitInit.IsAgentIdentity(identity)
 }
@@ -131,13 +150,17 @@ func IsAgentIdentity(identity string) bool {
 //
 // What the person chose in the green room (microphone, camera) is not asked:
 // it is the client's state, and the token always lets them change their mind
-// (see livekitInit.callPublishSources).
+// (see livekitInit.CallPublishSources); only what the call holds is left out.
 func CreateRoomAndGetToken(ctx context.Context, roomId string, userDgraphInfo *dgraphStruct.DgraphUser, isAdmin bool, language string) (token string, alreadyExisted bool, err error) {
 
 	if userDgraphInfo == nil || userDgraphInfo.Uid == "" {
 		return "", false, ErrNotInCall
 	}
 	if err := MayEnter(ctx, roomId, userDgraphInfo, isAdmin); err != nil {
+		return "", false, err
+	}
+	sources, err := SourcesAtDoor(ctx, roomId, userDgraphInfo, isAdmin)
+	if err != nil {
 		return "", false, err
 	}
 
@@ -163,7 +186,7 @@ func CreateRoomAndGetToken(ctx context.Context, roomId string, userDgraphInfo *d
 		}
 	}
 
-	token, err = GenerateToken(ctx, roomId, userDgraphInfo.Uid, callName(roomId, userDgraphInfo), isAdmin, language)
+	token, err = GenerateToken(ctx, roomId, userDgraphInfo.Uid, callName(roomId, userDgraphInfo), isAdmin, language, sources)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -224,11 +247,24 @@ func StartRecording(ctx context.Context, roomName string, userDgraphInfo *dgraph
 	if _, ferr := callStateModel.RecordingStarted(ctx, roomName, egresssInfo.EgressId, by, time.Now()); ferr != nil {
 		helpers.LogErrorWithContext(ctx, "business/StartRecording could not file the recording under its call: %+v", ferr)
 	}
+	// They keep the call recorded: a recording ends with its room, and the
+	// call records again as them when its room is made again after its
+	// breakout rooms (business/CallControl).
+	if by != nil {
+		if kerr := callStateModel.KeepRecording(ctx, roomName, by); kerr != nil {
+			helpers.LogErrorWithContext(ctx, "business/StartRecording could not note who keeps the call in %s recorded: %+v", roomName, kerr)
+		}
+	}
 	callChanged(ctx, roomName)
 	return
 }
 
 func StopRecording(ctx context.Context, roomName string) (err error) {
+	// A person's Stop is final: nothing records the call again by itself,
+	// even when its recording already ended with its room.
+	if kerr := callStateModel.KeepRecording(ctx, roomName, nil); kerr != nil {
+		helpers.LogErrorWithContext(ctx, "business/StopRecording could not note that nobody keeps the call in %s recorded: %+v", roomName, kerr)
+	}
 	_, err = livekitInit.LiveKitService.StopRecording(ctx, roomName)
 
 	if err != nil {

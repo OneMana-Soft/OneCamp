@@ -60,24 +60,14 @@ func handleTaskEvent(ctx context.Context, trigger string, data map[string]interf
 	if taskID == "" {
 		return
 	}
-	name := str("task_name")
-	if name == "" {
-		name = str("name")
-	}
 	by := str("updated_by_uuid")
 	for _, k := range []string{"assigned_by", "created_by"} {
 		if by == "" {
 			by = str(k)
 		}
 	}
-	vars := map[string]string{
-		"task":    name,
-		"status":  str("new_status_name"),
-		"from":    str("old_status_name"),
-		"project": str("project_name"),
-		"by":      firstOf(str("updated_by_name"), str("assigned_by_name")),
-		"link":    authService.FrontendBaseURL() + "/app/task/" + taskID,
-	}
+	vars := taskEventVars(data)
+	name := vars["task"]
 	move := taskStatusBusiness.MoveFromEvent(data)
 	projectID := str("project_id")
 	key := eventKey(trigger, data)
@@ -102,8 +92,52 @@ func handleTaskEvent(ctx context.Context, trigger string, data map[string]interf
 
 // wants says whether a rule cares about this task event beyond its kind:
 // the move it names, the fields it watches.
+// taskEventVars is what a rule's words may say of a task event: {task},
+// {status}, {from}, {project}, {by} and {link}, and for a form's, {form} and
+// each answer as {answer:<question id>}.
+func taskEventVars(data map[string]interface{}) map[string]string {
+	str := func(k string) string { s, _ := data[k].(string); return s }
+	taskID := str("task_id")
+	vars := map[string]string{
+		"task":    firstOf(str("task_name"), str("name")),
+		"status":  str("new_status_name"),
+		"from":    str("old_status_name"),
+		"project": str("project_name"),
+		"by":      firstOf(str("updated_by_name"), str("assigned_by_name")),
+		"link":    authService.FrontendBaseURL() + "/app/task/" + taskID,
+	}
+	if form := str("form_title"); form != "" {
+		vars["form"] = form
+	}
+	// An answered approval: who answered last, how it ended, and what they said.
+	if outcome := str("outcome"); outcome != "" {
+		vars["approver"] = str("approver")
+		vars["outcome"] = map[string]string{"approved": "approved", "changes": "asked for changes", "rejected": "rejected"}[outcome]
+		vars["comment"] = str("comment")
+	}
+	switch answers := data["answers"].(type) {
+	case map[string]interface{}:
+		for id, v := range answers {
+			if s, ok := v.(string); ok {
+				vars["answer:"+id] = s
+			}
+		}
+	case map[string]string:
+		for id, s := range answers {
+			vars["answer:"+id] = s
+		}
+	}
+	return vars
+}
+
 func (cw *compiledWorkflow) wants(trigger string, data map[string]interface{}, move taskStatusBusiness.Move) bool {
 	switch trigger {
+	case workflowModel.TriggerFormSubmitted:
+		f, _ := data["form_id"].(string)
+		return cw.formID != "" && f == cw.formID
+	case workflowModel.TriggerApprovalDecided:
+		o, _ := data["outcome"].(string)
+		return cw.outcome == "" || o == cw.outcome
 	case workflowModel.TriggerTaskStatusChanged:
 		return cw.taskMove.Matches(move)
 	case workflowModel.TriggerTaskFieldChanged:

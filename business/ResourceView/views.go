@@ -53,17 +53,6 @@ var (
 	pruneDays    = viewModels.PruneDays
 )
 
-// RELEASE-LINE ONLY (v2.75.0 / v1.60.0): a doc's views by day are written only
-// where docs C6-3's web is: its insights read them, and a member turns them off
-// there ("Don't record my views"). This release's web has neither, so the
-// release lines write no day rows, for members or a published page's visitors,
-// and "Viewed by" is recorded as in v2.74.2. Beta writes them; the release that
-// carries C6-3's web sets this back (releaseLine_test.go holds it till then).
-const recordsByDayOnTheReleaseLine = false
-
-// recordsByDay is that switch, a seam for tests.
-var recordsByDay = recordsByDayOnTheReleaseLine
-
 // memberRecordsViews is a member's choice: on unless they turned it off. A
 // member with no preferences yet has the defaults; a read that fails records
 // nothing (their choice can't be known, so it isn't overridden).
@@ -92,9 +81,6 @@ func RecordView(ctx context.Context, resourceType, resourceUUID, userUUID string
 	if err := recordView(ctx, resourceType, resourceUUID, userUUID); err != nil {
 		return err
 	}
-	if !recordsByDay {
-		return nil
-	}
 	return recordDay(ctx, resourceType, resourceUUID, viewModels.SourceMember, userUUID, now())
 }
 
@@ -121,7 +107,7 @@ func (v Visit) Counted() bool {
 // CountPageVisit counts a published page's visitor for the day, when the
 // visit may be counted. scope keeps one visitor's keys apart between pages.
 func CountPageVisit(ctx context.Context, resourceType, resourceUUID, scope string, v Visit) error {
-	if !recordsByDay || !v.Counted() || resourceUUID == "" {
+	if !v.Counted() || resourceUUID == "" {
 		return nil
 	}
 	at := now().UTC()

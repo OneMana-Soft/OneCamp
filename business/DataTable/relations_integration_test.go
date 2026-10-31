@@ -18,7 +18,9 @@ package business
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -494,6 +496,140 @@ func TestRelationEdges(t *testing.T) {
 	}
 }
 
+// refuseUpdates has the database refuse every update of a field's row, until
+// the func it returns lifts that.
+func (w *relationWorld) refuseUpdates(field uuid.UUID) (lift func()) {
+	w.t.Helper()
+	exec := func(q string) {
+		w.t.Helper()
+		if _, err := postgresInit.DBConn.SqlDB.ExecContext(w.ctx, q); err != nil {
+			w.t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec(fmt.Sprintf(`CREATE FUNCTION refuse_field_updates() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF OLD.id = '%s'::uuid THEN
+				RAISE EXCEPTION 'this field''s updates are refused';
+			END IF;
+			RETURN NEW;
+		END $$`, field))
+	exec(`CREATE TRIGGER refuse_field_updates BEFORE UPDATE ON data_table_fields FOR EACH ROW EXECUTE FUNCTION refuse_field_updates()`)
+	return func() {
+		exec(`DROP TRIGGER refuse_field_updates ON data_table_fields`)
+		exec(`DROP FUNCTION refuse_field_updates()`)
+	}
+}
+
+// twoWayRelation is a relation from Posts to Tags whose links show in Tags
+// too, in the other side.
+type twoWayRelation struct {
+	w           *relationWorld
+	tags, posts *model.DataTable
+	tag, other  *model.Field
+}
+
+func (w *relationWorld) twoWay() *twoWayRelation {
+	w.t.Helper()
+	r := &twoWayRelation{w: w}
+	r.tags, _ = w.table("Tags")
+	r.posts, _ = w.table("Posts")
+	r.tag = w.field(r.posts, "Tags", model.FieldRelation, map[string]interface{}{"relation_target": "table", "table_id": r.tags.Id.String(), "two_way": true})
+	r.other = w.otherSide(r.tags, r.tag)
+	return r
+}
+
+// sides is whether the other side is live, and the field the relation says
+// shows its links in Tags.
+func (r *twoWayRelation) sides() (bool, string) {
+	t := r.w.t
+	t.Helper()
+	there, err := model.ListFields(r.w.ctx, r.tags.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := false
+	for _, f := range there {
+		live = live || f.Id == r.other.Id
+	}
+	mine, err := model.ListFields(r.w.ctx, r.posts.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range mine {
+		if f.Id == r.tag.Id {
+			l, ok := linkOf(f)
+			if !ok || l.table != r.tags.Id {
+				t.Fatalf("the relation no longer links to Tags: %s", f.Config)
+			}
+			return live, l.inverse
+		}
+	}
+	t.Fatal("the relation is gone")
+	return false, ""
+}
+
+// Deleting the other side of a relation and the relation's no longer showing
+// its links there are one change: when the database refuses the relation's
+// half, the other side stays too, and the delete says it failed.
+func TestRelationOtherSideGoesInOneChange(t *testing.T) {
+	w := newRelationWorld(t)
+	r := w.twoWay()
+	lift := w.refuseUpdates(r.tag.Id)
+	if err := DeleteField(w.ctx, r.tags.Id, r.other.Id, w.me); err == nil {
+		t.Error("the other side's delete said it went while the relation couldn't stop showing its links there")
+	}
+	lift()
+	if live, shows := r.sides(); !live || shows != r.other.Id.String() {
+		t.Errorf("after a refused delete the other side is live: %v, and the relation shows its links in %q", live, shows)
+	}
+	if err := DeleteField(w.ctx, r.tags.Id, r.other.Id, w.me); err != nil {
+		t.Fatalf("delete the other side: %v", err)
+	}
+	if live, shows := r.sides(); live || shows != "" {
+		t.Errorf("after the delete the other side is live: %v, and the relation shows its links in %q", live, shows)
+	}
+}
+
+// Bringing the other side back from the trash and the relation's showing its
+// links there again are one change: when the database refuses the other
+// side's half, the relation stays as it was too, and the restore says it
+// failed. With the relation deleted, the other side can't come back.
+func TestRelationOtherSideComesBackInOneChange(t *testing.T) {
+	w := newRelationWorld(t)
+	r := w.twoWay()
+	if err := DeleteField(w.ctx, r.tags.Id, r.other.Id, w.me); err != nil {
+		t.Fatalf("delete the other side: %v", err)
+	}
+	restore := func() error {
+		_, err := RestoreFromTrash(w.ctx, r.tags.Id, RestoreInput{Fields: []uuid.UUID{r.other.Id}}, w.me)
+		return err
+	}
+	lift := w.refuseUpdates(r.other.Id)
+	if restore() == nil {
+		t.Error("the other side's restore said it came back while it stayed in the trash")
+	}
+	lift()
+	if live, shows := r.sides(); live || shows != "" {
+		t.Errorf("after a refused restore the other side is live: %v, and the relation shows its links in %q", live, shows)
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore the other side: %v", err)
+	}
+	if live, shows := r.sides(); !live || shows != r.other.Id.String() {
+		t.Errorf("after the restore the other side is live: %v, and the relation shows its links in %q", live, shows)
+	}
+
+	if err := DeleteField(w.ctx, r.tags.Id, r.other.Id, w.me); err != nil {
+		t.Fatalf("delete the other side again: %v", err)
+	}
+	if err := DeleteField(w.ctx, r.posts.Id, r.tag.Id, w.me); err != nil {
+		t.Fatalf("delete the relation: %v", err)
+	}
+	if err := restore(); err == nil || !strings.Contains(err.Error(), "Bring back the field") {
+		t.Errorf("the other side of a deleted relation came back: %v", err)
+	}
+}
+
 // linkRows makes n rows of a table, with a number cell, and links each of
 // them to row through field, straight in the database.
 func (w *relationWorld) linkRows(table, field, num, row uuid.UUID, n int) {
@@ -913,4 +1049,128 @@ func TestRelationsAtScale(t *testing.T) {
 			t.Fatalf("an order's customer: %q", name)
 		}
 	}
+}
+
+// A batch's patch writing a link cell sets the row's links through it, from
+// either side: those it lists stay or are added, the others go, in the
+// batch's one change set, which an undo takes back. A patch with only link
+// cells writes no cell. A row that isn't the table's is refused, so no link
+// is written from it.
+func TestBatchPatchSetsLinks(t *testing.T) {
+	w := newRelationWorld(t)
+	ctx := w.ctx
+	vendors, vName := w.table("Vendors")
+	budget, bName := w.table("Budget")
+	vendor := w.field(budget, "Vendor", model.FieldRelation, map[string]interface{}{"relation_target": "table", "table_id": vendors.Id.String(), "two_way": true})
+	back := w.otherSide(vendors, vendor)
+	acme := w.row(vendors, map[string]interface{}{vName.Id.String(): "Acme"})
+	globex := w.row(vendors, map[string]interface{}{vName.Id.String(): "Globex"})
+	initech := w.row(vendors, map[string]interface{}{vName.Id.String(): "Initech"})
+	booth := w.row(budget, map[string]interface{}{bName.Id.String(): "Booth", vendor.Id.String(): []interface{}{acme.String(), globex.String()}})
+	stage := w.row(budget, map[string]interface{}{bName.Id.String(): "Stage"})
+
+	res, err := Batch(ctx, budget.Id, BatchInput{Kind: "import", Patch: []PatchInput{
+		{Row: booth, Values: map[string]interface{}{vendor.Id.String(): []interface{}{globex.String(), initech.String()}}},
+		{Row: stage, Values: map[string]interface{}{bName.Id.String(): "Main stage", vendor.Id.String(): []interface{}{map[string]interface{}{"id": acme.String()}}}},
+	}}, w.me)
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	cells := w.cells(budget, &w.me)
+	if got := labels(cells[booth][vendor.Id.String()]); got != "Globex, Initech" {
+		t.Errorf("Booth's vendors are %q", got)
+	}
+	if got := labels(cells[stage][vendor.Id.String()]); got != "Acme" || cells[stage][bName.Id.String()] != "Main stage" {
+		t.Errorf("Stage is %v", cells[stage])
+	}
+	if got := labels(w.cells(vendors, &w.me)[acme][back.Id.String()]); got != "Main stage" {
+		t.Errorf("Acme's other side shows %q", got)
+	}
+
+	// From the other side: Initech's cell set to Stage alone takes it off Booth.
+	if _, err := Batch(ctx, vendors.Id, BatchInput{Patch: []PatchInput{{Row: initech, Values: map[string]interface{}{back.Id.String(): []interface{}{stage.String()}}}}}, w.me); err != nil {
+		t.Fatalf("batch from the other side: %v", err)
+	}
+	cells = w.cells(budget, &w.me)
+	if got := labels(cells[booth][vendor.Id.String()]); got != "Globex" {
+		t.Errorf("after the other side's write, Booth's vendors are %q", got)
+	}
+	if got := labels(cells[stage][vendor.Id.String()]); got != "Acme, Initech" {
+		t.Errorf("after the other side's write, Stage's vendors are %q", got)
+	}
+
+	// Undo takes the first batch's links back as they were.
+	if _, err := Undo(ctx, vendors.Id, nil, w.me); err != nil {
+		t.Fatalf("undo the other side: %v", err)
+	}
+	if _, err := Undo(ctx, budget.Id, &res.ChangeSet, w.me); err != nil {
+		t.Fatalf("undo the batch: %v", err)
+	}
+	cells = w.cells(budget, &w.me)
+	// An undo puts the links back, in the order it makes them.
+	if got := sortedLabels(cells[booth][vendor.Id.String()]); got != "Acme, Globex" {
+		t.Errorf("after undo, Booth's vendors are %q", got)
+	}
+	if got := labels(cells[stage][vendor.Id.String()]); got != "" || cells[stage][bName.Id.String()] != "Stage" {
+		t.Errorf("after undo, Stage is %v", cells[stage])
+	}
+
+	// A row of another table can't be patched into links.
+	if _, err := Batch(ctx, budget.Id, BatchInput{Patch: []PatchInput{{Row: acme, Values: map[string]interface{}{vendor.Id.String(): []interface{}{globex.String()}}}}}, w.me); err == nil {
+		t.Error("a patch to another table's row was taken")
+	}
+	if n := w.links(vendor.Id, acme); n != 0 {
+		t.Errorf("a refused patch wrote %d links from Acme", n)
+	}
+
+	// A batch's rows are read a group at a time: past a group each row still
+	// gets its own links, and a row naming what isn't a vendor is refused by
+	// itself, the batch with it.
+	create := make([]RowInput, linkGroup+20)
+	for i := range create {
+		create[i] = RowInput{Values: map[string]interface{}{bName.Id.String(): fmt.Sprintf("Line %d", i)}}
+	}
+	made, err := Batch(ctx, budget.Id, BatchInput{Create: create}, w.me)
+	if err != nil || len(made.Created) != len(create) {
+		t.Fatalf("make the lines: %v", err)
+	}
+	vendorOf := func(i int) (uuid.UUID, string) {
+		if i%2 == 1 {
+			return globex, "Globex"
+		}
+		return acme, "Acme"
+	}
+	patch := make([]PatchInput, len(made.Created))
+	for i, r := range made.Created {
+		to, _ := vendorOf(i)
+		patch[i] = PatchInput{Row: r.Id, Values: map[string]interface{}{vendor.Id.String(): []interface{}{to.String()}}}
+	}
+	if _, err := Batch(ctx, budget.Id, BatchInput{Patch: patch}, w.me); err != nil {
+		t.Fatalf("a batch past a group: %v", err)
+	}
+	cells = w.cells(budget, &w.me)
+	for i, r := range made.Created {
+		if _, want := vendorOf(i); labels(cells[r.Id][vendor.Id.String()]) != want {
+			t.Fatalf("line %d's vendor is %q, want %q", i, labels(cells[r.Id][vendor.Id.String()]), want)
+		}
+	}
+	first, second := made.Created[0].Id, made.Created[1].Id
+	_, err = Batch(ctx, budget.Id, BatchInput{Patch: []PatchInput{
+		{Row: first, Values: map[string]interface{}{vendor.Id.String(): []interface{}{initech.String()}}},
+		{Row: second, Values: map[string]interface{}{vendor.Id.String(): []interface{}{booth.String()}}},
+	}}, w.me)
+	var refused BatchErrors
+	if !errors.As(err, &refused) || len(refused) != 1 || refused[0].Row != second || !strings.Contains(refused[0].Msg, "isn't one") {
+		t.Fatalf("a row naming what isn't a vendor: %v", err)
+	}
+	if got := labels(w.cells(budget, &w.me)[first][vendor.Id.String()]); got != "Acme" {
+		t.Errorf("a refused batch changed line 0's vendor to %q", got)
+	}
+}
+
+// sortedLabels is a relation cell's links by name, in name order.
+func sortedLabels(cell interface{}) string {
+	names := strings.Split(labels(cell), ", ")
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }

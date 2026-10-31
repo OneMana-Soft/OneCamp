@@ -66,6 +66,9 @@ var (
 	ErrTrashForbidden = errors.New("you can't do that to this doc")
 	// ErrDemoKept is a delete of a page the demo keeps for every visitor.
 	ErrDemoKept = errors.New("the demo keeps this page")
+	// ErrNotUnder is a delete asked only while the page is under a page
+	// (TrashChild), of one that isn't: moved out since, or only linked to.
+	ErrNotUnder = errors.New("that page isn't under this one")
 	// ErrTooMany is a subtree too large to delete or copy at once: the tree's
 	// own (graph.ErrTooMany), so every refusal of a subtree answers alike.
 	ErrTooMany = graph.ErrTooMany
@@ -131,6 +134,19 @@ const siblingsCap = 5000
 // the doc. ErrDemoKept when the demo keeps any page that would go;
 // ErrNotFound / ErrDocDeleted when the doc isn't there or is in the trash.
 func TrashSubtree(ctx context.Context, docUUID, byUID, byUUID, byEmail string) (*TrashResult, error) {
+	return trashSubtree(ctx, docUUID, "", byUID, byUUID, byEmail)
+}
+
+// TrashChild is TrashSubtree for a page only while it is a child of parent,
+// which is checked under the tree's lock: its sub-page block was deleted from
+// that page's body (docs C7a), so a page moved out since, or one the block
+// only linked to, stays where it is. ErrNotUnder then.
+func TrashChild(ctx context.Context, docUUID, parent, byUID, byUUID, byEmail string) (*TrashResult, error) {
+	return trashSubtree(ctx, docUUID, parent, byUID, byUUID, byEmail)
+}
+
+// trashSubtree is TrashSubtree, only under parent when one is named.
+func trashSubtree(ctx context.Context, docUUID, parent, byUID, byUUID, byEmail string) (*TrashResult, error) {
 	unlock, err := graph.Lock(ctx, DocTree.Kind)
 	if err != nil {
 		return nil, err
@@ -159,6 +175,9 @@ func TrashSubtree(ctx context.Context, docUUID, byUID, byUUID, byEmail string) (
 	if root == nil {
 		return nil, liveOr(ctx, docUUID)
 	}
+	if parent != "" && !strings.EqualFold(parentUUIDOf(root), parent) {
+		return nil, ErrNotUnder
+	}
 	take, err := takeFor(ctx, Viewer{UID: byUID, UUID: byUUID}, pageOf(root), pagesUnder(under, rows), takesOnDelete)
 	if err != nil {
 		return nil, err
@@ -185,7 +204,7 @@ func TrashSubtree(ctx context.Context, docUUID, byUID, byUUID, byEmail string) (
 		return nil, err
 	}
 	uuids := uuidsOf(take.Takes)
-	searchFollowsTrash(uuids, now)
+	searchFollowsTrash(ctx, uuids, now)
 	for _, id := range uuids {
 		resourceEventBusiness.Bus.Emit(ctx, resourceEventBusiness.Event{
 			Kind: resourceEventBusiness.DocDeleted, ResourceKind: "doc", ResourceUUID: id,
@@ -319,7 +338,7 @@ func liveOr(ctx context.Context, docUUID string) error {
 // (business/Archive's docCascadeFields, which this follows).
 var (
 	docCascadeFields  = []string{"comment_doc_id", "attachment_doc_id", "content_uuid", "doc_uuid"}
-	docCascadeIndexes = []string{"comments", "attachments"}
+	docCascadeIndexes = []string{"docs", "comments", "attachments"}
 	docAIIndexes      = []string{"ai_embeddings"}
 )
 
@@ -331,20 +350,37 @@ func cascadeFields(uuids []string) map[string][]string {
 	return m
 }
 
-// searchFollowsTrash has search follow docs into the trash: each doc's own
-// entry written from the doc (deleted now), its comments' and files' entries
-// marked deleted. The AI index is asked apart, as DeleteDoc does: an edition
+// searchFollowsTrash has search follow docs into the trash: the docs' own
+// entries and their comments' and files' are marked deleted in one settled
+// update before the trash answers, so search stops granting them at once
+// (docs C2-1); then each doc's entry is written whole from the doc, in the
+// background. The AI index is asked apart, as DeleteDoc does: an edition
 // without it fails that call alone.
-func searchFollowsTrash(uuids []string, at time.Time) {
+func searchFollowsTrash(ctx context.Context, uuids []string, at time.Time) {
+	fields := cascadeFields(uuids)
+	if err := trashSettled(ctx, fields, at); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Doc searchFollowsTrash: search not settled for %d docs: %+v", len(uuids), err)
+	}
 	for _, id := range uuids {
 		domain.SyncDocSearch(id, false)
 	}
-	fields := cascadeFields(uuids)
 	helpers.GoSafeNamed("doc.trash-search", func() {
-		globalSearchDomain.SyncCascadingDeletionInOpenSearchCombined(fields, at.Unix(), docCascadeIndexes, "cascade")
 		globalSearchDomain.SyncCascadingDeletionInOpenSearchCombined(fields, at.Unix(), docAIIndexes, "cascade")
 	})
 }
+
+// trashSettled is searchFollowsTrash's settled update, bounded by
+// settleTimeout: the request going away (a closed tab) doesn't stop it, only
+// the bound does.
+func trashSettled(ctx context.Context, fields map[string][]string, at time.Time) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+	defer cancel()
+	return cascadeDeleteNow(ctx, fields, at.Unix(), docCascadeIndexes, "cascade")
+}
+
+// cascadeDeleteNow is the settled cascade (models/openSearch/GlobalSearch).
+// A seam for tests.
+var cascadeDeleteNow = opensearchModels.SyncCascadingDeletionInOpenSearchCombined
 
 // searchFollowsRestore is the reverse: entries written from the docs (live
 // again), and what the delete marked unmarked.
@@ -421,8 +457,10 @@ func Trash(ctx context.Context, viewerUID string, isAdmin bool, now time.Time) (
 type Restored struct {
 	Count int `json:"restored"`
 	// ParentUUID is where the restored page landed: its parent, or "" at the top.
-	ParentUUID string   `json:"parent_uuid"`
-	UUIDs      []string `json:"-"`
+	ParentUUID string `json:"parent_uuid"`
+	// Top is the page that landed there, at the top of what came back.
+	Top   string   `json:"-"`
+	UUIDs []string `json:"-"`
 }
 
 // RestoreDoc brings a doc back from the trash with everything deleted with it
@@ -504,8 +542,11 @@ func RestoreDoc(ctx context.Context, docUUID, viewerUID, viewerUUID string, isAd
 		})
 	}
 	out := &Restored{Count: len(back), UUIDs: back}
-	if top != nil && top.Parent != nil && !helpers.IsSoftDeleted(top.Parent.DeletedAt) {
-		out.ParentUUID = top.Parent.Uuid
+	if top != nil {
+		out.Top = top.Uuid
+		if top.Parent != nil && !helpers.IsSoftDeleted(top.Parent.DeletedAt) {
+			out.ParentUUID = top.Parent.Uuid
+		}
 	}
 	return out, nil
 }
@@ -638,10 +679,22 @@ func purge(ctx context.Context, docs []*dgraphStruct.DgraphDoc, up []domain.Move
 	if err := domain.PurgeDocNodes(ctx, uids, comments, time.Now(), up, rebatch); err != nil {
 		return 0, err
 	}
+	// The docs are gone from the graph, so a second purge can't find them to
+	// finish what's left of them elsewhere: that goes on to the end on a
+	// context of its own, whether or not the person's request still waits.
+	// Under the request, a purge cut part way kept the pages' search entries,
+	// snapshots and files' bytes for good.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), purgeRestDeadline)
+	defer cancel()
 	if err := placesBusiness.Forget(ctx, "doc", uuids); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/purge: places: %v", err)
 	}
 	purgeDocRows(ctx, uuids)
+	// A file's versions go with it, and their attachments rows are archived,
+	// so the attachments purge takes the bytes (docs F1).
+	if err := forgetPurgedFiles(ctx, uuids, time.Now()); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/purge: file versions: %v", err)
+	}
 	for _, id := range uuids {
 		if err := opensearchModels.ForgetEntry(ctx, openSearchStruct.DOC_INDEX, id); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/purge: search entry %s: %v", id, err)
@@ -649,6 +702,10 @@ func purge(ctx context.Context, docs []*dgraphStruct.DgraphDoc, up []domain.Move
 	}
 	return len(uuids), nil
 }
+
+// purgeRestDeadline bounds what a purge removes after the graph: a trashed
+// tree holds up to trashSubtreeCap pages, each a search entry and its history.
+const purgeRestDeadline = 5 * time.Minute
 
 // purgeDocRows removes what Postgres holds of docs gone for good: their
 // history (and its stored bodies), who viewed them, saved-for-later entries,

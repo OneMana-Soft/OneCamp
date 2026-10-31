@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Made is what MakePages made.
+// Made is what MakePages made, or a Targeted importer (Created and Skipped).
 type Made struct {
 	// Created are the docs there are now, parents first.
 	Created []Created
@@ -21,6 +21,14 @@ type Made struct {
 	// Docs is the doc each page became, by the page's Key, for the docs
 	// there are now.
 	Docs map[string]string
+	// Unchanged is how many things a Targeted importer found already there.
+	Unchanged int
+	// Count is how many a Targeted importer made, when Created names only
+	// the first of them; Into is where they went, and Show what to show
+	// first (Job's Made, Into and Show).
+	Count int
+	Into  []Into
+	Show  *Created
 	// TryAgain says some pages were left out because the graph or the
 	// document service failed, not because of what they hold: making them
 	// again later may work (UnmakePages takes away what was made first).

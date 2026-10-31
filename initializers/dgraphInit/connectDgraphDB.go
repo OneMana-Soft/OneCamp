@@ -203,6 +203,9 @@ func createSchema() (err error) {
 		dm_name: string .
 		dm_participants: [uid] @reverse .
 		dm_chats: [uid] .
+		# When a DM's newest message was written: the DM list reads newest first,
+		# a page at a time, by it (DG4; models/dgraph dmLastChat.go).
+		dm_last_chat_at: dateTime @index(hour) .
 		dm_recording: [uid] .
 
 		chat_from: uid .
@@ -332,6 +335,16 @@ func createSchema() (err error) {
 		# makes of one host's doc at once conflict and one doc is made.
 		doc_host_kind: string @index(exact) .
 		doc_host_uuid: string @index(exact) @upsert .
+		# What a node of the tree is when it isn't a page (docs F1, Docs &
+		# Files): "folder", "file" or "link", one set in domain/Doc. A
+		# page has none, so nothing writes "" or "page"; the exact index is
+		# what a page-only read and a folder's count filter on. A node's
+		# colour, a camp hue's name (helpers.CampHues); a link's address,
+		# https only. A file's name, size and versions are in Postgres
+		# (doc_file_versions).
+		doc_node_kind: string @index(exact) .
+		doc_color: string .
+		doc_link_url: string .
 		# How it looks.
 		doc_icon: string .
 		doc_cover_key: string .
@@ -415,6 +428,9 @@ func createSchema() (err error) {
 		# How long the task should take, in minutes; unset or 0, no estimate.
 		# The workload counts it in hours. business/Task/taskEstimate.go
 		task_estimate_minutes: int .
+		# How big the task is on its project's estimate scale; unset is none, as
+		# zero can be a size. business/EstimateScale
+		task_estimate_points: float .
 
 		event_uuid: string @index(exact) @upsert .
 		event_title: string @index(trigram) .
@@ -432,6 +448,18 @@ func createSchema() (err error) {
 		# those days off their capacity. Indexed to find the away events of a
 		# window without walking every user. business/Project/workload.go
 		event_is_away: bool @index(bool) .
+
+		# A meeting in the work graph (DG13): a thin node business/Refs keeps
+		# from the calendar's events in Postgres, which it never reads back from
+		# here (the legacy event_* above are the old graph store's). Its uuid
+		# takes exact alone, as an @upsert predicate must; each edge is @reverse
+		# because the allow-list walks it back (a person's meetings, a project's).
+		cal_event_uuid: string @index(exact) @upsert .
+		cal_event_deleted_at: dateTime .
+		cal_event_updated_at: dateTime .
+		cal_event_organiser: [uid] @reverse .
+		cal_event_with: [uid] @reverse .
+		cal_event_on: [uid] @reverse .
 
 		team_uuid: string @index(exact) @upsert .
 		team_name: string .
@@ -522,6 +550,9 @@ func createSchema() (err error) {
 			doc_space_uuid
 			doc_host_kind
 			doc_host_uuid
+			doc_node_kind
+			doc_color
+			doc_link_url
 			doc_icon
 			doc_cover_key
 			doc_cover_offset
@@ -707,6 +738,7 @@ func createSchema() (err error) {
 			dm_grouping_id
 			dm_name
 			dm_chats: [Chat]
+			dm_last_chat_at
 			dm_participants: [User]
 			dm_recording: [Recording]
 		}
@@ -787,8 +819,10 @@ func createSchema() (err error) {
 			task_rank
 			task_blocked_by: [Task]
 			task_estimate_minutes
+			task_estimate_points
 			linked_docs: [Doc]
 			linked_boards: [Board]
+			refers_to
 		}
 
 		type Event {
@@ -805,6 +839,16 @@ func createSchema() (err error) {
 			event_created_at
 			event_updated_at
 			event_deleted_at
+		}
+
+		type CalEvent {
+			cal_event_uuid
+			cal_event_deleted_at
+			cal_event_updated_at
+			cal_event_organiser
+			cal_event_with
+			cal_event_on
+			refers_to
 		}
 
 		type Project {

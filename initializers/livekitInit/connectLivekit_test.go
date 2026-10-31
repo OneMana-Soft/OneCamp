@@ -3,7 +3,36 @@ package livekitInit
 import (
 	"errors"
 	"testing"
+
+	"github.com/livekit/protocol/livekit"
 )
+
+// V-89. One rule says who is a person in a call: the transcription agent, a
+// recorder and a hidden watcher are not. They are never recorded in a call,
+// never handed it, never muted with everyone, never keep it going, and never
+// light its dot. Someone who dialled in is a person.
+func TestOnlyPeopleCount(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		p    *livekit.ParticipantInfo
+		want bool
+	}{
+		{"a member", &livekit.ParticipantInfo{Identity: "0x1"}, true},
+		{"a guest", &livekit.ParticipantInfo{Identity: "guest-a-b"}, true},
+		{"someone who dialled in", &livekit.ParticipantInfo{Identity: "sip_1", Kind: livekit.ParticipantInfo_SIP}, true},
+		{"the transcription agent", &livekit.ParticipantInfo{Identity: "transcriber-bot"}, false},
+		{"an agent", &livekit.ParticipantInfo{Identity: "agent-1", Kind: livekit.ParticipantInfo_AGENT}, false},
+		{"a hidden recorder", &livekit.ParticipantInfo{Identity: "EG_1", Permission: &livekit.ParticipantPermission{Hidden: true}}, false},
+		{"an egress", &livekit.ParticipantInfo{Identity: "EG_2", Kind: livekit.ParticipantInfo_EGRESS}, false},
+		{"a hidden watcher", &livekit.ParticipantInfo{Identity: "watcher", Permission: &livekit.ParticipantPermission{Hidden: true}}, false},
+		{"no identity", &livekit.ParticipantInfo{Identity: " "}, false},
+		{"nobody", nil, false},
+	} {
+		if got := IsPerson(c.p); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
 
 func TestIsAgentIdentity(t *testing.T) {
 	cases := []struct {

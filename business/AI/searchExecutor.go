@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	globalSearchBusiness "github.com/akashc777/OneCamp/business/GlobalSearch"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -93,7 +94,8 @@ var namedSearch = func(ctx context.Context, userInfo *userModels.UserInfo, query
 
 // namedHitsAs runs the global name search as one person.
 func namedHitsAs(ctx context.Context, scope *dgraphStruct.DgraphUser, query string) ([]UnifiedHit, bool) {
-	page, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, scope.Uuid, scope.EmailID, scope.Channels, scope.Projects, scope.Teams, query)
+	who := accessBusiness.Subject{UserUID: scope.Uid, UserUUID: scope.Uuid}
+	page, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, who, scope.EmailID, scope.Channels, scope.Projects, scope.Teams, query)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/AI/namedSearch global search failed err: %v", err)
 		return nil, false

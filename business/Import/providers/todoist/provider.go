@@ -23,9 +23,10 @@
 //	File attachment → attachment.
 //	Collaborator    → user.
 //
-// Priority inversion: Todoist API priority 1 is the LOWEST visually but
-// returns as 1; priority 4 is the HIGHEST and returns as 4. We map
-// 4→high, 3→medium, 2→low, 1→low for OneCamp's 3-level scale.
+// Priority inversion: Todoist API priority 4 is the highest (shown as P1)
+// and 1 is "no priority" (P4), the default every task has. We map 4→high,
+// 3→medium, 2→low and 1→none; mapping 1 to low made every imported task
+// low.
 package todoist
 
 import (
@@ -97,7 +98,7 @@ func (p *Provider) DefaultPriorityMap() map[string]string {
 		"4": "high",
 		"3": "medium",
 		"2": "low",
-		"1": "low",
+		"1": "",
 	}
 }
 
@@ -450,6 +451,19 @@ type todoistUser struct {
 	FullName string `json:"full_name"`
 	Email    string `json:"email"`
 	ImageID  string `json:"image_id"`
+	TZInfo   *struct {
+		Timezone string `json:"timezone"`
+	} `json:"tz_info"`
+}
+
+// zone is the user's own time zone, where a floating due time is read; UTC
+// when Todoist doesn't say or names one Go can't read. Pure but for the zone
+// database.
+func (u todoistUser) zone() *time.Location {
+	if u.TZInfo == nil {
+		return time.UTC
+	}
+	return helpers.Location(u.TZInfo.Timezone)
 }
 
 type todoistProject struct {
@@ -627,6 +641,9 @@ func (p *Provider) fullSnapshot(ctx context.Context, j *importModels.Job) (*todo
 // at a fake.
 var syncURL = "https://api.todoist.com/api/v1/sync"
 
+// statusRules reads Todoist's answers; its limit is per 15 minutes.
+var statusRules = importProvider.StatusRules{Name: "Todoist", Wait: 30 * time.Second}
+
 // flag is a Todoist yes/no: true/false in API v1, 0/1 in older answers.
 type flag bool
 
@@ -668,20 +685,8 @@ func (p *Provider) sync(ctx context.Context, tok string, resourceTypes []string)
 	}
 	defer resp.Body.Close()
 
-	switch {
-	case resp.StatusCode == http.StatusTooManyRequests:
-		retryAfter := 30 * time.Second
-		if v := resp.Header.Get("Retry-After"); v != "" {
-			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-				retryAfter = time.Duration(secs) * time.Second
-			}
-		}
-		return nil, &importProvider.ErrRateLimited{RetryAfter: retryAfter, Reason: "Todoist 429"}
-	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return nil, &importProvider.TokenRejected{Msg: fmt.Sprintf("todoist auth failed (HTTP %d); reconnect token", resp.StatusCode)}
-	case resp.StatusCode >= 400:
-		raw, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("todoist HTTP %d: %s", resp.StatusCode, string(raw))
+	if err := statusRules.Check(resp); err != nil {
+		return nil, err
 	}
 
 	var s todoistSnapshot
@@ -715,12 +720,9 @@ func buildSourceTask(snap *todoistSnapshot, it *todoistItem, sectionName map[str
 	addedAt, _ := time.Parse(time.RFC3339, it.AddedAt)
 	updatedAt, _ := time.Parse(time.RFC3339, it.UpdatedAt)
 	var due *time.Time
-	if it.Due != nil && it.Due.Date != "" {
-		if t, err := time.Parse(time.RFC3339, it.Due.Date); err == nil {
-			due = &t
-		} else if t, err := time.Parse("2006-01-02", it.Due.Date); err == nil {
-			due = &t
-		}
+	var dueDay importProvider.Day
+	if it.Due != nil {
+		due, dueDay = todoistDue(it.Due.Date, snap.User.zone())
 	}
 
 	status := "active"
@@ -750,6 +752,7 @@ func buildSourceTask(snap *todoistSnapshot, it *todoistItem, sectionName map[str
 		Labels:          labels,
 		AssigneeIds:     assignees,
 		DueDate:         due,
+		DueDay:          dueDay,
 		Created:         addedAt,
 		Updated:         updatedAt,
 		Completed:       status == "checked",
@@ -869,4 +872,23 @@ func (p *Provider) CleanupJob(jobId string) {
 	p.mu.Lock()
 	delete(p.snapshot, id)
 	p.mu.Unlock()
+}
+
+// todoistDue reads a due's date in each of Todoist's three shapes: an all-day
+// "2026-10-22" is a day with no time, which the import writes where the team
+// is (provider.Day); "2026-10-22T17:00:00Z" is an instant (a due fixed to a
+// zone); a floating "2026-10-22T17:00:00" is that time on the user's own
+// clock, in loc. The floating shape failed both parses and was dropped.
+// Pure.
+func todoistDue(s string, loc *time.Location) (*time.Time, importProvider.Day) {
+	if d, ok := importProvider.ParseDay(s); ok {
+		return nil, d
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return &t, importProvider.Day{}
+	}
+	if t, err := time.ParseInLocation("2006-01-02T15:04:05", s, loc); err == nil {
+		return &t, importProvider.Day{}
+	}
+	return nil, importProvider.Day{}
 }

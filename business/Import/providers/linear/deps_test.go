@@ -29,12 +29,15 @@ func TestAnIssueKeepsWhatBlocksIt(t *testing.T) {
 	}
 }
 
-// I1: a Linear issue's estimate is in the team's points, not time, so it
-// comes across as a number field.
+// I1, linear-05: a Linear issue's estimate is in its team's points, not time,
+// so it comes across as the task's points, never a field or minutes.
 func TestAnIssueKeepsItsPoints(t *testing.T) {
 	five := 5.0
 	st := New().issueToSourceTask(linearIssue{ID: "a", Title: "Ship", Estimate: &five}, "p")
-	if len(st.Fields) != 1 || st.Fields[0].Field.Name != "Points" || st.Fields[0].Value != 5.0 || st.EstimateMinutes != 0 {
-		t.Fatalf("fields %+v, estimate %d", st.Fields, st.EstimateMinutes)
+	if st.EstimatePoints == nil || *st.EstimatePoints != 5 || len(st.Fields) != 0 || st.EstimateMinutes != 0 {
+		t.Fatalf("points %v, fields %+v, estimate %d", st.EstimatePoints, st.Fields, st.EstimateMinutes)
+	}
+	if st := New().issueToSourceTask(linearIssue{ID: "b", Title: "Plan"}, "p"); st.EstimatePoints != nil {
+		t.Fatalf("an issue with no estimate has no points: %v", *st.EstimatePoints)
 	}
 }

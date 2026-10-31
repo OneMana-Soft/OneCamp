@@ -161,3 +161,28 @@ func TestSomeHandlesAreReserved(t *testing.T) {
 		t.Error("a handle with an unseen character is accepted")
 	}
 }
+
+// Two spellings of one name are one key: spaces, case and how an accent was
+// typed don't make a second person; a different name does.
+func TestPersonNameKeyIsOneKeyForOneName(t *testing.T) {
+	same := []string{"Ana Lima", "  ana   lima ", "ANA LIMA", "Ana\tLima"}
+	for _, n := range same {
+		if got := PersonNameKey(n); got != PersonNameKey(same[0]) {
+			t.Errorf("%q: got %q, want %q", n, got, PersonNameKey(same[0]))
+		}
+	}
+	if PersonNameKey("José") != PersonNameKey("José") {
+		t.Error("an accent typed apart is the same name")
+	}
+	if PersonNameKey("Straße") != PersonNameKey("STRASSE") {
+		t.Error("case is folded, not only lowered")
+	}
+	for _, n := range []string{"", "   "} {
+		if got := PersonNameKey(n); got != "" {
+			t.Errorf("%q is no name: got %q", n, got)
+		}
+	}
+	if PersonNameKey("Ana Lima") == PersonNameKey("Ana Lim") {
+		t.Error("a different name is a different key")
+	}
+}

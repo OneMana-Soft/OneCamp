@@ -16,6 +16,7 @@ import (
 	syncBusiness "github.com/akashc777/OneCamp/business"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
+	estimateScale "github.com/akashc777/OneCamp/business/EstimateScale"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
@@ -26,6 +27,7 @@ import (
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 
 	githubPRReviewDomain "github.com/akashc777/OneCamp/domain/GitHubPRReview"
 	githubTaskActivityDomain "github.com/akashc777/OneCamp/domain/GitHubTaskActivity"
@@ -384,6 +386,18 @@ func CreateTaskComment(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// writeMakeFailure answers a task or a sub-task that wasn't made: a due or
+// start date that isn't a date is the asker's to correct (400), an assignee
+// who can't be given work a 409 that names them, and anything else a failed
+// write to try again (helpers.WriteWriteFailure).
+func writeMakeFailure(w http.ResponseWriter, r *http.Request, err error, couldnt, where string) {
+	if errors.Is(err, business.ErrBadDate) {
+		helpers.WriteBadRequest(w, "Couldn't save the dates: "+err.Error()+".")
+		return
+	}
+	helpers.WriteWriteFailure(w, r, err, couldnt, where)
+}
+
 func CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
@@ -517,7 +531,7 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	taskUUID, err := business.CreateTask(ctx, projectUUID, &userInfo, dgraphProjectInfo, assigneeDgraphInfo, createTaskInfoInput, mentionUsers)
+	taskUUID, held, err := business.CreateTaskAsked(ctx, projectUUID, &userInfo, dgraphProjectInfo, assigneeDgraphInfo, createTaskInfoInput, mentionUsers)
 
 	if errors.Is(err, taskStatusBusiness.ErrUnknownStatus) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
@@ -525,29 +539,30 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// Someone who can't see the task is a 409 that names them, so the person
-	// picks someone else.
-	if errors.Is(err, helpers.ErrConflict) {
-		helpers.WriteWriteFailure(w, r, err, "Couldn't create the task.", "controllers/CreateTask")
+	// The status's rule said no to it as a first status: nothing was made.
+	if projectaccess.RefuseStatus(w, err) {
 		return
 	}
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateTask Failed to create task err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to create task",
-			"err": err,
-		})
+		writeMakeFailure(w, r, err, "Couldn't create the task.", "controllers/CreateTask")
 		return
-
 	}
 
 	// The id lets the caller link to what it just made, e.g. a "Made this a
 	// task" reply under the message the task came from.
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Created task!", "data": helpers.Envolope{"task_uuid": taskUUID.String()}})
+	data := helpers.Envolope{"task_uuid": taskUUID.String()}
+	if held != nil {
+		// Made in the default status, its move asked for (RefuseStatus's
+		// codes): "approval" with the request, "status_rule" when none opened.
+		code := "status_rule"
+		if held.ApprovalID != "" {
+			code, data["approval_id"] = "approval", held.ApprovalID
+		}
+		data["status"] = held.Status
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": held.Why, "code": code, "data": data})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Created task!", "data": data})
 
 }
 
@@ -1106,25 +1121,12 @@ func UpdateTaskAssignee(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
 		return
 	}
-	// Someone who can't see the task is a 409 that names them, so the person
-	// picks someone else.
-	if errors.Is(err, helpers.ErrConflict) {
+
+	// Someone who can't be given work (their account is deactivated) is a 409
+	// that names them, so the person picks someone else.
+	if err != nil {
 		helpers.WriteWriteFailure(w, r, err, "Couldn't reassign the task.", "controllers/UpdateTaskAssignee")
 		return
-	}
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdateTaskAssignee Failed to update task desc in dgraph info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Couldn't reassign the task. Try again.",
-			"err": err,
-		})
-		return
-
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Updated task Assignee!"})
@@ -1517,6 +1519,9 @@ func UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err = business.UpdateTaskStatusByTaskUUID(ctx, taskUUID, createTaskInfoInput.Status, dgraphTaskInfo, &userInfo.UserDgraphInfo)
+	if projectaccess.RefuseStatus(w, err) {
+		return
+	}
 
 	if errors.Is(err, business.ErrTaskDeleted) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
@@ -1823,24 +1828,12 @@ func CreateSubTask(w http.ResponseWriter, r *http.Request) {
 
 	subTaskDgraph, err := business.CreateSubTask(ctx, projectUUID, &userInfo, dgraphProjectInfo, assigneeDgraphInfo, createSubTaskInfoInput)
 
-	// Someone who can't see the sub-task is a 409 that names them, so the
-	// person picks someone else.
-	if errors.Is(err, helpers.ErrConflict) {
-		helpers.WriteWriteFailure(w, r, err, "Couldn't add the subtask.", "controllers/CreateSubTask")
-		return
-	}
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateSubTask Failed to create sub task err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to create sub task",
-			"err": err,
-		})
+		writeMakeFailure(w, r, err, "Couldn't add the subtask.", "controllers/CreateSubTask")
 		return
 	}
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Created sub task!", "data": subTaskDgraph})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Subtask added", "data": subTaskDgraph})
 
 }
 
@@ -2782,9 +2775,8 @@ func CreateGitHubPRForTask(w http.ResponseWriter, r *http.Request) {
 	// The task's branch as every read of a task has it: the Postgres GitHub
 	// fields laid over the graph's copy (MergeGitHubMetaIntoTask). The graph's
 	// own branch is written only by creating one from the task, and stayed
-	// after the branch was deleted on GitHub. (Use "0x1" as userUid to avoid
-	// Dgraph "ID can't be empty" in server ops.)
-	dgraphTaskInfo, err := business.GetDgraphTaskInfo(helpers.WithSystemRead(ctx), taskUUIDStr, "0x1")
+	// after the branch was deleted on GitHub.
+	dgraphTaskInfo, err := business.GetDgraphTaskInfo(helpers.WithSystemRead(ctx), taskUUIDStr, "")
 	if err == nil && dgraphTaskInfo != nil {
 		err = business.MergeGitHubMetaIntoTask(ctx, taskUUID, dgraphTaskInfo)
 	}
@@ -2832,8 +2824,8 @@ func RetryGitHubSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get current task info to determine what to sync (use "0x1" as userUid for server ops)
-	dgraphTaskInfo, err := business.GetDgraphTaskInfo(helpers.WithSystemRead(ctx), taskUUIDStr, "0x1")
+	// Get current task info to determine what to sync.
+	dgraphTaskInfo, err := business.GetDgraphTaskInfo(helpers.WithSystemRead(ctx), taskUUIDStr, "")
 	if err != nil || dgraphTaskInfo == nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Task not found",
@@ -2944,8 +2936,9 @@ type datesInput struct {
 // task_start_date, task_due_date, shift_dependents, tz}: both dates in one
 // write, for a timeline that moves or stretches a task. An empty date clears
 // it. With shift_dependents, the tasks waiting on it that it now overlaps move
-// later too, and come back as shifted. For the project's admins, as every
-// task edit is.
+// later too, in the same write (all or nothing; 409 when the tasks kept
+// changing under the move), and come back as shifted. For whoever may change
+// the task, by Work Access.
 func UpdateTaskDates(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -2977,7 +2970,30 @@ func UpdateTaskDates(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A task can't start after it's due."})
 		return
 	}
-	if err := business.UpdateTaskDates(ctx, taskUUID, business.TaskDates{Start: start, Due: due}, task, &userInfo.UserDgraphInfo); err != nil {
+	dates := business.TaskDates{Start: start, Due: due}
+	shifted := []business.ShiftedTask{}
+	if in.ShiftDependents {
+		// The task and the tasks it pushes along move together or not at
+		// all (DG10).
+		moved, err := business.MoveTaskDates(ctx, task, dates, helpers.Location(in.TZ), &userInfo.UserDgraphInfo)
+		switch {
+		case err == nil:
+			shifted = append(shifted, moved...)
+		case errors.Is(err, business.ErrTaskDeleted), errors.Is(err, business.ErrDependencyMissing):
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+			return
+		case errors.Is(err, business.ErrMoveStale):
+			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "These tasks changed while you were moving them, so nothing moved. Try again."})
+			return
+		case errors.Is(err, business.ErrNotAllowed):
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": err.Error()})
+			return
+		default:
+			helpers.LogErrorWithContext(ctx, "controllers/UpdateTaskDates move err: %+v", err)
+			helpers.WriteRetryLater(w, "The dates couldn't be saved just now.")
+			return
+		}
+	} else if err := business.UpdateTaskDates(ctx, taskUUID, dates, task, &userInfo.UserDgraphInfo); err != nil {
 		if errors.Is(err, business.ErrTaskDeleted) {
 			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
 			return
@@ -2985,15 +3001,6 @@ func UpdateTaskDates(w http.ResponseWriter, r *http.Request) {
 		helpers.LogErrorWithContext(ctx, "controllers/UpdateTaskDates err: %+v", err)
 		helpers.WriteRetryLater(w, "The dates couldn't be saved just now.")
 		return
-	}
-	shifted := []business.ShiftedTask{}
-	if in.ShiftDependents {
-		moved, err := business.ShiftDependents(ctx, task.Project.Uuid, in.Uuid, helpers.Location(in.TZ), &userInfo.UserDgraphInfo)
-		if err != nil {
-			// The task itself moved; what didn't move along is fetched again by the timeline.
-			helpers.LogErrorWithContext(ctx, "controllers/UpdateTaskDates shift err: %+v", err)
-		}
-		shifted = append(shifted, moved...)
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Updated the task's dates.", "data": map[string]any{"shifted": shifted}})
 }
@@ -3010,8 +3017,9 @@ type dependencyInput struct {
 // AddTaskDependency handles POST /task/dependency {task_uuid,
 // blocked_by_uuid, kind, lag}: the task waits on the other, finish to start
 // unless kind says otherwise, and changes how when it does already. Both
-// must be top-level tasks of one project, the person one of its admins, and
-// it mustn't close a loop.
+// must be top-level tasks of projects: one, where the person may change the
+// task, or two, where they may change tasks in both (DG10); and it mustn't
+// close a loop.
 func AddTaskDependency(w http.ResponseWriter, r *http.Request) {
 	dependencyChange(w, r, false)
 }
@@ -3052,7 +3060,7 @@ func dependencyChange(w http.ResponseWriter, r *http.Request, remove bool) {
 	case errors.Is(err, business.ErrDependencySelf):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A task can't wait on itself."})
 	case errors.Is(err, business.ErrDependencyProject):
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A task can only wait on tasks in its own project."})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Dependencies are between tasks in projects."})
 	case errors.Is(err, business.ErrDependencySubtask):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Dependencies are between a project's tasks, not subtasks."})
 	case errors.Is(err, business.ErrDependencyLoop):
@@ -3118,5 +3126,45 @@ func UpdateTaskEstimate(w http.ResponseWriter, r *http.Request) {
 	default:
 		helpers.LogErrorWithContext(ctx, "controllers/UpdateTaskEstimate err: %+v", err)
 		helpers.WriteRetryLater(w, "The estimate couldn't be saved just now.")
+	}
+}
+
+// pointsInput is the body of POST /task/updateTaskPoints.
+type pointsInput struct {
+	Uuid string `json:"task_uuid"`
+	// Points is how big the task is on its project's scale; null takes them off.
+	Points *float64 `json:"task_estimate_points"`
+}
+
+// UpdateTaskPoints handles POST /task/updateTaskPoints {task_uuid (or its
+// key), task_estimate_points}: how big a task is on its project's estimate
+// scale, for whoever may edit the task (business.UpdateTaskPoints).
+func UpdateTaskPoints(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	var in pointsInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That change couldn't be read."})
+		return
+	}
+	taskUUID, task, ok := projectaccess.RequireTask(w, r, in.Uuid, workAccess.NeedEditTask)
+	if !ok {
+		return
+	}
+	switch err := business.UpdateTaskPoints(ctx, taskUUID, in.Points, task, &userInfo.UserDgraphInfo); {
+	case err == nil:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Points saved.", "data": map[string]any{"task_estimate_points": in.Points}})
+	case errors.Is(err, estimateScale.ErrHours):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "This task's project estimates in hours."})
+	case errors.Is(err, estimateScale.ErrNotASize):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Those points aren't a size on this project's scale."})
+	case errors.Is(err, business.ErrTaskDeleted):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+	default:
+		helpers.LogErrorWithContext(ctx, "controllers/UpdateTaskPoints err: %+v", err)
+		helpers.WriteRetryLater(w, "The points couldn't be saved just now.")
 	}
 }

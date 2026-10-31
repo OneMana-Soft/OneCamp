@@ -90,8 +90,13 @@ func AccessChanged(ctx context.Context, docUUIDs []string, by Actor, kind resour
 	}
 	everyone := ex.Everyone != nil
 	now := time.Now()
+	took := tookFromAnyone(ex)
 	for _, id := range docUUIDs {
-		RepairAccessIndexes(ctx, id)
+		if took {
+			SettleAccessIndexes(ctx, id)
+		} else {
+			RepairAccessIndexes(ctx, id)
+		}
 		for _, e := range accessEvents(id, by, kind, ex, data, now) {
 			resourceEventBusiness.Bus.Emit(ctx, e)
 		}
@@ -209,6 +214,35 @@ func Reauth(ctx context.Context, docUUID string, userUUIDs []string) {
 // again.
 func RepairAccessIndexes(ctx context.Context, docUUID string) {
 	syncDocSearch(docUUID, true)
+	repairAIAccess(ctx, docUUID)
+}
+
+// settleTimeout bounds how long a change that took a doc from someone waits
+// for search to stop granting it; past it the background write takes over.
+const settleTimeout = 10 * time.Second
+
+// SettleAccessIndexes is RepairAccessIndexes for a change that took a doc
+// from someone: its search entries, its comments' and files' with it, are
+// written and visible to the next search before it returns, so search's
+// counts stop granting the doc before the change answers (docs C2-1; the
+// live check keeps it off every page meanwhile). A write that fails or runs
+// out of time is left to the background write, logged.
+func SettleAccessIndexes(ctx context.Context, docUUID string) {
+	wctx, cancel := context.WithTimeout(ctx, settleTimeout)
+	defer cancel()
+	if err := writeDocSearchNow(wctx, docUUID, true); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Doc SettleAccessIndexes %s: search not settled, written in the background: %+v", docUUID, err)
+		syncDocSearch(docUUID, true)
+	}
+	repairAIAccess(ctx, docUUID)
+}
+
+// writeDocSearchNow is domain.WriteDocSearchNow. A seam for tests.
+var writeDocSearchNow = domain.WriteDocSearchNow
+
+// repairAIAccess writes a doc's AI entries' sharing again, in the AI edition,
+// in the background.
+func repairAIAccess(ctx context.Context, docUUID string) {
 	if aiAccessEntries == nil {
 		return
 	}

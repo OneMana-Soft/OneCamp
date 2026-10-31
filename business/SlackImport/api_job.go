@@ -28,13 +28,21 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
-// APIRead is a read an admin asks for.
+// APIRead is a read asked for: an admin's of a workspace, or a member's of
+// their own conversations (member_read.go).
 type APIRead struct {
 	// Workspace labels the Slack workspace, as an upload's does.
 	Workspace string
 	// Token is a Slack user's (xoxp-) or an app's (xoxb-) token.
 	Token   string
 	Options APIReadOptions
+	// JobOptions are the job's own (a member's read marks itself).
+	JobOptions json.RawMessage
+	// Then, when set, runs once the export is staged and the job waits to be
+	// planned: a member's read plans and runs itself. A read with it waits
+	// its turn behind an import of its workspace under way, rather than
+	// failing (stage "waiting").
+	Then func(ctx context.Context, jobId uuid.UUID, report APIReadReport)
 }
 
 // apiReadStage is the stage of a job whose export is being read.
@@ -73,6 +81,7 @@ func StartAPIRead(ctx context.Context, read APIRead, by uuid.UUID) (uuid.UUID, e
 		Source:             importModels.SourceAPI,
 		RawObjectKey:       &key,
 		Status:             importModels.StatusPending,
+		Options:            read.JobOptions,
 		TriggeredBy:        &by,
 	}
 	if err := importModels.CreateJob(ctx, job); err != nil {
@@ -102,9 +111,46 @@ func StartAPIRead(ctx context.Context, read APIRead, by uuid.UUID) (uuid.UUID, e
 	return jobId, nil
 }
 
+// readSlots bounds the reads from Slack under way at once on this server
+// (SLACK_IMPORT_API_READS, 4). Each holds a 16 MB part and a spool file while
+// it reads, and a team moving in may all bring their DMs within the hour; the
+// rest wait their turn, in the order they asked (stage "queued").
+var readSlots = make(chan struct{}, envIntDefault("SLACK_IMPORT_API_READS", 4))
+
+// queuedStage is the stage of a read waiting for one of readSlots.
+const queuedStage = "queued"
+
+// takeReadSlot waits for one of readSlots, saying so on the job while it
+// waits, and answers how to give it back (once, however often it's called).
+// An error is a read discarded while it waited.
+func takeReadSlot(ctx context.Context, jobId uuid.UUID, workspace string) (func(), error) {
+	var once sync.Once
+	release := func() { once.Do(func() { <-readSlots }) }
+	select {
+	case readSlots <- struct{}{}:
+		return release, nil
+	default:
+	}
+	pending := []string{importModels.StatusPending}
+	_, _ = importModels.UpdateStatusFrom(ctx, jobId, pending, importModels.StatusPending, strPtr(queuedStage), nil)
+	publishProgress(ctx, jobId, workspace, importModels.StatusPending, queuedStage, "")
+	select {
+	case readSlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	_, _ = importModels.UpdateStatusFrom(ctx, jobId, pending, importModels.StatusPending, strPtr(apiReadStage), nil)
+	return release, nil
+}
+
 // readAPIIntoJob reads the workspace into the job's staged export, and moves
 // the job on to be planned, or fails it saying why.
 func readAPIIntoJob(ctx context.Context, jobId uuid.UUID, read APIRead) {
+	release, err := takeReadSlot(ctx, jobId, read.Workspace)
+	if err != nil {
+		return // discarded while it waited its turn: nothing was read
+	}
+	defer release() // given back as soon as the read ends, below
 	opts := read.Options
 	opts.Progress = func(ctx context.Context, r APIReadReport) error {
 		noteAPIReadProgress(ctx, jobId, r)
@@ -134,7 +180,8 @@ func readAPIIntoJob(ctx context.Context, jobId uuid.UUID, read APIRead) {
 	}
 	_ = pw.CloseWithError(readErr)
 	<-staged
-	err := first.err()
+	release()
+	err = first.err()
 
 	// What the read did is kept whether or not it was stopped. A job moves
 	// on only from waiting: one discarded, or failed by the cleanup, while it
@@ -151,8 +198,12 @@ func readAPIIntoJob(ctx context.Context, jobId uuid.UUID, read APIRead) {
 		}
 		return
 	}
-	moved, err := importModels.UpdateStatusFrom(after, jobId, []string{importModels.StatusPending},
-		importModels.StatusValidating, strPtr("validating"), nil)
+	moved, err := toBePlanned(after, jobId, read)
+	if errors.Is(err, errNoTurn) {
+		msg := "The team's import was busy for six hours, so this read never had its turn. Start it again."
+		_, _ = importModels.UpdateStatusFrom(after, jobId, []string{importModels.StatusPending}, importModels.StatusFailed, strPtr("failed"), &msg)
+		publishProgress(after, jobId, read.Workspace, importModels.StatusFailed, "failed", msg)
+	}
 	if err != nil || !moved {
 		if err := DeleteStagedZip(after, jobId); err != nil {
 			helpers.LogWarnWithContext(after, "SlackImport API read job=%s: deleting the export of a job that moved on: %+v", jobId, err)
@@ -160,6 +211,48 @@ func readAPIIntoJob(ctx context.Context, jobId uuid.UUID, read APIRead) {
 		return
 	}
 	publishProgress(after, jobId, read.Workspace, importModels.StatusValidating, "validating", "")
+	if read.Then != nil {
+		read.Then(after, jobId, report)
+	}
+}
+
+// The stage of a read that waits its turn behind an import of its workspace
+// under way, and how long and how often it waits.
+const waitingStage = "waiting"
+
+var (
+	turnWait = 6 * time.Hour
+	turnPoll = 20 * time.Second
+	// errNoTurn is a read whose workspace's import stayed busy past turnWait.
+	errNoTurn = errors.New("no turn")
+)
+
+// toBePlanned moves the job, its export staged, on to be planned. One of a
+// workspace with an import under way (only one may be) waits its turn when
+// the read goes on by itself (read.Then); an admin's fails, as an upload's
+// would. A job discarded meanwhile stays discarded.
+func toBePlanned(ctx context.Context, jobId uuid.UUID, read APIRead) (bool, error) {
+	deadline := time.Now().Add(turnWait)
+	for {
+		moved, err := importModels.UpdateStatusFrom(ctx, jobId, []string{importModels.StatusPending},
+			importModels.StatusValidating, strPtr("validating"), nil)
+		if read.Then == nil || !errors.Is(err, importModels.ErrConflictActiveJob) {
+			return moved, err
+		}
+		if time.Now().After(deadline) {
+			return false, errNoTurn
+		}
+		if still, _ := importModels.UpdateStatusFrom(ctx, jobId, []string{importModels.StatusPending},
+			importModels.StatusPending, strPtr(waitingStage), nil); !still {
+			return false, nil
+		}
+		publishProgress(ctx, jobId, read.Workspace, importModels.StatusPending, waitingStage, "")
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(turnPoll):
+		}
+	}
 }
 
 // firstError keeps the first of the errors noted.
@@ -183,10 +276,12 @@ func (f *firstError) err() error {
 }
 
 // noteAPIReadProgress keeps how far the read is on the job, as progress.read
-// (its notes go to the job's errors).
+// (its notes go to the job's errors), and the Slack workspace it read as
+// progress.slack_team, as a plan notes an export's (a member's read finds its
+// team's import by it).
 func noteAPIReadProgress(ctx context.Context, jobId uuid.UUID, r APIReadReport) {
 	r.Notes = nil
-	patch, err := json.Marshal(map[string]APIReadReport{"read": r})
+	patch, err := json.Marshal(map[string]any{"read": r, "slack_team": r.TeamID})
 	if err == nil {
 		err = importModels.UpdateProgress(ctx, jobId, patch)
 	}

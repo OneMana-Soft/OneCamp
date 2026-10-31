@@ -283,6 +283,28 @@ func TestPlainHTTPOriginsAreTrustedOnlyInDevelopment(t *testing.T) {
 	}
 }
 
+// Audit, LOW: every install trusted the web's dev servers, so a page on a
+// visitor's own localhost:3000 passed the check against a production API.
+func TestTheWebsDevServersAreTrustedOnlyByADevelopmentBackend(t *testing.T) {
+	csrfEnv(t)
+	write := func(origin string) bool {
+		_, reached := serveCSRF(withToken(csrfRequest(http.MethodPost, origin, true), "the-token"))
+		return reached
+	}
+	for _, origin := range []string{"http://localhost:3000", "https://localhost:3000", "http://localhost:3001", "https://localhost:3001"} {
+		if write(origin) {
+			t.Errorf("a write from %s passed on an https install", origin)
+		}
+	}
+	if !write("https://acme.onemana.dev") {
+		t.Fatal("a write from the web app's own origin was refused")
+	}
+	t.Setenv("COOKIE_SECURE", "false")
+	if !write("http://localhost:3000") {
+		t.Error("a write from next dev was refused by a development backend")
+	}
+}
+
 func TestInDevelopmentTheCookieHasNoPrefixAndIsNotSecure(t *testing.T) {
 	csrfEnv(t)
 	t.Setenv("COOKIE_SECURE", "false")

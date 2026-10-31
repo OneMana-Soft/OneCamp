@@ -151,3 +151,36 @@ func TestPeekAndIsZip(t *testing.T) {
 		t.Errorf("html should not be detected as zip")
 	}
 }
+
+// A stranger's file (a public form's) that a browser could run or render is
+// refused, not stored defused: an executable or script by its name, and HTML
+// by its bytes whatever its name. What a member uploads is still kept, as
+// octet-stream and an attachment. Images and documents pass either way.
+func TestPrepareUpload_RefuseRunnableForStrangers(t *testing.T) {
+	refused := []struct{ name, body string }{
+		{"setup.exe", "MZ\x90\x00\x03"},
+		{"run.sh", "#!/bin/sh\necho hi\n"},
+		{"logo.svg", `<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`},
+		{"page.html", "<html><body>hi</body></html>"},
+		{"brief.pdf", "<!DOCTYPE html><html><script>alert(1)</script></html>"},
+	}
+	for _, c := range refused {
+		if _, err := PrepareUpload(strings.NewReader(c.body), c.name, Options{RefuseRunnable: true}); !errors.Is(err, ErrUnsupportedType) {
+			t.Errorf("%s from a stranger: %v, want ErrUnsupportedType", c.name, err)
+		}
+		if _, err := PrepareUpload(strings.NewReader(c.body), c.name, Options{}); err != nil {
+			t.Errorf("%s from a member was refused: %v", c.name, err)
+		}
+	}
+	kept := []struct{ name, body string }{
+		{"shot.png", "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"},
+		{"brief.pdf", "%PDF-1.7\n1 0 obj"},
+		{"notes.txt", "steps to reproduce"},
+		{"data.csv", "a,b\n1,2\n"},
+	}
+	for _, c := range kept {
+		if _, err := PrepareUpload(strings.NewReader(c.body), c.name, Options{RefuseRunnable: true}); err != nil {
+			t.Errorf("%s from a stranger was refused: %v", c.name, err)
+		}
+	}
+}

@@ -395,6 +395,10 @@ func commonFolder(pages []string) string {
 	return common
 }
 
+// errUnpackBudget is a file of a zip that would take it past what an import
+// unpacks (unpackBudget).
+var errUnpackBudget = errors.New("the zip unpacks to more than an import reads")
+
 // unpackBudget is what a zip may still unpack.
 type unpackBudget struct {
 	left int64
@@ -413,7 +417,7 @@ func (b *unpackBudget) read(f *zip.File, max int64) ([]byte, error) {
 	}
 	if int64(len(data)) > limit {
 		if limit == b.left {
-			return nil, fmt.Errorf("the zip unpacks to more than an import reads")
+			return nil, errUnpackBudget
 		}
 		return nil, fmt.Errorf("is larger than a page can be (%d MB)", max>>20)
 	}
@@ -466,7 +470,7 @@ func (a zipAssets) Open(p string) (io.ReadCloser, int64, error) {
 		return nil, 0, ErrNotFound
 	}
 	if a.budget.left < 0 || f.UncompressedSize64 > uint64(a.budget.left) {
-		return nil, 0, fmt.Errorf("the zip unpacks to more than an import reads")
+		return nil, 0, errUnpackBudget
 	}
 	size := int64(f.UncompressedSize64)
 	rc, err := f.Open()
@@ -488,7 +492,7 @@ func (b *budgeted) Read(p []byte) (int, error) {
 	n, err := b.Reader.Read(p)
 	b.budget.left -= int64(n)
 	if b.budget.left < 0 && err == nil {
-		err = fmt.Errorf("the zip unpacks to more than an import reads")
+		err = errUnpackBudget
 	}
 	return n, err
 }

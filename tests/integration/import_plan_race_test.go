@@ -49,6 +49,7 @@ type raceProvider struct{ importProvider.Provider }
 
 func (raceProvider) Name() string                            { return "racesource" }
 func (raceProvider) Capabilities() importProvider.Capability { return importProvider.CapProjects }
+func (raceProvider) DefaultStatusMap() map[string]string     { return nil }
 func (raceProvider) Validate(context.Context, *importModels.Job, importProvider.JobOptions) error {
 	return nil
 }

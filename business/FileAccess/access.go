@@ -3,7 +3,8 @@
 //
 // A file (an attachments row) is the file of the place its src_key and
 // src_value name: a channel, a conversation with one person ("chat", named by
-// its grouping id) or with several ("grpChat"), a project, a doc, a board, or
+// its grouping id) or with several ("grpChat"), a project, a doc, a board, a
+// table (its files fields' cells), or
 // nobody's ("public": a profile picture, an app's icon). It is served to
 // whoever may see that place, so adding one is writing in it.
 //
@@ -33,6 +34,7 @@ import (
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	tableAccess "github.com/akashc777/OneCamp/business/TableAccess"
 	attachmentDomain "github.com/akashc777/OneCamp/domain/Attachment"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -154,21 +156,12 @@ func FileOf(ctx context.Context, place Place, id string) (*attachmentModels.Atta
 		return importKeptFile(ctx, place.ID, fileID)
 	}
 	switch {
-	case errors.Is(err, sql.ErrNoRows), err == nil && (!stored(att) || att.SrcValue != place.ID):
+	case errors.Is(err, sql.ErrNoRows), err == nil && (!attachmentBusiness.IsStored(att) || att.SrcValue != place.ID):
 		return nil, ErrNoSuchFile
 	case err != nil:
 		return nil, err
 	}
 	return att, nil
-}
-
-// stored is whether a file's row names a file that is there: one with its
-// stored object, not taken off its place. Taking a file off a task or a
-// project stamps its row deleted (ArchiveAttachmentByAttachmentUUID) and the
-// purge removes it later; until then it is no such file to every read by id
-// (FileOf, importKeptFile, FilesOf).
-func stored(att *attachmentModels.Attachment) bool {
-	return att != nil && att.ObjKey != "" && !helpers.IsSoftDeleted(&att.DeletedAt)
 }
 
 // importKeptFile is the file with id when an import keeps it under one of the
@@ -182,7 +175,7 @@ func importKeptFile(ctx context.Context, projectID string, id uuid.UUID) (*attac
 	switch {
 	case err != nil:
 		return nil, err
-	case !found || !stored(att):
+	case !found || !attachmentBusiness.IsStored(att):
 		return nil, ErrNoSuchFile
 	}
 	_, project, err := taskDomain.FileHolder(ctx, att.SrcKey, att.SrcValue)
@@ -198,22 +191,7 @@ func importKeptFile(ctx context.Context, projectID string, id uuid.UUID) (*attac
 // FilesOf is FileOf for several files of one place in one read: the ones
 // that are files of it, by id; any other id is left out.
 func FilesOf(ctx context.Context, place Place, ids []string) (map[string]*attachmentModels.Attachment, error) {
-	valid := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if _, err := uuid.Parse(id); err == nil {
-			valid = append(valid, id)
-		}
-	}
-	found, err := attachmentBusiness.AttachmentsOfPlace(ctx, valid, place.Kind, place.ID)
-	if err != nil {
-		return nil, err
-	}
-	for id, att := range found {
-		if !stored(att) {
-			delete(found, id)
-		}
-	}
-	return found, nil
+	return attachmentBusiness.StoredFilesOfPlace(ctx, ids, place.Kind, place.ID)
 }
 
 // sources are where the answers come from: each place's own rule, everywhere
@@ -227,6 +205,10 @@ type sources struct {
 	editsBoard    func(ctx context.Context, userUUID, boardID string) (bool, error)
 	readsDoc      func(ctx context.Context, userUUID, docID string) error
 	addsToDoc     func(ctx context.Context, userUUID, docID string) error
+	// A table's files go with its rows: whoever may read its rows has them,
+	// whoever may write its rows adds them (Table Access decides both).
+	readsTable  func(ctx context.Context, userUUID, tableID string) (bool, error)
+	writesTable func(ctx context.Context, userUUID, tableID string) (bool, error)
 	// keepsTaskFile is whether the file is on a task kept from the person,
 	// as its own or on one of its comments.
 	keepsTaskFile func(ctx context.Context, userUUID string, file *attachmentModels.Attachment) (bool, error)
@@ -237,15 +219,17 @@ var live = sources{
 	writesChannel: channelAnswer(channelBusiness.WritableBy),
 	inGroup:       inGroup,
 	inProject:     inProject,
-	readsBoard: func(ctx context.Context, userUUID, boardID string) (bool, error) {
+	readsBoard: onStage(func(ctx context.Context, userUUID, boardID string) (bool, error) {
 		readable, err := boardBusiness.ReadableBoardsFor(ctx, []string{boardID}, userUUID)
 		return readable[boardID], err
-	},
-	editsBoard: func(ctx context.Context, userUUID, boardID string) (bool, error) {
+	}, false),
+	editsBoard: onStage(func(ctx context.Context, userUUID, boardID string) (bool, error) {
 		return boardBusiness.EditableBy(ctx, boardID, userUUID)
-	},
+	}, true),
 	readsDoc:      readsDoc,
 	addsToDoc:     addsToDoc,
+	readsTable:    tableAnswer(func(d tableAccess.Decision) bool { return d.View }),
+	writesTable:   tableAnswer(func(d tableAccess.Decision) bool { return d.Edit }),
 	keepsTaskFile: keepsTaskFile,
 }
 
@@ -271,6 +255,27 @@ func keepsTaskFile(ctx context.Context, userUUID string, file *attachmentModels.
 	return taskDomain.AnyHoldsFile(ctx, kept.IDs(), file.Uuid.String())
 }
 
+// tableAnswer is a table's rule for its files: what Table Access decides for
+// the person, as themselves (an admin's way to a private table is its
+// owner's choice, O6, not a file's).
+func tableAnswer(may func(tableAccess.Decision) bool) func(ctx context.Context, userUUID, tableID string) (bool, error) {
+	return func(ctx context.Context, userUUID, tableID string) (bool, error) {
+		user, err := uuid.Parse(userUUID)
+		table, terr := uuid.Parse(tableID)
+		if err != nil || terr != nil {
+			return false, nil
+		}
+		d, err := tableAccess.Tables.Resolve(ctx, tableAccess.Who{User: user}, table)
+		if err != nil {
+			if errors.Is(err, tableAccess.ErrNotFound) {
+				return false, nil
+			}
+			return false, err
+		}
+		return may(d), nil
+	}
+}
+
 func (s sources) mayRead(ctx context.Context, userUUID string, p Place) error {
 	switch p.Kind {
 	case postgresStruct.ATTACHMENT_SRC_PUBLIC:
@@ -288,11 +293,16 @@ func (s sources) mayRead(ctx context.Context, userUUID string, p Place) error {
 			return docBusiness.ErrNotFound
 		}
 		return s.readsDoc(ctx, userUUID, p.ID)
+	case postgresStruct.ATTACHMENT_SRC_FORM:
+		// A form's picture is served only by its form's link (GET
+		// /public/form/{token}/cover and /logo), to anyone holding it.
+		return ErrRefused
 	}
 	ask := map[string]func(ctx context.Context, userUUID, id string) (bool, error){
 		postgresStruct.ATTACHMENT_SRC_CHANNEL: s.readsChannel,
 		postgresStruct.ATTACHMENT_SRC_PROJECT: s.inProject,
 		postgresStruct.ATTACHMENT_SRC_BOARD:   s.readsBoard,
+		postgresStruct.ATTACHMENT_SRC_TABLE:   s.readsTable,
 	}[p.Kind]
 	if ask == nil || !isID(p.ID) {
 		return ErrRefused
@@ -303,6 +313,12 @@ func (s sources) mayRead(ctx context.Context, userUUID string, p Place) error {
 func (s sources) mayAdd(ctx context.Context, userUUID string, p Place) error {
 	switch p.Kind {
 	case postgresStruct.ATTACHMENT_SRC_PUBLIC:
+		return nil
+	case postgresStruct.ATTACHMENT_SRC_FORM:
+		// A picture for a form's cover or logo: anyone signed in may upload
+		// one, as a public file may be. It goes on a form only through that
+		// form's save, which takes only the saver's own picture onto a form
+		// they manage (business/Form checkLook), and no file route serves it.
 		return nil
 	case postgresStruct.ATTACHMENT_SRC_CHAT:
 		return yes(inDM(userUUID, p.ID), nil)
@@ -325,6 +341,7 @@ func (s sources) mayAdd(ctx context.Context, userUUID string, p Place) error {
 		postgresStruct.ATTACHMENT_SRC_CHANNEL: s.writesChannel,
 		postgresStruct.ATTACHMENT_SRC_PROJECT: s.inProject,
 		postgresStruct.ATTACHMENT_SRC_BOARD:   s.editsBoard,
+		postgresStruct.ATTACHMENT_SRC_TABLE:   s.writesTable,
 	}[p.Kind]
 	if ask == nil || !isID(p.ID) {
 		return ErrRefused

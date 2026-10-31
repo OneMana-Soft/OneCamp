@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	estimateScale "github.com/akashc777/OneCamp/business/EstimateScale"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	cycleModel "github.com/akashc777/OneCamp/models/postgres/Cycle"
@@ -47,7 +48,7 @@ func TestTheBacklogIsTheOpenCyclesThenWhatIsInNone(t *testing.T) {
 			task("open-d", "todo", 0, 3),
 		},
 	}
-	b := Assemble([]cycleModel.Cycle{n6, next, c1, cur, c2, n5}, members, read, at(10))
+	b := Assemble([]cycleModel.Cycle{n6, next, c1, cur, c2, n5}, members, read, at(10), nil)
 	if len(b.Cycles) != 3 || b.Cycles[0].Number != 3 || b.Cycles[1].Number != 4 || b.Cycles[2].Number != 5 {
 		t.Fatalf("the open cycles in order, three at most: %+v", b.Cycles)
 	}
@@ -70,8 +71,51 @@ func TestTheBacklogIsTheOpenCyclesThenWhatIsInNone(t *testing.T) {
 	}
 
 	// No completed cycle with estimates: no capacity.
-	if b := Assemble([]cycleModel.Cycle{cur}, members, &projectDomain.BacklogRead{}, at(10)); b.CapacityMinutes != nil || b.Tasks == nil {
+	if b := Assemble([]cycleModel.Cycle{cur}, members, &projectDomain.BacklogRead{}, at(10), nil); b.CapacityMinutes != nil || b.Tasks == nil {
 		t.Fatalf("no capacity before a cycle finishes estimated work: %+v", b)
+	}
+}
+
+// linear-05: in a project that estimates in points, each open cycle and the
+// backlog total their points, a task with none counting as its scale says,
+// and capacity is what recent cycles finished in points.
+func TestTheBacklogCountsPointsOnTheProjectsScale(t *testing.T) {
+	pointed := func(id, status string, points float64, created int) *dgraphStruct.DgraphTask {
+		tk := task(id, status, 0, created)
+		tk.EstimatePoints = &points
+		return tk
+	}
+	done := at(1)
+	old := cycleModel.Cycle{Id: uuid.New(), Number: 1, StartsAt: at(1).AddDate(0, 0, -14), EndsAt: at(1), CompletedAt: &done}
+	cur := cycleModel.Cycle{Id: uuid.New(), Number: 2, StartsAt: at(5), EndsAt: at(19)}
+	members := map[uuid.UUID][]string{old.Id: {"old-a", "old-b"}, cur.Id: {"a", "b"}}
+	read := &projectDomain.BacklogRead{
+		// 40 in the backlog, 30 with points adding up to 90.
+		Count: 40, Points: 90, Pointed: 30,
+		Planned: []*dgraphStruct.DgraphTask{
+			pointed("old-a", "done", 8, 1), task("old-b", "done", 0, 1),
+			pointed("a", "todo", 5, 3), task("b", "todo", 0, 3),
+		},
+	}
+	counting := &estimateScale.Scale{Kind: "fibonacci", CountUnestimated: true}
+	b := Assemble([]cycleModel.Cycle{old, cur}, members, read, at(10), counting)
+	if b.EstimatePoints == nil || *b.EstimatePoints != 100 {
+		t.Fatalf("the backlog's points: 90, and 10 tasks with none at one each: %v", b.EstimatePoints)
+	}
+	if p := b.Cycles[0].EstimatePoints; p == nil || *p != 6 {
+		t.Fatalf("the cycle's points: 5, and one task with none: %v", p)
+	}
+	if b.CapacityPoints == nil || *b.CapacityPoints != 9 {
+		t.Fatalf("capacity: the completed cycle finished 8 and one unestimated: %v", b.CapacityPoints)
+	}
+
+	b = Assemble([]cycleModel.Cycle{old, cur}, members, read, at(10), &estimateScale.Scale{Kind: "fibonacci"})
+	if *b.EstimatePoints != 90 || *b.Cycles[0].EstimatePoints != 5 || *b.CapacityPoints != 8 {
+		t.Fatalf("with the unestimated counting nothing: %v %v %v", *b.EstimatePoints, *b.Cycles[0].EstimatePoints, *b.CapacityPoints)
+	}
+
+	if b := Assemble([]cycleModel.Cycle{old, cur}, members, read, at(10), nil); b.EstimatePoints != nil || b.Cycles[0].EstimatePoints != nil || b.CapacityPoints != nil {
+		t.Fatal("a project in hours has no points in its backlog")
 	}
 }
 

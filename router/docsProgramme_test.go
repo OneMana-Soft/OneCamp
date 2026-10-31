@@ -31,8 +31,9 @@ func TestDocsProgrammeRoutersAreProtected(t *testing.T) {
 	rt.Member.Get("/probe", reached)
 	rt.Internal.Get("/probe", reached)
 	rt.V1.Get("/probe", reached)
+	rt.Files.Get("/files-probe", reached)
 
-	for _, path := range []string{"/probe", "/docColab/probe", "/v1/probe"} {
+	for _, path := range []string{"/probe", "/docColab/probe", "/v1/probe", "/files-probe"} {
 		rec := httptest.NewRecorder()
 		root.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != http.StatusUnauthorized && rec.Code != http.StatusForbidden {
@@ -50,7 +51,7 @@ func TestDocsProgrammeRoutersArePinned(t *testing.T) {
 	for i := 0; i < ty.NumField(); i++ {
 		got = append(got, ty.Field(i).Name)
 	}
-	want := []string{"Doc", "Member", "Admin", "Internal", "V1"}
+	want := []string{"Doc", "Member", "Admin", "Internal", "V1", "Files"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("docsRouters holds %v, want %v", got, want)
 	}

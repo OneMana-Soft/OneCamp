@@ -209,7 +209,7 @@ func RestoreMemoryByScope(ctx context.Context, scope memoryModels.ScopeRef) int 
 // set of memory ids. Best-effort per id so one failure never stalls the
 // rest. Shared by the source- and scope-level delete/archive cascades.
 func dropMemoryProjections(ctx context.Context, ids []uuid.UUID) {
-	if err := dropMemoryProjectionsMany(ctx, uuidStrings(ids)); err != nil {
+	if err := dropMemoryProjectionsMany(ctx, helpers.UUIDStrings(ids)); err != nil {
 		helpers.LogErrorWithContext(ctx, "memory cascade: drop %d projections failed: %v", len(ids), err)
 	}
 }
@@ -287,7 +287,7 @@ func HideMemoryBySources(ctx context.Context, sourceType string, sourceUUIDs []s
 	if err != nil {
 		return err
 	}
-	return dropMemoryProjectionsMany(ctx, uuidStrings(ids))
+	return dropMemoryProjectionsMany(ctx, helpers.UUIDStrings(ids))
 }
 
 // ShowMemoryBySources brings back what HideMemoryBySources hid with reason:

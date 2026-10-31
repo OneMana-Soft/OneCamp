@@ -107,6 +107,15 @@ func TestFormulaFields(t *testing.T) {
 	if err != nil || agg == nil || agg.MatchedRows != 1 {
 		t.Errorf("count where Late is Late: %+v, %v", agg, err)
 	}
+	// It compares as what it gives, as the grid's filters read it: Total, a
+	// number, as people write one; and what a number can't take is refused.
+	agg, _, err = AggregateTable(ctx, table.Id, actor, QuerySpec{Op: "count", Filters: []Filter{{Field: "Total", Op: "eq", Value: "50.0"}}})
+	if err != nil || agg == nil || agg.MatchedRows != 1 {
+		t.Errorf("count where Total is 50.0: %+v, %v", agg, err)
+	}
+	if _, _, err := AggregateTable(ctx, table.Id, actor, QuerySpec{Op: "count", Filters: []Filter{{Field: "Total", Op: "contains", Value: "5"}}}); err == nil {
+		t.Error("contains on a formula giving a number was read")
+	}
 
 	// Renamed: shown under the new name, and still worked out.
 	if _, err := UpdateField(ctx, table.Id, price.Id, FieldPatch{Name: optStr("Unit price"), Type: optStr(model.FieldNumber)}, actor); err != nil {

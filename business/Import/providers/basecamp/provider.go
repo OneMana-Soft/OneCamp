@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -197,7 +198,13 @@ func (p *Provider) loadToken(ctx context.Context, j *importModels.Job) (string, 
 	if j.TriggeredBy == nil {
 		return "", errors.New("job has no triggered_by user")
 	}
-	return importProvider.FreshAccessToken(ctx, oauthConfig(), providerName, *j.TriggeredBy)
+	return tokenFor(ctx, *j.TriggeredBy)
+}
+
+// tokenFor is owner's stored sign-in, refreshed: an import's (whoever ran
+// it), and a re-check's (whoever's connection it reads with).
+func tokenFor(ctx context.Context, owner uuid.UUID) (string, error) {
+	return importProvider.FreshAccessToken(ctx, oauthConfig(), providerName, owner)
 }
 
 // accountsOf are the Basecamp accounts a sign-in can see (not its HEY or
@@ -242,24 +249,36 @@ func (p *Provider) account(ctx context.Context, j *importModels.Job) (string, st
 	if ok {
 		return tok, base, nil
 	}
-	items, err := p.accountsOf(ctx, tok)
-	if err != nil {
+	if base, err = p.pickAccount(ctx, tok, j); err != nil {
 		return "", "", err
-	}
-	picked, err := importProvider.PickScope(items, importProvider.JobPickedID(j, importProvider.OptBasecampAccountID), j.SourceWorkspaceName,
-		importProvider.Scope{Provider: "Basecamp", Noun: "account", Credential: "sign-in"})
-	if err != nil {
-		return "", "", err
-	}
-	for _, it := range items {
-		if it.ID == picked {
-			base, _ = it.Meta["api"].(string)
-		}
 	}
 	p.mu.Lock()
 	p.accounts[j.Id] = base
 	p.mu.Unlock()
 	return tok, base, nil
+}
+
+// errUnpicked is PickScope's refusal of a job's account among those a sign-in
+// sees (gone from it, or several and none named like the import): its words
+// tell the admin what to do.
+type errUnpicked struct{ error }
+
+// pickAccount is the API base of the job's account among those tok's sign-in
+// sees: the account the admin picked, else the one named like the import
+// (PickScope). Its refusal is an errUnpicked.
+func (p *Provider) pickAccount(ctx context.Context, tok string, j *importModels.Job) (string, error) {
+	items, err := p.accountsOf(ctx, tok)
+	if err != nil {
+		return "", err
+	}
+	picked, err := importProvider.PickScope(items, importProvider.JobPickedID(j, importProvider.OptBasecampAccountID), j.SourceWorkspaceName,
+		importProvider.Scope{Provider: "Basecamp", Noun: "account", Credential: "sign-in"})
+	if err != nil {
+		return "", errUnpicked{err}
+	}
+	i := slices.IndexFunc(items, func(it importProvider.DiscoverItem) bool { return it.ID == picked })
+	base, _ := items[i].Meta["api"].(string)
+	return base, nil
 }
 
 // CleanupJob forgets the job's account.
@@ -473,19 +492,18 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 				Metadata:    map[string]any{"basecamp_url": pr.AppURL},
 			})
 		}
-		importModels.LogImportErrors(ctx, j.Id, nil, notes)
+		importModels.LogImportErrors(ctx, j.Id, notes)
 		return out, nil
 	})
 }
 
 // projectPeople is who of a project's people join it here (source ids), and
-// how many are its clients, who don't: a client sees only what's shared with
-// clients in Basecamp, and everything in a project here. Pure.
+// how many are its clients, who don't (joinsProjects). Pure.
 func projectPeople(people []bcPerson) ([]string, int) {
 	members := make([]string, 0, len(people))
 	clients := 0
 	for _, m := range people {
-		if m.Client {
+		if !joinsProjects(m) {
 			clients++
 			continue
 		}
@@ -493,6 +511,12 @@ func projectPeople(people []bcPerson) ([]string, int) {
 	}
 	return members, clients
 }
+
+// joinsProjects is whether a Basecamp person joins the projects they are on
+// here: a client doesn't, since Basecamp shows a client only what's shared
+// with clients, and a project here shows its people everything in it. The
+// import's rule, and a re-check's (recheck.go). Pure.
+func joinsProjects(pr bcPerson) bool { return !pr.Client }
 
 // clientsNote is the import's report line counting the clients a project
 // left out (projectPeople), so the admin can add them on purpose. Pure.
@@ -652,17 +676,6 @@ func todoStatus(r bcRecording) string {
 	return statusOpen
 }
 
-func day(s string) *time.Time {
-	if s == "" {
-		return nil
-	}
-	d, err := time.Parse("2006-01-02", s)
-	if err != nil {
-		return nil
-	}
-	return &d
-}
-
 func files(refs []bcFileRef, parent importProvider.SourceRef) []importProvider.SourceAttachment {
 	out := make([]importProvider.SourceAttachment, 0, len(refs))
 	for _, f := range refs {
@@ -693,8 +706,8 @@ func toTask(r bcRecording, projectID, status string, done bool, labels []string)
 		Description:     richText(body),
 		Status:          status,
 		Labels:          labels,
-		StartDate:       day(r.StartsOn),
-		DueDate:         day(r.DueOn),
+		StartDay:        day(r.StartsOn),
+		DueDay:          day(r.DueOn),
 		Created:         r.CreatedAt,
 		Updated:         r.UpdatedAt,
 		Completed:       done,
@@ -730,4 +743,11 @@ func richText(html string) string {
 		}
 		return ""
 	})
+}
+
+// day is a to-do's starts_on or due_on: a day with no time, which the import
+// writes where the team is (provider.Day). Pure.
+func day(s string) importProvider.Day {
+	d, _ := importProvider.ParseDay(s)
+	return d
 }

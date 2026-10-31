@@ -46,6 +46,11 @@ var (
 // nobody (""), every restricted task is hidden. Two reads at most, and one
 // when no restricted task is left out for the reader by its rows.
 func hiddenFor(ctx context.Context, reader string) (map[string]bool, error) {
+	return hidden(ctx, reader, true)
+}
+
+// hidden is hiddenFor, with the reader's assignments counted or not.
+func hidden(ctx context.Context, reader string, assignments bool) (map[string]bool, error) {
 	me, err := uuid.Parse(strings.TrimSpace(reader))
 	if err != nil {
 		me = uuid.Nil
@@ -54,6 +59,29 @@ func hiddenFor(ctx context.Context, reader string) (map[string]bool, error) {
 	if err != nil || len(rows) == 0 {
 		return nil, err
 	}
+	hidden, candidates, ids := leftOut(me, rows)
+	if len(candidates) == 0 {
+		return hidden, nil
+	}
+	// The decision reads the restricted tasks it decides about: as a read
+	// with no audience, or it would ask itself.
+	tasks, err := readStanding(taskread.WithSystem(ctx), ids, me.String())
+	if err != nil {
+		return nil, err
+	}
+	standings, err := OfMany(ctx, me.String(), projectsOf(tasks))
+	if err != nil {
+		return nil, err
+	}
+	letInBy(me, hidden, candidates, tasks, standings, assignments)
+	return hidden, nil
+}
+
+// leftOut starts the decision from the reader's rows: every restricted task
+// hidden but those its rows let them into, the ones left out (candidates;
+// none for nobody, who is left out of every one), and the tasks to read for
+// them: theirs, and those they are restricted with. Pure.
+func leftOut(me uuid.UUID, rows []restrictionModel.Candidate) (map[string]bool, []restrictionModel.Candidate, []string) {
 	hidden := make(map[string]bool, len(rows))
 	var candidates []restrictionModel.Candidate
 	ids := make([]string, 0, len(rows))
@@ -67,7 +95,7 @@ func hiddenFor(ctx context.Context, reader string) (map[string]bool, error) {
 		ids = append(ids, c.TaskID.String())
 	}
 	if me == uuid.Nil || len(candidates) == 0 {
-		return hidden, nil
+		return hidden, nil, nil
 	}
 	// The tasks they're restricted with are read too, for their assignees.
 	asked := map[string]bool{}
@@ -80,22 +108,25 @@ func hiddenFor(ctx context.Context, reader string) (map[string]bool, error) {
 			ids = append(ids, v)
 		}
 	}
-	// The decision reads the restricted tasks it decides about: as a read
-	// with no audience, or it would ask itself.
-	tasks, err := readStanding(taskread.WithSystem(ctx), ids, me.String())
-	if err != nil {
-		return nil, err
-	}
+	return hidden, candidates, ids
+}
+
+// projectsOf is the projects of the tasks read for the decision. Pure.
+func projectsOf(tasks []*dgraphStruct.DgraphTask) []*dgraphStruct.DgraphProject {
 	var projects []*dgraphStruct.DgraphProject
 	for _, t := range tasks {
 		if t != nil && t.Project != nil {
 			projects = append(projects, t.Project)
 		}
 	}
-	standings, err := OfMany(ctx, me.String(), projects)
-	if err != nil {
-		return nil, err
-	}
+	return projects
+}
+
+// letInBy settles the candidates in hidden: one shows when the rule lets the
+// reader in as they stand in its project (as its assignee too when
+// assignments count), or when the task it is restricted with lets them in,
+// by its rows or the rule. Pure.
+func letInBy(me uuid.UUID, hidden map[string]bool, candidates []restrictionModel.Candidate, tasks []*dgraphStruct.DgraphTask, standings map[string]Standing, assignments bool) {
 	is := func(u *dgraphStruct.DgraphUser) bool { return u != nil && strings.EqualFold(u.Uuid, me.String()) }
 	letIn := map[string]bool{}
 	for _, t := range tasks {
@@ -106,7 +137,7 @@ func hiddenFor(ctx context.Context, reader string) (map[string]bool, error) {
 		if t.Project != nil {
 			s = standings[strings.ToLower(t.Project.Uuid)]
 		}
-		letIn[strings.ToLower(t.Uuid)] = s.LetIn(TaskFacts{Restricted: true, Assignee: is(t.Assignee), Creator: is(t.CreatedBy)})
+		letIn[strings.ToLower(t.Uuid)] = s.LetIn(TaskFacts{Restricted: true, Assignee: assignments && is(t.Assignee), Creator: is(t.CreatedBy)})
 	}
 	for _, c := range candidates {
 		id := c.TaskID.String()
@@ -117,7 +148,6 @@ func hiddenFor(ctx context.Context, reader string) (map[string]bool, error) {
 			hidden[id] = false
 		}
 	}
-	return hidden, nil
 }
 
 // ErrNotProjectPeople is a grant to someone who can't see the task's

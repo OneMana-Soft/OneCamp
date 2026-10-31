@@ -395,12 +395,12 @@ func TestAReminderSaysWhenInWords(t *testing.T) {
 		{2 * time.Hour, "Design review in 2 hours"},
 		{48 * time.Hour, "Design review in 2 days"},
 	} {
-		if got, _ := reminderWords(e, 0, false, start.Add(-c.before), time.UTC); got != c.want {
+		if got, _ := reminderWords(e, e.Title, 0, false, start.Add(-c.before), time.UTC); got != c.want {
 			t.Errorf("%v before: %q, want %q", c.before, got, c.want)
 		}
 	}
 	day := &models.Event{Title: "Offsite", StartDate: "2026-10-21", EndDate: "2026-10-22"}
-	if got, _ := reminderWords(day, 900, false, time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC), time.UTC); got != "Offsite is tomorrow" {
+	if got, _ := reminderWords(day, day.Title, 900, false, time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC), time.UTC); got != "Offsite is tomorrow" {
 		t.Errorf("all-day: %q", got)
 	}
 }

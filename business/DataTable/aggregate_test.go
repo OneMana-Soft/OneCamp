@@ -160,8 +160,10 @@ func TestAggregate_NumericFilter(t *testing.T) {
 	}
 }
 
-// Text in a number column is read as formula.ParseNumber reads it: "1,5" was
-// 15, by dropping its comma, and "NaN" a number no answer could hold.
+// Text in a number column is read as formula.ParseNumber reads it when it's
+// added up: "1,5" was 15, by dropping its comma, and "NaN" a number no answer
+// could hold. A filter reads the column as the grid does (rowFilters.go): text
+// there is no number, and a value that isn't one is refused.
 func TestAggregate_NumbersWrittenAsText(t *testing.T) {
 	amount := fld("Amount", model.FieldNumber)
 	var rows []*model.Row
@@ -178,11 +180,12 @@ func TestAggregate_NumbersWrittenAsText(t *testing.T) {
 	if _, err := json.Marshal(res); err != nil {
 		t.Errorf("the answer can't be sent: %v", err)
 	}
-	for value, want := range map[string]float64{"1,000": 1, "1,5": 0} {
-		res, err := Aggregate([]*model.Field{amount}, rows, QuerySpec{Op: OpCount, Filters: []Filter{{Field: "Amount", Op: "gte", Value: value}}})
-		if b, _ := bucketByLabel(res, "Total"); err != nil || b.Value != want {
-			t.Errorf("rows at least %q: %v (%v), want %v", value, b.Value, err, want)
-		}
+	res, err = Aggregate([]*model.Field{amount}, rows, QuerySpec{Op: OpCount, Filters: []Filter{{Field: "Amount", Op: "gte", Value: "1,000"}}})
+	if err != nil || res.MatchedRows != 0 {
+		t.Errorf("rows at least 1,000: %v (%v), want none: the only number is 2", res, err)
+	}
+	if _, err := Aggregate([]*model.Field{amount}, rows, QuerySpec{Op: OpCount, Filters: []Filter{{Field: "Amount", Op: "gte", Value: "1,5"}}}); err == nil {
+		t.Error(`rows at least "1,5": counted, where it isn't a number`)
 	}
 }
 

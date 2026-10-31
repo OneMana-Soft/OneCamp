@@ -8,6 +8,12 @@ import (
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	importDomain "github.com/akashc777/OneCamp/domain/Import"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
+	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	conversationModels "github.com/akashc777/OneCamp/models/postgres/Conversation"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -27,17 +33,15 @@ type UserResolveStats struct {
 // import_id are no-ops thanks to the import_id_map upsert, and re-runs
 // against the same workspace are no-ops thanks to the workspace map.
 //
-// Matching policy (in order, first match wins):
-//  1. Per-import id_map → no work, just count.
-//  2. Workspace id_map (prior import for same provider+workspace).
-//  3. Existing OneCamp user with the same email.
-//  4. Provision a new external user (synth email if none provided).
+// Matching policy (personFacts.match, first match wins), else a new external
+// user (synth email if none provided).
 func runUsersStage(ctx context.Context, prov importProvider.Provider,
 	job *importModels.Job, opts importProvider.JobOptions) error {
 
 	userCh, errCh := prov.IterUsers(ctx, job, opts)
 
 	stats := UserResolveStats{}
+	members := &memberNames{}
 
 	for {
 		select {
@@ -59,7 +63,7 @@ func runUsersStage(ctx context.Context, prov importProvider.Provider,
 				return nil
 			}
 			stats.Total++
-			if err := resolveOneUser(ctx, prov, job, &su, &stats); err != nil {
+			if err := resolveOneUser(ctx, job, &su, &stats, members); err != nil {
 				// Resolution should be tolerant of single-user failures.
 				// Redact email from the message so privacy-sensitive
 				// data isn't forwarded to log aggregators (the per-import
@@ -75,53 +79,232 @@ func runUsersStage(ctx context.Context, prov importProvider.Provider,
 	}
 }
 
-func resolveOneUser(ctx context.Context, prov importProvider.Provider,
-	job *importModels.Job, su *importProvider.SourceUser, stats *UserResolveStats) error {
+// personMatch is who a source's person is here, and how the import knows:
+// by its own map, the workspace's map from an earlier import, their email or
+// their name. by "" is no one, and they come as a placeholder; sameName is
+// how many members share their name when that is why.
+type personMatch struct {
+	by       string
+	id       uuid.UUID
+	sameName int
+}
+
+// The ways a person is matched (import_id_map's matched_by).
+const (
+	matchedByImport    = "import"
+	matchedByWorkspace = "workspace_map"
+	matchedByEmail     = "email"
+	matchedByName      = "name"
+)
+
+// personFacts is what matching people reads, for many at once: the import's
+// own map, the workspace's map from an earlier import of the same source, the
+// members by address, and the members by name.
+type personFacts struct {
+	own, earlier map[string]uuid.UUID // by source id
+	byAddress    map[string]uuid.UUID // by address in lower case
+	members      *memberNames
+}
+
+// readPersonFacts reads what matching people needs, one statement a kind: the
+// maps by the people's source ids, the members by their addresses, and the
+// members' names when someone is placed by none of those.
+func readPersonFacts(ctx context.Context, job *importModels.Job, people []importProvider.SourceUser, members *memberNames) (*personFacts, error) {
+	ids := make([]string, 0, len(people))
+	var addresses []string
+	for i := range people {
+		ids = append(ids, people[i].SourceID)
+		if a := addressOf(&people[i]); a != "" {
+			addresses = append(addresses, a)
+		}
+	}
+	f := &personFacts{members: members}
+	var err error
+	if f.own, err = importDomain.LookupIdMappingsBatch(ctx, job.Id, importModels.EntityUser, ids); err != nil {
+		return nil, err
+	}
+	if f.earlier, err = importModels.LookupWorkspaceMappingsBatch(ctx, job.Provider, job.SourceWorkspaceName, importModels.EntityUser, ids); err != nil {
+		return nil, err
+	}
+	if f.byAddress, err = userBusiness.MembersByAddress(ctx, addresses); err != nil {
+		return nil, err
+	}
+	// Someone matched before is never looked for by name, so the members
+	// aren't read for them.
+	byName := false
+	for i := range people {
+		if _, placed := f.placed(&people[i]); !placed {
+			byName = true
+			break
+		}
+	}
+	if byName {
+		if err := members.load(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return f, nil
+}
+
+// match finds who su is here, in this order: the import's own map; the
+// workspace's map from an earlier import of the same source; the member with
+// su's address; then, when the source gave no address (Trello, a CSV's
+// names), the one member with su's name. Two members with one name are never
+// guessed between, and a bot is never matched by name.
+func (f *personFacts) match(su *importProvider.SourceUser) personMatch {
+	if m, placed := f.placed(su); placed {
+		return m
+	}
+	ids := f.members.named(su.DisplayName)
+	if len(ids) != 1 {
+		return personMatch{sameName: len(ids)}
+	}
+	return personMatch{by: matchedByName, id: ids[0]}
+}
+
+// placed is match's answer up to the members' names, and whether it is the
+// answer: no map and no address leave someone who isn't a bot to their name.
+func (f *personFacts) placed(su *importProvider.SourceUser) (personMatch, bool) {
+	if id := f.own[su.SourceID]; id != uuid.Nil {
+		return personMatch{by: matchedByImport, id: id}, true
+	}
+	if id := f.earlier[su.SourceID]; id != uuid.Nil {
+		return personMatch{by: matchedByWorkspace, id: id}, true
+	}
+	if a := addressOf(su); a != "" {
+		if id := f.byAddress[a]; id != uuid.Nil {
+			return personMatch{by: matchedByEmail, id: id}, true
+		}
+		return personMatch{}, true
+	}
+	return personMatch{}, su.IsBot
+}
+
+// addressOf is su's address as addresses are compared.
+func addressOf(su *importProvider.SourceUser) string {
+	return strings.TrimSpace(strings.ToLower(su.Email))
+}
+
+// memberNames are the workspace's members by name (PersonNameKey of their
+// display and full names) and each one's name as people see it, read once a
+// pass, when a person first needs them.
+type memberNames struct {
+	byName map[string][]uuid.UUID
+	nameOf map[uuid.UUID]string
+}
+
+// load reads the members' names from the graph, keeping those Postgres says
+// are members: live, and not external rows or bots.
+func (m *memberNames) load(ctx context.Context) error {
+	if m.byName != nil {
+		return nil
+	}
+	users, _, err := userDomain.GetMembersPage(ctx, dgraphquery.ReadAllMax, 0, userDomain.MembersFilter{})
+	if err != nil {
+		return err
+	}
+	ids := make([]uuid.UUID, 0, len(users))
+	for _, u := range users {
+		if id, err := uuid.Parse(u.Uuid); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	people, err := conversationModels.People(ctx, ids)
+	if err != nil {
+		return err
+	}
+	m.byName, m.nameOf = membersByName(users, func(id uuid.UUID) bool {
+		p, ok := people[id]
+		return ok && p.Active && !p.External && !p.Bot
+	})
+	return nil
+}
+
+// named is the members called name: one is a match, two or more are a
+// shared name.
+func (m *memberNames) named(name string) []uuid.UUID {
+	return m.byName[helpers.PersonNameKey(name)]
+}
+
+// membersByName indexes the users member says are members by each of their
+// names' keys, once a user for a name, and gives each one's name as people
+// see it. Pure.
+func membersByName(users []*dgraphStruct.DgraphUser, member func(uuid.UUID) bool) (byName map[string][]uuid.UUID, nameOf map[uuid.UUID]string) {
+	byName = make(map[string][]uuid.UUID, len(users))
+	nameOf = make(map[uuid.UUID]string, len(users))
+	for _, u := range users {
+		id, err := uuid.Parse(u.Uuid)
+		if err != nil || !member(id) {
+			continue
+		}
+		nameOf[id] = u.DisplayName()
+		seen := ""
+		for _, n := range []string{u.UserName, u.UserFullName} {
+			if k := helpers.PersonNameKey(n); k != "" && k != seen {
+				byName[k] = append(byName[k], id)
+				seen = k
+			}
+		}
+	}
+	return byName, nameOf
+}
+
+// previewPeople says how the users stage will match each person a plan lists
+// (personFacts.match), and whom, reading only.
+func previewPeople(ctx context.Context, job *importModels.Job, people []importProvider.PlanPerson) error {
+	if len(people) == 0 {
+		return nil
+	}
+	members := &memberNames{}
+	if err := members.load(ctx); err != nil {
+		return err
+	}
+	users := make([]importProvider.SourceUser, len(people))
+	for i, p := range people {
+		users[i] = importProvider.SourceUser{SourceID: p.SourceID, Email: p.Email, DisplayName: p.Name}
+	}
+	facts, err := readPersonFacts(ctx, job, users, members)
+	if err != nil {
+		return err
+	}
+	for i := range people {
+		m := facts.match(&users[i])
+		people[i].MatchedBy, people[i].SameName, people[i].Member = m.by, m.sameName, members.nameOf[m.id]
+	}
+	return nil
+}
+
+func resolveOneUser(ctx context.Context, job *importModels.Job,
+	su *importProvider.SourceUser, stats *UserResolveStats, members *memberNames) error {
 
 	if su.SourceID == "" {
 		stats.Skipped++
 		return nil
 	}
-
-	// 1. Per-import map.
-	if existing, err := importModels.LookupIdMapping(ctx, job.Id,
-		importModels.EntityUser, su.SourceID); err == nil && existing != uuid.Nil {
+	facts, err := readPersonFacts(ctx, job, []importProvider.SourceUser{*su}, members)
+	if err != nil {
+		return err
+	}
+	m := facts.match(su)
+	switch m.by {
+	case matchedByImport:
 		stats.Reused++
 		return nil
-	}
-
-	// 2. Workspace map (cross-import for this provider+workspace).
-	if existing, err := importModels.LookupWorkspaceMapping(ctx,
-		job.Provider, job.SourceWorkspaceName,
-		importModels.EntityUser, su.SourceID); err == nil && existing != uuid.Nil {
-
-		_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
-			importModels.EntityUser, su.SourceID, existing, nil,
-			mustMarshal(map[string]any{"matched_by": "workspace_map"}),
-			false)
-		stats.Reused++
-		return nil
-	}
-
-	// 3. OneCamp by email.
-	email := strings.TrimSpace(strings.ToLower(su.Email))
-	if email != "" {
-		if oc, _ := userBusiness.GetUserByEmailId(ctx, &email); oc != nil {
-			_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
-				importModels.EntityUser, su.SourceID, oc.Id, nil,
-				mustMarshal(map[string]any{
-					"matched_by": "email",
-					"email":      email,
-				}), false)
-			_ = importModels.UpsertWorkspaceMapping(ctx,
-				job.Provider, job.SourceWorkspaceName,
-				importModels.EntityUser, su.SourceID, oc.Id, job.Id)
-			stats.Reused++
-			return nil
+	case matchedByWorkspace, matchedByEmail, matchedByName:
+		meta := map[string]any{"matched_by": m.by}
+		if m.by == matchedByEmail {
+			meta["email"] = addressOf(su)
 		}
+		if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
+			importModels.EntityUser, su.SourceID, m.id, nil, mustMarshal(meta), false); err != nil {
+			return err
+		}
+		stats.Reused++
+		return nil
 	}
 
-	// 4. Provision an external user.
+	email := addressOf(su)
+	// No one here: a placeholder, an external user.
 	emailToUse := email
 	displayName := pickDisplayName(su)
 	login := su.Login
@@ -157,20 +340,11 @@ func resolveOneUser(ctx context.Context, prov importProvider.Provider,
 		return fmt.Errorf("create external user: %w", err)
 	}
 
-	if err := importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+	if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 		importModels.EntityUser, su.SourceID, newUser.Id, nil,
-		mustMarshal(map[string]any{
-			"matched_by":   "external",
-			"email":        emailToUse,
-			"display_name": displayName,
-			"login":        prefixedLogin,
-			"is_bot":       su.IsBot,
-		}), true); err != nil {
+		mustMarshal(placeholderMetadata(*su, emailToUse, displayName, prefixedLogin)), true); err != nil {
 		return err
 	}
-	_ = importModels.UpsertWorkspaceMapping(ctx,
-		job.Provider, job.SourceWorkspaceName,
-		importModels.EntityUser, su.SourceID, newUser.Id, job.Id)
 
 	if su.IsBot {
 		stats.Bots++
@@ -244,8 +418,6 @@ func sanitizeLogin(s string) string {
 	return out
 }
 
-// resolveUserUUID looks up an already-resolved user. Used by task/comment
-// workers that have a source author id and need the OneCamp user.
 // people is a chunk's memo of who source ids came across as: a person is
 // resolved (two statements and a graph read) once a chunk, where it was once
 // for each task, subtask and comment they made or were given.
@@ -255,42 +427,59 @@ type people struct {
 }
 
 type personRef struct {
-	id   uuid.UUID
-	info *userModels.UserInfo
+	match importModels.PersonMatch
+	info  *userModels.UserInfo
 }
 
 func newPeople(job *importModels.Job) *people {
 	return &people{job: job, seen: make(map[string]personRef, 16)}
 }
 
-// resolve is resolveUserUUID, once a person.
-func (p *people) resolve(ctx context.Context, sourceId string) (uuid.UUID, *userModels.UserInfo) {
+// resolve is resolveUser, once a person.
+func (p *people) resolve(ctx context.Context, sourceId string) (importModels.PersonMatch, *userModels.UserInfo) {
 	if r, ok := p.seen[sourceId]; ok {
-		return r.id, r.info
+		return r.match, r.info
 	}
-	id, info := resolveUserUUID(ctx, p.job, sourceId)
-	p.seen[sourceId] = personRef{id, info}
-	return id, info
+	match, info := resolveUser(ctx, p.job, sourceId)
+	p.seen[sourceId] = personRef{match, info}
+	return match, info
 }
 
-func resolveUserUUID(ctx context.Context, job *importModels.Job, sourceId string) (uuid.UUID, *userModels.UserInfo) {
+// resolveUser is who a source's person is here, and how they came across
+// (PeopleMatched), read in one statement before their user.
+func resolveUser(ctx context.Context, job *importModels.Job, sourceId string) (importModels.PersonMatch, *userModels.UserInfo) {
 	if sourceId == "" {
-		return uuid.Nil, nil
+		return importModels.PersonMatch{}, nil
 	}
-	ocUUID, _ := importModels.LookupIdMapping(ctx, job.Id, importModels.EntityUser, sourceId)
-	if ocUUID == uuid.Nil {
-		return uuid.Nil, nil
+	matched, err := importModels.PeopleMatched(ctx, job.Id, job.Provider, job.SourceWorkspaceName, []string{sourceId})
+	match := matched[sourceId]
+	if err != nil || match.ID == uuid.Nil {
+		return importModels.PersonMatch{}, nil
 	}
-	pgUser, err := userBusiness.GetUserByUUID(ctx, ocUUID)
+	pgUser, err := userBusiness.GetUserByUUID(ctx, match.ID)
 	if err != nil || pgUser == nil {
-		return ocUUID, nil
+		return match, nil
 	}
-	dgUser, err := userBusiness.GetDgraphUserInfoByUUID(ctx, ocUUID.String())
+	dgUser, err := userBusiness.GetDgraphUserInfoByUUID(ctx, match.ID.String())
 	if err != nil || dgUser == nil {
-		return ocUUID, &userModels.UserInfo{UserPostgresInfo: *pgUser}
+		return match, &userModels.UserInfo{UserPostgresInfo: *pgUser}
 	}
-	return ocUUID, &userModels.UserInfo{
+	return match, &userModels.UserInfo{
 		UserPostgresInfo: *pgUser,
 		UserDgraphInfo:   *dgUser,
+	}
+}
+
+// placeholderMetadata is what the import records about a person it made a
+// placeholder for: people.go reads is_bot and deleted to leave bots and
+// people who left the source out of the invitations. Pure.
+func placeholderMetadata(su importProvider.SourceUser, email, displayName, login string) map[string]any {
+	return map[string]any{
+		"matched_by":   "external",
+		"email":        email,
+		"display_name": displayName,
+		"login":        login,
+		"is_bot":       su.IsBot,
+		"deleted":      su.Left,
 	}
 }

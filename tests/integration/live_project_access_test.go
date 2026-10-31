@@ -6,26 +6,34 @@ package integration_test
 // Does live access follow a project's access, at the broker?
 //
 // An app's settings name a project's topic as they name a conversation's, and
-// the broker never asks again about a topic a client holds. So someone taken
-// off a project, or off its team, kept its live messages in any app already
-// open until it reconnected.
+// the broker never asks again about a topic a client holds. So a project made
+// or joined after an app loaded never streamed into it (an open board took its
+// topic up, nothing else did), and someone taken off a project, or off its
+// team, kept its live messages in any app already open until it reconnected.
 //
-// These run the real removal and team removal paths against a real EMQX
-// (live_access_test.go's stores and helpers).
+// These run the real join, make, removal and team removal paths against a
+// real EMQX (live_access_test.go's stores and helpers).
 //
 // Run: go test -tags=integration ./tests/integration/ -run 'TestLive.*(Project|Team)' -v
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/opensearch-project/opensearch-go/v4"
+	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
+	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -33,6 +41,21 @@ import (
 
 // A live project's deletion time.
 const liveProject = "0001-01-01T00:00:00Z"
+
+// livePeople are accounts, one for each name.
+func livePeople(t *testing.T, env *integration.Env, names ...string) map[string]uuid.UUID {
+	t.Helper()
+	out := map[string]uuid.UUID{}
+	for _, n := range names {
+		id := uuid.New()
+		if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, NOW(), NOW())`, id, id.String()+"@example.test", n+"-"+id.String()[:8], n); err != nil {
+			t.Fatalf("seed %s: %v", n, err)
+		}
+		out[n] = id
+	}
+	return out
+}
 
 // appOf is a client of someone's, as the web app connects one, on topics.
 func appOf(t *testing.T, broker *integration.BrokerEnv, device string, who uuid.UUID, topics ...string) *integration.BrokerClient {
@@ -54,6 +77,102 @@ func heldUntilGone(t *testing.T, broker *integration.BrokerEnv, client string, t
 		}
 	}
 	return held
+}
+
+// A project joined after the app loaded: the app is told, on the one topic it
+// holds from the start, and the settings it fetches then name the project's
+// topic.
+func TestLiveJoiningAProjectTellsTheNewMembersApp(t *testing.T) {
+	env, dg, broker := liveStores(t)
+	ctx := context.Background()
+	ana := livePeople(t, env, "ana")["ana"]
+	project := uuid.New()
+	if _, err := env.PG.Exec(`INSERT INTO projects (id, project_name, created_by) VALUES ($1, 'Launch', $2)`, project, ana); err != nil {
+		t.Fatalf("seed the project: %v", err)
+	}
+	uids := dg.Mutate(t, []map[string]any{
+		{"uid": "_:ana", "dgraph.type": "User", "user_uuid": ana.String(), "user_name": "ana"},
+		{"uid": "_:p", "dgraph.type": "Project", "project_uuid": project.String(), "project_name": "Launch", "project_deleted_at": liveProject},
+	})
+	app := appOf(t, broker, "dev1", ana, helpers.GetMqttTopicForUserActivity(ana.String()))
+
+	if err := projectBusiness.AddMemberToProject(ctx, project, uids["ana"], ana.String()); err != nil {
+		t.Fatalf("Ana joins: %v", err)
+	}
+	ev, ok := conversationEvent(t, app, 10*time.Second)
+	if !ok || ev.Kind != mqttStruct.ACCESS_KIND_PROJECT || ev.Id != project.String() || ev.Change != mqttStruct.CONVERSATION_ADDED {
+		t.Fatalf("Ana's app wasn't told of the project she joined: %+v %v", ev, ok)
+	}
+	cfg, err := mqttBusiness.GetMqttConfig(ctx, ana.String(), false)
+	if err != nil || !slices.Contains(cfg.Topics, helpers.GetMqttTopicForProjectMessage(project.String())) {
+		t.Fatalf("the settings Ana's app fetches then don't name the project's topic: %v", err)
+	}
+}
+
+// A project made: its maker's other open apps are told, as they are of a
+// channel they make.
+func TestLiveMakingAProjectTellsTheMakersApp(t *testing.T) {
+	env, dg, broker := liveStores(t)
+	ctx := context.Background()
+	// The project is put in search as it's made: give the search somewhere to go.
+	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"_index":"x","_id":"x","result":"created","took":1,"errors":false,"items":[]}`)
+	}))
+	t.Cleanup(search.Close)
+	client, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{search.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := opensearchInit.OpenSearchClient
+	opensearchInit.OpenSearchClient = client
+	t.Cleanup(func() { opensearchInit.OpenSearchClient = old })
+
+	ana := livePeople(t, env, "ana")["ana"]
+	team := uuid.New()
+	if _, err := env.PG.Exec(`INSERT INTO teams (id, team_name, created_by) VALUES ($1, 'Ops', $2)`, team, ana); err != nil {
+		t.Fatalf("seed the team: %v", err)
+	}
+	uids := dg.Mutate(t, []map[string]any{
+		{"uid": "_:ana", "dgraph.type": "User", "user_uuid": ana.String(), "user_name": "ana"},
+		{"uid": "_:team", "dgraph.type": "Team", "team_uuid": team.String(), "team_name": "Ops", "team_members": []map[string]any{{"uid": "_:ana"}}},
+	})
+	phone := appOf(t, broker, "dev2", ana, helpers.GetMqttTopicForUserActivity(ana.String()))
+
+	made, err := projectBusiness.CreateProject(ctx, "Spring launch", uids["ana"], ana,
+		&dgraphStruct.DgraphTeam{Uid: uids["team"], Uuid: team.String(), Name: "Ops"}, team,
+		&dgraphStruct.DgraphUser{Uid: uids["ana"], Uuid: ana.String(), UserName: "ana"})
+	if err != nil || made == nil {
+		t.Fatalf("Ana makes a project: %v", err)
+	}
+	ev, ok := conversationEvent(t, phone, 10*time.Second)
+	if !ok || ev.Kind != mqttStruct.ACCESS_KIND_PROJECT || ev.Id != made.Uuid || ev.Change != mqttStruct.CONVERSATION_ADDED {
+		t.Fatalf("Ana's phone wasn't told of the project she made: %+v %v", ev, ok)
+	}
+}
+
+// A bulk import's people aren't told of each project it puts them in, as
+// they aren't of its channels.
+func TestLiveABulkImportsPeopleArentToldOfItsProjects(t *testing.T) {
+	env, dg, broker := liveStores(t)
+	ana := livePeople(t, env, "ana")["ana"]
+	project := uuid.New()
+	if _, err := env.PG.Exec(`INSERT INTO projects (id, project_name, created_by) VALUES ($1, 'Imported', $2)`, project, ana); err != nil {
+		t.Fatalf("seed the project: %v", err)
+	}
+	uids := dg.Mutate(t, []map[string]any{
+		{"uid": "_:ana", "dgraph.type": "User", "user_uuid": ana.String(), "user_name": "ana"},
+		{"uid": "_:p", "dgraph.type": "Project", "project_uuid": project.String(), "project_name": "Imported", "project_deleted_at": liveProject},
+	})
+	app := appOf(t, broker, "dev1", ana, helpers.GetMqttTopicForUserActivity(ana.String()))
+
+	bulk := context.WithValue(context.Background(), helpers.BulkImportContextKey, true)
+	if err := projectBusiness.AddMemberToProject(bulk, project, uids["ana"], ana.String()); err != nil {
+		t.Fatalf("the import adds Ana: %v", err)
+	}
+	if ev, ok := conversationEvent(t, app, 2*time.Second); ok {
+		t.Fatalf("Ana's app was told of a project an import put her in: %+v", ev)
+	}
 }
 
 // Taken off a project: the app is told, the broker takes the project's topic
@@ -83,11 +202,11 @@ func TestLiveStreamOfAProjectEndsWhenSomeoneIsTakenOff(t *testing.T) {
 	}
 	ev, ok := conversationEvent(t, tab, 10*time.Second)
 	if !ok || ev.Kind != mqttStruct.ACCESS_KIND_PROJECT || ev.Id != project.String() || ev.Change != mqttStruct.CONVERSATION_DROPPED {
-		t.Errorf("Maya's app wasn't told it lost the project: %+v %v", ev, ok)
+		t.Fatalf("Maya's app wasn't told it lost the project: %+v %v", ev, ok)
 	}
 	held := heldUntilGone(t, broker, tab.ID, topic)
 	if slices.Contains(held, topic) {
-		t.Errorf("Maya's client still holds the project's topic: %v", held)
+		t.Fatalf("Maya's client still holds the project's topic: %v", held)
 	}
 	if !slices.Contains(held, mayaActivity) {
 		t.Fatalf("Maya's client lost her own notifications too: %v", held)
@@ -135,11 +254,11 @@ func TestLiveTakingSomeoneOffATeamEndsItsProjectsStreams(t *testing.T) {
 	}
 	ev, ok := conversationEvent(t, tab, 10*time.Second)
 	if !ok || ev.Kind != mqttStruct.ACCESS_KIND_TEAM || ev.Id != team.String() || ev.Change != mqttStruct.CONVERSATION_DROPPED {
-		t.Errorf("Maya's app wasn't told it lost the team: %+v %v", ev, ok)
+		t.Fatalf("Maya's app wasn't told it lost the team: %+v %v", ev, ok)
 	}
 	held := heldUntilGone(t, broker, tab.ID, launchTopic, budgetTopic)
 	if slices.Contains(held, launchTopic) || slices.Contains(held, budgetTopic) {
-		t.Errorf("Maya's client still holds the team's projects' topics: %v", held)
+		t.Fatalf("Maya's client still holds the team's projects' topics: %v", held)
 	}
 	if !slices.Contains(held, mayaActivity) {
 		t.Fatalf("Maya's client lost her own notifications too: %v", held)

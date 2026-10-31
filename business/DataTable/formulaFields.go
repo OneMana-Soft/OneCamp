@@ -59,6 +59,9 @@ func kindOf(fieldType string) formula.Kind {
 // gives, any other field by its type.
 func kindOfField(f *model.Field) formula.Kind {
 	if cfg, ok := rollupOf(f); ok {
+		if cfg.Aggregate == rollupByFormula {
+			return rollupProgram(cfg.Formula).Kind(rollupDraftID)
+		}
 		if k, ok := rollupGives[cfg.Aggregate]; ok {
 			return k
 		}
@@ -72,16 +75,18 @@ func kindOfField(f *model.Field) formula.Kind {
 // yes or no, and anything else as its labels ("Design, Launch" for a
 // multi-select, a person's or a linked item's name).
 func cellValue(fieldType string, raw interface{}) formula.Value {
-	switch fieldType {
-	case model.FieldNumber:
+	// By what its kind reads as (business/FieldTypes): a duration, a rating
+	// and a row's number are numbers; when a row was made or changed, dates.
+	switch kindOf(fieldType) {
+	case formula.KindNumber:
 		if f, ok := cellNumber(raw); ok {
 			return formula.Number(f)
 		}
 		return formula.Blank()
-	case model.FieldCheckbox:
+	case formula.KindBool:
 		b, _ := raw.(bool)
 		return formula.Bool(b)
-	case model.FieldDate:
+	case formula.KindDate:
 		if s, ok := raw.(string); ok {
 			if v, ok := formula.ParseDate(s); ok {
 				return v
@@ -90,8 +95,68 @@ func cellValue(fieldType string, raw interface{}) formula.Value {
 		return formula.Blank()
 	default:
 		// A number in a list reads as a number cell does (1e+21 from 1e21).
-		return formula.Text(strings.Join(fieldTypes.LabelsWith(raw, formula.FormatNumber), ", "))
+		labels := fieldTypes.LabelsWith(raw, formula.FormatNumber)
+		if _, isList := raw.([]interface{}); !isList {
+			return formula.Text(strings.Join(labels, ", "))
+		}
+		// A list (a multi-select's options, people, linked items) is its
+		// labels joined, as before, and its items for the ARRAY functions.
+		// Every label is kept, a blank one too, so the text is as it was.
+		items := make([]formula.Value, len(labels))
+		for i, l := range labels {
+			items[i] = formula.Text(l)
+		}
+		return formula.List(items)
 	}
+}
+
+// withLinked gives each link field among in the fields of the table it
+// links to, which its formulas read as {Link}.{Field}; theirs is a table's
+// fields, nil when the reader can't open it (nothing to read there).
+func withLinked(in []formula.Field, fields []*model.Field, theirs func(table uuid.UUID) []*model.Field) []formula.Field {
+	links := map[string]uuid.UUID{}
+	for _, f := range fields {
+		if l, ok := linkOf(f); ok {
+			links[f.Id.String()] = l.table
+		}
+	}
+	for i := range in {
+		if table, ok := links[in[i].ID]; ok {
+			if their := theirs(table); len(their) > 0 {
+				in[i].Linked = formulaInputs(their)
+			}
+		}
+	}
+	return in
+}
+
+// linkedFieldsFor is the fields of each table a formula being saved or
+// previewed may read through a link: those of tables the actor can open,
+// loaded once each.
+func linkedFieldsFor(ctx context.Context, actor Actor) func(table uuid.UUID) []*model.Field {
+	loaded := map[uuid.UUID][]*model.Field{}
+	return func(table uuid.UUID) []*model.Field {
+		if fs, ok := loaded[table]; ok {
+			return fs
+		}
+		loaded[table] = nil
+		t, err := model.GetTableByID(ctx, table)
+		if err != nil || t == nil || !opens(ctx, t, actor) {
+			return nil
+		}
+		fs, err := model.ListFields(ctx, table)
+		if err != nil {
+			return nil
+		}
+		loaded[table] = liveOnly(fs)
+		return loaded[table]
+	}
+}
+
+// formulaRow is what a row's formulas read of the row itself: RECORD_ID(),
+// CREATED_TIME() and LAST_MODIFIED_TIME().
+func formulaRow(r *model.Row) formula.Row {
+	return formula.Row{ID: r.Id.String(), Created: r.CreatedAt, Modified: r.UpdatedAt}
 }
 
 // storedFormula is a formula field's formula as stored.
@@ -339,12 +404,14 @@ func readWithComputed(ctx context.Context, tableID uuid.UUID, rows []*model.Row)
 }
 
 // stripComputed takes what each read works out out of a row being written,
-// as the grid sends a row back with it in: formula and rollup values, and
-// the cells of links to tables, which aren't stored in a row's values (a
-// write sets them with takeLinks).
+// as the grid sends a row back with it in: formula and rollup values, the
+// cells of links to tables, which aren't stored in a row's values (a write
+// sets them with takeLinks), and what is read from the row itself (its
+// number, when it was made and last changed, and by whom), which nobody
+// writes.
 func stripComputed(fields []*model.Field, values map[string]interface{}) map[string]interface{} {
 	for _, f := range fields {
-		if _, isLink := linkOf(f); isLink || f.Type == model.FieldFormula || f.Type == model.FieldRollup {
+		if _, isLink := linkOf(f); isLink || f.Type == model.FieldFormula || f.Type == model.FieldRollup || rowStamp(f) != nil {
 			delete(values, f.Id.String())
 		}
 	}
@@ -406,13 +473,17 @@ func draftID(self uuid.UUID) string {
 
 // formulaConfigWith checks a formula field's formula against the table's
 // other fields, and returns the config to store: the formula with fields by
-// id. self is the field being saved (uuid.Nil for a new one).
-func formulaConfigWith(fields []*model.Field, self uuid.UUID, cfg map[string]interface{}) (map[string]interface{}, error) {
+// id. self is the field being saved (uuid.Nil for a new one); theirs is the
+// fields of the tables its links link to, for {Link}.{Field} (nil for none).
+func formulaConfigWith(fields []*model.Field, self uuid.UUID, cfg map[string]interface{}, theirs func(uuid.UUID) []*model.Field) (map[string]interface{}, error) {
 	if err := roomForFormula(fields, self); err != nil {
 		return nil, err
 	}
 	src, _ := cfg["formula"].(string)
 	inputs := formulaInputs(fields)
+	if theirs != nil {
+		inputs = withLinked(inputs, fields, theirs)
+	}
 	if _, err := formula.Check(src, inputs, draftID(self)); err != nil {
 		return nil, err
 	}
@@ -425,6 +496,14 @@ func formulaConfigWith(fields []*model.Field, self uuid.UUID, cfg map[string]int
 		out[k] = v
 	}
 	out["formula"] = stored
+	format, err := resultFormat(cfg["format"])
+	if err != nil {
+		return nil, err
+	}
+	delete(out, "format")
+	if format != nil {
+		out["format"] = format
+	}
 	// Worked out on each read; never stored.
 	delete(out, "result")
 	delete(out, "error")
@@ -488,7 +567,7 @@ func PreviewFormula(ctx context.Context, tableID, fieldID uuid.UUID, src string,
 	if err := roomForFormula(fields, fieldID); err != nil {
 		return &FormulaPreview{Result: formula.KindText.Name(), Error: err.Error(), Values: []interface{}{}}, nil
 	}
-	inputs := formulaInputs(fields)
+	inputs := withLinked(formulaInputs(fields), fields, linkedFieldsFor(ctx, actor))
 	kind, err := formula.Check(src, inputs, draftID(fieldID))
 	if err != nil {
 		return &FormulaPreview{Result: kind.Name(), Error: err.Error(), Values: []interface{}{}}, nil

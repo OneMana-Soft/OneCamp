@@ -831,6 +831,12 @@ func GetDocForCollab(w http.ResponseWriter, r *http.Request) {
 		docGone(w, true)
 		return
 	}
+	// Nor is a folder, a file or a link (docs F1): only a page has a body to
+	// edit, and the session refuses the rest before this is asked.
+	if !business.IsPage(dgraphDoc) {
+		notAPage(w)
+		return
+	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":  "Success",

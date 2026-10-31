@@ -382,12 +382,9 @@ func TestDesktopNoticesReachWhomAPushWould(t *testing.T) {
 	// doc owner or follower was pushed the doc's title and the reply's words,
 	// and a desktop-only member heard of no notice at all (TN-BUG-12).
 	t.Run("a notice reaches no one deactivated, and the desktop app hears of it", func(t *testing.T) {
-		// Every device lookup leaves dex out, whichever place pushes.
-		if toks, err := fcmDomain.GetFCMTokenByListOfUserId(ctx, []string{id("bo").String(), id("dex").String()}); err != nil || !slices.Equal(toks, []string{"tok-bo"}) {
+		// The one device lookup, Deliver's, leaves dex out.
+		if _, toks, err := fcmDomain.ReachableNow(ctx, []string{id("bo").String(), id("dex").String()}); err != nil || !slices.Equal(toks, []string{"tok-bo"}) {
 			t.Errorf("the devices of bo and dex were %v (err %v), want bo's alone: dex is deactivated", toks, err)
-		}
-		if toks, err := fcmDomain.GetFCMTokenByUserId(ctx, id("dex").String()); err != nil || len(toks) != 0 {
-			t.Errorf("dex's devices were %v (err %v), want none: dex is deactivated", toks, err)
 		}
 
 		key := "doc.mentioned|" + uuid.NewString()

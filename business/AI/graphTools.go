@@ -27,11 +27,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	workGraph "github.com/akashc777/OneCamp/business/WorkGraph"
+	docDomain "github.com/akashc777/OneCamp/domain/Doc"
+	workGraphDomain "github.com/akashc777/OneCamp/domain/WorkGraph"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -41,7 +44,7 @@ import (
 // missing are one sentence, so an answer can't be used to probe what exists.
 const (
 	graphNotFound = "That item isn't there, or you can't open it."
-	graphBadAsk   = "That isn't something I can look up: name an item by its kind (doc, task, project, person, board, channel, message or team) and its uuid."
+	graphBadAsk   = "That isn't something I can look up: name an item by its kind (doc, folder, file, link, task, project, person, board, channel, message or team) and its uuid."
 )
 
 // graph reads, as seams for tests.
@@ -95,7 +98,7 @@ func executeRelatedItems(ctx context.Context, action ai.ProposedAction, userUUID
 		}
 		depth = n
 	}
-	kinds, err := workGraph.ParseKinds(p["kinds"])
+	kinds, err := workGraph.ParseKinds(graphKinds(p["kinds"]))
 	if err != nil {
 		return graphBadAsk, nil, nil
 	}
@@ -103,7 +106,7 @@ func executeRelatedItems(ctx context.Context, action ai.ProposedAction, userUUID
 	if err != nil {
 		return "", nil, err
 	}
-	root := workGraph.Ref{Kind: strings.ToLower(strings.TrimSpace(p["kind"])), ID: strings.TrimSpace(p["uuid"])}
+	root := workGraph.Ref{Kind: graphKind(p["kind"]), ID: strings.TrimSpace(p["uuid"])}
 	got, err := graphNeighbours(ctx, readers, root, depth, kinds)
 	switch {
 	case errors.Is(err, workGraph.ErrBadRequest):
@@ -124,8 +127,8 @@ func executeHowConnected(ctx context.Context, action ai.ProposedAction, userUUID
 	if err != nil {
 		return "", nil, err
 	}
-	from := workGraph.Ref{Kind: strings.ToLower(strings.TrimSpace(p["from_kind"])), ID: strings.TrimSpace(p["from_uuid"])}
-	to := workGraph.Ref{Kind: strings.ToLower(strings.TrimSpace(p["to_kind"])), ID: strings.TrimSpace(p["to_uuid"])}
+	from := workGraph.Ref{Kind: graphKind(p["from_kind"]), ID: strings.TrimSpace(p["from_uuid"])}
+	to := workGraph.Ref{Kind: graphKind(p["to_kind"]), ID: strings.TrimSpace(p["to_uuid"])}
 	got, err := graphPaths(ctx, readers, from, to)
 	switch {
 	case errors.Is(err, workGraph.ErrBadRequest):
@@ -137,6 +140,32 @@ func executeHowConnected(ctx context.Context, action ai.ProposedAction, userUUID
 		return "", nil, fmt.Errorf("couldn't read how these connect just now")
 	}
 	return describePaths(got), map[string]string{"paths": strconv.Itoa(len(got.Paths))}, nil
+}
+
+// graphKind is a kind word as the work graph takes it. A folder, a file and
+// a link are doc nodes (docs F1), and an answer names them by what they are,
+// so an agent that repeats the word is asking about a doc.
+func graphKind(word string) string {
+	k := strings.ToLower(strings.TrimSpace(word))
+	if docDomain.IsNodeKind(k) {
+		return string(workGraphDomain.KindDoc)
+	}
+	return k
+}
+
+// graphKinds is a kinds filter ("folder,task") with each word as graphKind
+// takes it, each kind once.
+func graphKinds(words string) string {
+	if strings.TrimSpace(words) == "" {
+		return ""
+	}
+	var out []string
+	for _, w := range strings.Split(words, ",") {
+		if k := graphKind(w); !slices.Contains(out, k) {
+			out = append(out, k)
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 // relWords is how a relationship reads in a sentence, from the earlier
@@ -172,6 +201,12 @@ var relWords = map[string]string{
 	"project":      "has the project",
 	"on":           "on",
 	"about":        "about",
+
+	// The doc tree's edge where a folder, a file or a link is at one end
+	// (business/WorkGraph treeRel).
+	workGraph.RelInFolder: "in",
+	workGraph.RelContains: "contains",
+	workGraph.RelHolds:    "holds",
 }
 
 // relPhrase is how one relationship of the work graph reads in a sentence.
@@ -182,29 +217,31 @@ func relPhrase(rel string) string {
 	return strings.ReplaceAll(rel, "_", " ")
 }
 
-// named is a thing as an answer cites it: its kind, its title in quotes and
-// its uuid, which the tools that read it take. A title is someone's words,
-// so it is cut short and its quotes are softened.
-func named(kind, title, id string) string {
-	t := strings.TrimSpace(strings.ReplaceAll(title, "\"", "'"))
+// named is a thing as an answer cites it: what it is (a doc's node kind
+// when it isn't a page: folder, file or link, which the tools take back as a
+// doc), its title in quotes and its uuid, which the tools that read it take.
+// A title is someone's words, so it is cut short and its quotes are
+// softened.
+func named(h workGraph.Hop) string {
+	t := strings.TrimSpace(strings.ReplaceAll(h.Title, "\"", "'"))
 	if t == "" {
 		t = "untitled"
 	}
-	return fmt.Sprintf("%s \"%s\" (%s)", kind, helpers.TruncateRunes(t, 80), id)
+	return fmt.Sprintf("%s \"%s\" (%s)", h.Noun(), helpers.TruncateRunes(t, 80), h.ID)
 }
 
 // pathWords is a path as a sentence from the thing it starts at.
 func pathWords(hops []workGraph.Hop) string {
 	parts := make([]string, 0, len(hops))
 	for _, h := range hops {
-		parts = append(parts, relPhrase(h.Rel)+" "+named(h.Kind, h.Title, h.ID))
+		parts = append(parts, relPhrase(h.Rel)+" "+named(h))
 	}
 	return strings.Join(parts, ", then ")
 }
 
 func describeConnected(c *workGraph.Connected) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Connected to %s:\n", named(c.Root.Kind, c.Root.Title, c.Root.ID))
+	fmt.Fprintf(&b, "Connected to %s:\n", named(c.Root))
 	if countItems(c) == 0 {
 		b.WriteString("Nothing you can open is connected to it.\n")
 		return b.String()
@@ -212,7 +249,7 @@ func describeConnected(c *workGraph.Connected) string {
 	for _, g := range c.Groups {
 		fmt.Fprintf(&b, "\n%s:\n", g.Kind)
 		for _, it := range g.Items {
-			fmt.Fprintf(&b, "- %s: %s\n", named(it.Kind, it.Title, it.ID), pathWords(it.Path))
+			fmt.Fprintf(&b, "- %s: %s\n", named(it.Hop), pathWords(it.Path))
 		}
 		if g.More {
 			fmt.Fprintf(&b, "- and more of these than are listed\n")
@@ -223,7 +260,7 @@ func describeConnected(c *workGraph.Connected) string {
 
 func describePaths(p *workGraph.Paths) string {
 	var b strings.Builder
-	from, to := named(p.From.Kind, p.From.Title, p.From.ID), named(p.To.Kind, p.To.Title, p.To.ID)
+	from, to := named(p.From), named(p.To)
 	if len(p.Paths) == 0 {
 		fmt.Fprintf(&b, "No connection you can see links %s to %s within four steps.\n", from, to)
 		return b.String()

@@ -62,13 +62,28 @@ func isKeyChar(r rune) bool  { return isKeyStart(r) || (r >= '0' && r <= '9') }
 // "): its project's key in capitals and its number. ok is false for anything
 // else, a uuid included.
 func Parse(raw string) (projectKey string, number int, ok bool) {
+	return parseKey(raw, func(k string) (string, bool) {
+		v, err := Valid(k)
+		return v, err == nil && v == strings.ToUpper(k)
+	})
+}
+
+// ParseSource reads a key a task had in the source it was imported from, as
+// anyone might type it ("ENG-7", "engine-7"): any prefix SourceKey takes, which
+// includes every project's key, and its number.
+func ParseSource(raw string) (sourceKey string, number int, ok bool) {
+	return parseKey(raw, SourceKey)
+}
+
+// parseKey reads raw as a prefix that valid takes, a dash and a number.
+func parseKey(raw string, valid func(string) (string, bool)) (string, int, bool) {
 	s := strings.TrimSpace(raw)
 	dash := strings.LastIndexByte(s, '-')
 	if dash <= 0 || dash == len(s)-1 {
 		return "", 0, false
 	}
-	k, err := Valid(s[:dash])
-	if err != nil || k != strings.ToUpper(s[:dash]) {
+	k, ok := valid(s[:dash])
+	if !ok {
 		return "", 0, false
 	}
 	digits := s[dash+1:]
@@ -196,4 +211,25 @@ func latinWords(name string) []word {
 		out = append(out, w)
 	}
 	return out
+}
+
+// MaxSourceKeyLen is the longest key prefix a task keeps from its source
+// (task_key_aliases.key). Linear publishes no limit for its team keys; ten
+// covers any a team would type before each issue.
+const MaxSourceKeyLen = 10
+
+// SourceKey is a key prefix as another tool writes it (Linear's ENG), in
+// capitals: 1 to MaxSourceKeyLen capitals and digits, starting with a letter.
+// A project's own key is always one. ok is false for anything else.
+func SourceKey(raw string) (string, bool) {
+	k := strings.ToUpper(raw)
+	if k == "" || len(k) > MaxSourceKeyLen || !isKeyStart(rune(k[0])) {
+		return "", false
+	}
+	for _, r := range k {
+		if !isKeyChar(r) {
+			return "", false
+		}
+	}
+	return k, true
 }

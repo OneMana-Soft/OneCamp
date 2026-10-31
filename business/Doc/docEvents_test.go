@@ -126,12 +126,54 @@ func TestASaveTellsOnlyThePeopleItNewlyMentions(t *testing.T) {
 	}
 }
 
+// A quiet save (a copy's body, an import's) keeps whom its body mentions and
+// the docs it links to, and tells nobody, though the same save made loudly in
+// a new doc tells everyone it mentions.
+func TestAQuietSaveKeepsWhoItMentionsAndTellsNobody(t *testing.T) {
+	ev := withEmitted(t)
+	oldS, oldR, oldW := syncMentions, readDocLinks, writeDocLinks
+	t.Cleanup(func() { syncMentions, readDocLinks, writeDocLinks = oldS, oldR, oldW })
+	since := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	made := since.Add(time.Hour)
+	kept := map[string][]string{}
+	syncMentions = func(_ context.Context, docUUID string, people []string) (followModels.MentionSync, error) {
+		kept[docUUID] = people
+		// The doc's first keeping: everyone it mentions is new.
+		return followModels.MentionSync{Added: people, First: true, Since: since}, nil
+	}
+	readDocLinks = func(context.Context, string) (*dgraphStruct.DgraphDoc, error) {
+		return &dgraphStruct.DgraphDoc{Uid: "0x1", CreatedAt: &made}, nil
+	}
+	linked := map[string][]string{}
+	writeDocLinks = func(_ context.Context, doc *dgraphStruct.DgraphDoc, refs []string) (bool, error) {
+		linked[doc.Uid] = refs
+		return true, nil
+	}
+
+	body := `<p><span data-type="mention" data-id="` + maya + `@0x3">@Maya</span> owns <a href="/app/doc/` + d2 + `">the plan</a>.</p>`
+	const quietCopy, loudDoc = "77777777-7777-4777-8777-777777777777", "88888888-8888-4888-8888-888888888888"
+	mentionsSaved(context.Background(), Change{DocUUID: quietCopy, Body: body, Contributors: []string{sam}, SavedAt: made, Quiet: true})
+	if len(ev.events) != 0 {
+		t.Fatalf("a quiet save told %+v", ev.events)
+	}
+	if !slices.Equal(kept[quietCopy], []string{maya}) || !slices.Equal(linked["0x1"], []string{d2}) {
+		t.Fatalf("a quiet save kept mentions %v and links %v, want [maya] and [d2]", kept[quietCopy], linked["0x1"])
+	}
+
+	mentionsSaved(context.Background(), Change{DocUUID: loudDoc, Body: body, Contributors: []string{sam}, SavedAt: made})
+	if len(ev.events) != 1 || !slices.Equal(ev.events[0].Subjects, []string{maya}) {
+		t.Fatalf("the same save made loudly told %+v, want Maya", ev.events)
+	}
+}
+
 // Who a save's mentions tell. The people it newly mentions, but not its own
 // editors. Nobody for a save holding nobody's edit (a conversion as a doc
 // loads). Nobody for a doc's first keeping when the doc was made before docs'
 // mentions were kept, or isn't known to have been made since: its body
 // mentioned them before anyone could be told (an upgrade's first save). A doc
-// made since is told from its first save, and an agent's save tells.
+// made since is told from its first save, and an agent's save tells. Nobody
+// for a quiet save (a copy's body, an import's), a doc made since included:
+// nobody wrote its mentions just now.
 func TestWhoASavesMentionsTell(t *testing.T) {
 	since := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 	before, after := since.Add(-24*time.Hour), since.Add(time.Minute)
@@ -153,6 +195,9 @@ func TestWhoASavesMentionsTell(t *testing.T) {
 		{"the first keeping of a doc not read", byMaya, followModels.MentionSync{Added: []string{sam}, First: true, Since: since}, nil, nil},
 		{"the first keeping of a doc with no time", byMaya, followModels.MentionSync{Added: []string{sam}, First: true, Since: since}, &dgraphStruct.DgraphDoc{Uid: "0x1"}, nil},
 		{"the first keeping when the start isn't known", byMaya, followModels.MentionSync{Added: []string{sam}, First: true}, made(after), nil},
+		{"a quiet save", Change{Contributors: []string{maya}, Quiet: true}, followModels.MentionSync{Added: []string{sam, jo}, Since: since}, made(before), nil},
+		{"the quiet first keeping of a doc made since", Change{Contributors: []string{maya}, Quiet: true}, followModels.MentionSync{Added: []string{sam}, First: true, Since: since}, made(after), nil},
+		{"an agent's quiet save", Change{Agents: []AgentContributor{{AgentUUID: jo, AskerUUID: maya}}, Quiet: true}, followModels.MentionSync{Added: []string{sam}}, made(before), nil},
 	} {
 		if got := whoToTell(c.save, c.kept, c.doc); !slices.Equal(got, c.want) {
 			t.Errorf("%s: tells %v, want %v", c.name, got, c.want)

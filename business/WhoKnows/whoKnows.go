@@ -111,8 +111,9 @@ type Person struct {
 // Answer is who knows about the words.
 type Answer struct {
 	Query string `json:"query"`
-	// Considered is how many items the asker can read were looked at. Never
-	// how many were left out.
+	// Considered is how many items the asker can read, of those that can
+	// count (pages, tasks and posts), were looked at. Never how many were
+	// left out.
 	Considered int      `json:"considered"`
 	People     []Person `json:"people"`
 	// YouHidden is whether the asker has asked to be left out.
@@ -310,8 +311,11 @@ func uniqueSeeds(seeds []domain.Seed, n int) []domain.Seed {
 	return out
 }
 
-// decide is the seeds the asker may open, with their titles, in one
-// ReadMany (one read per kind).
+// decide is the seeds the asker may open that can count, with their titles,
+// in one ReadMany (one read per kind). Of the docs, only pages count (docs
+// F1): a folder, a file or a link may be opened, but making one isn't
+// writing about anything. Its chip says what it is, in the same read, so it
+// is left out here: never counted, never evidence and never considered.
 func decide(ctx context.Context, who accessBusiness.Subject, seeds []domain.Seed) (map[domain.Seed]decided, error) {
 	out := map[domain.Seed]decided{}
 	if len(seeds) == 0 {
@@ -326,9 +330,13 @@ func decide(ctx context.Context, who accessBusiness.Subject, seeds []domain.Seed
 		return nil, err
 	}
 	for i, e := range got {
-		if i < len(seeds) && e.Access == entityLinkBusiness.AccessOK {
-			out[seeds[i]] = decided{Title: e.Title, Data: linkData(seeds[i].Kind, e.Data)}
+		if i >= len(seeds) || e.Access != entityLinkBusiness.AccessOK {
+			continue
 		}
+		if seeds[i].Kind == domain.KindDoc && entityLinkBusiness.NodeKindOf(e.Data) != "" {
+			continue
+		}
+		out[seeds[i]] = decided{Title: e.Title, Data: linkData(seeds[i].Kind, e.Data)}
 	}
 	return out, nil
 }

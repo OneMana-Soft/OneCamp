@@ -5,9 +5,11 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphActivityModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
 	opensearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
@@ -180,5 +182,130 @@ func TestBoardSharingIsWrittenOntoItsComments(t *testing.T) {
 		len(got.Reading) != 1 || got.Reading[0] != "reader" ||
 		len(got.Commenting) != 1 || got.Commenting[0] != "commenter" || len(got.Editing) != 0 {
 		t.Errorf("wrote %+v onto %q's comments", got, gotBoard)
+	}
+}
+
+// A change that took a board from someone settles search before it answers
+// (SettleBoardSearch). A write that failed there was only logged, and the
+// entries went on granting the board in counts until the next change or a
+// search's repair. It is written again in the background now, from the
+// board as it is then.
+func TestABoardSettleThatFailsIsWrittenAgainInTheBackground(t *testing.T) {
+	oldRead, oldWrite, oldComments, oldRefresh := readBoardSharing, writeBoardSearch, writeBoardCommentSearch, refreshBoardSearch
+	t.Cleanup(func() {
+		readBoardSharing, writeBoardSearch, writeBoardCommentSearch, refreshBoardSearch = oldRead, oldWrite, oldComments, oldRefresh
+	})
+	// The rewrite goes on to the comments' writer after it hands its fields
+	// over: it ends before the seams go back (cleanups run last first).
+	t.Cleanup(func() {
+		if busy := helpers.SettleBackground(5 * time.Second); len(busy) > 0 {
+			t.Errorf("still running when the seams go back: %v", busy)
+		}
+	})
+	private := true
+	readBoardSharing = func(context.Context, string) (*dgraphStruct.DgraphBoard, error) {
+		return &dgraphStruct.DgraphBoard{IsPrivate: &private}, nil
+	}
+	writeBoardCommentSearch = func(context.Context, string, opensearchModels.BoardCommentAccess) (int, error) { return 0, nil }
+	refreshBoardSearch = func(context.Context) error { return nil }
+	var mu sync.Mutex
+	writes := 0
+	rewritten := make(chan map[string]interface{}, 1)
+	writeBoardSearch = func(_ context.Context, _ string, fields map[string]interface{}) error {
+		mu.Lock()
+		defer mu.Unlock()
+		writes++
+		if writes == 1 {
+			return errors.New("search is not connected")
+		}
+		rewritten <- fields
+		return nil
+	}
+
+	SettleBoardSearch(context.Background(), "b1")
+	select {
+	case fields := <-rewritten:
+		if fields["board_private"] != true {
+			t.Errorf("the background write: %v; want the board as it is now, private", fields)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a settle whose write failed was never written again")
+	}
+}
+
+// A board's settles (SettleBoardSearch for a change that took it from
+// someone, settleBoardDelete for its deletion) ran under the request's ctx,
+// so a closed tab would have stopped them halfway now that the writes honour
+// their ctx. Each runs within boardSettleTimeout of the call, whatever
+// becomes of the request.
+func TestABoardSettleOutlivesItsRequestWithinItsBound(t *testing.T) {
+	oldRead, oldWrite, oldComments, oldRefresh := readBoardSharing, writeBoardSearch, writeBoardCommentSearch, refreshBoardSearch
+	oldDelete, oldCascade := deleteBoardSearch, cascadeBoardDelete
+	t.Cleanup(func() {
+		readBoardSharing, writeBoardSearch, writeBoardCommentSearch, refreshBoardSearch = oldRead, oldWrite, oldComments, oldRefresh
+		deleteBoardSearch, cascadeBoardDelete = oldDelete, oldCascade
+	})
+	// What each write's ctx was at the call: the settle cancels its own when it returns.
+	type atCall struct {
+		err  error
+		left time.Duration
+		ok   bool
+	}
+	var mu sync.Mutex
+	seen := map[string]atCall{}
+	saw := func(what string, ctx context.Context) {
+		mu.Lock()
+		defer mu.Unlock()
+		if _, ok := seen[what]; !ok {
+			d, bounded := ctx.Deadline()
+			seen[what] = atCall{err: ctx.Err(), left: time.Until(d), ok: bounded}
+		}
+	}
+	readBoardSharing = func(context.Context, string) (*dgraphStruct.DgraphBoard, error) {
+		return &dgraphStruct.DgraphBoard{}, nil
+	}
+	writeBoardSearch = func(ctx context.Context, _ string, _ map[string]interface{}) error {
+		saw("the sharing settle", ctx)
+		return nil
+	}
+	writeBoardCommentSearch = func(context.Context, string, opensearchModels.BoardCommentAccess) (int, error) { return 0, nil }
+	refreshBoardSearch = func(context.Context) error { return nil }
+	deleteBoardSearch = func(ctx context.Context, _ string, _ int64) error {
+		saw("the delete settle", ctx)
+		return nil
+	}
+	// The AI index's cascade runs in the background, on its own ctx: only the
+	// comments' is the settle's.
+	aiAsked := make(chan struct{}, 1)
+	cascadeBoardDelete = func(ctx context.Context, _ []string, _ string, _ int64, indices []string, _ string) error {
+		if len(indices) == 1 && indices[0] == "comments" {
+			saw("the delete settle's cascade", ctx)
+		} else {
+			aiAsked <- struct{}{}
+		}
+		return nil
+	}
+	request, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	SettleBoardSearch(request, "b1")
+	settleBoardDelete(request, "b1", 1)
+	select {
+	case <-aiAsked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the AI index's cascade never ran")
+	}
+	for _, what := range []string{"the sharing settle", "the delete settle", "the delete settle's cascade"} {
+		c, ran := seen[what]
+		if !ran {
+			t.Errorf("%s never ran", what)
+			continue
+		}
+		if c.err != nil {
+			t.Errorf("%s ran under the request's ctx, gone with it: %v", what, c.err)
+		}
+		if !c.ok || c.left <= 0 || c.left > boardSettleTimeout {
+			t.Errorf("%s had %v left (bounded: %v); want a bound of at most %v", what, c.left, c.ok, boardSettleTimeout)
+		}
 	}
 }

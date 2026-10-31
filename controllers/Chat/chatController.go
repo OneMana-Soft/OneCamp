@@ -3,6 +3,7 @@ package controllers
 import (
 	"encoding/json"
 	"errors"
+	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	"net/http"
 	"strconv"
 
@@ -15,6 +16,7 @@ import (
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userChatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
+	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	chatDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Chat"
@@ -409,6 +411,11 @@ func UpdateChatInGroup(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
 		return
 	}
+	// The server's own messages (a system line, a call's message) are never edited.
+	if chatDgraphInfo.ServerWritten() {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "This message can't be edited."})
+		return
+	}
 	group, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, chatDgraphInfo.DM.GroupingId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/UpdateChatInGroup Failed to get the group err: %+v", err)
@@ -506,6 +513,11 @@ func UpdateChat(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
 		return
 	}
+	// The server's own messages (a system line, a call's message) are never edited.
+	if chatDgraphInfo.ServerWritten() {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "This message can't be edited."})
+		return
+	}
 
 	mentionsDgraphUsersList, err := sendBusiness.Mentions(ctx, &userInfo, sendBusiness.Where{People: []string{chatDgraphInfo.From.Uuid, chatDgraphInfo.To.Uuid}}, &chatInfo.TextHtml)
 	if err != nil {
@@ -585,6 +597,13 @@ func DeleteChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A call's message goes only once its call has ended (calls CALLS-3b).
+	if chatDgraphInfo.Kind == helpers.KindHuddle {
+		if live, lerr := callStateBusiness.IsLivePost(ctx, chatUUID); lerr != nil || live {
+			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "This call is still going on. Its message can be deleted once the call ends."})
+			return
+		}
+	}
 	err = business.DeleteChat(ctx, &chatInfo, chatUUID, chatDgraphInfo.DM.GroupingId, chatDgraphInfo)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -659,10 +678,35 @@ func GetUserListWithLatestChatWithUserIdAndSearchText(w http.ResponseWriter, r *
 
 }
 
+// GetUserChatListWithLatestChat answers the person's DMs, each with its
+// newest message. GET /getLatestChatList is the whole list, as every client
+// before DG4 reads it; ?paged=1 is the first page, newest first, and
+// ?at=&grp_id= (a page's next) the page after.
 func GetUserChatListWithLatestChat(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+
+	q := r.URL.Query()
+	if at, grp := q.Get("at"), q.Get("grp_id"); q.Get("paged") == "1" || at != "" || grp != "" {
+		var edge *chatDomain.DMEdge
+		if at != "" || grp != "" {
+			e, err := chatDomain.ParseDMEdge(at, grp)
+			if err != nil {
+				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+				return
+			}
+			edge = &e
+		}
+		page, err := business.GetUserChatListPage(ctx, userInfo.UserPostgresInfo.Id, edge)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/GetUserChatListWithLatestChat a page of the DM list failed: %+v", err)
+			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to get user's chat list"})
+			return
+		}
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got chat list successfully!", "data": page})
+		return
+	}
 
 	dgraphUser, err := business.GetUserChatListWithLatestChat(ctx, userInfo.UserPostgresInfo.Id)
 

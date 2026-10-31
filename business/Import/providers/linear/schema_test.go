@@ -3,7 +3,11 @@ package linear
 import (
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -30,13 +34,7 @@ func TestEveryQueryReadsLiveFieldsUnderTheCap(t *testing.T) {
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatal(err)
 	}
-	queries := map[string]string{
-		"viewer": viewerQuery, "discover": discoverQuery, "users": usersQuery,
-		"teams": teamsQuery, "projects": projectsQuery, "issues": teamIssuesQuery,
-		"issue comments": issueCommentsQuery, "issue files": issueAttachmentsQuery,
-		"issue relations": issueRelationsQuery,
-	}
-	for name, q := range queries {
+	for name, q := range sentQueries(t) {
 		sel, err := parseSelection(q)
 		if err != nil {
 			t.Errorf("%s: %v", name, err)
@@ -99,6 +97,147 @@ func TestEveryQueryReadsLiveFieldsUnderTheCap(t *testing.T) {
 			t.Errorf("%s: about %.0f points, over Linear's cap of 10,000 (a page would always be refused)", name, total)
 		}
 	}
+}
+
+// sentQueries is every query the import sends, by its constant's name, read
+// from the package's code instead of a list kept by hand: the calls of gql,
+// and of each function that hands one of its own parameters to such a call
+// as the query (issuePages, rootList). A query sent any other way (a literal
+// at the call, a string made at run time) fails, since the guard couldn't
+// read it, and so does a *Query constant that nothing sends.
+func sentQueries(t *testing.T) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	consts := map[string]string{} // each string constant's value, by name
+	funcs := map[string]*ast.FuncDecl{}
+	for _, e := range entries {
+		if n := e.Name(); !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, e.Name(), nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			switch d := d.(type) {
+			case *ast.GenDecl:
+				for _, s := range d.Specs {
+					vs, ok := s.(*ast.ValueSpec)
+					if !ok || d.Tok != token.CONST {
+						continue
+					}
+					for i, name := range vs.Names {
+						if i >= len(vs.Values) {
+							continue
+						}
+						if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+							if v, err := strconv.Unquote(lit.Value); err == nil {
+								consts[name.Name] = v
+							}
+						}
+					}
+				}
+			case *ast.FuncDecl:
+				if d.Body != nil {
+					funcs[d.Name.Name] = d
+				}
+			}
+		}
+	}
+	senders := map[string]int{"gql": 2} // which argument is the query
+	for grew := true; grew; {
+		grew = false
+		for name, fn := range funcs {
+			if _, ok := senders[name]; ok {
+				continue
+			}
+			params := paramNames(fn)
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if _, arg, ok := queryArg(n, senders); ok {
+					if id, ok := arg.(*ast.Ident); ok && slices.Contains(params, id.Name) {
+						senders[name], grew = slices.Index(params, id.Name), true
+					}
+				}
+				return true
+			})
+		}
+	}
+	sent := map[string]string{}
+	for name, fn := range funcs {
+		params := paramNames(fn)
+		_, handsOn := senders[name]
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, arg, ok := queryArg(n, senders)
+			if !ok {
+				return true
+			}
+			id, _ := arg.(*ast.Ident)
+			switch {
+			case id != nil && consts[id.Name] != "":
+				sent[id.Name] = consts[id.Name]
+			case id != nil && handsOn && slices.Contains(params, id.Name):
+				// Its callers' constants are what it sends.
+			default:
+				t.Errorf("%s: a query the guard can't read: send a string constant", fset.Position(call.Pos()))
+			}
+			return true
+		})
+	}
+	for name := range consts {
+		if strings.HasSuffix(name, "Query") && sent[name] == "" {
+			t.Errorf("%s is never sent through gql", name)
+		}
+	}
+	if len(sent) == 0 {
+		t.Fatal("found no query sent through gql")
+	}
+	return sent
+}
+
+// queryArg is the query a call sends, when n calls one of the senders (by
+// name, as a function, a method or a generic function's instance).
+func queryArg(n ast.Node, senders map[string]int) (*ast.CallExpr, ast.Expr, bool) {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return nil, nil, false
+	}
+	fun := call.Fun
+	switch f := fun.(type) {
+	case *ast.IndexExpr:
+		fun = f.X
+	case *ast.IndexListExpr:
+		fun = f.X
+	}
+	var name string
+	switch f := fun.(type) {
+	case *ast.Ident:
+		name = f.Name
+	case *ast.SelectorExpr:
+		name = f.Sel.Name
+	}
+	i, ok := senders[name]
+	if !ok || i >= len(call.Args) {
+		return nil, nil, false
+	}
+	return call, call.Args[i], true
+}
+
+// paramNames is fn's parameters in order, its receiver aside.
+func paramNames(fn *ast.FuncDecl) []string {
+	var names []string
+	for _, f := range fn.Type.Params.List {
+		if len(f.Names) == 0 {
+			names = append(names, "_")
+		}
+		for _, n := range f.Names {
+			names = append(names, n.Name)
+		}
+	}
+	return names
 }
 
 // gqlField is one field of a selection set: its name, its page size when it

@@ -34,6 +34,7 @@ type world struct {
 	owned    map[string]bool                 // docs the tester owns
 	docs     []fakeDoc
 	seeded   map[string]string // doc → seeded HTML
+	quiet    map[string]bool   // doc → whether its seed was quiet
 	assets   []string          // uploaded asset names
 	appended []appendCall      // what the live writer was asked to append
 	deleted  []string
@@ -58,7 +59,7 @@ var tester = accessBusiness.Subject{UserUID: "0x1", UserUUID: uuid.NewString()}
 func newWorld(t *testing.T) *world {
 	w := &world{
 		t: t, jobs: map[uuid.UUID]*contentIOModels.Job{}, files: map[string][]byte{},
-		levels: map[string]accessBusiness.Level{}, owned: map[string]bool{}, seeded: map[string]string{}, bodies: map[string][2]string{},
+		levels: map[string]accessBusiness.Level{}, owned: map[string]bool{}, seeded: map[string]string{}, quiet: map[string]bool{}, bodies: map[string][2]string{},
 	}
 	saved := struct {
 		jobs    jobStore
@@ -214,7 +215,28 @@ func (f fakeJobs) Finish(_ context.Context, id uuid.UUID, status string, result 
 	return nil
 }
 
-func (f fakeJobs) FailAbandoned(context.Context, time.Time, time.Time) ([]*contentIOModels.Job, error) {
+func (f fakeJobs) Ready(_ context.Context, id uuid.UUID, result json.RawMessage) error {
+	f.w.mu.Lock()
+	defer f.w.mu.Unlock()
+	j := f.w.jobs[id]
+	if j.Status == contentIOModels.StatusRunning {
+		j.Status, j.Progress, j.Result = contentIOModels.StatusReady, 100, result
+	}
+	return nil
+}
+
+func (f fakeJobs) Choose(_ context.Context, id uuid.UUID, params json.RawMessage) (bool, error) {
+	f.w.mu.Lock()
+	defer f.w.mu.Unlock()
+	j := f.w.jobs[id]
+	if j == nil || j.Status != contentIOModels.StatusReady {
+		return false, nil
+	}
+	j.Status, j.Params, j.Result, j.Progress = contentIOModels.StatusQueued, params, json.RawMessage("{}"), 0
+	return true, nil
+}
+
+func (f fakeJobs) FailAbandoned(context.Context, time.Time, time.Time, time.Time) ([]*contentIOModels.Job, error) {
 	return nil, nil
 }
 
@@ -358,6 +380,7 @@ func (f fakeLive) Seed(_ context.Context, id, html string, o collab.Options) (co
 	f.w.mu.Lock()
 	defer f.w.mu.Unlock()
 	f.w.seeded[id] = html
+	f.w.quiet[id] = o.Quiet
 	return collab.Result{}, nil
 }
 

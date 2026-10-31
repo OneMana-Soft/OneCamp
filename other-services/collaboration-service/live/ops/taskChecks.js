@@ -9,9 +9,8 @@
 // changed: 0. held is how many to-dos stand for the tasks at all: 0 tells the
 // API the doc no longer holds them, so it stops following them.
 
-import * as Y from 'yjs'
 import { idOf } from '../../schema/connected.js'
-import { FIELD } from './blocks.js'
+import { FIELD, elementsNamed } from './blocks.js'
 import { refuse, runWrite } from './write.js'
 
 export const TASK_ID_ATTR = 'taskId'
@@ -32,27 +31,21 @@ export function checksOf(body) {
     return out
 }
 
-// setChecks walks the body for to-dos standing for a task in checks, and sets
-// each box that differs. Returns how many to-dos stand for one (held), and how
-// many of those changed.
+// setChecks finds the to-dos in the body standing for a task in checks, and
+// sets each box that differs. Returns how many to-dos stand for one (held), and
+// how many of those changed.
 export function setChecks(fragment, checks) {
     let changed = 0
     let held = 0
-    const walk = (node) => {
-        if (!(node instanceof Y.XmlElement) && !(node instanceof Y.XmlFragment)) return
-        if (node instanceof Y.XmlElement && node.nodeName === 'taskItem') {
-            const id = String(node.getAttribute(TASK_ID_ATTR) || '').toLowerCase()
-            if (checks.has(id)) {
-                held++
-                if (Boolean(node.getAttribute('checked')) !== checks.get(id)) {
-                    node.setAttribute('checked', checks.get(id))
-                    changed++
-                }
-            }
+    for (const { node } of elementsNamed(fragment, 'taskItem')) {
+        const id = String(node.getAttribute(TASK_ID_ATTR) || '').toLowerCase()
+        if (!checks.has(id)) continue
+        held++
+        if (Boolean(node.getAttribute('checked')) !== checks.get(id)) {
+            node.setAttribute('checked', checks.get(id))
+            changed++
         }
-        for (const child of node.toArray()) walk(child)
     }
-    walk(fragment)
     return { changed, held }
 }
 

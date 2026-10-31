@@ -3,6 +3,7 @@ package notion
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -15,6 +16,8 @@ import (
 	notionAdapter "github.com/akashc777/OneCamp/business/ContentIO/adapters/notion"
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
+	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
+	"github.com/akashc777/OneCamp/helpers/bodyrefs"
 	"github.com/akashc777/OneCamp/helpers/safefetch"
 	dataTableModels "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
@@ -53,11 +56,15 @@ func withFakeNotion(t *testing.T, answers map[string]string) (*Provider, *fakeNo
 	t.Helper()
 	fake := &fakeNotion{t: t, answers: answers}
 	saved := importProvider.SharedAPIClient
-	savedFetch, savedFile, savedTable, savedLookup, savedRecord := fetchPicture, fetchFile, tableFromDatabase, lookupMapped, recordMapped
+	savedFetch, savedFile, savedTable, savedLookup, savedMapped, savedRecord, savedActor := fetchPicture, fetchFile, tableFromDatabase, lookupMapped, mappedOf, recordMapped, importActor
 	t.Cleanup(func() {
 		importProvider.SharedAPIClient = saved
-		fetchPicture, fetchFile, tableFromDatabase, lookupMapped, recordMapped = savedFetch, savedFile, savedTable, savedLookup, savedRecord
+		fetchPicture, fetchFile, tableFromDatabase, lookupMapped, mappedOf, recordMapped, importActor = savedFetch, savedFile, savedTable, savedLookup, savedMapped, savedRecord, savedActor
 	})
+	// The person importing, as the tables' actor reads them (an admin here).
+	importActor = func(_ context.Context, person uuid.UUID) (dataTableBusiness.Actor, error) {
+		return dataTableBusiness.Actor{UserID: person, IsAdmin: true, Kind: rowLedger.ActorImport}, nil
+	}
 	fetchFile = func(_ context.Context, address string) (*safefetch.Response, error) {
 		u, _ := url.Parse(address)
 		return &safefetch.Response{URL: u, Status: http.StatusOK, ContentType: "application/octet-stream", Body: []byte("file " + path.Base(u.Path))}, nil
@@ -67,6 +74,15 @@ func withFakeNotion(t *testing.T, answers map[string]string) (*Provider, *fakeNo
 	lookupMapped = func(_ context.Context, _ uuid.UUID, entity, source string) (uuid.UUID, error) {
 		return mapped[entity+":"+source], nil
 	}
+	mappedOf = func(_ context.Context, _ uuid.UUID, entity string) (map[string]uuid.UUID, error) {
+		of := map[string]uuid.UUID{}
+		for key, id := range mapped {
+			if source, ok := strings.CutPrefix(key, entity+":"); ok {
+				of[source] = id
+			}
+		}
+		return of, nil
+	}
 	recordMapped = func(_ context.Context, _ uuid.UUID, entity, source string, id uuid.UUID, _ *string, _ json.RawMessage, owned bool) error {
 		if !owned {
 			t.Errorf("a table the import made was recorded as not its own")
@@ -75,9 +91,14 @@ func withFakeNotion(t *testing.T, answers map[string]string) (*Provider, *fakeNo
 		return nil
 	}
 	var made []notionAdapter.Database
-	tableFromDatabase = func(_ context.Context, _ dataTableBusiness.Actor, db notionAdapter.Database) (*dataTableModels.DataTable, int, error) {
+	tableFromDatabase = func(_ context.Context, a dataTableBusiness.Actor, db notionAdapter.Database) (*dataTableModels.DataTable, []dataTableBusiness.ImportNote, error) {
+		// Made by the person importing as they are, their admin flag with them
+		// (an import's actor carried their id alone).
+		if !a.IsAdmin || a.Kind != rowLedger.ActorImport {
+			t.Errorf("a database became a table as %+v, not as the person importing", a)
+		}
 		made = append(made, db)
-		return &dataTableModels.DataTable{Id: uuid.MustParse("00000000-0000-4000-8000-0000000000aa"), Name: db.Title}, 0, nil
+		return &dataTableModels.DataTable{Id: uuid.MustParse("00000000-0000-4000-8000-0000000000aa"), Name: db.Title}, nil, nil
 	}
 	fetchPicture = func(_ context.Context, address string) (*safefetch.Response, error) {
 		u, _ := url.Parse(address)
@@ -345,28 +366,49 @@ func TestAPageInAColumnComesAcrossOnce(t *testing.T) {
 }
 
 // What a tree leaves in Notion is said to the importer, once each: a page the
-// connection can't read, a tree past its size, and rows a table didn't take.
+// connection can't read, a tree past its size, a cell a table didn't take
+// (its row comes across without it) naming the value, and a value that
+// became an option. A table's notes are written together, however many.
 func TestWhatATreeLeavesBehindIsSaid(t *testing.T) {
 	answers := treeAnswers()
 	delete(answers, "GET /pages/"+deploys)
 	p, _, _ := withFakeNotion(t, answers)
-	var notes []string
+	var notes, said []string
+	var writes [][]string // each write's codes
 	saved := noteImport
 	t.Cleanup(func() { noteImport = saved })
-	noteImport = func(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _, source, _, code, _ string, _ json.RawMessage) {
-		notes = append(notes, code+" "+source)
+	noteImport = func(_ context.Context, _ uuid.UUID, list []importModels.ImportError) {
+		var codes []string
+		for _, e := range list {
+			notes = append(notes, e.Code+" "+e.SourceID)
+			said = append(said, e.Message)
+			codes = append(codes, e.Code)
+		}
+		writes = append(writes, codes)
 	}
-	tableFromDatabase = func(_ context.Context, _ dataTableBusiness.Actor, db notionAdapter.Database) (*dataTableModels.DataTable, int, error) {
-		return &dataTableModels.DataTable{Id: uuid.New(), Name: db.Title}, 1, nil
+	tableFromDatabase = func(_ context.Context, _ dataTableBusiness.Actor, db notionAdapter.Database) (*dataTableModels.DataTable, []dataTableBusiness.ImportNote, error) {
+		return &dataTableModels.DataTable{Id: uuid.New(), Name: db.Title}, []dataTableBusiness.ImportNote{
+			{Table: "database", Field: "State", Row: "1", Code: "CELL_LEFT_OUT", Msg: `"State" has no option "Abandoned": its options are Reading, Read`},
+			{Table: "database", Field: "Stage", Code: "OPTION_ADDED", Msg: `"Stage" gained the option "Paused"`},
+		}, nil
 	}
 	tr := &tree{p: p, ctx: context.Background(), tok: "secret", job: &importModels.Job{Id: uuid.New(), TriggeredBy: ptrUUID(uuid.New())}, titles: map[string]string{}, tables: map[string][]string{}}
 	if err := tr.page(rootID, ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"PAGE_LEFT_OUT " + deploys, "TABLE_ROWS_LEFT_OUT " + dsID} {
+	for _, want := range []string{"PAGE_LEFT_OUT " + deploys, "CELL_LEFT_OUT " + dsID, "OPTION_ADDED " + dsID} {
 		if !slices.Contains(notes, want) {
 			t.Errorf("no %q in %v", want, notes)
 		}
+	}
+	if !slices.ContainsFunc(said, func(m string) bool { return strings.Contains(m, `"Abandoned"`) }) {
+		t.Errorf("no note names the value left out: %q", said)
+	}
+	if !slices.Contains(said, `"Releases": "Stage" gained the option "Paused"`) {
+		t.Errorf("no note names the option its table gained: %q", said)
+	}
+	if !slices.ContainsFunc(writes, func(codes []string) bool { return slices.Equal(codes, []string{"CELL_LEFT_OUT", "OPTION_ADDED"}) }) {
+		t.Errorf("a table's notes weren't written together: %v", writes)
 	}
 
 	savedMax := maxTreePages
@@ -439,3 +481,88 @@ func TestLinksToNotionPagesPointAtTheirDocs(t *testing.T) {
 }
 
 func ptrUUID(u uuid.UUID) *uuid.UUID { return &u }
+
+// A person mentioned in a Notion page comes across as a mention of the user
+// the import brought them across as (N1 gap 1): the doc keeps it, as its
+// mentions hook reads a body, and it survives the docs pipeline's reading.
+// Someone the import didn't bring across stays their name, as text. Who came
+// across is read once a tree.
+func TestAPersonMentionedComesAcrossAsTheirMention(t *testing.T) {
+	p, _, _ := withFakeNotion(t, nil)
+	maya := uuid.New()
+	asked := 0
+	mappedOf = func(_ context.Context, _ uuid.UUID, entity string) (map[string]uuid.UUID, error) {
+		asked++
+		if entity != importModels.EntityUser {
+			t.Errorf("read the import's %s map for people", entity)
+		}
+		return map[string]uuid.UUID{"1f0b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d": maya}, nil
+	}
+	tr := &tree{p: p, ctx: context.Background(), job: &importModels.Job{Id: uuid.New()}, titles: map[string]string{}}
+	var rts []notionRichText
+	if err := json.Unmarshal([]byte(`[
+		{"type":"mention","plain_text":"@Maya Patel","mention":{"type":"user","user":{"object":"user","id":"1f0b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"}}},
+		{"type":"text","plain_text":" and ","text":{"content":" and "}},
+		{"type":"mention","plain_text":"@Ann <guest>","mention":{"type":"user","user":{"object":"user","id":"99999999-0000-4000-8000-000000000000"}}},
+		{"type":"text","plain_text":" agree; over to ","text":{"content":" agree; over to "}},
+		{"type":"mention","plain_text":"@Maya Patel","mention":{"type":"user","user":{"object":"user","id":"1f0b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"}}}
+	]`), &rts); err != nil {
+		t.Fatal(err)
+	}
+	got := tr.text(rts)
+	chip := `<span data-type="mention" data-id="` + maya.String() + `" data-label="Maya Patel">@Maya Patel</span>`
+	if want := chip + ` and @Ann &lt;guest&gt; agree; over to ` + chip; got != want {
+		t.Fatalf("%s\nwant %s", got, want)
+	}
+	tr.text(rts)
+	if asked != 1 {
+		t.Errorf("who came across was read %d times for one tree", asked)
+	}
+	if people := bodyrefs.Scan(got).People; !slices.Equal(people, []string{maya.String()}) {
+		t.Errorf("the body mentions %v, want Maya alone", people)
+	}
+	body, err := contentcodec.FromHTML("<p>"+got+"</p>", contentcodec.HTMLOptions{Foreign: true, Assets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var read []string
+	body.Walk(func(n *contentcodec.Node) bool {
+		if n.Type == "mention" {
+			read = append(read, n.Attrs["id"].(string)+" "+n.Attrs["label"].(string))
+		}
+		return true
+	})
+	if want := maya.String() + " Maya Patel"; !slices.Equal(read, []string{want, want}) {
+		t.Errorf("the docs pipeline read mentions %q", read)
+	}
+}
+
+// When who came across can't be read, a tree's people mentioned stay their
+// names, and the import says so once, however many mentions the tree holds.
+func TestPeopleWhoseImportCantBeReadStayNamesSaidOnce(t *testing.T) {
+	p, _, _ := withFakeNotion(t, nil)
+	mappedOf = func(context.Context, uuid.UUID, string) (map[string]uuid.UUID, error) {
+		return nil, errors.New("the database is away")
+	}
+	saved := noteImport
+	t.Cleanup(func() { noteImport = saved })
+	var codes []string
+	noteImport = func(_ context.Context, _ uuid.UUID, list []importModels.ImportError) {
+		for _, e := range list {
+			codes = append(codes, e.Code)
+		}
+	}
+	tr := &tree{p: p, ctx: context.Background(), job: &importModels.Job{Id: uuid.New()}, titles: map[string]string{}}
+	var rts []notionRichText
+	if err := json.Unmarshal([]byte(`[{"type":"mention","plain_text":"@Maya Patel","mention":{"type":"user","user":{"object":"user","id":"1f0b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"}}}]`), &rts); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if got := tr.text(rts); got != "@Maya Patel" {
+			t.Errorf("a person whose import can't be read: %q, want their name", got)
+		}
+	}
+	if !slices.Equal(codes, []string{"people_unread"}) {
+		t.Errorf("the import was told %v, want people_unread once", codes)
+	}
+}

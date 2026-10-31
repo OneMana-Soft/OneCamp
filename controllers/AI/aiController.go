@@ -1248,6 +1248,12 @@ func AnalyzeCodeIssue(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "issue title or body is required"})
 		return
 	}
+	// Before the AI is asked, or the asker's rate spent: a repository they may
+	// not read is refused whatever else holds.
+	if err := business.CodeRepoAllowed(ctx, userInfo.UserDgraphInfo.Uuid, req.Owner, req.Repo); err != nil {
+		helpers.WriteJSON(w, codeReadStatus(err), helpers.Envolope{"msg": err.Error()})
+		return
+	}
 
 	svc := ai.GetService()
 	if svc == nil || !svc.IsEnabled() {
@@ -1260,10 +1266,6 @@ func AnalyzeCodeIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := business.CodeRepoAllowed(ctx, userInfo.UserDgraphInfo.Uuid, req.Owner, req.Repo); err != nil {
-		helpers.WriteJSON(w, codeReadStatus(err), helpers.Envolope{"msg": err.Error()})
-		return
-	}
 	analysis, err := codeagent.AnalyzeIssue(ctx, req.Owner, req.Repo, req.Title, req.Body, req.Ref, req.Deep)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/AnalyzeCodeIssue failed: %v", err)

@@ -103,3 +103,17 @@ func MappedComments(ctx context.Context, importID uuid.UUID, taskSources []strin
 	}
 	return out, nil
 }
+
+// CommentIDs reads a page of the comments an import made, by id, after the
+// id given (uuid.Nil for the first page).
+func CommentIDs(ctx context.Context, importID, after uuid.UUID, limit int) ([]uuid.UUID, error) {
+	return pgexec.Query(ctx, `
+		SELECT m.onecamp_uuid FROM import_id_map m
+		WHERE m.import_id = $1 AND m.entity_type = 'comment' AND m.created_by_this_import AND m.onecamp_uuid > $2
+		ORDER BY m.onecamp_uuid LIMIT $3`,
+		func(r pgexec.Row) (uuid.UUID, error) {
+			var id uuid.UUID
+			err := r.Scan(&id)
+			return id, err
+		}, importID, after, limit)
+}

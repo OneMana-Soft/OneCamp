@@ -40,6 +40,11 @@ var SyncSignal = make(chan struct{}, 1)
 // workspace. The agent's other changes to the task, its status say, still sync.
 // See helpers.WithAgentWrite.
 //
+// GUARD 4: NOT A CHANGE THAT STAYS IN THE WORKSPACE. An upgrade's repair takes
+// someone off tasks they can't read in OneCamp. The issue's own assignees are
+// shared with everyone who sees the issue, and the repair leaves them as they
+// are. See helpers.WithWorkspaceOnly.
+//
 // The lookup costs one indexed read on a path that previously cost an insert, a
 // worker wake, an API call and three retries.
 func EnqueueGitHubSync(ctx context.Context, taskID uuid.UUID, syncType string, payload map[string]interface{}) {
@@ -54,7 +59,7 @@ func EnqueueGitHubSync(ctx context.Context, taskID uuid.UUID, syncType string, p
 		}
 	}()
 
-	if helpers.IsGitHubOrigin(ctx) {
+	if helpers.IsGitHubOrigin(ctx) || helpers.IsWorkspaceOnly(ctx) {
 		return
 	}
 	if helpers.IsAgentWrite(ctx) && commentSyncs[syncType] {

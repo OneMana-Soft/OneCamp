@@ -36,6 +36,7 @@ import (
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
+	workflowBusiness "github.com/akashc777/OneCamp/business/Workflow"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
@@ -378,6 +379,9 @@ func StartAgentTaskWorker(ctx context.Context) {
 
 	webhookBusiness.RegisterEventListenerSeeingRestricted(handleTaskAssignedForAgent)
 	webhookBusiness.RegisterEventListenerSeeingRestricted(handleTaskCommentForAgent)
+	// A rule that assigns a task to an agent hands it over itself: its write
+	// reaches no listener (the loop guard).
+	workflowBusiness.RegisterAgentHandOff(HandOffAssignment)
 	// Wire the code_pr tool → durable coding-job executor (gated: the tool is
 	// only offered to the model when an admin has enabled code PRs).
 	RegisterCodePRExecutor()

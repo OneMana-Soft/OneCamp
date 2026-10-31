@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	domain "github.com/akashc777/OneCamp/domain/Attachment"
@@ -78,5 +79,33 @@ func TestOwnUploadsAreReadOnceForEveryPlace(t *testing.T) {
 	}
 	if reads != 1 {
 		t.Errorf("%d reads, want one for every place", reads)
+	}
+}
+
+// A write keeps, of the files a message lists, the ones a row holds, in the
+// list's order and each once, on the object the row stored, whatever key or
+// spelling of the id the list says.
+func TestKeepStoredKeepsWhatARowHoldsOnItsObject(t *testing.T) {
+	a, b, gone := uuid.New(), uuid.New(), uuid.New()
+	rows := map[uuid.UUID]string{a: "u1/a.png", b: "u1/b.pdf"}
+	list := []*dgraphStruct.DgraphAttachment{
+		{Uuid: b.String(), ObjectKey: "someone-else/salaries.xlsx"},
+		nil,
+		{Uuid: "not an id"},
+		{Uuid: gone.String(), ObjectKey: "u2/c.png"},
+		{Uuid: strings.ToUpper(a.String()), ObjectKey: "u2/a.png"},
+		{Uuid: b.String()},
+	}
+	kept := KeepStored(list, func(id uuid.UUID) (string, bool) {
+		key, ok := rows[id]
+		return key, ok
+	})
+	var got []string
+	for _, f := range kept {
+		got = append(got, f.Uuid+" "+f.ObjectKey)
+	}
+	want := []string{b.String() + " u1/b.pdf", a.String() + " u1/a.png"}
+	if strings.Join(got, ", ") != strings.Join(want, ", ") {
+		t.Errorf("kept %v, want %v", got, want)
 	}
 }

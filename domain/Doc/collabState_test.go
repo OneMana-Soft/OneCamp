@@ -24,8 +24,8 @@ func TestACollabSaveIsWrittenOnlyOnALiveDocWithItsUUID(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(req.Query, "live as var(func: uid(all)) @filter("+liveDocFilter+")") {
-			t.Errorf("the save's doc is not only a live one:\n%s", req.Query)
+		if !strings.Contains(req.Query, "live as var(func: uid(all)) @filter("+liveDocFilter+" AND "+pageOnly+")") {
+			t.Errorf("the save's doc is not only a live page:\n%s", req.Query)
 		}
 		if req.Vars["$id"] != id || req.Vars["$hash"] != "h2" {
 			t.Errorf("vars %v", req.Vars)
@@ -87,6 +87,24 @@ func TestACollabSaveSaysWhatItFound(t *testing.T) {
 	}
 	if !strings.Contains(collabUpsertQuery, "doc_host_kind") {
 		t.Error("the save's read doesn't ask whether the doc is hosted")
+	}
+}
+
+// A folder, a file or a link takes no save from the collaboration service
+// (docs F1): its write only lands on a live page, and the answer says it
+// isn't one, so nothing is retried and nothing fans out.
+func TestACollabSaveOfANodeThatIsntAPageWritesNothing(t *testing.T) {
+	w := CollabWrite{DocUUID: uuid.NewString(), Body: "<p>x</p>", Hash: "h2"}
+	for _, kind := range []string{NodeFolder, NodeFile, NodeLink} {
+		if _, err := collabSaveAnswer([]byte(`{"found":[{"doc_yjs_body_hash":"","doc_deleted_at":"0001-01-01T00:00:00Z","doc_node_kind":"`+kind+`"}]}`), w); !errors.Is(err, ErrNotAPage) {
+			t.Errorf("a %s: %v, want ErrNotAPage", kind, err)
+		}
+	}
+	if !strings.Contains(collabUpsertQuery, "live as var(func: uid(all)) @filter("+liveDocFilter+" AND "+pageOnly+")") {
+		t.Errorf("the save's writes aren't held to a live page:\n%s", collabUpsertQuery)
+	}
+	if !strings.Contains(collabUpsertQuery, "doc_node_kind") {
+		t.Error("the save's read doesn't ask what the node is")
 	}
 }
 

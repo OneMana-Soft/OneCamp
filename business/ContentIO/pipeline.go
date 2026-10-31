@@ -83,15 +83,23 @@ func (p *pipeline) RegisterExporter(e Exporter) {
 }
 
 // importerFor is the importer that reads a file, by its name first.
-func (p *pipeline) importerFor(filename, mediaType string) Importer {
+func (p *pipeline) importerFor(filename, mediaType, into string) Importer {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, i := range p.importers {
-		if i.Accepts(filename, mediaType) {
+		if intoOf(i) == into && i.Accepts(filename, mediaType) {
 			return i
 		}
 	}
 	return nil
+}
+
+// intoOf is what an importer makes: "" for docs.
+func intoOf(i Importer) string {
+	if t, ok := i.(Targeted); ok {
+		return t.Into()
+	}
+	return ""
 }
 
 func (p *pipeline) importerByFormat(format string) Importer {
@@ -160,14 +168,22 @@ func (p *pipeline) prepare(ctx context.Context, who accessBusiness.Subject, req 
 	if err != nil {
 		return nil, uuid.Nil, ErrForbidden
 	}
-	imp := p.importerFor(req.Filename, req.MediaType)
+	imp := p.importerFor(req.Filename, req.MediaType, req.Into)
 	if imp == nil {
 		return nil, uuid.Nil, ErrUnsupported
+	}
+	if err := checkChoices(req.Choices); err != nil {
+		return nil, uuid.Nil, err
 	}
 	if req.Size > maxImportBytes() {
 		return nil, uuid.Nil, ErrTooLarge
 	}
-	if err := checkParent(ctx, who, req.ParentUUID); err != nil {
+	if req.Into != "" {
+		// What it makes isn't a page: it goes under none.
+		if req.ParentUUID != "" {
+			return nil, uuid.Nil, ErrUnsupported
+		}
+	} else if err := checkParent(ctx, who, req.ParentUUID); err != nil {
 		return nil, uuid.Nil, err
 	}
 	return imp, userID, nil
@@ -175,9 +191,26 @@ func (p *pipeline) prepare(ctx context.Context, who accessBusiness.Subject, req 
 
 func paramsOf(req ImportRequest, size int64) json.RawMessage {
 	raw, _ := json.Marshal(jobParams{
-		Filename: path.Base(req.Filename), MediaType: req.MediaType, ParentUUID: req.ParentUUID, Size: size,
+		Filename: path.Base(req.Filename), MediaType: req.MediaType, ParentUUID: req.ParentUUID, Size: size, Into: req.Into,
+		Choices: req.Choices,
 	})
 	return raw
+}
+
+// maxChoicesBytes bounds the choices a person sends a Previewer's import.
+const maxChoicesBytes = 256 << 10
+
+// checkChoices refuses choices that aren't none or a JSON object within
+// maxChoicesBytes: what an import and a preview's answer take.
+func checkChoices(choices json.RawMessage) error {
+	if len(choices) == 0 {
+		return nil
+	}
+	var object map[string]json.RawMessage
+	if len(choices) > maxChoicesBytes || json.Unmarshal(choices, &object) != nil || object == nil {
+		return ErrBadChoices
+	}
+	return nil
 }
 
 func (p *pipeline) Import(ctx context.Context, who accessBusiness.Subject, req ImportRequest) (Job, error) {
@@ -249,6 +282,35 @@ func own(ctx context.Context, who accessBusiness.Subject, id string) (*contentIO
 		return nil, ErrNotFound
 	}
 	return row, nil
+}
+
+func (p *pipeline) Choose(ctx context.Context, who accessBusiness.Subject, id string, choices json.RawMessage, confirmed bool) (Job, error) {
+	if err := checkChoices(choices); err != nil {
+		return Job{}, err
+	}
+	row, err := own(ctx, who, id)
+	if err != nil {
+		return Job{}, err
+	}
+	if row.Status != contentIOModels.StatusReady {
+		return toJob(row), ErrConflict
+	}
+	var params jobParams
+	_ = json.Unmarshal(row.Params, &params)
+	params.Choices, params.Confirmed = choices, confirmed
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return Job{}, err
+	}
+	queued, err := jobs.Choose(ctx, row.ID, raw)
+	if err != nil {
+		return Job{}, err
+	}
+	if !queued {
+		// Chosen twice at once, or failed meanwhile: the other answer stands.
+		return toJob(row), ErrConflict
+	}
+	return p.announce(ctx, row.ID)
 }
 
 func (p *pipeline) StartUploaded(ctx context.Context, who accessBusiness.Subject, id string) (Job, error) {

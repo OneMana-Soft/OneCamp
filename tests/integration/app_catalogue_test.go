@@ -20,10 +20,10 @@ import (
 
 	"github.com/google/uuid"
 
+	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
 	commandBusiness "github.com/akashc777/OneCamp/business/Command"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	slashModel "github.com/akashc777/OneCamp/models/postgres/SlashCommand"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
@@ -83,11 +83,32 @@ func TestADirectoryAppsCommandsWaitForItsAddress(t *testing.T) {
 		t.Error("Jira counts as set up with no address for its commands")
 	}
 
+	// Set up the way an admin does it, through the admin's own path, which moves
+	// the catalog's version on. Jira is set up once its address and its OAuth
+	// client are both in: a member's "/" menu leaves out an app that still needs
+	// setting up (commandPlace), so the address alone isn't enough.
 	appID := uuid.MustParse(app.ID)
-	if err := slashModel.UpdateApp(ctx, appID, map[string]interface{}{"handler_url": "https://hooks.example.test/jira"}); err != nil {
-		t.Fatalf("giving Jira its address: %v", err)
+	// A public address literal, as command_responses_test uses: the admin's
+	// path refuses every special range (TEST-NET-3 among them) and would look
+	// a name up, so a literal public address is checked without the network.
+	// Nothing dials it, nor the OAuth addresses: the menu only reads them.
+	address := "https://93.184.216.34/jira"
+	if _, err := commandBusiness.UpdateApp(ctx, appID, commandAdapter.UpdateAppRequest{
+		HandlerURL: &address,
+		OAuthConfig: &commandAdapter.AppOAuthConfig{
+			ClientID:     "jira-client",
+			ClientSecret: "jira-client-secret",
+			AuthURL:      "https://auth.atlassian.com/authorize",
+			TokenURL:     "https://auth.atlassian.com/oauth/token",
+			Scopes:       []string{"read:jira-work", "write:jira-work"},
+		},
+	}); err != nil {
+		t.Fatalf("setting Jira up: %v", err)
+	}
+	if needsSetup(t) {
+		t.Error("Jira still needs setting up with its address and OAuth client in")
 	}
 	if !inMenu(t) {
-		t.Error("/jira stays out of the / menu after the app got its address")
+		t.Error("/jira stays out of the / menu once the app was set up")
 	}
 }

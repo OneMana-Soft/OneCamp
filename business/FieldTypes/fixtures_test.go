@@ -53,7 +53,7 @@ func TestEveryKindStoresWhatTheFixturesSay(t *testing.T) {
 			if cfg == nil {
 				cfg = map[string]any{}
 			}
-			if c.Kind == model.FieldSelect || c.Kind == model.FieldMultiSelect {
+			if k, _ := Kinds.Lookup(c.Kind); k.HasOptions {
 				cfg["options"] = fx.Options
 			}
 			b, _ := json.Marshal(cfg)

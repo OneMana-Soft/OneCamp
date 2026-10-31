@@ -20,6 +20,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -80,6 +81,9 @@ type Event struct {
 	GuestsCanSeeGuests bool
 	// EmailOnAnswers is the organiser's "Email me when guests answer".
 	EmailOnAnswers bool
+	// TaskUUID is a task block's task: kind task_block alone names one
+	// (486_calendar_task_blocks).
+	TaskUUID *uuid.UUID
 
 	CreatedBy     uuid.UUID
 	Sequence      int
@@ -103,7 +107,7 @@ const eventColumns = `e.id, e.calendar_id, e.kind, e.title, e.notes, e.notes_for
 	COALESCE(array_to_json(e.exdates), '[]'), COALESCE(array_to_json(e.rdates), '[]'), e.changed,
 	e.transparency, e.visibility, e.hue, e.status, e.guests_can_modify, e.guests_can_invite, e.guests_can_see_guests,
 	e.created_by, e.sequence, e.ical_uid, e.source, COALESCE(e.google_event_id, ''),
-	e.created_at, e.updated_at, e.deleted_at, e.deleted_by, e.email_on_answers`
+	e.created_at, e.updated_at, e.deleted_at, e.deleted_by, e.email_on_answers, e.task_uuid`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -116,6 +120,7 @@ func scanEvent(s scanner) (*Event, error) {
 		exdates, rdates            []byte
 		deletedAt                  sql.NullTime
 		deletedBy                  uuid.NullUUID
+		task                       uuid.NullUUID
 	)
 	err := s.Scan(&e.ID, &e.CalendarID, &e.Kind, &e.Title, &e.Notes, &e.NotesFormat, &e.Location, &e.CallRoom,
 		&startAt, &endAt, &startDate, &endDate, &e.TZ, &e.EndTZ,
@@ -123,7 +128,7 @@ func scanEvent(s scanner) (*Event, error) {
 		&exdates, &rdates, pq.Array(&e.Changed),
 		&e.Transparency, &e.Visibility, &e.Hue, &e.Status, &e.GuestsCanModify, &e.GuestsCanInvite, &e.GuestsCanSeeGuests,
 		&createdBy, &e.Sequence, &e.ICalUID, &e.Source, &e.GoogleEventID,
-		&e.CreatedAt, &e.UpdatedAt, &deletedAt, &deletedBy, &e.EmailOnAnswers)
+		&e.CreatedAt, &e.UpdatedAt, &deletedAt, &deletedBy, &e.EmailOnAnswers, &task)
 	if err != nil {
 		return nil, err
 	}
@@ -147,6 +152,10 @@ func scanEvent(s scanner) (*Event, error) {
 	if deletedBy.Valid {
 		id := deletedBy.UUID
 		e.DeletedBy = &id
+	}
+	if task.Valid {
+		id := task.UUID
+		e.TaskUUID = &id
 	}
 	if e.Changed == nil {
 		e.Changed = []string{}
@@ -216,10 +225,10 @@ const insertColumns = `id, calendar_id, kind, title, notes, notes_format, locati
 	rrule, until_at, series_id, recurrence_id, exdates, rdates, changed,
 	transparency, visibility, hue, status, guests_can_modify, guests_can_invite, guests_can_see_guests,
 	created_by, sequence, ical_uid, source, google_event_id, created_at, updated_at, deleted_at, deleted_by,
-	email_on_answers`
+	email_on_answers, task_uuid`
 
 // insertColumnCount is how many values one row of insertColumns takes.
-const insertColumnCount = 38
+const insertColumnCount = 39
 
 // insertPlaceholders is one row's placeholders from $first, with the casts
 // the text-sent values need.
@@ -246,17 +255,10 @@ func insertPlaceholders(first int) string {
 func insertArgs(e *Event) []any {
 	return []any{e.ID, e.CalendarID, e.Kind, e.Title, e.Notes, e.NotesFormat, e.Location, e.CallRoom,
 		e.StartAt, e.EndAt, nullDate(e.StartDate), nullDate(e.EndDate), e.TZ, e.EndTZ,
-		e.RRule, e.UntilAt, nullUUID(e.SeriesID), e.RecurrenceID, timesArray(e.Exdates), timesArray(e.Rdates), pq.Array(nonNil(e.Changed)),
+		e.RRule, e.UntilAt, nullUUID(e.SeriesID), e.RecurrenceID, timesArray(e.Exdates), timesArray(e.Rdates), pq.Array(helpers.NonNil(e.Changed)),
 		e.Transparency, e.Visibility, e.Hue, e.Status, e.GuestsCanModify, e.GuestsCanInvite, e.GuestsCanSeeGuests,
 		e.CreatedBy, e.Sequence, e.ICalUID, e.Source, nullText(e.GoogleEventID), e.CreatedAt, e.UpdatedAt, e.DeletedAt, nullUUID(e.DeletedBy),
-		e.EmailOnAnswers}
-}
-
-func nonNil(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
+		e.EmailOnAnswers, nullUUID(e.TaskUUID)}
 }
 
 // Insert writes a new event.
@@ -314,15 +316,15 @@ func Update(ctx context.Context, db DB, e *Event, expect *int) (int, error) {
 			transparency = $19, visibility = $20, hue = $21, status = $22,
 			guests_can_modify = $23, guests_can_invite = $24, guests_can_see_guests = $25,
 			google_event_id = $26, updated_at = $27, series_id = $29, recurrence_id = $30, ical_uid = $31,
-			email_on_answers = $32, sequence = sequence + 1
+			email_on_answers = $32, task_uuid = $33, sequence = sequence + 1
 		WHERE id = $1 AND ($28::int IS NULL OR sequence = $28)
 		RETURNING sequence`,
 		e.ID, e.Kind, e.Title, e.Notes, e.NotesFormat, e.Location, e.CallRoom,
 		e.StartAt, e.EndAt, nullDate(e.StartDate), nullDate(e.EndDate), e.TZ, e.EndTZ,
-		e.RRule, e.UntilAt, timesArray(e.Exdates), timesArray(e.Rdates), pq.Array(nonNil(e.Changed)),
+		e.RRule, e.UntilAt, timesArray(e.Exdates), timesArray(e.Rdates), pq.Array(helpers.NonNil(e.Changed)),
 		e.Transparency, e.Visibility, e.Hue, e.Status,
 		e.GuestsCanModify, e.GuestsCanInvite, e.GuestsCanSeeGuests,
-		nullText(e.GoogleEventID), e.UpdatedAt, expect, nullUUID(e.SeriesID), e.RecurrenceID, e.ICalUID, e.EmailOnAnswers).Scan(&seq)
+		nullText(e.GoogleEventID), e.UpdatedAt, expect, nullUUID(e.SeriesID), e.RecurrenceID, e.ICalUID, e.EmailOnAnswers, nullUUID(e.TaskUUID)).Scan(&seq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, missingOrStale(ctx, db, e.ID)
 	}
@@ -406,6 +408,29 @@ func Touch(ctx context.Context, db DB, id uuid.UUID, now time.Time) (int, error)
 	return seq, err
 }
 
+// SetCallRoom gives a live event the call held in room ("" takes it off) while
+// its call is still was, and its series' instances changed on their own the
+// same (calendar B11): two people adding a call at once make one, as the second
+// finds the first's. The event gets a new sequence: its call is part of what
+// an invitation says. It answers whether the event took it. Both writes are
+// one transaction (joining the caller's when it has one).
+func SetCallRoom(ctx context.Context, id uuid.UUID, room, was string, now time.Time) (bool, error) {
+	took := false
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		n, err := pgexec.Exec(ctx, `UPDATE events SET call_room = $2, updated_at = $4, sequence = sequence + 1
+			WHERE id = $1 AND call_room = $3 AND deleted_at IS NULL`, id, room, was, now)
+		if err != nil || n == 0 {
+			return err
+		}
+		if _, err = pgexec.Exec(ctx, `UPDATE events SET call_room = $2 WHERE series_id = $1`, id, room); err != nil {
+			return err
+		}
+		took = true
+		return nil
+	})
+	return took, err
+}
+
 // SetGoogleID records the event's copy in Google Calendar ("" forgets it),
 // and nothing else: the copy's id says nothing about the event's own fields.
 func SetGoogleID(ctx context.Context, db DB, id uuid.UUID, googleID string) error {
@@ -435,6 +460,15 @@ func GetMany(ctx context.Context, db DB, ids []uuid.UUID) ([]*Event, error) {
 		return nil, nil
 	}
 	return queryEvents(ctx, db, `SELECT `+eventColumns+` FROM events e WHERE e.id = ANY($1::uuid[])`, uuidArray(ids))
+}
+
+// ByICalUIDs is the events, series and single ones (never an instance changed
+// on its own), named by these iCalendar UIDs, in the trash or not.
+func ByICalUIDs(ctx context.Context, db DB, uids []string) ([]*Event, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	return queryEvents(ctx, db, `SELECT `+eventColumns+` FROM events e WHERE e.series_id IS NULL AND e.ical_uid = ANY($1::text[])`, pq.Array(uids))
 }
 
 func queryEvents(ctx context.Context, db DB, q string, args ...any) ([]*Event, error) {
@@ -475,6 +509,21 @@ func RangeOf(ctx context.Context, db DB, person uuid.UUID, w Window, limit int) 
 		LIMIT $6`, person, w.From, w.To, w.FromDate, w.ToDate, limit)
 }
 
+// RangeOnCalendars is what is on these calendars that could touch w, not in
+// the trash, as RangeOf reads a person's: single events overlapping it, and
+// series that reach it or have an instance moved into it. At most limit
+// rows, by start.
+func RangeOnCalendars(ctx context.Context, db DB, calendars []uuid.UUID, w Window, limit int) ([]*Event, error) {
+	if len(calendars) == 0 {
+		return nil, nil
+	}
+	return queryEvents(ctx, db, `SELECT `+eventColumns+` FROM events e
+		WHERE e.deleted_at IS NULL AND e.series_id IS NULL AND e.calendar_id = ANY($1::uuid[])
+		  AND (`+overlaps+` OR `+movedInto+`)
+		ORDER BY COALESCE(e.start_at, (e.start_date::timestamp AT TIME ZONE 'UTC')), e.id
+		LIMIT $6`, uuidArray(calendars), w.From, w.To, w.FromDate, w.ToDate, limit)
+}
+
 // movedInto is a series with a live instance moved by hand into the window
 // over the same parameters as overlaps: past the series' end or before its
 // start, where the series itself doesn't reach.
@@ -508,15 +557,22 @@ func TrashOf(ctx context.Context, db DB, person uuid.UUID, before *time.Time, li
 // in the trash nor cancelled: single events and series (expanded by the
 // caller).
 func AwayOf(ctx context.Context, db DB, people []uuid.UUID, w Window, limit int) ([]*Event, error) {
+	return OwnKindOf(ctx, db, people, "out_of_office", w, limit)
+}
+
+// OwnKindOf is these people's own events of one kind (out of office, a
+// working location) that could touch w, not in the trash nor cancelled:
+// single events and series (expanded by the caller).
+func OwnKindOf(ctx context.Context, db DB, people []uuid.UUID, kind string, w Window, limit int) ([]*Event, error) {
 	if len(people) == 0 {
 		return nil, nil
 	}
 	return queryEvents(ctx, db, `SELECT `+eventColumns+` FROM events e
-		WHERE e.created_by = ANY($1::uuid[]) AND e.kind = 'out_of_office'
+		WHERE e.created_by = ANY($1::uuid[]) AND e.kind = $7
 		  AND e.deleted_at IS NULL AND e.status <> 'cancelled' AND e.series_id IS NULL
 		  AND `+overlaps+`
 		ORDER BY COALESCE(e.start_at, (e.start_date::timestamp AT TIME ZONE 'UTC')), e.id
-		LIMIT $6`, uuidArray(people), w.From, w.To, w.FromDate, w.ToDate, limit)
+		LIMIT $6`, uuidArray(people), w.From, w.To, w.FromDate, w.ToDate, limit, kind)
 }
 
 // OverridesOf is the overrides of these series that could touch w: by the
@@ -549,4 +605,43 @@ func OverrideAt(ctx context.Context, db DB, series uuid.UUID, recurrence time.Ti
 		return nil, nil
 	}
 	return e, err
+}
+
+// SeriesIDsAfter is the next limit ids, after after, of the series and single
+// events (no instance changed on its own) of no kind in skip, those read from
+// an address too when subscribed, the trash's among them. The nightly passes
+// read them in pages by id: the work graph's (no subscribed events) and
+// search's.
+func SeriesIDsAfter(ctx context.Context, db DB, after uuid.UUID, skip []string, subscribed bool, limit int) ([]uuid.UUID, error) {
+	return queryIDs(ctx, db, "SeriesIDsAfter", `SELECT id FROM events
+		WHERE id > $1 AND series_id IS NULL AND ($2 OR source <> 'subscribed') AND kind <> ALL($3::text[])
+		ORDER BY id LIMIT $4`, after, subscribed, pq.Array(skip), limit)
+}
+
+// queryIDs runs a query that answers one uuid a row, named for the log.
+func queryIDs(ctx context.Context, db DB, name, q string, args ...any) ([]uuid.UUID, error) {
+	return queryRows(ctx, db, name, q, func(r *sql.Rows) (uuid.UUID, error) {
+		var id uuid.UUID
+		return id, r.Scan(&id)
+	}, args...)
+}
+
+// queryRows runs a query and reads each row it answers with scan, named for
+// the log. A failure partway is an error, never a short list.
+func queryRows[T any](ctx context.Context, db DB, name, q string, scan func(*sql.Rows) (T, error), args ...any) ([]T, error) {
+	rows, err := db.QueryContext(ctx, q, args...)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CalendarV2.%s err: %+v", name, err)
+		return nil, err
+	}
+	defer rows.Close()
+	var out []T
+	for rows.Next() {
+		v, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }

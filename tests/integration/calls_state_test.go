@@ -16,9 +16,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -109,22 +106,11 @@ func told(j *joined, kind string) (map[string]any, string, bool) {
 	return nil, "", false
 }
 
-func callStateMigration(t *testing.T, dir string) string {
-	t.Helper()
-	_, here, _, _ := runtime.Caller(0)
-	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(here), "..", "..", "migrations", "*_call_sessions."+dir+".sql"))
-	if len(matches) != 1 {
-		t.Fatalf("want one call_sessions %s migration, found %v", dir, matches)
-	}
-	b, err := os.ReadFile(matches[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
-}
-
 // Call State's migration goes down and up again on Postgres 12, and its one
-// rule in the schema holds: one call going on per room.
+// rule in the schema holds: one call going on per room. A call's polls and
+// questions (call_activities), the boards on its stage (call_board) and its
+// breakout rooms (call_breakouts) hang off call_sessions, so they come off
+// first and go back on last, the order a migrate down and up takes.
 func TestCallStateMigrationUpDownUp(t *testing.T) {
 	env := integration.SetupEnv(t)
 	exists := func(table string) bool {
@@ -134,17 +120,21 @@ func TestCallStateMigrationUpDownUp(t *testing.T) {
 		}
 		return n == 1
 	}
-	tables := []string{"call_sessions", "call_attendance", "call_recordings"}
-	if _, err := env.PG.Exec(callStateMigration(t, "down")); err != nil {
-		t.Fatalf("down: %v", err)
+	tables := []string{"call_sessions", "call_attendance", "call_recordings", "call_breakouts", "call_breakout_assignments"}
+	for _, name := range []string{"call_breakouts", "call_board", "call_activities", "call_sessions"} {
+		if _, err := env.PG.Exec(migrationSQL(t, name, "down")); err != nil {
+			t.Fatalf("down %s: %v", name, err)
+		}
 	}
 	for _, table := range tables {
 		if exists(table) {
 			t.Errorf("%s is still there after down", table)
 		}
 	}
-	if _, err := env.PG.Exec(callStateMigration(t, "up")); err != nil {
-		t.Fatalf("up again: %v", err)
+	for _, name := range []string{"call_sessions", "call_activities", "call_board", "call_breakouts"} {
+		if _, err := env.PG.Exec(migrationSQL(t, name, "up")); err != nil {
+			t.Fatalf("up %s again: %v", name, err)
+		}
 	}
 	for _, table := range tables {
 		if !exists(table) {
@@ -296,9 +286,10 @@ func micOnServer(ctx context.Context, room, identity string) bool {
 	})
 }
 
-// seedChannel makes a channel with these people in it (the first its
-// moderator), each a member in the graph and in Postgres, and answers their
-// graph uids by name.
+// seedChannel makes a channel with these people (the first its moderator),
+// each a user in the graph and in Postgres, and answers their graph uids by
+// name. The last of them is left out of the channel's members: the outsider
+// a test keeps out, so name one ("outsider") after everyone who joins.
 func seedChannel(t *testing.T, pg *integration.Env, dg *integration.DgraphEnv, channelUUID string, names ...string) map[string]*dgraphStruct.DgraphUser {
 	t.Helper()
 	var nodes []map[string]any
@@ -316,7 +307,10 @@ func seedChannel(t *testing.T, pg *integration.Env, dg *integration.DgraphEnv, c
 		t.Fatal(err)
 	}
 	nodes = append(nodes, map[string]any{"uid": "_:c", "dgraph.type": "Channel", "ch_uuid": channelUUID, "ch_name": "launch",
-		"ch_members": members[:len(members)-1], "ch_moderators": []map[string]any{{"uid": "_:" + names[0]}}})
+		// Live, as every channel the app writes is: a zero deletion time, never
+		// none (the reply route reads it).
+		"ch_deleted_at": "0001-01-01T00:00:00Z",
+		"ch_members":    members[:len(members)-1], "ch_moderators": []map[string]any{{"uid": "_:" + names[0]}}})
 	uids := dg.Mutate(t, nodes)
 	out := map[string]*dgraphStruct.DgraphUser{}
 	for _, n := range names {
@@ -355,7 +349,7 @@ func TestCallControlLetsHostsRunACall(t *testing.T) {
 	in := map[string]*joined{}
 	enter := func(name string) *joined {
 		t.Helper()
-		token, err := livekitInit.LiveKitService.GenerateToken(room, people[name].Uid, title(name), false, "")
+		token, err := livekitInit.LiveKitService.GenerateToken(room, people[name].Uid, title(name), false, "", livekitInit.CallPublishSources)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -460,7 +454,7 @@ func TestCallControlLetsHostsRunACall(t *testing.T) {
 	}
 
 	// Lee's token is from before the lock; Lee arrives after it.
-	leeToken, err := livekitInit.LiveKitService.GenerateToken(room, people["lee"].Uid, "Lee", false, "")
+	leeToken, err := livekitInit.LiveKitService.GenerateToken(room, people["lee"].Uid, "Lee", false, "", livekitInit.CallPublishSources)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +542,7 @@ func TestCallControlHandsACallOnWhenItsHostsLeave(t *testing.T) {
 		t.Fatal(err)
 	}
 	joinAs := func(name string) *joined {
-		token, _ := livekitInit.LiveKitService.GenerateToken(room, people[name].Uid, title(name), false, "")
+		token, _ := livekitInit.LiveKitService.GenerateToken(room, people[name].Uid, title(name), false, "", livekitInit.CallPublishSources)
 		j := join(t, lk, token)
 		joinSettled(t, room, people[name].Uid, j)
 		connected(t, ctx, room, people[name].Uid)
@@ -597,7 +591,7 @@ func TestCallStateReconcileHealsLostWebhooks(t *testing.T) {
 	}
 	var js []*joined
 	for _, name := range []string{"sam", "ana"} {
-		token, _ := livekitInit.LiveKitService.GenerateToken(room, people[name].Uid, title(name), false, "")
+		token, _ := livekitInit.LiveKitService.GenerateToken(room, people[name].Uid, title(name), false, "", livekitInit.CallPublishSources)
 		j := join(t, lk, token)
 		joinSettled(t, room, people[name].Uid, j)
 		js = append(js, j)
@@ -685,7 +679,7 @@ func TestTheCallReadShowsACallToItsPeopleOnly(t *testing.T) {
 	if _, err := livekitInit.LiveKitService.CreateRoom(ctx, room); err != nil {
 		t.Fatal(err)
 	}
-	token, _ := livekitInit.LiveKitService.GenerateToken(room, people["maya"].Uid, "Maya", false, "")
+	token, _ := livekitInit.LiveKitService.GenerateToken(room, people["maya"].Uid, "Maya", false, "", livekitInit.CallPublishSources)
 	maya := join(t, lk, token)
 	joinSettled(t, room, people["maya"].Uid, maya)
 	connected(t, ctx, room, people["maya"].Uid)

@@ -26,7 +26,6 @@ func mountDocAccess(rt docsRouters) {
 	rt.Doc.Post("/access/request", docController.RequestDocAccess)
 	rt.Doc.Post("/access/answer", docController.AnswerDocAccess)
 	rt.Doc.Post("/lock", docController.LockDoc)
-	rt.Admin.Post("/docs/recover", docController.RecoverDoc)
 
 	// Route swaps.
 	rt.Doc.Get("/getDocPermissions", docController.GetDocSharing)

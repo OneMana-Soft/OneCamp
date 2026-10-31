@@ -3,6 +3,7 @@ package controllers
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
@@ -59,6 +60,8 @@ func TestEveryMemberChangeSaysWhoMayMakeIt(t *testing.T) {
 	mayaIn := &dgraphStruct.DgraphUser{Uid: "0x2", Uuid: maya}
 	creator := &dgraphStruct.DgraphUser{Uid: "0x1", Uuid: maya}
 	guest := &dgraphStruct.DgraphUser{Uid: "0x3", Uuid: maya, IsExternal: true}
+	gone := time.Now().Add(-time.Hour)
+	deactivated := &dgraphStruct.DgraphUser{Uid: "0x4", Uuid: maya, UserName: "Sam Rivera", DeletedAt: &gone}
 	project := func(member, admin bool, in []*dgraphStruct.DgraphUser, team []*dgraphStruct.DgraphUser) *dgraphStruct.DgraphProject {
 		count := func(b bool) uint8 {
 			if b {
@@ -85,6 +88,7 @@ func TestEveryMemberChangeSaysWhoMayMakeIt(t *testing.T) {
 		{"someone outside, adding", project(false, false, none, []*dgraphStruct.DgraphUser{mayaIn}), addMember, http.StatusNotFound, "Project not found"},
 		{"an admin adding someone in the team", project(true, true, none, []*dgraphStruct.DgraphUser{mayaIn}), addMember, 0, ""},
 		{"an admin adding someone outside the team", project(true, true, none, none), addMember, http.StatusNotFound, "They aren't in the project's team."},
+		{"an admin adding someone whose account is deactivated", project(true, true, none, []*dgraphStruct.DgraphUser{deactivated}), addMember, http.StatusConflict, "Sam Rivera can't be added: their account is deactivated."},
 		{"an admin adding a guest", project(true, true, none, []*dgraphStruct.DgraphUser{guest}), addMember, http.StatusBadRequest, "A guest can't join a project. Share it with them instead."},
 		{"an admin making a member an admin", project(true, true, []*dgraphStruct.DgraphUser{mayaIn}, none), makeAdmin, 0, ""},
 		{"an admin making someone not in it an admin", project(true, true, none, none), makeAdmin, http.StatusNotFound, "They aren't in this project."},

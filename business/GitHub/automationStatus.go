@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
@@ -54,35 +55,44 @@ func NormalizeAutomationRules(ctx context.Context, projectID uuid.UUID, rules ma
 }
 
 // repointAutomationRules rewrites the project's rules that named a status
-// that was renamed or deleted, and drops the cached copies so the next webhook
-// reads them.
-func repointAutomationRules(ctx context.Context, r taskStatusBusiness.Repoint) error {
+// that was renamed, deleted or restored, drops the cached copies so the next
+// webhook reads them, and answers which rules it changed (ruleRef).
+func repointAutomationRules(ctx context.Context, r taskStatusBusiness.Repoint) ([]string, error) {
 	links, err := GetLinkedRepos(ctx, r.ProjectID)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var changed []string
 	for _, link := range links {
 		rules := parseAutomationRules(link)
-		changed := false
+		var these []string
 		for trigger, v := range rules {
-			if r.Matches(v) {
+			if ref := ruleRef(link.Id, trigger); r.Matches(v) && r.Allows(ref) {
 				rules[trigger] = r.New
-				changed = true
+				these = append(these, ref)
 			}
 		}
-		if !changed {
+		if len(these) == 0 {
 			continue
 		}
 		b, err := json.Marshal(rules)
 		if err != nil {
-			return err
+			return changed, err
 		}
 		if err := githubLinkDomain.UpdateAutomationRules(ctx, link.Id, string(b)); err != nil {
-			return err
+			return changed, err
 		}
 		invalidateLinkByLink(link)
+		slices.Sort(these)
+		changed = append(changed, these...)
 	}
-	return nil
+	return changed, nil
+}
+
+// ruleRef names a link's rule for a trigger, as a status's delete records it
+// for its restore (taskStatusBusiness.Repoint.Only).
+func ruleRef(link uuid.UUID, trigger string) string {
+	return "github_rule:" + link.String() + ":" + trigger
 }
 
 // statusSyncPayload is what the app needs to show a task's new status without

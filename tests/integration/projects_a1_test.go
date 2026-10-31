@@ -168,6 +168,10 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		}
 		code, body = comment("ben", w.task)
 		expect("a viewer commenting", code, body, http.StatusForbidden, "You can see this project but not comment in it.")
+		code, body = call("ben", taskController.CreateTask, nil, map[string]any{"task_project_uuid": w.project, "task_name": "A viewer's task"})
+		expect("a viewer making a task", code, body, http.StatusForbidden, "You can see this project but not add tasks to it.")
+		code, body = call("ben", taskController.CreateSubTask, nil, map[string]any{"task_uuid": w.task, "task_project_uuid": w.project, "task_name": "A viewer's sub-task"})
+		expect("a viewer making a sub-task", code, body, http.StatusForbidden, "You can see this project but not add tasks to it.")
 		code, body = call("ben", projectController.ProjectInfo, map[string]string{"project_uuid": w.project}, nil)
 		expect("a viewer opening the project", code, body, http.StatusOK, "")
 		code, body = call("ana", projectController.GetDgraphProjectCombinedMemberInfo, map[string]string{"project_uuid": w.project}, nil)

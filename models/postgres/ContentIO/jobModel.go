@@ -12,14 +12,17 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
-// Statuses, as the CHECK constraint in migration 207 has them.
+// Statuses, as the CHECK constraint has them (migration 207; ready since
+// the content_io_ready migration).
 const (
 	StatusUploading = "uploading"
 	StatusQueued    = "queued"
 	StatusRunning   = "running"
+	StatusReady     = "ready"
 	StatusDone      = "done"
 	StatusFailed    = "failed"
 )
@@ -188,10 +191,29 @@ func Finish(ctx context.Context, id uuid.UUID, status string, result json.RawMes
 	return err
 }
 
-// FailAbandoned fails the jobs left running or waiting for an upload since
-// before the given time, saying why: a restart stopped them, or the upload
-// never came. It returns them, so their stored files can go.
-func FailAbandoned(ctx context.Context, runningBefore, uploadingBefore time.Time) ([]*Job, error) {
+// Ready leaves a running job waiting for its person to choose (ready), with
+// result, what its file was found to hold.
+func Ready(ctx context.Context, id uuid.UUID, result json.RawMessage) error {
+	_, err := pgexec.Exec(ctx, `UPDATE content_io_jobs
+		SET status = 'ready', progress = 100, result = $2, updated_at = NOW()
+		WHERE id = $1 AND status = 'running'`, id, jsonOrEmpty(result))
+	return err
+}
+
+// Choose queues a ready job again, asked params (holding its person's
+// choices), its result cleared. It reports whether the job was still ready.
+func Choose(ctx context.Context, id uuid.UUID, params json.RawMessage) (bool, error) {
+	n, err := pgexec.Exec(ctx, `UPDATE content_io_jobs
+		SET status = 'queued', params = $2, result = '{}'::jsonb, progress = 0, updated_at = NOW()
+		WHERE id = $1 AND status = 'ready'`, id, jsonOrEmpty(params))
+	return n == 1, err
+}
+
+// FailAbandoned fails the jobs left running, waiting for an upload, or ready
+// and never chosen for, since before the given times, saying why: a restart
+// stopped them, the upload never came, nobody confirmed what to make. It
+// returns them, so their stored files can go.
+func FailAbandoned(ctx context.Context, runningBefore, uploadingBefore, readyBefore time.Time) ([]*Job, error) {
 	conn, timeout, err := db()
 	if err != nil {
 		return nil, err
@@ -203,10 +225,12 @@ func FailAbandoned(ctx context.Context, runningBefore, uploadingBefore time.Time
 		    error = CASE
 		        WHEN status = 'running' AND kind = 'export' THEN 'The server restarted while this export was being made. Start it again.'
 		        WHEN status = 'running' THEN 'The server restarted while this was being imported. Docs made before it stopped are kept; import the rest again.'
+		        WHEN status = 'ready' THEN 'Nobody confirmed what to make of this file in time. Import it again.'
 		        ELSE 'The file never finished uploading.'
 		    END
 		WHERE (status = 'running' AND updated_at < $1) OR (status = 'uploading' AND updated_at < $2)
-		RETURNING `+cols, runningBefore, uploadingBefore)
+		   OR (status = 'ready' AND updated_at < $3)
+		RETURNING `+cols, runningBefore, uploadingBefore, readyBefore)
 	if err != nil {
 		return nil, err
 	}

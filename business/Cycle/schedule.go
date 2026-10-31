@@ -130,6 +130,8 @@ type ScheduleInput struct {
 	Upcoming      int       `json:"upcoming"`
 	RollOver      bool      `json:"roll_over"`
 	StartsAt      time.Time `json:"starts_at"`
+	// AddStarted: a task that starts joins the cycle running then (startedJoins.go).
+	AddStarted bool `json:"add_started"`
 }
 
 // Schedule checks the input, with words for the person. Pure.

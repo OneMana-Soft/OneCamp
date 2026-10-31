@@ -15,17 +15,17 @@ import (
 // models/ still run SQL or DQL themselves rather than through models/pgexec
 // or models/dgexec (1,219 when this landed; the audit, counting differently,
 // said about 1,090; 1,170 on beta 23c884e2, and 1,168 once the projects chain
-// landed on it, the two its branch had moved onto the generics). It only goes
-// down: move a function onto the generics, then lower this to the count the
-// test reports. The release lines leave out the demo's own code, so theirs is
-// one lower (1,166 on v2.75.0's main; 1,163 once
-// UpdateAttachmentDeletedTimeByUUID went; 1,162 with the import re-check).
-const handExecutorBaseline = 1162
+// landed on it, the two its branch had moved onto the generics; 1,150 with
+// the calls stack, whose C10 fix writes MarkRemoved through pgexec; 1,143
+// once UpdateAttachmentDeletedTimeByUUID went; 1,141 once UpsertWorkspaceMapping
+// went). It only goes down: move a
+// function onto the generics, then lower this to the count the test reports.
+const handExecutorBaseline = 1134
 
 // backgroundTimeoutBaseline is how many times models/ starts a statement's
 // timeout from context.Background() instead of the caller's ctx (206 at the
 // audit, 199 when this landed). It only goes down.
-const backgroundTimeoutBaseline = 149
+const backgroundTimeoutBaseline = 148
 
 // executorCalls are the calls that run a statement or a query on a store
 // client, or open a graph transaction to run one in (an HTTP client's Do is

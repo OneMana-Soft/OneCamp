@@ -696,8 +696,14 @@ func (s *service) Reopen(ctx context.Context, who accessBusiness.Subject, id str
 	if !ok {
 		return Proposal{}, ErrUnavailable
 	}
-	if _, err := level(ctx, k, who, p.ResourceUUID); err != nil {
+	access, err := level(ctx, k, who, p.ResourceUUID)
+	if err != nil {
 		return Proposal{}, err
+	}
+	// Reopening changes decisions, so it needs what deciding needs, now: a
+	// decider moved down to view since can't take theirs back.
+	if !canEdit(access) {
+		return Proposal{}, ErrForbidden
 	}
 	now := s.now().UTC()
 	want := map[string]bool{}

@@ -71,7 +71,7 @@ func TestAnAppsCredentialActsAsTheAppWhereItWasAddedAndStopsWithIt(t *testing.T)
 	}
 	appID := uuid.MustParse(view.ID)
 	if _, err := appBusiness.SetAccess(ctx, appID, []string{"tables:read"},
-		appBusiness.Audience{Places: []appBusiness.Place{{Kind: "table", ID: added.Id.String()}}}); err != nil {
+		appBusiness.Audience{Places: []appBusiness.Place{{Kind: "table", ID: added.Id.String()}}}, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -174,7 +174,7 @@ func TestAnAppsCredentialActsAsTheAppWhereItWasAddedAndStopsWithIt(t *testing.T)
 	// Taking a scope from the app takes it from its tokens on their next call,
 	// and giving it back gives it back.
 	places := appBusiness.Audience{Places: []appBusiness.Place{{Kind: "table", ID: added.Id.String()}}}
-	if _, err := appBusiness.SetAccess(ctx, appID, []string{"tasks:read"}, places); err != nil {
+	if _, err := appBusiness.SetAccess(ctx, appID, []string{"tasks:read"}, places, ""); err != nil {
 		t.Fatal(err)
 	}
 	if a, _ := apiTokenBusiness.Validate(ctx, fresh); a == nil || len(a.Scopes) != 0 {
@@ -183,7 +183,7 @@ func TestAnAppsCredentialActsAsTheAppWhereItWasAddedAndStopsWithIt(t *testing.T)
 	if code, out := call(fresh, "/v1/tables/"+added.Id.String()); code != http.StatusForbidden {
 		t.Errorf("a token whose scope the app lost answered %d %v", code, out)
 	}
-	if _, err := appBusiness.SetAccess(ctx, appID, []string{"tables:read"}, places); err != nil {
+	if _, err := appBusiness.SetAccess(ctx, appID, []string{"tables:read"}, places, ""); err != nil {
 		t.Fatal(err)
 	}
 	if a, _ := apiTokenBusiness.Validate(ctx, fresh); a == nil || len(a.Scopes) != 1 || a.Scopes[0] != "tables:read" {

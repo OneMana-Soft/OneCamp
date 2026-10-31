@@ -34,10 +34,16 @@ const (
 // Redis so the composer typeahead never hits Postgres on the hot path. The
 // cache key embeds a workspace-wide catalog version so an admin
 // install/toggle/remove invalidates every user's cache at once (bumpCatalogVersion).
+// A command stands where commandPlace puts it: an app that isn't set up is
+// offered to admins to set up and kept from members, whose "/giphy" only said
+// an admin had to add a key; one turned off or removed is offered to nobody,
+// and so is a command this build can't run (wired).
 func GetCatalog(ctx context.Context, user userModels.UserInfo) (*commandAdapter.CatalogResponse, error) {
 	userUUID := user.UserDgraphInfo.Uuid
+	// An admin's API token acts as a member, so it reads a member's menu.
+	admin := user.UserPostgresInfo.IsAdmin && !helpers.ActsThroughToken(ctx)
 	version := catalogVersion(ctx)
-	cacheArg := userUUID + ":" + version
+	cacheArg := userUUID + ":" + version + ":" + strconv.FormatBool(admin)
 
 	// Cache hit.
 	var cached commandAdapter.CatalogResponse
@@ -52,13 +58,58 @@ func GetCatalog(ctx context.Context, user userModels.UserInfo) (*commandAdapter.
 	if err != nil {
 		return nil, err
 	}
+	installed, err := slashModel.ListApps(ctx)
+	if err != nil {
+		return nil, err
+	}
+	removed, err := slashModel.RemovedAppSlugs(ctx)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetCatalog removed apps err: %+v", err)
+		return nil, err
+	}
+	apps := make(map[string]*latestApp, len(installed)+len(removed))
+	for slug := range removed {
+		apps[slug] = &latestApp{Removed: true}
+	}
+	for _, a := range installed {
+		apps[a.Slug] = &latestApp{App: a}
+	}
+	bags := map[uuid.UUID]*appSecretBag{}
 
 	resp := &commandAdapter.CatalogResponse{Commands: make([]commandAdapter.CatalogCommand, 0, len(cmds))}
 	for _, c := range cmds {
+		if !wired(c) {
+			continue
+		}
+		t, ok := commandTemplate(c)
+		var app *latestApp
+		var bag *appSecretBag
+		if ok {
+			app = apps[t.Slug]
+		}
+		if app != nil && !app.Removed && app.IsEnabled {
+			if _, read := bags[app.Id]; !read {
+				b, err := loadAppSecrets(ctx, app.Id)
+				if err != nil {
+					// Secrets that can't be read serve no better than none: the
+					// app is offered to set up again.
+					helpers.LogErrorWithContext(ctx, "business/GetCatalog secrets of %s err: %+v", app.Slug, err)
+				}
+				bags[app.Id] = b
+			}
+			bag = bags[app.Id]
+		}
+		place := commandPlace(t, ok, app, bag)
+		if place == menuHidden || (place == menuSetup && !admin) {
+			continue
+		}
 		entry := commandAdapter.CatalogCommand{
 			Command:     c.Command,
 			Description: c.Description,
 			IsBuiltin:   c.IsBuiltin,
+		}
+		if place == menuSetup {
+			entry.Setup = &commandAdapter.CatalogSetup{Slug: t.Slug, Name: t.Name}
 		}
 		if c.UsageHint != nil {
 			entry.UsageHint = *c.UsageHint
@@ -407,9 +458,10 @@ func postSigned(ctx context.Context, url, secret string, payload map[string]inte
 }
 
 // forwardCheck and forwardClient are how a command, its answer's card and a
-// press reach an app: an HTTPS address on a public network, through the
-// SSRF-safe client. Seams for the integration test, which serves its app on
-// loopback (forwardToThisNetworkForTest_integration.go).
+// press reach an app, Giphy's API included (giphyQuery): an HTTPS address on
+// a public network, through the SSRF-safe client. Seams for the tests that
+// serve an app on loopback (forwardToThisNetworkForTest_integration.go, and
+// giphyPicker_test.go's Giphy stand-in).
 var (
 	forwardCheck  = func(raw string) error { _, err := helpers.ValidateOutboundURL(raw, false); return err }
 	forwardClient = func() *http.Client { return helpers.SSRFSafeClient(false) }

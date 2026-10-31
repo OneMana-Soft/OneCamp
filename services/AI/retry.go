@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -79,27 +78,6 @@ func isRetryableStatus(code int) bool {
 		return true
 	}
 	return false
-}
-
-// parseRetryAfter reads the Retry-After header (delta-seconds or HTTP-date).
-// Returns 0 when absent/unparseable so the caller falls back to backoff.
-func parseRetryAfter(h http.Header) time.Duration {
-	v := h.Get("Retry-After")
-	if v == "" {
-		return 0
-	}
-	if secs, err := strconv.Atoi(v); err == nil {
-		if secs < 0 {
-			return 0
-		}
-		return time.Duration(secs) * time.Second
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		if d := time.Until(t); d > 0 {
-			return d
-		}
-	}
-	return 0
 }
 
 // backoffWait sleeps before the next attempt, preferring the server-suggested
@@ -172,7 +150,7 @@ func doHTTPWithRetry(ctx context.Context, client *http.Client, newReq func() (*h
 		}
 
 		// Retryable: honor Retry-After, drain+close, and try again.
-		wait := parseRetryAfter(resp.Header)
+		wait := helpers.RetryAfter(resp.Header, 0)
 		_ = resp.Body.Close()
 		if werr := backoffWait(ctx, attempt, cfg, wait); werr != nil {
 			return nil, fmt.Errorf("ai: provider rate-limited; cancelled while waiting to retry: %w", werr)

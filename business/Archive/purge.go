@@ -29,6 +29,7 @@ import (
 	archiveModels "github.com/akashc777/OneCamp/models/postgres/Archive"
 	"time"
 
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	attachmentDomain "github.com/akashc777/OneCamp/domain/Attachment"
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	"github.com/akashc777/OneCamp/helpers"
@@ -80,13 +81,6 @@ func purgeCutoff(p *ArchivePolicy, now time.Time) (time.Time, bool) {
 	return now.Add(-time.Duration(p.PurgeAfterDays) * 24 * time.Hour), true
 }
 
-// attachmentObject is where an attachment row's bytes live: every upload path
-// (chat, import, Slack) writes under this prefix and stores the rest as
-// obj_key. Kept as one function so the purge and the uploads cannot drift.
-func attachmentObject(objKey string) string {
-	return "userFileUpload/" + objKey
-}
-
 // PurgeResult is what one pass over one policy did.
 type PurgeResult struct {
 	Removed int64 // items gone for good
@@ -110,6 +104,13 @@ var (
 // removeObjectFromStorage removes one object and reports its size. An object
 // that is already absent counts as removed with no size: the row it belonged
 // to must still go, or it would be tried forever.
+//
+// The size is asked first only for the policy's running total, so a HEAD that
+// fails some other way doesn't stop the delete, which is the same whether the
+// object is there or not; the total misses that one object's bytes. A CDN in
+// front of storage turned every first HEAD into a GET its signature didn't
+// cover, and storage refused it: each first delete of a recording failed
+// (V-31). Only the delete's own refusal fails the removal.
 func removeObjectFromStorage(ctx context.Context, bucket, key string) (int64, error) {
 	var size int64
 	if st, err := minioInit.MinioClient.StatObject(ctx, bucket, key, minio.StatObjectOptions{}); err == nil {
@@ -117,7 +118,7 @@ func removeObjectFromStorage(ctx context.Context, bucket, key string) (int64, er
 	} else if isNoSuchKey(err) {
 		return 0, nil
 	} else {
-		return 0, err
+		helpers.LogWarnWithContext(ctx, "business/Archive couldn't read the size of %s before removing it: %v", key, err)
 	}
 	if err := minioInit.MinioClient.RemoveObject(ctx, bucket, key, minio.RemoveObjectOptions{}); err != nil && !isNoSuchKey(err) {
 		return 0, err
@@ -190,7 +191,7 @@ func purgeAttachments(ctx context.Context, cutoff time.Time) (PurgeResult, error
 		}
 		var size int64
 		if !held {
-			size, err = removeObject(ctx, bucket, attachmentObject(a.ObjKey))
+			size, err = removeObject(ctx, bucket, attachmentBusiness.ObjectName(a.ObjKey))
 			if err != nil {
 				helpers.LogErrorWithContext(ctx, "purge attachments: removing %s: %v", a.ObjKey, err)
 				res.Failed++

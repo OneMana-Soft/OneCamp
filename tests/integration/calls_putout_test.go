@@ -26,12 +26,12 @@ import (
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
-// attendanceAway takes the call's attendance out of reach (renamed), as a
+// tableAway takes one of the call's tables out of reach (renamed), as a
 // database that doesn't answer it, and answers how to put it back; it is put
 // back when the test ends whatever happens.
-func attendanceAway(t *testing.T, db *sql.DB) func() {
+func tableAway(t *testing.T, db *sql.DB, table string) func() {
 	t.Helper()
-	if _, err := db.Exec(`ALTER TABLE call_attendance RENAME TO call_attendance_away`); err != nil {
+	if _, err := db.Exec(`ALTER TABLE ` + table + ` RENAME TO ` + table + `_away`); err != nil {
 		t.Fatal(err)
 	}
 	back := false
@@ -40,7 +40,7 @@ func attendanceAway(t *testing.T, db *sql.DB) func() {
 			return
 		}
 		back = true
-		if _, err := db.Exec(`ALTER TABLE call_attendance_away RENAME TO call_attendance`); err != nil {
+		if _, err := db.Exec(`ALTER TABLE ` + table + `_away RENAME TO ` + table); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -69,7 +69,7 @@ func oneInACall(t *testing.T, name string) (context.Context, *integration.Env, *
 	if _, err := livekitInit.LiveKitService.CreateRoom(ctx, room); err != nil {
 		t.Fatal(err)
 	}
-	token, err := livekitInit.LiveKitService.GenerateToken(room, uids["p"], title(name), false, "")
+	token, err := livekitInit.LiveKitService.GenerateToken(room, uids["p"], title(name), false, "", livekitInit.CallPublishSources)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestCallAPutOutHoldsWhenTheRecordCantAnswer(t *testing.T) {
 	connected(t, ctx, room, sam.Uid)
 	host := liveKitBusiness.Remover{Identity: "0xa1", Name: "Maya Chen"}
 
-	back := attendanceAway(t, pg.PG)
+	back := tableAway(t, pg.PG, "call_attendance")
 	if err := liveKitBusiness.RemoveFromCall(ctx, room, sam.Uid, host, liveKitBusiness.RemovedByHost); !errors.Is(err, liveKitBusiness.ErrCallUnchecked) {
 		t.Errorf("a removal the record couldn't keep: %v", err)
 	}
@@ -108,13 +108,49 @@ func TestCallAPutOutHoldsWhenTheRecordCantAnswer(t *testing.T) {
 	}
 }
 
+// A host's removal is one change: when the admission that goes with it can't
+// be forgotten, Sam is neither kept out nor put out, and the host's next try
+// does both. Before (audit C10's review), the two were separate statements,
+// and a failed second one left him marked removed while still in the call.
+func TestCallARemovalThatCantFinishChangesNothing(t *testing.T) {
+	ctx, pg, env, room, sam, token := oneInACall(t, "sam")
+	in := join(t, env, token)
+	joinSettled(t, room, sam.Uid, in)
+	connected(t, ctx, room, sam.Uid)
+	// The check that he may stay has finished before his admissions go out of reach.
+	if busy := helpers.SettleBackground(15 * time.Second); len(busy) > 0 {
+		t.Fatalf("the check was still running: %v", busy)
+	}
+	host := liveKitBusiness.Remover{Identity: "0xa1", Name: "Maya Chen"}
+
+	back := tableAway(t, pg.PG, "call_admissions")
+	if err := liveKitBusiness.RemoveFromCall(ctx, room, sam.Uid, host, liveKitBusiness.RemovedByHost); !errors.Is(err, liveKitBusiness.ErrCallUnchecked) {
+		t.Errorf("a removal that couldn't finish: %v", err)
+	}
+	back()
+	if people, _ := livekitInit.LiveKitService.ConnectedParticipants(ctx, room); len(people) != 1 {
+		t.Errorf("put out by a removal that failed: %v", people)
+	}
+	if _, _, err := liveKitBusiness.CreateRoomAndGetToken(ctx, room, sam, false, ""); err != nil {
+		t.Fatalf("a removal that failed still keeps him out: %v", err)
+	}
+
+	if err := liveKitBusiness.RemoveFromCall(ctx, room, sam.Uid, host, liveKitBusiness.RemovedByHost); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "Sam to be put out", func() bool { return in.disconnected.Load() != nil })
+	if _, _, err := liveKitBusiness.CreateRoomAndGetToken(ctx, room, sam, false, ""); !errors.Is(err, liveKitBusiness.ErrRemovedFromCall) {
+		t.Fatalf("a removed member minted a token back into the call: %v", err)
+	}
+}
+
 // Someone who connects while whether they may stay can't be checked is put
 // out, told it was unconfirmed, and comes back once it can be: before, a
 // check that couldn't answer let them stay, so a token minted before a
 // removal or a lock walked back in while the database blinked.
 func TestCallSomeoneWhoseStandingCantBeCheckedIsPutOut(t *testing.T) {
 	ctx, pg, env, room, ana, token := oneInACall(t, "ana")
-	back := attendanceAway(t, pg.PG)
+	back := tableAway(t, pg.PG, "call_attendance")
 	in := join(t, env, token)
 	joinSettled(t, room, ana.Uid, in)
 	connected(t, ctx, room, ana.Uid) // the server's check runs, and can't answer

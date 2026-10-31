@@ -516,16 +516,18 @@ func TestDocAccessResolver(t *testing.T) {
 		}
 	})
 
+	// Through Settings > Docs' hand-over of a departed person's docs
+	// (business/Departed), which recovers each doc this way.
 	t.Run("an admin recovers a doc, loudly", func(t *testing.T) {
 		left := create("cy", "Left behind", "", nil)
-		if got := call("bea", "POST", "/admin/docs/recover", docController.RecoverDoc, map[string]any{"doc_uuid": left, "reason": "Cy left"}, nil); got.code != 403 {
-			t.Errorf("a member recovers: %d", got.code)
+		res := accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: left}
+		if _, err := accessBusiness.Recover(ctx, subject("bea"), res, "", "Cy left"); !errors.Is(err, accessBusiness.ErrForbidden) {
+			t.Errorf("a member recovers: %v", err)
 		}
-		if got := call("ada", "POST", "/admin/docs/recover", docController.RecoverDoc, map[string]any{"doc_uuid": left}, nil); got.code != 400 {
-			t.Errorf("a recovery without a reason: %d", got.code)
-		}
-		if got := call("ada", "POST", "/admin/docs/recover", docController.RecoverDoc, map[string]any{"doc_uuid": left, "to_user_uuid": people["di"].String(), "reason": "Cy left"}, nil); got.code != 200 {
-			t.Fatalf("recover to di: %d %v", got.code, got.body)
+		admin := subject("ada")
+		admin.Admin = true
+		if _, err := accessBusiness.Recover(ctx, admin, res, people["di"].String(), "Cy left"); err != nil {
+			t.Fatalf("recover to di: %v", err)
 		}
 		if a := access("di", left).data(); a["owner"] != true {
 			t.Errorf("di after the recovery: %v", a)

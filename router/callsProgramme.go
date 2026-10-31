@@ -30,4 +30,9 @@ func newCallsRouters(root chi.Router) callsRouters {
 // line per package, in merge order, and nothing else.
 func mountCallsProgramme(rt callsRouters) {
 	mountCallSessions(rt) // CALLS-1: Call State's reads and Call Control's actions
+	mountCallsLobby(rt)   // CALLS-2: a meeting's lobby choice
+	mountCallRooms(rt)    // CALLS-2: a member's personal meeting room
+	mountCallInvites(rt)  // HU13: a call's invite, and members at a link as themselves
+	mountCallThread(rt)   // CALLS-3b: the call's thread for people outside its conversation
+	mountCallQuality(rt)  // A5: Call Quality Telemetry
 }

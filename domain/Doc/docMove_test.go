@@ -56,7 +56,8 @@ func TestDocArchiveRequestDefinesAVariablePerDoc(t *testing.T) {
 // as every save does, so a save and the archive of one doc conflict and can't
 // both land: it wrote only its two marks, and a save that had read the doc
 // live went into it after it was archived. A hosted doc (a table row's page,
-// D-18) is never archived by the docs' retention: it goes with its host.
+// D-18) is never archived by the docs' retention: it goes with its host; nor
+// is a folder, a file or a link (docs F1: pageOnly).
 func TestTheArchiveChecksEachDocAgainAndConflictsWithASave(t *testing.T) {
 	id := "11111111-1111-4111-8111-111111111111"
 	cutoff := time.Date(2025, 10, 12, 9, 30, 0, 0, time.UTC)
@@ -66,7 +67,7 @@ func TestTheArchiveChecksEachDocAgainAndConflictsWithASave(t *testing.T) {
 		t.Fatalf("no archive request for a doc: %+v", req)
 	}
 	want := `d0 as var(func: eq(doc_uuid, "` + id + `")) @filter(` + liveDocFilter +
-		` AND (lt(doc_updated_at, "2025-10-12T09:30:00Z") OR (NOT has(doc_updated_at) AND lt(doc_created_at, "2025-10-12T09:30:00Z"))) AND NOT ge(doc_restored_at, "2025-10-12T09:30:00Z") AND NOT has(doc_host_kind))`
+		` AND (lt(doc_updated_at, "2025-10-12T09:30:00Z") OR (NOT has(doc_updated_at) AND lt(doc_created_at, "2025-10-12T09:30:00Z"))) AND NOT ge(doc_restored_at, "2025-10-12T09:30:00Z") AND NOT has(doc_host_kind) AND ` + pageOnly + `)`
 	if !strings.Contains(req.Query, want) {
 		t.Errorf("the archive does not check the doc again:\n%s\nwant it to hold\n%s", req.Query, want)
 	}

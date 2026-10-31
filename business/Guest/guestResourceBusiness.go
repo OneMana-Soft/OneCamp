@@ -135,7 +135,7 @@ func CreateResourceGrant(ctx context.Context, creatorUUID uuid.UUID, resourceTyp
 	// The ceiling still applies to every link that HAS an expiry, and the
 	// workspace's cap to every link: permanence is only reachable by asking
 	// for it explicitly, and only while there is no cap (kinds.go).
-	expiresAt := linkLifetime(ctx, time.Now(), ttl, neverExpires)
+	expiresAt := linkLifetime(ctx, KindLink, time.Now(), ttl, neverExpires)
 	grantID, err := guestModel.CreateGrant(ctx, hashToken(raw), resourceType, resourceID, cap, creatorUUID, expiresAt)
 	if err != nil {
 		return nil, err
@@ -313,17 +313,18 @@ func ValidateResourceGrant(ctx context.Context, rawToken, expectedType string) (
 }
 
 // grantedLive refuses a doc or board grant whose doc or board has been deleted
-// (or is gone): a link outlives nothing it opens, so it opens nothing, takes no
-// comment and joins no live session until the doc or board is restored, when
-// it works again. ErrNotFound reads to the guest as the uniform "no longer
-// available"; a read that failed is kept, for the 503 their page retries.
+// (or is gone): a link outlives nothing it opens, so it joins no live session
+// until the doc or board is restored, when it works again. ErrNotFound reads
+// to the guest as the uniform "no longer available"; a read that failed is
+// kept, for the 503 their page retries. A folder, a file or a link joins none
+// at all (docBusiness.ErrNotAPage, docs F1): only a page opens in the editor.
 func grantedLive(ctx context.Context, g *guestModel.GuestGrant) error {
 	if g == nil {
 		return nil
 	}
 	switch g.ResourceType {
 	case guestModel.ResourceDoc:
-		err := docBusiness.CheckDocLive(ctx, g.ResourceID)
+		err := docBusiness.CheckPageLive(ctx, g.ResourceID)
 		if errors.Is(err, docBusiness.ErrNotFound) || errors.Is(err, docBusiness.ErrDocDeleted) {
 			return ErrNotFound
 		}
@@ -383,7 +384,7 @@ func IssueGuestCollabToken(ctx context.Context, grant *guestModel.GuestGrant, di
 		// `sub` lives in the reserved guest namespace so it can never collide
 		// with a member UUID identity in the collab awareness layer.
 		"sub":   collabIdentity(grant.Id),
-		"name":  "Guest: " + name,
+		"name":  callNamePrefix + name,
 		"guest": true,
 		"gid":   grant.Id.String(),
 		"rt":    grant.ResourceType,
@@ -449,9 +450,34 @@ func AuthorizeGuestCollab(ctx context.Context, bearerToken, kind, resourceID str
 	return g, nil
 }
 
-// parseGuestCollabClaims verifies the JWT signature + expiry and extracts the
-// guest scope. Rejects any token that is not a guest token.
+// parseGuestCollabClaims verifies a share link's guest collab JWT and
+// extracts its scope. Rejects any token that is not a link's: a member's, or a
+// call's board token (callBoard.go).
 func parseGuestCollabClaims(tokenString, secret string) (*GuestCollabClaims, error) {
+	claims, err := verifiedGuestClaims(tokenString, secret)
+	if err != nil {
+		return nil, err
+	}
+	if _, call := claims["call"]; call {
+		return nil, ErrInvalidGrant
+	}
+	gidStr, _ := claims["gid"].(string)
+	gid, err := uuid.Parse(gidStr)
+	if err != nil {
+		return nil, ErrInvalidGrant
+	}
+	rt, _ := claims["rt"].(string)
+	rid, _ := claims["rid"].(string)
+	name, _ := claims["name"].(string)
+	if rt == "" || rid == "" {
+		return nil, ErrInvalidGrant
+	}
+	return &GuestCollabClaims{GrantID: gid, ResourceType: rt, ResourceID: rid, Name: name}, nil
+}
+
+// verifiedGuestClaims verifies a guest collab JWT's signature and expiry, and
+// that it is a guest's.
+func verifiedGuestClaims(tokenString, secret string) (jwt.MapClaims, error) {
 	if tokenString == "" {
 		return nil, ErrInvalidGrant
 	}
@@ -471,16 +497,5 @@ func parseGuestCollabClaims(tokenString, secret string) (*GuestCollabClaims, err
 	if g, _ := claims["guest"].(bool); !g {
 		return nil, ErrInvalidGrant
 	}
-	gidStr, _ := claims["gid"].(string)
-	gid, err := uuid.Parse(gidStr)
-	if err != nil {
-		return nil, ErrInvalidGrant
-	}
-	rt, _ := claims["rt"].(string)
-	rid, _ := claims["rid"].(string)
-	name, _ := claims["name"].(string)
-	if rt == "" || rid == "" {
-		return nil, ErrInvalidGrant
-	}
-	return &GuestCollabClaims{GrantID: gid, ResourceType: rt, ResourceID: rid, Name: name}, nil
+	return claims, nil
 }

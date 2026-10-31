@@ -350,13 +350,13 @@ func Fetch(ctx context.Context, rawURL string, opt Options) (*Response, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, unwrapURLError(err)
+		return nil, UnwrapURLError(err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, opt.MaxBytes+1))
 	if err != nil {
-		return nil, unwrapURLError(err)
+		return nil, UnwrapURLError(err)
 	}
 	out := &Response{URL: resp.Request.URL, Status: resp.StatusCode, Header: resp.Header, Body: body}
 	if int64(len(body)) > opt.MaxBytes {
@@ -368,10 +368,11 @@ func Fetch(ctx context.Context, rawURL string, opt Options) (*Response, error) {
 	return out, nil
 }
 
-// unwrapURLError answers the error inside the client's *url.Error, so a
+// UnwrapURLError answers the error inside the client's *url.Error, so a
 // caller can tell a refusal (errors.Is ErrBlocked) from a timeout or a
-// network failure.
-func unwrapURLError(err error) error {
+// network failure, and can log or show it without the request's address,
+// whose query may hold a key.
+func UnwrapURLError(err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) && ue.Err != nil {
 		return ue.Err

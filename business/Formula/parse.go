@@ -21,6 +21,11 @@ type env struct {
 	cell func(id string) Value
 	now  time.Time
 	loc  *time.Location
+	// row is the row's own id and stamps (Program.RunRow).
+	row Row
+	// current is the items FILTER and MAP are going through, innermost
+	// last: what CURRENT() reads.
+	current []Value
 	// steps is the work done for the row, and read the work done for every
 	// row of the read so far (Program.read).
 	steps int
@@ -117,7 +122,7 @@ func (e *env) truthy(v Value) bool {
 // reader's day when it's compared, printed or taken apart. A whole day is a
 // calendar date, the same everywhere, and stays as it is.
 func (e *env) local(v Value) Value {
-	if v.Kind == KindDate && !v.Day {
+	if v.Kind == KindDate && !v.Day && !v.Zoned {
 		v.Time = v.Time.In(e.loc)
 	}
 	return v
@@ -235,6 +240,7 @@ func (n *binary) kind(k func(string) Kind) Kind {
 }
 
 func (n *call) eval(e *env) Value {
+	e.spend(n.fn.cost)
 	if n.fn.lazy != nil {
 		return n.fn.lazy(e, n.args)
 	}
@@ -434,7 +440,10 @@ type parser struct {
 	i     int
 	depth int
 	field func(ref string) (string, error)
-	refs  map[string]bool
+	// linked resolves {Link}.{Field}'s field among link's linked fields;
+	// nil when none can be read.
+	linked func(link, ref string) (string, error)
+	refs   map[string]bool
 }
 
 func (p *parser) peek() token { return p.toks[p.i] }
@@ -447,8 +456,8 @@ func (p *parser) next() token {
 	return t
 }
 
-// parse reads a whole formula.
-func parse(src string, field func(ref string) (string, error)) (node, map[string]bool, error) {
+// parse reads a whole formula, {Link}.{Field} with linked.
+func parse(src string, field func(ref string) (string, error), linked func(link, ref string) (string, error)) (node, map[string]bool, error) {
 	if strings.TrimSpace(src) == "" {
 		return nil, nil, &SyntaxError{Msg: "Write a formula"}
 	}
@@ -459,7 +468,7 @@ func parse(src string, field func(ref string) (string, error)) (node, map[string
 	if err != nil {
 		return nil, nil, err
 	}
-	p := &parser{toks: toks, field: field, refs: map[string]bool{}}
+	p := &parser{toks: toks, field: field, linked: linked, refs: map[string]bool{}}
 	n, err := p.comparison()
 	if err != nil {
 		return nil, nil, err
@@ -563,6 +572,23 @@ func (p *parser) primary() (node, error) {
 			return nil, syntaxErr(t.pos, "%s", err.Error())
 		}
 		p.refs[id] = true
+		if p.peek().kind == tDot {
+			p.next()
+			ft := p.next()
+			if ft.kind != tField {
+				return nil, syntaxErr(ft.pos, "A link's field goes in braces after the dot, like {Vendor}.{City}")
+			}
+			if p.linked == nil {
+				return nil, syntaxErr(ft.pos, "{%s} doesn't link to a table's rows, so it has no fields to read", clip(t.text))
+			}
+			lid, err := p.linked(id, ft.text)
+			if err != nil {
+				return nil, syntaxErr(ft.pos, "%s", err.Error())
+			}
+			ref := LinkedRef(id, lid)
+			p.refs[ref] = true
+			return &fieldRef{id: ref}, nil
+		}
 		return &fieldRef{id: id}, nil
 	case tLParen:
 		if err := p.enter(t.pos); err != nil {
@@ -593,6 +619,14 @@ func (p *parser) ident(t token) (node, error) {
 			return &boolLit{b: true}, nil
 		case "FALSE":
 			return &boolLit{b: false}, nil
+		case "VALUES":
+			// A rollup's formula reads its linked values as Airtable's
+			// does, bare: SUM(values). Only a rollup has a field so called
+			// to read (RollupValues).
+			if id, err := p.field(RollupValues); err == nil {
+				p.refs[id] = true
+				return &fieldRef{id: id}, nil
+			}
 		}
 		return nil, syntaxErr(t.pos, "%s isn't a function; a field's name goes in braces, like {%s}", clip(t.text), clip(t.text))
 	}

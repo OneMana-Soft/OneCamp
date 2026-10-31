@@ -12,20 +12,14 @@ package business
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
-	"github.com/akashc777/OneCamp/initializers/opensearchInit"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/google/uuid"
-	"github.com/opensearch-project/opensearch-go/v4"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
 // tasksProvider streams n tasks of one project, made by Maya and assigned
@@ -54,24 +48,24 @@ func (p tasksProvider) IterTasksOfProject(context.Context, *importModels.Job, im
 	return out, errs
 }
 
-func importTasksStatements(t *testing.T, n int) int {
+// taskWorld is what an import's task stage needs: a project in Postgres and
+// the graph, its team, the person importing, Maya and Bo, and a job of
+// provider, run by the person importing, that maps the project as P1 and the
+// two people as u-maya and u-bo. Search answers every write.
+type taskWorld struct {
+	env      *integration.Env
+	dg       *integration.DgraphEnv
+	job      *importModels.Job
+	project  uuid.UUID
+	importer *userModels.UserInfo
+	// counter, when a test counts Postgres statements, marks importTasks'
+	// context, so the import's own statements are what it counts.
+	counter *integration.PostgresCounter
+}
+
+func newTaskWorld(t *testing.T, provider string) *taskWorld {
 	ctx := context.Background()
-	env := integration.SetupEnv(t)
-	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
-		t.Fatal(err)
-	}
-	dg := integration.SetupDgraph(t)
-	integration.SetupRedis(t)
-	integration.StubMqttClient(t)
-	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"took":1,"errors":false,"items":[]}`)
-	}))
-	t.Cleanup(search.Close)
-	client, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{search.URL}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	opensearchInit.OpenSearchClient = client
+	env, dg := importEnv(t)
 
 	admin, maya, bo, project, team := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	for _, q := range []struct {
@@ -93,7 +87,7 @@ func importTasksStatements(t *testing.T, n int) int {
 		{"uid": "_:project", "dgraph.type": "Project", "project_uuid": project.String(), "project_name": "Launch", "project_team": map[string]any{"uid": "_:team"}},
 	})
 
-	job := &importModels.Job{Id: uuid.New(), Provider: "asana", SourceWorkspaceName: "w", Source: "api", Status: importModels.StatusRunning}
+	job := &importModels.Job{Id: uuid.New(), Provider: provider, SourceWorkspaceName: "w", Source: "api", Status: importModels.StatusRunning, TriggeredBy: &admin}
 	if err := importModels.CreateJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
@@ -105,21 +99,36 @@ func importTasksStatements(t *testing.T, n int) int {
 	if err := importModels.UpsertIdMappingWithOwnership(ctx, job.Id, importModels.EntityProject, "P1", project, nil, mustMarshal(map[string]any{}), true); err != nil {
 		t.Fatal(err)
 	}
+	importer := &userModels.UserInfo{UserPostgresInfo: userModels.User{Id: admin}}
+	importer.UserDgraphInfo.Uid, importer.UserDgraphInfo.Uuid = uids["admin"], admin.String()
+	return &taskWorld{env: env, dg: dg, job: job, project: project, importer: importer}
+}
+
+// importTasks runs the task stage's chunk for P1, as a worker claims it,
+// with the tasks prov streams.
+func (w *taskWorld) importTasks(t *testing.T, prov importProvider.Provider) {
+	t.Helper()
+	ctx := context.Background()
+	if w.counter != nil {
+		ctx = w.counter.Context(ctx)
+	}
 	p1 := "P1"
-	chunk := &importModels.Chunk{Id: uuid.New(), ImportId: job.Id, ChunkType: importModels.ChunkProjectTasks, ParentSourceId: &p1, Status: importModels.ChunkStatusInProgress, MaxAttempts: 3}
+	chunk := &importModels.Chunk{Id: uuid.New(), ImportId: w.job.Id, ChunkType: importModels.ChunkProjectTasks, ParentSourceId: &p1, Status: importModels.ChunkStatusInProgress, MaxAttempts: 3}
 	if err := importModels.CreateChunks(ctx, []*importModels.Chunk{chunk}); err != nil {
 		t.Fatal(err)
 	}
-	importer := &userModels.UserInfo{UserPostgresInfo: userModels.User{Id: admin}}
-	importer.UserDgraphInfo.Uid, importer.UserDgraphInfo.Uuid = uids["admin"], admin.String()
-
-	counter := integration.CountPostgres(t, env)
-	if err := processTaskChunk(counter.Context(ctx), tasksProvider{n: n}, job, importProvider.JobOptions{}, chunk, importer); err != nil {
-		t.Fatalf("import %d tasks: %v", n, err)
+	if err := processTaskChunk(ctx, prov, w.job, importProvider.JobOptions{}, chunk, w.importer); err != nil {
+		t.Fatalf("the project's tasks: %v", err)
 	}
-	sent := counter.Count()
+}
+
+func importTasksStatements(t *testing.T, n int) int {
+	w := newTaskWorld(t, "asana")
+	w.counter = integration.CountPostgres(t, w.env)
+	w.importTasks(t, tasksProvider{n: n})
+	sent := w.counter.Count()
 	var made int
-	if err := env.PG.QueryRow(`SELECT count(*) FROM tasks WHERE project_id = $1`, project).Scan(&made); err != nil || made != n {
+	if err := w.env.PG.QueryRow(`SELECT count(*) FROM tasks WHERE project_id = $1`, w.project).Scan(&made); err != nil || made != n {
 		t.Fatalf("%d tasks made of %d (%v)", made, n, err)
 	}
 	return sent

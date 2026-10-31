@@ -8,7 +8,8 @@ package integration_test
 // and tells its owner in the app and by push (CAL-BUG-5); the owner moving or
 // deleting a booked meeting moves or cancels the booking, tells the guest and
 // frees the slot (CAL-BUG-4); a guest cancelling takes the meeting off both
-// calendars; and without notification email the owner is still told. On
+// calendars; and without notification email the owner is still told. Nobody
+// else can change, take or delete someone's page, by its id or its address. On
 // beta, a deleted page keeps its bookings and their links (CAL-BUG-3, with
 // migration 212 down and up again). A cancel link is kept only as its hash
 // and its seal, and a link mailed before that still cancels, through the
@@ -461,6 +462,45 @@ func TestBookingPages(t *testing.T) {
 			// their host, and Mo cancelled.
 			if len(got) != 2 || got["intro-call"] != 2 || got["quick-chat"] != 0 {
 				t.Errorf("upcoming bookings %v", got)
+			}
+		})
+
+		t.Run("someone else can't change, take or delete one of Sam's pages", func(t *testing.T) {
+			maya := uuid.New()
+			exec(`INSERT INTO users (id, email_id, username) VALUES ($1, 'maya@acme.test', 'maya')`, maya)
+			var page uuid.UUID
+			if err := env.PG.QueryRow(`SELECT id FROM booking_pages WHERE slug = 'intro-call'`).Scan(&page); err != nil {
+				t.Fatal(err)
+			}
+			hers := calendarBusiness.PageInput{Id: page.String(), Slug: "intro-call", Title: "Mine now", DurationMinutes: 60,
+				MaxDaysAhead: 7, Active: true, Hours: calendarBusiness.WorkingHours{Days: []int{1}, Start: "09:00", End: "17:00", TZ: "UTC"}}
+			var notHers *calendarBusiness.AvailabilityError
+			if _, err := calendarBusiness.SaveBookingPage(ctx, maya, hers); !errors.As(err, &notHers) {
+				t.Errorf("Maya changed Sam's page by its id: %v", err)
+			}
+			hers.Id = ""
+			if _, err := calendarBusiness.SaveBookingPage(ctx, maya, hers); !errors.Is(err, helpers.ErrConflict) {
+				t.Errorf("Maya took the address of Sam's live page: %v", err)
+			}
+			if ok, _, err := calendarBusiness.DeleteBookingPage(ctx, maya, page); ok || err != nil {
+				t.Errorf("Maya deleted Sam's page: %v %v", ok, err)
+			}
+			var owner uuid.UUID
+			var title string
+			var deleted *time.Time
+			if err := env.PG.QueryRow(`SELECT user_id, title, deleted_at FROM booking_pages WHERE id = $1`, page).Scan(&owner, &title, &deleted); err != nil {
+				t.Fatal(err)
+			}
+			if owner != sam || title != "Intro call" || deleted != nil {
+				t.Errorf("Sam's page is now %v's %q, deleted at %v", owner, title, deleted)
+			}
+		})
+
+		t.Run("a page whose owner can't be read says to try again, not that there's no such page", func(t *testing.T) {
+			calendarBusiness.ForgetBookingPagesForTest()
+			dg.Break(t)
+			if _, err := calendarBusiness.GetPublicPage(ctx, "intro-call", time.Now(), time.Now()); err == nil || errors.Is(err, calendarBusiness.ErrNoPage) {
+				t.Errorf("the owner's read failed and the page answered %v", err)
 			}
 		})
 

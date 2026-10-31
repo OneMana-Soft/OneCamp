@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -1100,8 +1099,7 @@ func SetSandboxConfig(ctx context.Context, req adapter.SetSandboxConfigRequest) 
 		return fmt.Errorf("a runner URL is required to enable the sandbox")
 	}
 	if runnerURL != "" {
-		u, err := url.Parse(runnerURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		if _, ok := helpers.WebLink(runnerURL); !ok {
 			return fmt.Errorf("runner URL must be an absolute http(s) URL")
 		}
 	}
@@ -1241,8 +1239,7 @@ func SetCodePRConfig(ctx context.Context, req adapter.SetCodePRConfigRequest) er
 		return fmt.Errorf("a runner URL is required to enable code PRs")
 	}
 	if runnerURL != "" {
-		u, err := url.Parse(runnerURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		if _, ok := helpers.WebLink(runnerURL); !ok {
 			return fmt.Errorf("runner URL must be an absolute http(s) URL")
 		}
 	}

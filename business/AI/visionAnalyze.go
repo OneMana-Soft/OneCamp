@@ -14,18 +14,18 @@ package business
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"strings"
+
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 
 	fileAccessBusiness "github.com/akashc777/OneCamp/business/FileAccess"
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/minioInit"
 	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
 	attachmentModels "github.com/akashc777/OneCamp/models/postgres/Attachment"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
-	"github.com/minio/minio-go/v7"
 )
 
 // visionMaxImageBytes caps the image we send to the model. Protects the
@@ -116,46 +116,22 @@ func attachmentFor(ctx context.Context, userInfo *userModels.UserInfo, srcKey, s
 	return att, nil
 }
 
-// fetchImageObject downloads the attachment bytes from MinIO and returns them
-// with the stored content type. Rejects non-images and oversized files. The
-// object key comes from the trusted attachment row, never from the client.
+// fetchImageObject reads the attachment's bytes and stored content type
+// (attachmentBusiness.ReadStored): only a picture, at most visionMaxImageBytes.
+// The object key comes from the trusted attachment row, never from the client.
 func fetchImageObject(ctx context.Context, objKey string) ([]byte, string, error) {
-	bucket := helpers.UserUploadBucket()
-	// Uploads are stored under the userFileUpload/ prefix (same path the
-	// presigned-GET helper uses).
-	fullName := "userFileUpload/" + objKey
-
-	info, err := minioInit.MinioClient.StatObject(ctx, bucket, fullName, minio.StatObjectOptions{})
-	if err != nil {
-		return nil, "", fmt.Errorf("could not read the attachment")
-	}
-	mime := strings.ToLower(strings.TrimSpace(info.ContentType))
-	// uploadsafe coerces XSS-prone types (e.g. SVG) to octet-stream, so only
-	// genuine raster images carry an image/* content type here.
-	if !strings.HasPrefix(mime, "image/") {
+	data, mime, err := attachmentBusiness.ReadStored(ctx, objKey, visionMaxImageBytes, true)
+	switch {
+	case err == nil:
+		return data, mime, nil
+	case errors.Is(err, attachmentBusiness.ErrStoredNotImage):
 		return nil, "", fmt.Errorf("that attachment isn't an image I can analyze")
-	}
-	if info.Size > visionMaxImageBytes {
+	case errors.Is(err, attachmentBusiness.ErrStoredTooLarge):
 		return nil, "", fmt.Errorf("that image is too large to analyze (limit 8 MB)")
-	}
-
-	obj, err := minioInit.MinioClient.GetObject(ctx, bucket, fullName, minio.GetObjectOptions{})
-	if err != nil {
-		return nil, "", fmt.Errorf("could not read the attachment")
-	}
-	defer obj.Close()
-
-	data, err := io.ReadAll(io.LimitReader(obj, visionMaxImageBytes+1))
-	if err != nil {
-		return nil, "", fmt.Errorf("could not read the attachment")
-	}
-	if len(data) == 0 {
+	case errors.Is(err, attachmentBusiness.ErrStoredEmpty):
 		return nil, "", fmt.Errorf("the attachment is empty")
 	}
-	if len(data) > visionMaxImageBytes {
-		return nil, "", fmt.Errorf("that image is too large to analyze (limit 8 MB)")
-	}
-	return data, mime, nil
+	return nil, "", fmt.Errorf("could not read the attachment")
 }
 
 // ImageRef is a TRUSTED reference to an image object in storage. The caller

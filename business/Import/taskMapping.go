@@ -7,9 +7,11 @@ import (
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
+	workTaxonomy "github.com/akashc777/OneCamp/business/WorkTaxonomy"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
+	taskKeyModel "github.com/akashc777/OneCamp/models/postgres/TaskKey"
 	"github.com/google/uuid"
 )
 
@@ -38,6 +40,16 @@ func sourceNumber(st *importProvider.SourceTask) int {
 	return n
 }
 
+// builtinType is the WorkTaxonomy type a source's task comes as; nil is a
+// Task.
+func builtinType(t importProvider.TaskType) *uuid.UUID {
+	if t != importProvider.TaskMilestone {
+		return nil
+	}
+	id := workTaxonomy.TypeMilestone
+	return &id
+}
+
 // coAssigneeNames are the names of a source task's assignees after the first
 // (who is its assignee), for the line its description keeps. Each person is
 // read once a chunk, through who.
@@ -64,6 +76,20 @@ func keepSourceKey(ctx context.Context, job *importModels.Job, sp *importProvide
 	}
 }
 
+// keepNumbersFree has a project number the tasks an import makes with no
+// number of their own (Linear's milestones) after every number its source's
+// tasks keep. Sub-tasks come in later chunks than their project's tasks, so
+// one would otherwise find its number taken, and its key naming another task.
+func keepNumbersFree(ctx context.Context, sp *importProvider.SourceProject, project uuid.UUID) {
+	if sp.HighestNumber < 1 {
+		return
+	}
+	if err := taskKeyModel.NumberAfter(ctx, project, sp.HighestNumber); err != nil {
+		helpers.LogWarnWithContext(ctx, "import: project %s couldn't keep numbers up to %d for its source's tasks: %+v",
+			project, sp.HighestNumber, err)
+	}
+}
+
 // estimateMinutes is a source's estimate as a task holds it: at most a
 // thousand hours, and none for none or a negative one.
 func estimateMinutes(m int) int {
@@ -71,4 +97,29 @@ func estimateMinutes(m int) int {
 		return 0
 	}
 	return min(m, taskBusiness.MaxEstimateMinutes)
+}
+
+// keepTaskAliases is taskKeys.KeepSourceKeys (a seam for tests).
+var keepTaskAliases = taskKeys.KeepSourceKeys
+
+// keepSourceAliases makes the keys a task had in its source find it beside its
+// own (O-L2): Linear's ENG-7 when its project here is keyed MOB, and the keys
+// it had before it moved teams. A key a project here uses, or one another task
+// already answers to, stays as it is, and the import says so once for the
+// task. A key no task key could be (Jira's MY_APP-7) is left out quietly: the
+// project's KEY_NOT_KEPT said so.
+func keepSourceAliases(ctx context.Context, job *importModels.Job, st *importProvider.SourceTask, task uuid.UUID) {
+	raws := append([]string{st.SourceKey}, st.FormerKeys...)
+	held, err := keepTaskAliases(ctx, raws, task, job.Id)
+	msg := ""
+	switch {
+	case err != nil:
+		msg = "Its keys from " + job.Provider + " couldn't be kept: " + err.Error()
+	case len(held) > 0:
+		msg = strings.Join(held, ", ") + " already name something else here, so they open that, not this task."
+	default:
+		return
+	}
+	importModels.LogImportError(ctx, job.Id, nil, importModels.EntityTask, st.SourceID,
+		importModels.SeverityWarning, "KEY_ALIAS_NOT_KEPT", msg, nil)
 }

@@ -157,8 +157,13 @@ func draftInputs(gen *generatedTable) (TableInput, []FieldInput, error) {
 		if !fieldTypes.Kinds.Valid(ftype) {
 			ftype = model.FieldText
 		}
+		// People are members by their ids, which a draft can't know: names
+		// it writes stay text.
+		if ftype == model.FieldPeople {
+			ftype = model.FieldPerson
+		}
 		cfg := map[string]interface{}{}
-		if (ftype == model.FieldSelect || ftype == model.FieldMultiSelect) && len(f.Options) > 0 {
+		if k, _ := fieldTypes.Kinds.Lookup(ftype); k.HasOptions && len(f.Options) > 0 {
 			opts := make([]map[string]interface{}, 0, len(f.Options))
 			for _, o := range f.Options {
 				if o = strings.TrimSpace(o); o != "" {
@@ -204,14 +209,14 @@ func tableGenSystemPrompt() string {
 		"  \"name\": short table title,",
 		"  \"icon\": a single emoji that fits the table,",
 		"  \"description\": one short sentence,",
-		"  \"fields\": array of columns, each {\"name\": string, \"type\": one of text|number|select|multi_select|date|checkbox|url|email|person, \"options\": array of strings (ONLY for select/multi_select)},",
+		"  \"fields\": array of columns, each {\"name\": string, \"type\": one of text|long_text|number|select|multi_select|status|date|checkbox|url|email|phone|person|rating, \"options\": array of strings (ONLY for select/multi_select/status)},",
 		"  \"rows\": array of up to 8 example rows; each row is an object keyed by COLUMN NAME with a sensible value",
 		"}",
 		"",
 		"RULES:",
 		"1. The first column should be a human-readable 'Name'/'Title' text column.",
-		"2. Pick 3-7 useful columns with the most appropriate types. Use select/multi_select (with options) for categorical fields, date for dates (YYYY-MM-DD), checkbox for yes/no, number for quantities.",
-		"3. Row values must match their column type: number -> a number, checkbox -> true/false, date -> \"YYYY-MM-DD\", select -> one of its options, multi_select -> array of its options.",
+		"2. Pick 3-7 useful columns with the most appropriate types. Use select/multi_select (with options) for categorical fields, status (with options from not started to done) for a stage of work, date for dates (YYYY-MM-DD), checkbox for yes/no, number for quantities, rating for a score from 1 to 5, long_text for notes of more than one line, phone for phone numbers.",
+		"3. Row values must match their column type: number -> a number, checkbox -> true/false, date -> \"YYYY-MM-DD\", select and status -> one of its options, multi_select -> array of its options, rating -> a whole number from 1 to 5.",
 		"4. If workspace context is provided and the description refers to existing work (e.g. 'action items from #engineering', 'leads we discussed'), derive the seed rows from that real content. If the context is not relevant, ignore it and use plausible examples.",
 		"5. Do NOT invent ids or reference external systems. Output a single valid JSON object and nothing else.",
 	}, "\n")

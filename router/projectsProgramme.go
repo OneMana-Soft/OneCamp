@@ -58,4 +58,7 @@ func mountProjectsProgramme(rt projectsRouters) {
 	mountTaskRestriction(rt) // WA2: restricted tasks
 	// PR1: a project's counts, from the server, in the reader's day.
 	rt.Project.Get("/{project_uuid}/glance", projectController.ProjectGlance)
+	mountApprovals(rt)    // package 9 R2: status rules and approvals
+	mountProjectForms(rt) // package 9 R4: a form's submissions
+	mountRestore(rt)      // V-78: the one restore route for soft deletes
 }

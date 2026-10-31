@@ -55,7 +55,9 @@ func TestASlackImportKeepsAChannelsHistoryAsLines(t *testing.T) {
 			{"type":"message","subtype":"channel_join","user":"U2","inviter":"U1","text":"<@U2> has joined the channel","ts":"1759309100.000050"},
 			{"type":"message","subtype":"channel_topic","user":"U1","topic":"Ship on Friday","text":"set the channel topic: Ship on Friday","ts":"1759309150.000060"},
 			{"type":"message","user":"U1","text":"Launch on Friday?","ts":"1759309200.000100"},
-			{"type":"message","subtype":"channel_name","user":"U1","name":"launch","old_name":"q4-launch","text":"has renamed the channel","ts":"1759309300.000200"}]`,
+			{"type":"message","subtype":"channel_name","user":"U1","name":"launch","old_name":"q4-launch","text":"has renamed the channel","ts":"1759309300.000200"},
+			{"type":"message","subtype":"channel_purpose","user":"U1","purpose":"Everything for Friday","text":"set the channel purpose: Everything for Friday","ts":"1759309310.000210"},
+			{"type":"message","subtype":"pinned_item","user":"U2","item_type":"C","text":"<@U2> pinned a message to this channel.","ts":"1759309320.000220"}]`,
 	} {
 		f, _ := zw.Create(name)
 		_, _ = f.Write([]byte(body))
@@ -119,11 +121,9 @@ func TestASlackImportKeepsAChannelsHistoryAsLines(t *testing.T) {
 		mu.Unlock()
 	})()
 
+	// The job doesn't say whether to skip system messages, as one started
+	// without the plan's options doesn't: the history comes across all the same.
 	job := e.job(t, "slack", "Acme", "planned", "slackImport/acme/raw.zip")
-	// The operator keeps system messages (the plan's "Skip system messages" off).
-	if _, err := e.PG.Exec(`UPDATE import_jobs SET options = '{"skip_subtypes": false}' WHERE id = $1`, job); err != nil {
-		t.Fatal(err)
-	}
 	arc, done, err := slackBusiness.OpenStagedZipFromMinIO(ctx, "slackImport/acme/raw.zip")
 	if err != nil {
 		t.Fatalf("open the export: %v", err)
@@ -150,7 +150,9 @@ func TestASlackImportKeepsAChannelsHistoryAsLines(t *testing.T) {
 	}
 	rows.Close()
 
-	// One message has a row; the three lines don't (a line is never counted).
+	// One message has a row; the three lines don't (a line is never counted),
+	// and Slack's notices OneCamp writes no line for (a purpose set, a pin, which
+	// comes across as the pin itself) aren't posts at all.
 	var posts int
 	if err := e.PG.QueryRow(`SELECT count(*) FROM posts`).Scan(&posts); err != nil {
 		t.Fatal(err)

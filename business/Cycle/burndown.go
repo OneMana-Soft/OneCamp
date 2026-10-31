@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	estimateScale "github.com/akashc777/OneCamp/business/EstimateScale"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -14,8 +15,10 @@ import (
 )
 
 // Burndown and velocity: how a cycle's open work went down day by day, and
-// how much the project's recent cycles finished. Both count tasks and, where
-// tasks have estimates, hours.
+// how much the project's recent cycles finished. Both count tasks; where
+// tasks have estimates, hours; and, in a project that estimates in points,
+// points (business/EstimateScale), where a task with none counts as its
+// scale says.
 
 // VelocityCycles is how many completed cycles velocity looks back over, and
 // TypicalCycles how many of the latest it averages.
@@ -35,10 +38,12 @@ type TaskProgress struct {
 	// Hours is the estimate; HasEstimate says whether there is one.
 	Hours       float64
 	HasEstimate bool
+	// Points are its points; nil is none.
+	Points *float64
 }
 
 func progressOf(t *dgraphStruct.DgraphTask) TaskProgress {
-	p := TaskProgress{Status: t.Status, Since: t.StatusSince}
+	p := TaskProgress{Status: t.Status, Since: t.StatusSince, Points: t.EstimatePoints}
 	if t.EstimateMinutes != nil && *t.EstimateMinutes > 0 {
 		p.Hours, p.HasEstimate = float64(*t.EstimateMinutes)/60, true
 	}
@@ -48,22 +53,29 @@ func progressOf(t *dgraphStruct.DgraphTask) TaskProgress {
 // Burndown is a cycle's work by day, in the reader's zone. Scope and
 // Remaining run only up to today, or to the day the cycle was completed;
 // Ideal is an even pace from the first day's scope to nothing by the end of
-// the last day. The hour series are null unless some task has an estimate.
+// the last day. The hour series are null unless some task has an estimate,
+// and the point series unless the project estimates in points.
 type Burndown struct {
-	Days           []string  `json:"days"`
-	Scope          []int     `json:"scope"`
-	Remaining      []int     `json:"remaining"`
-	Ideal          []float64 `json:"ideal"`
-	ScopeHours     []float64 `json:"scope_hours"`
-	RemainingHours []float64 `json:"remaining_hours"`
-	IdealHours     []float64 `json:"ideal_hours"`
+	Days            []string  `json:"days"`
+	Scope           []int     `json:"scope"`
+	Remaining       []int     `json:"remaining"`
+	Ideal           []float64 `json:"ideal"`
+	ScopeHours      []float64 `json:"scope_hours"`
+	RemainingHours  []float64 `json:"remaining_hours"`
+	IdealHours      []float64 `json:"ideal_hours"`
+	ScopePoints     []float64 `json:"scope_points"`
+	RemainingPoints []float64 `json:"remaining_points"`
+	IdealPoints     []float64 `json:"ideal_points"`
 	// Tasks in the cycle, Done of them (cancelled ones aren't), Open still to
 	// do, and Estimated with an estimate; Hours is their estimates added up.
+	// Pointed have points, and Points is what they all count as.
 	Tasks     int     `json:"tasks"`
 	Done      int     `json:"done"`
 	Open      int     `json:"open"`
 	Estimated int     `json:"estimated"`
 	Hours     float64 `json:"hours"`
+	Pointed   int     `json:"pointed"`
+	Points    float64 `json:"points"`
 }
 
 func closedStatus(s string) bool { return !isOpen(s) }
@@ -74,8 +86,9 @@ func round1(v float64) float64 { return math.Round(v*10) / 10 }
 // joined (from the first day if it joined before the cycle began) and stops
 // being remaining the day it was finished or cancelled. A task the cycle left
 // unfinished when it was completed stays remaining to the end, whatever it
-// became later. Tasks not in tasks (archived) aren't counted. Pure.
-func BuildBurndown(c cycleModel.Cycle, members []cycleModel.Member, tasks map[string]TaskProgress, now time.Time, loc *time.Location) Burndown {
+// became later. Tasks not in tasks (archived) aren't counted. With a scale
+// (nil: the project estimates in hours) it counts points too. Pure.
+func BuildBurndown(c cycleModel.Cycle, members []cycleModel.Member, tasks map[string]TaskProgress, now time.Time, loc *time.Location, scale *estimateScale.Scale) Burndown {
 	b := Burndown{Days: []string{}, Scope: []int{}, Remaining: []int{}, Ideal: []float64{}}
 	// The reader's days the cycle touches, from the one it starts on to the
 	// one it ends in: a reader zones away from whoever made it can see one
@@ -109,7 +122,8 @@ func BuildBurndown(c cycleModel.Cycle, members []cycleModel.Member, tasks map[st
 	}
 	scope, remaining := make([]int, known), make([]int, known)
 	scopeH, remainingH := make([]float64, known), make([]float64, known)
-	var totalH float64
+	scopeP, remainingP := make([]float64, known), make([]float64, known)
+	var totalH, totalP float64
 	for _, m := range members {
 		t, ok := tasks[m.TaskUUID]
 		if !ok {
@@ -127,6 +141,14 @@ func BuildBurndown(c cycleModel.Cycle, members []cycleModel.Member, tasks map[st
 		if t.HasEstimate {
 			b.Estimated++
 		}
+		var points float64
+		if scale != nil {
+			points = estimateScale.Counted(scale, t.Points)
+			totalP += points
+			if t.Points != nil {
+				b.Pointed++
+			}
+		}
 		if closedAt == nil {
 			b.Open++
 		} else if t.Status == dgraphStruct.TASK_STATUS_DONE {
@@ -138,18 +160,20 @@ func BuildBurndown(c cycleModel.Cycle, members []cycleModel.Member, tasks map[st
 			}
 			scope[i]++
 			scopeH[i] += t.Hours
+			scopeP[i] += points
 			if closedAt == nil || !closedAt.Before(ends[i]) {
 				remaining[i]++
 				remainingH[i] += t.Hours
+				remainingP[i] += points
 			}
 		}
 	}
 	b.Scope, b.Remaining = scope, remaining
 	// The ideal paces what was in by the end of the first day (or, before the
 	// cycle starts, everything in it now) evenly down to nothing.
-	from, fromH := float64(b.Tasks), totalH
+	from, fromH, fromP := float64(b.Tasks), totalH, totalP
 	if known > 0 {
-		from, fromH = float64(scope[0]), scopeH[0]
+		from, fromH, fromP = float64(scope[0]), scopeH[0], scopeP[0]
 	}
 	b.Ideal = idealLine(from, len(b.Days))
 	b.Hours = round1(totalH)
@@ -159,6 +183,14 @@ func BuildBurndown(c cycleModel.Cycle, members []cycleModel.Member, tasks map[st
 			b.ScopeHours[i], b.RemainingHours[i] = round1(scopeH[i]), round1(remainingH[i])
 		}
 		b.IdealHours = idealLine(fromH, len(b.Days))
+	}
+	if scale != nil {
+		b.Points = round1(totalP)
+		b.ScopePoints, b.RemainingPoints = make([]float64, known), make([]float64, known)
+		for i := 0; i < known; i++ {
+			b.ScopePoints[i], b.RemainingPoints[i] = round1(scopeP[i]), round1(remainingP[i])
+		}
+		b.IdealPoints = idealLine(fromP, len(b.Days))
 	}
 	return b
 }
@@ -175,27 +207,31 @@ func idealLine(start float64, n int) []float64 {
 
 // CycleDone is what a completed cycle finished, and how much it left.
 type CycleDone struct {
-	Id         uuid.UUID `json:"id"`
-	Number     int       `json:"number"`
-	Name       string    `json:"name"`
-	Done       int       `json:"done"`
-	DoneHours  float64   `json:"done_hours"`
-	Unfinished int       `json:"unfinished"`
+	Id        uuid.UUID `json:"id"`
+	Number    int       `json:"number"`
+	Name      string    `json:"name"`
+	Done      int       `json:"done"`
+	DoneHours float64   `json:"done_hours"`
+	// DonePoints is what it finished in points, when the project estimates in them.
+	DonePoints *float64 `json:"done_points,omitempty"`
+	Unfinished int      `json:"unfinished"`
 	// estimated: some of what it finished had an estimate.
 	estimated bool
 }
 
 // Velocity is the latest completed cycles, oldest first, with what the most
-// recent ones finished on average (Typical, in tasks and hours).
+// recent ones finished on average (Typical, in tasks, hours and points).
 type Velocity struct {
-	Cycles       []CycleDone `json:"cycles"`
-	Typical      *float64    `json:"typical,omitempty"`
-	TypicalHours *float64    `json:"typical_hours,omitempty"`
+	Cycles        []CycleDone `json:"cycles"`
+	Typical       *float64    `json:"typical,omitempty"`
+	TypicalHours  *float64    `json:"typical_hours,omitempty"`
+	TypicalPoints *float64    `json:"typical_points,omitempty"`
 }
 
 // BuildVelocity counts what each of the last completed cycles finished: its
-// tasks that are done (a cancelled one isn't). Pure.
-func BuildVelocity(cycles []cycleModel.Cycle, members map[uuid.UUID][]string, tasks map[string]TaskProgress) Velocity {
+// tasks that are done (a cancelled one isn't), and with a scale their points.
+// Pure.
+func BuildVelocity(cycles []cycleModel.Cycle, members map[uuid.UUID][]string, tasks map[string]TaskProgress, scale *estimateScale.Scale) Velocity {
 	completed := completedCycles(cycles)
 	v := Velocity{Cycles: []CycleDone{}}
 	for _, c := range completed {
@@ -203,30 +239,45 @@ func BuildVelocity(cycles []cycleModel.Cycle, members map[uuid.UUID][]string, ta
 		if c.CarriedCount != nil {
 			d.Unfinished = *c.CarriedCount
 		}
+		var points float64
 		for _, id := range members[c.Id] {
 			if t, ok := tasks[id]; ok && t.Status == dgraphStruct.TASK_STATUS_DONE {
 				d.Done++
 				d.DoneHours += t.Hours
 				d.estimated = d.estimated || t.HasEstimate
+				if scale != nil {
+					points += estimateScale.Counted(scale, t.Points)
+				}
 			}
 		}
 		d.DoneHours = round1(d.DoneHours)
+		if scale != nil {
+			points = round1(points)
+			d.DonePoints = &points
+		}
 		v.Cycles = append(v.Cycles, d)
 	}
 	if n := min(len(v.Cycles), TypicalCycles); n > 0 {
-		var tasksSum, hoursSum float64
+		var tasksSum, hoursSum, pointsSum float64
 		// Hours only when the cycles averaged counted some.
 		anyHours := false
 		for _, d := range v.Cycles[len(v.Cycles)-n:] {
 			tasksSum += float64(d.Done)
 			hoursSum += d.DoneHours
 			anyHours = anyHours || d.estimated
+			if d.DonePoints != nil {
+				pointsSum += *d.DonePoints
+			}
 		}
 		typical := round1(tasksSum / float64(n))
 		v.Typical = &typical
 		if anyHours {
 			typicalH := round1(hoursSum / float64(n))
 			v.TypicalHours = &typicalH
+		}
+		if scale != nil {
+			typicalP := round1(pointsSum / float64(n))
+			v.TypicalPoints = &typicalP
 		}
 	}
 	return v
@@ -255,8 +306,13 @@ type BurndownView struct {
 }
 
 // GetBurndown reads a cycle's burndown, in loc's days, and the velocity of
-// its project's latest completed cycles.
+// its project's latest completed cycles, in points too when the project
+// estimates in them.
 func GetBurndown(ctx context.Context, c *cycleModel.Cycle, now time.Time, loc *time.Location) (*BurndownView, error) {
+	scale, err := estimateScale.Of(ctx, c.ProjectUUID)
+	if err != nil {
+		return nil, err
+	}
 	members, err := cycleModel.MembersOf(c.Id)
 	if err != nil {
 		return nil, err
@@ -299,7 +355,7 @@ func GetBurndown(ctx context.Context, c *cycleModel.Cycle, now time.Time, loc *t
 	}
 	return &BurndownView{
 		Cycle:    View{Cycle: *c, Progress: Count(statuses), State: State(*c, now)},
-		Burndown: BuildBurndown(*c, members, tasks, now, loc),
-		Velocity: BuildVelocity(cycles, byCycle, tasks),
+		Burndown: BuildBurndown(*c, members, tasks, now, loc, scale),
+		Velocity: BuildVelocity(cycles, byCycle, tasks, scale),
 	}, nil
 }

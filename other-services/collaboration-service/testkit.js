@@ -190,7 +190,9 @@ export class FakeBackend {
         if (/\/(docColab|boardColab)\/(authorize|guestAuthorize)$/.test(path)) {
             if (this.authStatus) throw httpError(this.authStatus, 'refused')
             const sub = subOf(config)
-            const level = this.levels.get(sub) || 'edit'
+            // A share link's guest reads only, as the API answers it; a call's
+            // guest draws when the call lets them (set their level to 'edit').
+            const level = this.levels.get(sub) || (path.endsWith('/guestAuthorize') ? 'view' : 'edit')
             if (level === 'none') throw httpError(403, 'refused')
             const until = this.until.get(sub)
             const name = path.endsWith('/guestAuthorize') ? undefined : this.names.get(sub)
@@ -207,13 +209,13 @@ export class FakeBackend {
                 const hash = bodyHash(d.doc_body)
                 if (body.expectBodyHash && body.expectBodyHash !== hash) return { status: 200, data: { data: { stored: false } } }
                 Object.assign(d, { doc_yjs_state: body.yjsState, doc_yjs_body_hash: hash, doc_yjs_lineage: body.lineage || '' })
-                this.saves.push({ id: body.documentId, keepBody: true, contributors: body.contributors || [], agents: body.agents || [] })
+                this.saves.push({ id: body.documentId, keepBody: true, contributors: body.contributors || [], agents: body.agents || [], quiet: body.quiet === true })
                 return { status: 200, data: { data: { stored: true } } }
             }
             const html = body.htmlContent || ''
             if (!html.trim() || html.trim() === '<p>Error generating HTML</p>') throw httpError(422, 'unsafe body')
             Object.assign(d, { doc_body: html, doc_yjs_state: body.yjsState || d.doc_yjs_state, doc_yjs_body_hash: body.yjsState ? bodyHash(html) : d.doc_yjs_body_hash, doc_yjs_lineage: body.lineage || '' })
-            this.saves.push({ id: body.documentId, html, contributors: body.contributors || [], agents: body.agents || [] })
+            this.saves.push({ id: body.documentId, html, contributors: body.contributors || [], agents: body.agents || [], quiet: body.quiet === true })
             return { status: 200, data: { data: { stored: true } } }
         }
         if (path === '/boardColab/updateBoard') {

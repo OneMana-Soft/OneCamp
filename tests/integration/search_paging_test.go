@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	globalSearchBusiness "github.com/akashc777/OneCamp/business/GlobalSearch"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
@@ -69,7 +70,7 @@ func TestSearchPagesThroughEveryHit(t *testing.T) {
 	var first globalSearchBusiness.GlobalSearchPagination
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, me, me+"@example.test", mine, nil, nil, "rollout")
+		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, accessBusiness.Subject{UserUUID: me}, me+"@example.test", mine, nil, nil, "rollout")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -81,11 +82,10 @@ func TestSearchPagesThroughEveryHit(t *testing.T) {
 	if len(channels(first)) != 20 || !first.HasMore || first.Next == "" {
 		t.Fatalf("the first page holds %d channels, has_more %v, next %q; want 20, more, and a cursor", len(channels(first)), first.HasMore, first.Next)
 	}
-	after, err := globalSearchBusiness.DecodeSearchCursor(first.Next)
-	if err != nil {
-		t.Fatalf("the page's cursor: %v", err)
+	if first.Total != 25 || first.Totals["channel"] != 25 {
+		t.Errorf("the first page counts %d (%v); want all 25", first.Total, first.Totals)
 	}
-	second, err := globalSearchBusiness.GetUnifiedGlobalSearchPage(ctx, me, me+"@example.test", mine, nil, nil, "rollout", after, globalSearchBusiness.Within{})
+	second, err := globalSearchBusiness.GetUnifiedGlobalSearchPage(ctx, accessBusiness.Subject{UserUUID: me}, me+"@example.test", mine, nil, nil, "rollout", first.Next, globalSearchBusiness.Within{})
 	if err != nil {
 		t.Fatal(err)
 	}

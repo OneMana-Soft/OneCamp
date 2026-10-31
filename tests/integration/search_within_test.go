@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	globalSearchBusiness "github.com/akashc777/OneCamp/business/GlobalSearch"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
@@ -73,7 +74,7 @@ func TestSearchWithinOneConversation(t *testing.T) {
 	// found: what a search for "rollout" within a conversation finds, as text.
 	found := func(within globalSearchBusiness.Within) []string {
 		t.Helper()
-		p, err := globalSearchBusiness.GetUnifiedGlobalSearchPage(ctx, me, me+"@example.test", mine, nil, nil, "rollout", nil, within)
+		p, err := globalSearchBusiness.GetUnifiedGlobalSearchPage(ctx, accessBusiness.Subject{UserUUID: me}, me+"@example.test", mine, nil, nil, "rollout", "", within)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -48,13 +48,23 @@ type fakeS3 struct {
 	mu      sync.Mutex
 	objects map[string]int64 // "/bucket/key" -> size
 	refuse  map[string]bool  // paths storage refuses to touch
-	removed []string
+	// Paths whose first HEAD a CDN in front of storage turns into a GET, to
+	// fill its cache: the HEAD's signature doesn't cover a GET, so storage
+	// refuses it, and the client reads a bodiless 403 (Cloudflare on the
+	// demo's storage host, V-31). Later HEADs pass as they are.
+	headTurnedGet map[string]bool
+	removed       []string
 }
 
 func (s *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := r.URL.Path
+	if r.Method == http.MethodHead && s.headTurnedGet[path] {
+		delete(s.headTurnedGet, path)
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 	if s.refuse[path] {
 		w.Header().Set("Content-Type", "application/xml")
 		w.WriteHeader(http.StatusForbidden)
@@ -88,7 +98,7 @@ func TestRecordingLifecycle(t *testing.T) {
 
 	const bucket = "test-uploads"
 	t.Setenv("USER_UPLOAD_BUCKET_NAME", bucket)
-	store := &fakeS3{objects: map[string]int64{}, refuse: map[string]bool{}}
+	store := &fakeS3{objects: map[string]int64{}, refuse: map[string]bool{}, headTurnedGet: map[string]bool{}}
 	srv := httptest.NewServer(store)
 	t.Cleanup(srv.Close)
 	endpoint, _ := url.Parse(srv.URL)
@@ -124,7 +134,7 @@ func TestRecordingLifecycle(t *testing.T) {
 		{"uid": "_:u", "user_uuid": uuid.NewString(), "user_name": "maya"},
 		{"uid": "_:ch", "ch_uuid": channel, "ch_name": "eng", "ch_private": true,
 			"ch_members":   []map[string]any{{"uid": "_:u"}},
-			"ch_recording": []map[string]any{{"uid": "_:live"}, {"uid": "_:stuck"}}},
+			"ch_recording": []map[string]any{{"uid": "_:live"}, {"uid": "_:stuck"}, {"uid": "_:cdn"}}},
 		recording("_:live", "EG_live", "recordings/eng/EG_live.mp4", map[string]any{"recording_channel": map[string]any{"uid": "_:ch"}}, "_:t1", "_:t2"),
 		// Typed "Recording", as business/LiveKit.SaveTranscript writes a line.
 		{"uid": "_:t1", "dgraph.type": "Recording", "transcript_text": "the salary bands", "transcript_timestamp": 1},
@@ -132,6 +142,7 @@ func TestRecordingLifecycle(t *testing.T) {
 		// What the old delete left behind: a node holding only the egress id.
 		{"uid": "_:stray", "dgraph.type": "Recording", "recording_egress_id": "EG_live", "recording_deleted_at": ended},
 		recording("_:stuck", "EG_stuck", "recordings/eng/EG_stuck.mp4", map[string]any{"recording_channel": map[string]any{"uid": "_:ch"}}),
+		recording("_:cdn", "EG_cdn", "recordings/eng/EG_cdn.mp4", map[string]any{"recording_channel": map[string]any{"uid": "_:ch"}}),
 		{"uid": "_:dm", "dm_grouping_id": grouping, "dm_participants": []map[string]any{{"uid": "_:u"}},
 			"dm_recording": []map[string]any{{"uid": "_:call"}}},
 		recording("_:call", "EG_call", "recordings/dm/EG_call.mp4", map[string]any{"recording_dm": map[string]any{"uid": "_:dm"}}, "_:t3"),
@@ -278,6 +289,24 @@ func TestRecordingLifecycle(t *testing.T) {
 	}
 	if !opens("EG_stuck") {
 		t.Error("the recording went although its file is still in storage")
+	}
+
+	// Behind a CDN that turns the first HEAD into a GET, storage refuses that
+	// first HEAD (V-31: every first delete on the demo answered 500 "Failed to
+	// delete recording", and a retry 200). The size it asks is only for the
+	// totals, and a delete is the same whether the file is there or not: the
+	// first try removes the file and the recording.
+	cdnPath := "/" + bucket + "/recordings/eng/EG_cdn.mp4"
+	store.objects[cdnPath] = 5000
+	store.headTurnedGet[cdnPath] = true
+	if err := recordingBusiness.DeleteRecording(ctx, "EG_cdn"); err != nil {
+		t.Errorf("the first delete behind a CDN failed: %v", err)
+	}
+	if !slices.Contains(store.removed, cdnPath) {
+		t.Errorf("the file behind a CDN wasn't removed: storage removed %v", store.removed)
+	}
+	if n := len(nodes("EG_cdn")); n != 0 {
+		t.Errorf("EG_cdn is still held by %d nodes after its first delete", n)
 	}
 
 	// The archive job names hundreds at once: they go in batches, and the one

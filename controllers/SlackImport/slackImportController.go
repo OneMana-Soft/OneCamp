@@ -337,6 +337,9 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return
 	}
+	if refuseMemberRead(w, job.Options) {
+		return
+	}
 	switch job.Status {
 	case importModels.StatusValidating, importModels.StatusPlanned:
 	case importModels.StatusFailed:
@@ -447,6 +450,9 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 	job, err := business.GetJob(ctx, jobId)
 	if err != nil || job == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
+		return
+	}
+	if refuseMemberRead(w, job.Options) {
 		return
 	}
 	if job.Status != importModels.StatusPlanned && job.Status != importModels.StatusFailed {
@@ -565,7 +571,8 @@ func HandleRollback(w http.ResponseWriter, r *http.Request) {
 // HandleListJobs returns up to 50 recent jobs with their summary counts.
 func HandleListJobs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := requireAdmin(w, r); !ok {
+	viewer, ok := requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	jobs, err := business.ListJobs(ctx, 50)
@@ -578,9 +585,10 @@ func HandleListJobs(w http.ResponseWriter, r *http.Request) {
 		ids[i] = j.Id
 	}
 	counts, _ := business.JobCounts(ctx, ids)
+	names := memberNames(ctx, jobs)
 	views := make([]importAdapter.JobView, 0, len(jobs))
 	for _, j := range jobs {
-		views = append(views, jobToView(j, counts[j.Id]))
+		views = append(views, jobToView(j, counts[j.Id], viewer.UserPostgresInfo.Id, names))
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"jobs": views})
 }
@@ -588,7 +596,8 @@ func HandleListJobs(w http.ResponseWriter, r *http.Request) {
 // HandleGetJob returns the full view of a single job.
 func HandleGetJob(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := requireAdmin(w, r); !ok {
+	viewer, ok := requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	jobId, validID := helpers.UUIDParam(w, r, "jobId")
@@ -601,17 +610,24 @@ func HandleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	counts, _ := business.JobCounts(ctx, []uuid.UUID{j.Id})
-	helpers.WriteJSON(w, http.StatusOK, jobToView(j, counts[j.Id]))
+	helpers.WriteJSON(w, http.StatusOK, jobToView(j, counts[j.Id], viewer.UserPostgresInfo.Id, memberNames(ctx, []*importModels.Job{j})))
 }
 
-// HandleListErrors returns paginated error log entries.
+// HandleListErrors returns paginated error log entries. A member's own read's
+// are shown to that member alone: they name the member's conversations.
 func HandleListErrors(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := requireAdmin(w, r); !ok {
+	viewer, ok := requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	jobId, validID := helpers.UUIDParam(w, r, "jobId")
 	if !validID {
+		return
+	}
+	if j, err := business.GetJob(ctx, jobId); err == nil && j != nil &&
+		!business.ContentsShownTo(j.Options, j.TriggeredBy, viewer.UserPostgresInfo.Id) {
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"errors": []any{}, "hidden": true})
 		return
 	}
 	severity := r.URL.Query().Get("severity")
@@ -628,7 +644,10 @@ func HandleListErrors(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers --------------------------------------------------------------
 
-func jobToView(j *importModels.Job, c importModels.JobCount) importAdapter.JobView {
+// jobToView is a job as viewer is shown it: all of it, but for a member's own
+// read of their Slack DMs, which anyone else is shown without what's in it
+// (business/SlackImport member_view.go), with whose it is from names.
+func jobToView(j *importModels.Job, c importModels.JobCount, viewer uuid.UUID, names map[uuid.UUID]string) importAdapter.JobView {
 	view := importAdapter.JobView{
 		Id:                 j.Id,
 		SlackWorkspaceName: j.SlackWorkspaceName,
@@ -653,7 +672,43 @@ func jobToView(j *importModels.Job, c importModels.JobCount) importAdapter.JobVi
 	}
 	view.ChunksTotal, view.ChunksDone, view.ChunksFailed = c.ChunksTotal, c.ChunksDone, c.ChunksFailed
 	view.ItemsImported, view.ErrorsTotal = c.ItemsImported, c.ErrorsTotal
+	if j.TriggeredBy != nil && business.MemberRead(j.Options) {
+		view.MemberName = names[*j.TriggeredBy]
+	}
+	if !business.ContentsShownTo(j.Options, j.TriggeredBy, viewer) {
+		view.Plan, view.Digest = nil, nil
+		view.ErrorMessage = business.HiddenFailure(view.ErrorMessage)
+		view.Progress = business.HiddenProgress(view.Progress)
+	}
 	return view
+}
+
+// memberNames is the names of the members whose own reads are among jobs, in
+// one statement, for the history to say whose each is. None when they can't
+// be read: the history still lists the reads.
+func memberNames(ctx context.Context, jobs []*importModels.Job) map[uuid.UUID]string {
+	var ids []uuid.UUID
+	for _, j := range jobs {
+		if j.TriggeredBy != nil && business.MemberRead(j.Options) {
+			ids = append(ids, *j.TriggeredBy)
+		}
+	}
+	names, err := userModel.DisplayNamesByUUIDs(ctx, ids)
+	if err != nil {
+		helpers.LogWarnWithContext(ctx, "SlackImport history: the members' names: %+v", err)
+	}
+	return names
+}
+
+// refuseMemberRead answers 409, and true, for a member's own read of their
+// Slack DMs: it plans and runs itself, as its member, and an admin's plan or
+// run of it would bring it in as the admin, with options of theirs.
+func refuseMemberRead(w http.ResponseWriter, options json.RawMessage) bool {
+	if !business.MemberRead(options) {
+		return false
+	}
+	helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": business.MemberReadRefused, "code": "member_read"})
+	return true
 }
 
 // openMinioZipForRead exposes the staged ZIP as a *business.Archive. We use

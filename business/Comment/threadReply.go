@@ -49,6 +49,20 @@ type ThreadReply struct {
 	// Mentioned are those the reply mentions, as resolved when it was written.
 	Mentioned []*dgraphStruct.DgraphUser
 	At        time.Time
+	// Outsider is a writer outside the conversation (let into its call by the
+	// call's invite, calls CALLS-3b): the thread's index records the reply but
+	// not them, so the thread never enters their Threads.
+	Outsider bool
+}
+
+// replyRecord is the reply as the thread's index records it: its writer, unless
+// they're outside the conversation, and those it mentions. Pure.
+func replyRecord(r ThreadReply) threadIndex.Reply {
+	by := r.By.Uuid
+	if r.Outsider {
+		by = ""
+	}
+	return threadIndex.Reply{Thread: threadIndex.OfPost(r.Post), By: by, Mentioned: dgraphStruct.UUIDsOf(r.Mentioned), At: r.At}
 }
 
 // What a reply's notices read and the ways they go, and the thread's index
@@ -115,9 +129,7 @@ func NotifyThreadReply(r ThreadReply) {
 	// The thread's index first: its latest reply, the writer and those
 	// mentioned as its people, so the Threads view has it and the audience
 	// counts who follows it now.
-	recordReply(ctx, threadIndex.Reply{
-		Thread: threadIndex.OfPost(r.Post), By: r.By.Uuid, Mentioned: dgraphStruct.UUIDsOf(r.Mentioned), At: r.At,
-	})
+	recordReply(ctx, replyRecord(r))
 	aud, err := threadReplyAudience(ctx, r)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/NotifyThreadReply Failed to work out who hears of the reply, telling nobody err: %+v", err)

@@ -18,6 +18,13 @@ package businness
 // A CHANGE IS TOLD (I14). A changed body re-indexes the doc's search entry, runs
 // the save hooks with the Change (the AI index's re-embed, with the doc's title,
 // is one, in the AI edition), and emits doc.updated, credited to whoever made it.
+//
+// A QUIET SAVE TELLS NOBODY. A save holding a quiet write (a copy's body, an
+// import's: collab.Options.Quiet) is stored, indexed and hooked like any other,
+// but as a bulk import is (helpers.BulkImportContextKey): its doc.updated
+// reaches only the sinks that take an import's events (the audit, the AI's
+// record), and the mentions hook keeps whom the body mentions and tells nobody.
+// The new doc's own doc.created, which integrations hear, still fires.
 
 import (
 	"context"
@@ -30,6 +37,7 @@ import (
 	resourceViewBusiness "github.com/akashc777/OneCamp/business/ResourceView"
 	domain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
 )
 
@@ -52,6 +60,10 @@ type CollabSave struct {
 	// the agents, with who asked each.
 	Contributors []string           `json:"contributors"`
 	Agents       []AgentContributor `json:"agents"`
+	// Quiet is a save holding a quiet write (collab.Options.Quiet: a copy's
+	// body, an import's): its Change is quiet. Only the collaboration service
+	// sends it, on a route behind the internal secret.
+	Quiet bool `json:"quiet"`
 }
 
 // CollabSaved is what a save did.
@@ -71,14 +83,25 @@ var (
 		if err != nil {
 			return "", err
 		}
-		if doc == nil {
-			return "", ErrNotFound
-		}
-		return doc.Body, nil
+		return storedBodyOf(doc)
 	}
 	// fanOutSavedBody is a changed save's side effects outside the hooks.
 	fanOutSavedBody = reindexSavedBody
 )
+
+// storedBodyOf is the body of a doc as the system reads it: ErrNotAPage for a
+// folder, a file or a link, which hold none (docs F1). The seed's fallback
+// reads a new doc's stored body before writing its first one directly, and
+// would otherwise write a body into a folder (docLiveWrite.go seedBodyWith).
+func storedBodyOf(doc *dgraphStruct.DgraphDoc) (string, error) {
+	if doc == nil {
+		return "", ErrNotFound
+	}
+	if !IsPage(doc) {
+		return "", ErrNotAPage
+	}
+	return doc.Body, nil
+}
 
 // SaveFromCollab stores one save from the collaboration service.
 func SaveFromCollab(ctx context.Context, in CollabSave) (CollabSaved, error) {
@@ -119,15 +142,25 @@ func SaveFromCollab(ctx context.Context, in CollabSave) (CollabSaved, error) {
 	c := Change{
 		DocUUID: in.DocUUID, Body: in.HTML, Hash: hash, PrevHash: w.PrevHash, Lineage: in.Lineage,
 		Contributors: in.Contributors, Agents: in.Agents, SavedAt: time.Now(), Hosted: w.Hosted,
-		Before: previous,
+		Before: previous, Quiet: in.Quiet,
 	}
 	if previous != "" && massDeletion(len(previous), len(in.HTML)) {
 		c.Previous = previous
+	}
+	if c.Quiet {
+		ctx = quietly(ctx)
 	}
 	fanOutSavedBody(ctx, c)
 	SaveHooks.run(ctx, c)
 	resourceEventBusiness.Bus.Emit(ctx, savedEvent(c))
 	return CollabSaved{Stored: true, Changed: true}, nil
+}
+
+// quietly is the context a quiet save's side effects run in: a bulk import's,
+// so of the event sinks only those that take an import's events hear them, and
+// no inbox, push, email, webhook or integration does.
+func quietly(ctx context.Context) context.Context {
+	return context.WithValue(ctx, helpers.BulkImportContextKey, true)
 }
 
 // nobodyEdited is whether a save holds nobody's edit: no person and no agent
@@ -188,6 +221,9 @@ func collabSaveError(err error) error {
 		return ErrDocDeleted
 	case errors.Is(err, ErrNotFound):
 		return ErrNotFound
+	case errors.Is(err, ErrNotAPage):
+		// A folder, a file or a link has no body (docs F1).
+		return ErrNotAPage
 	}
 	return err
 }

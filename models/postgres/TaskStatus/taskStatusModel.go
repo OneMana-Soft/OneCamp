@@ -5,12 +5,15 @@ package models
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -58,7 +61,7 @@ func List(ctx context.Context, projectID uuid.UUID) ([]*TaskStatus, error) {
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
-		`SELECT `+columns+` FROM task_statuses WHERE project_id = $1 ORDER BY position, created_at`, projectID)
+		`SELECT `+columns+` FROM task_statuses WHERE project_id = $1 AND `+softDelete.Live("")+` ORDER BY position, created_at`, projectID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/TaskStatus List err: %+v", err)
 		return nil, err
@@ -85,7 +88,7 @@ func ListForProjects(ctx context.Context, projectIDs []uuid.UUID) (map[uuid.UUID
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
-		`SELECT `+columns+` FROM task_statuses WHERE project_id = ANY($1::uuid[]) ORDER BY position, created_at`, pq.Array(projectIDs))
+		`SELECT `+columns+` FROM task_statuses WHERE project_id = ANY($1::uuid[]) AND `+softDelete.Live("")+` ORDER BY position, created_at`, pq.Array(projectIDs))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/TaskStatus ListForProjects err: %+v", err)
 		return nil, err
@@ -106,7 +109,7 @@ func Get(ctx context.Context, projectID, id uuid.UUID) (*TaskStatus, error) {
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	s, err := scan(postgresInit.DBConn.SqlDB.QueryRowContext(c,
-		`SELECT `+columns+` FROM task_statuses WHERE id = $1 AND project_id = $2`, id, projectID))
+		`SELECT `+columns+` FROM task_statuses WHERE id = $1 AND project_id = $2 AND `+softDelete.Live(""), id, projectID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -118,7 +121,7 @@ func FindByName(ctx context.Context, projectID uuid.UUID, name string) (*TaskSta
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	s, err := scan(postgresInit.DBConn.SqlDB.QueryRowContext(c,
-		`SELECT `+columns+` FROM task_statuses WHERE project_id = $1 AND lower(name) = lower($2)`, projectID, strings.TrimSpace(name)))
+		`SELECT `+columns+` FROM task_statuses WHERE project_id = $1 AND lower(name) = lower($2) AND `+softDelete.Live(""), projectID, strings.TrimSpace(name)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -131,7 +134,7 @@ func IDsByName(ctx context.Context, name string) ([]string, error) {
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
-		`SELECT id FROM task_statuses WHERE lower(name) = lower($1)`, strings.TrimSpace(name))
+		`SELECT id FROM task_statuses WHERE lower(name) = lower($1) AND `+softDelete.Live(""), strings.TrimSpace(name))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/TaskStatus IDsByName err: %+v", err)
 		return nil, err
@@ -153,7 +156,7 @@ func Count(ctx context.Context, projectID uuid.UUID) (int, error) {
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	var n int
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `SELECT COUNT(*) FROM task_statuses WHERE project_id = $1`, projectID).Scan(&n)
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `SELECT COUNT(*) FROM task_statuses WHERE project_id = $1 AND `+softDelete.Live(""), projectID).Scan(&n)
 	return n, err
 }
 
@@ -180,7 +183,7 @@ func Update(ctx context.Context, s *TaskStatus) (*TaskStatus, error) {
 	defer cancel()
 	out, err := scan(postgresInit.DBConn.SqlDB.QueryRowContext(c, `
 		UPDATE task_statuses SET name = $3, category = $4, color = $5, updated_at = NOW()
-		WHERE id = $1 AND project_id = $2 RETURNING `+columns, s.ID, s.ProjectID, s.Name, s.Category, s.Color))
+		WHERE id = $1 AND project_id = $2 AND `+softDelete.Live("")+` RETURNING `+columns, s.ID, s.ProjectID, s.Name, s.Category, s.Color))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -208,18 +211,111 @@ func Reorder(ctx context.Context, projectID uuid.UUID, ids []uuid.UUID) error {
 	return err
 }
 
-// Delete removes one of a project's statuses.
-func Delete(ctx context.Context, projectID, id uuid.UUID) error {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(c, `DELETE FROM task_statuses WHERE id = $1 AND project_id = $2`, id, projectID)
+// Delete removes one of a project's statuses, keeping what its delete moved
+// for its restore. A status deleted again before its last restore finished
+// keeps that restore's remainder beside its own (Moves.Earlier), so the next
+// restore brings back all of both.
+func Delete(ctx context.Context, projectID, id, by uuid.UUID, moved Moves) error {
+	return pgexec.InTx(ctx, func(ctx context.Context) error {
+		pending, found, err := pgexec.QueryOne(ctx, `SELECT deleted_moves FROM task_statuses WHERE id = $1 AND project_id = $2 AND `+softDelete.Live("")+` FOR UPDATE`,
+			func(r pgexec.Row) (b []byte, err error) { err = r.Scan(&b); return b, err }, id, projectID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return ErrNotFound
+		}
+		if pending != nil {
+			var was Moves
+			if err := json.Unmarshal(pending, &was); err != nil {
+				return err
+			}
+			moved.Earlier = was.All()
+		}
+		raw, err := json.Marshal(moved)
+		if err != nil {
+			return err
+		}
+		if _, err := pgexec.Exec(ctx, `UPDATE task_statuses SET deleted_moves = $3 WHERE id = $1 AND project_id = $2 AND `+softDelete.Live(""), id, projectID, raw); err != nil {
+			return err
+		}
+		deleted, err := softDelete.Delete(ctx, softDelete.Status, id, by, "project_id = $3", projectID)
+		if err == nil && !deleted {
+			return ErrNotFound
+		}
+		return err
+	})
+}
+
+// Moves is where a status's delete moved its tasks, which it moved, and what
+// else that pointed at it the delete pointed there (Repointed, each as its
+// listener names it: a GitHub automation rule). Earlier holds, oldest first,
+// the moves of the deletes before it whose restore hadn't finished.
+type Moves struct {
+	Category   string   `json:"category"`
+	CustomID   string   `json:"custom_id,omitempty"`
+	CustomName string   `json:"custom_name,omitempty"`
+	Tasks      []string `json:"tasks"`
+	Repointed  []string `json:"repointed,omitempty"`
+	Earlier    []Moves  `json:"earlier,omitempty"`
+}
+
+// All is each delete's moves that m holds, oldest first.
+func (m Moves) All() []Moves {
+	all := append([]Moves(nil), m.Earlier...)
+	m.Earlier = nil
+	return append(all, m)
+}
+
+// Repointed records on a deleted status what its delete pointed elsewhere
+// (refs), for its restore to point back.
+func Repointed(ctx context.Context, id uuid.UUID, refs []string) error {
+	raw, err := json.Marshal(refs)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	_, err = pgexec.Exec(ctx, `UPDATE task_statuses SET deleted_moves = jsonb_set(COALESCE(deleted_moves, '{}'::jsonb), '{repointed}', $2::jsonb) WHERE id = $1 AND deleted_at IS NOT NULL`, id, string(raw))
+	return err
+}
+
+// Restore brings a deleted status back and answers it with the moves its
+// deletes made, for its tasks' return. Their record stays until Restored
+// clears it once all are back, so a restore that failed partway is finished
+// by the next: a live status that still holds its moves answers them again.
+// softDelete.ErrTaken: a live status of the project has its name now.
+func Restore(ctx context.Context, id uuid.UUID) (*TaskStatus, Moves, error) {
+	var moved Moves
+	var s *TaskStatus
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		var deleted bool
+		raw, found, err := pgexec.QueryOne(ctx, `SELECT COALESCE(deleted_moves, '{}'::jsonb), deleted_at IS NOT NULL FROM task_statuses
+			WHERE id = $1 AND `+softDelete.Restorable(softDelete.Status)+` FOR UPDATE`,
+			func(r pgexec.Row) (b []byte, err error) { err = r.Scan(&b, &deleted); return b, err }, id)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return ErrNotFound
+		}
+		if err := json.Unmarshal(raw, &moved); err != nil {
+			return err
+		}
+		if deleted {
+			if _, err := softDelete.Restore(ctx, softDelete.Status, id); err != nil {
+				return err
+			}
+		}
+		s, _, err = pgexec.QueryOne(ctx, `SELECT `+columns+` FROM task_statuses WHERE id = $1 AND `+softDelete.Live(""), func(r pgexec.Row) (*TaskStatus, error) { return scan(r) }, id)
+		return err
+	})
+	return s, moved, err
+}
+
+// Restored clears a restored status's record of what its delete moved, once
+// its tasks and what pointed at it are back.
+func Restored(ctx context.Context, id uuid.UUID) error {
+	_, err := pgexec.Exec(ctx, `UPDATE task_statuses SET deleted_moves = NULL WHERE id = $1 AND `+softDelete.Live(""), id)
+	return err
 }
 
 // Order is a project's saved column order (migration 326): built-in keys and

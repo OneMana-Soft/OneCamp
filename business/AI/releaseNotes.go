@@ -47,15 +47,17 @@ type ReleaseNotesResult struct {
 // drafts user-facing release notes for the calling user (using their resolved
 // model). Rate-limited per user. Read-only against GitHub.
 func DraftReleaseNotes(ctx context.Context, userUUID, owner, repo string, days int) (*ReleaseNotesResult, error) {
-	svc := ai.GetService()
-	if svc == nil || !svc.IsEnabled() {
-		return nil, fmt.Errorf("AI service is not enabled")
-	}
 	if strings.TrimSpace(owner) == "" || strings.TrimSpace(repo) == "" {
 		return nil, fmt.Errorf("repo owner and name are required")
 	}
+	// Before the AI is asked: a repository the asker may not read is refused
+	// whatever else holds.
 	if err := CodeRepoAllowed(ctx, userUUID, owner, repo); err != nil {
 		return nil, err
+	}
+	svc := ai.GetService()
+	if svc == nil || !svc.IsEnabled() {
+		return nil, fmt.Errorf("AI service is not enabled")
 	}
 	if days <= 0 {
 		days = 14

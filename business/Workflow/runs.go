@@ -92,24 +92,15 @@ func limited(ctx context.Context, cw *compiledWorkflow, now time.Time) (string, 
 // event, on the branch its conditions choose, and records the run.
 func runWorkflow(ctx context.Context, cw *compiledWorkflow, ev triggerEvent) {
 	allowed := access.allows(ctx, cw.createdBy, ev)
-	if !allowed && ev.taskID == "" {
+	if !allowed && ev.taskID == "" && cw.projectID == "" {
 		return // a channel its owner can't read: not theirs to hear
 	}
 	now := clock()
-	run := &workflowModel.Run{WorkflowID: cw.id, Trigger: cw.triggerType, SubjectID: ev.subjectID(), Subject: ev.text, StartedAt: now}
-	if pid, err := uuid.Parse(ev.projectID); err == nil {
-		run.ProjectID = &pid
-	}
+	run := cw.newRun(ev, now)
 	if ev.eventKey == "" {
 		ev.eventKey = eventKey(cw.triggerType, map[string]interface{}{"subject": ev.subjectID(), "at": now.UnixNano()})
 	}
-	skip := func(reason string) {
-		run.Status, run.Error = workflowModel.RunSkipped, reason
-		run.FinishedAt = &now
-		if _, err := claimRun(ctx, run, ev.eventKey); err != nil {
-			helpers.LogErrorWithContext(ctx, "Workflow %s skip record: %v", cw.id, err)
-		}
-	}
+	skip := func(reason string) { cw.recordSkip(ctx, ev, now, reason) }
 
 	actions := cw.actions
 	var rc *runCtx
@@ -160,7 +151,7 @@ func runWorkflow(ctx context.Context, cw *compiledWorkflow, ev triggerEvent) {
 
 	actionCtx := helpers.WithWorkflowGenerated(ctx)
 	limit := MaxActionsPerWorkflow
-	if rc != nil {
+	if rc != nil || cw.projectID != "" {
 		limit = MaxActionsPerBranch
 	}
 	var firstErr string
@@ -173,11 +164,24 @@ func runWorkflow(ctx context.Context, cw *compiledWorkflow, ev triggerEvent) {
 			step = cw.runTaskAction(actionCtx, act, ev, rc, i)
 		} else {
 			step = workflowModel.Step{Type: act.Type, Status: "ok"}
-			if made, err := cw.runAction(actionCtx, act, ev, rc); err != nil {
+			if rc == nil && isTaskAction(act.Type) {
+				// A schedule's steps act on the task it made: none yet.
+				step.Status, step.Detail = "skipped", "no task to act on"
+			} else if made, err := cw.runAction(actionCtx, act, ev, rc); err != nil {
 				helpers.LogErrorWithContext(ctx, "Workflow %s action %q failed: %v", cw.id, act.Type, err)
 				step.Status, step.Detail = "failed", plainError(err)
 			} else {
 				step.Made = made
+				if rc == nil && act.Type == ActionCreateTask && cw.triggerType == workflowModel.TriggerSchedule {
+					// The steps after it act on the task it made, read as
+					// the owner like any task a rule acts on.
+					rc = cw.madeTask(ctx, made, run.ID)
+					if rc != nil {
+						step.TaskID = rc.task.Uuid
+						run.SubjectID, run.Subject = rc.task.Uuid, rc.task.Name
+						ev.taskID, ev.vars = rc.task.Uuid, taskVars(rc.task)
+					}
+				}
 			}
 		}
 		if step.Status == "failed" && firstErr == "" {
@@ -197,6 +201,44 @@ func runWorkflow(ctx context.Context, cw *compiledWorkflow, ev triggerEvent) {
 	}
 }
 
+// newRun is a run of the rule for an event, starting now.
+func (cw *compiledWorkflow) newRun(ev triggerEvent, now time.Time) *workflowModel.Run {
+	run := &workflowModel.Run{WorkflowID: cw.id, Trigger: cw.triggerType, SubjectID: ev.subjectID(), Subject: ev.text, StartedAt: now}
+	if pid, err := uuid.Parse(ev.projectID); err == nil {
+		run.ProjectID = &pid
+	}
+	return run
+}
+
+// recordSkip records that the rule didn't run for an event, and why: once,
+// under the event's key.
+func (cw *compiledWorkflow) recordSkip(ctx context.Context, ev triggerEvent, now time.Time, reason string) {
+	run := cw.newRun(ev, now)
+	run.Status, run.Error = workflowModel.RunSkipped, reason
+	run.FinishedAt = &now
+	key := ev.eventKey
+	if key == "" {
+		key = eventKey(cw.triggerType, map[string]interface{}{"subject": ev.subjectID(), "at": now.UnixNano()})
+	}
+	if _, err := claimRun(ctx, run, key); err != nil {
+		helpers.LogErrorWithContext(ctx, "Workflow %s skip record: %v", cw.id, err)
+	}
+}
+
+// madeTask is the task a schedule's step just made, as its owner reads it,
+// for the steps after it; nil when it can't be read.
+func (cw *compiledWorkflow) madeTask(ctx context.Context, taskID string, runID uuid.UUID) *runCtx {
+	owner, err := loadActor(ctx, cw.createdBy)
+	if err != nil {
+		return nil
+	}
+	task, err := readTask(ctx, taskID, owner)
+	if err != nil || task == nil {
+		return nil
+	}
+	return &runCtx{owner: owner, task: task, runID: runID}
+}
+
 // stop pauses a rule that ran away and tells its owner, once.
 func (cw *compiledWorkflow) stop(ctx context.Context, reason string) {
 	paused, err := pauseRule(ctx, cw.id, reason)
@@ -204,6 +246,9 @@ func (cw *compiledWorkflow) stop(ctx context.Context, reason string) {
 		return
 	}
 	_ = reloadRules(ctx)
+	if cw.triggerType == workflowModel.TriggerSchedule {
+		_ = cancelScheduleJob(ctx, cw.id)
+	}
 	path := "/app/settings/workflows"
 	if cw.projectID != "" {
 		path = "/app/project/" + cw.projectID + "?rules=1"

@@ -32,7 +32,7 @@ func GetEmailConfig(w http.ResponseWriter, r *http.Request) {
 		"sender_email",
 		"invitation_email_subject",
 		"invitation_email_template",
-		"invitation_email_logo",
+		configModels.EmailLogoKey,
 	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -53,7 +53,7 @@ func GetEmailConfig(w http.ResponseWriter, r *http.Request) {
 	// who invited them, and to where), and the seeded sender, OneCamp's own
 	// domain, reads as none chosen, which sends from default_sender.
 	result := map[string]interface{}{
-		"has_logo":                  stored["invitation_email_logo"] != "",
+		"has_logo":                  stored[configModels.EmailLogoKey] != "",
 		"sender_email":              emailService.ChosenSender(stored["sender_email"]),
 		"default_sender":            emailService.SenderAddress(),
 		"invitation_email_subject":  userBusiness.InviteSubject(stored["invitation_email_subject"]),
@@ -179,7 +179,7 @@ func UploadEmailLogo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := configModels.UpsertConfig("invitation_email_logo", fullObjName); err != nil {
+	if err := configModels.UpsertConfig(configModels.EmailLogoKey, fullObjName); err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/UploadEmailLogo Failed to update config err: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
@@ -202,14 +202,14 @@ func DeleteEmailLogo(w http.ResponseWriter, r *http.Request) {
 	_ = ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 
 	// Fetch existing to see if we should delete from minio (optional cleanup, but good practice)
-	cfg, err := configModels.GetConfigByKey("invitation_email_logo")
+	cfg, err := configModels.GetConfigByKey(configModels.EmailLogoKey)
 	if err == nil && cfg != nil && cfg.Value != "" {
 		bucketName := helpers.UserUploadBucket()
 		_ = minioInit.MinioClient.RemoveObject(ctx, bucketName, cfg.Value, minio.RemoveObjectOptions{})
 	}
 
 	// Update the config string to be empty
-	if err := configModels.UpsertConfig("invitation_email_logo", ""); err != nil {
+	if err := configModels.UpsertConfig(configModels.EmailLogoKey, ""); err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/DeleteEmailLogo Failed to update config err: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{

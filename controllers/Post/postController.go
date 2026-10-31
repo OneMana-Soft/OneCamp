@@ -1,9 +1,12 @@
 package controllers
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
+	callThreadBusiness "github.com/akashc777/OneCamp/business/CallThread"
 	"net/http"
 	"strings"
 
@@ -97,7 +100,7 @@ func DeletePostCommentReaction(w http.ResponseWriter, r *http.Request) {
 
 	commentInfo, err := commentBusiness.GetDgraphPostCommentInfoByUUID(ctx, commentReactionInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || commentInfo == nil || commentInfo.Post == nil || commentInfo.Post.Channel == nil || !commentInfo.Post.Channel.DeletedAt.IsZero() {
+	if err != nil || commentInfo == nil || channelGone(commentInfo.Post) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/DeletePostCommentReaction Failed to get dgraph comment info err: %+v",
 			err)
@@ -157,7 +160,7 @@ func DeletePostReaction(w http.ResponseWriter, r *http.Request) {
 
 	postInfo, err := business.GetDgraphPostByUUID(ctx, postReactionInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || !postInfo.Channel.DeletedAt.IsZero() {
+	if err != nil || channelGone(postInfo) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/DeleteReaction Failed to get post info from dgraph err: %+v",
 			err)
@@ -218,7 +221,7 @@ func CreateOrUpdateReactionOnCommentPost(w http.ResponseWriter, r *http.Request)
 
 	dgraphComment, err := commentBusiness.GetDgraphPostCommentInfoByUUID(ctx, commentPostReactionInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || dgraphComment == nil || !dgraphComment.Post.Channel.DeletedAt.IsZero() {
+	if err != nil || dgraphComment == nil || channelGone(dgraphComment.Post) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateOrUpdateReactionOnCommentPost Failed to comment dgraph info err: %+v",
 			err)
@@ -234,6 +237,12 @@ func CreateOrUpdateReactionOnCommentPost(w http.ResponseWriter, r *http.Request)
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorized ",
 		})
+		return
+	}
+	// Nor while the people running a live call hold its chat: a reaction shows
+	// in the call's chat beside the reply (calls meet-12). Taking one's own
+	// reaction away stays open, as deleting one's own reply does.
+	if refusedForHeldChat(ctx, w, &userInfo, dgraphComment.Post.Uuid, "CreateOrUpdateReactionOnCommentPost", "Couldn't add the reaction. Try again in a moment.") {
 		return
 	}
 
@@ -295,7 +304,7 @@ func CreateOrUpdateReaction(w http.ResponseWriter, r *http.Request) {
 
 	postInfo, err := business.GetDgraphPostByUUID(ctx, postReactionInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || !postInfo.Channel.DeletedAt.IsZero() {
+	if err != nil || channelGone(postInfo) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateOrUpdateReaction Failed to dgraph post by uuid err: %+v",
 			err)
@@ -376,7 +385,7 @@ func UpdatePost(w http.ResponseWriter, r *http.Request) {
 
 	dgraphPost, err := business.GetDgraphPostByUUID(ctx, postInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || !dgraphPost.Channel.DeletedAt.IsZero() {
+	if err != nil || channelGone(dgraphPost) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/UpdatePost Failed to get post info from dgraph err: %+v",
 			err)
@@ -395,6 +404,11 @@ func UpdatePost(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Only the person who wrote a message can edit it.",
 		})
+		return
+	}
+	// The server's own messages (a system line, a call's post) are never edited.
+	if dgraphPost.ServerWritten() {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "This message can't be edited."})
 		return
 	}
 	// A deleted message isn't edited. A database that didn't answer says
@@ -473,8 +487,7 @@ func DeleteCommentInPost(w http.ResponseWriter, r *http.Request) {
 
 	dgraphComment, err := commentBusiness.GetDgraphPostCommentInfoByUUID(ctx, commentInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || dgraphComment == nil || dgraphComment.Post == nil || dgraphComment.Post.Channel == nil ||
-		dgraphComment.CommentBy == nil || !dgraphComment.Post.Channel.DeletedAt.IsZero() {
+	if err != nil || dgraphComment == nil || dgraphComment.CommentBy == nil || channelGone(dgraphComment.Post) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/DeleteCommentInPost Failed to get comment from dgraph err: %+v",
 			err)
@@ -516,6 +529,26 @@ func DeleteCommentInPost(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// refusedForHeldChat writes a reply route's refusal while the people running a
+// live call hold its chat for this person (calls meet-12): the call's chat is
+// the post's thread, so the thread's view in the channel must be no way round
+// the hold, by a reply, an edit or a reaction. 403 chat_held in the call's own
+// words; 503 when the hold can't be read, never an open thread. Answers
+// whether the route must stop.
+func refusedForHeldChat(ctx context.Context, w http.ResponseWriter, userInfo *userModels.UserInfo, postUUID, route, retry string) bool {
+	held, err := callThreadBusiness.ChatHeldFor(ctx, userInfo, postUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/%s could not read the call's hold on %s: %+v", route, postUUID, err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": retry})
+		return true
+	}
+	if held {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "chat_held", "msg": callThreadBusiness.ChatHeldText})
+		return true
+	}
+	return false
+}
+
 func UpdateCommentInPost(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -551,8 +584,7 @@ func UpdateCommentInPost(w http.ResponseWriter, r *http.Request) {
 
 	dgraphComment, err := commentBusiness.GetDgraphPostCommentInfoByUUID(ctx, commentInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || dgraphComment == nil || dgraphComment.Post == nil || dgraphComment.Post.Channel == nil ||
-		dgraphComment.CommentBy == nil || !dgraphComment.Post.Channel.DeletedAt.IsZero() {
+	if err != nil || dgraphComment == nil || dgraphComment.CommentBy == nil || channelGone(dgraphComment.Post) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/UpdateCommentInPost Failed to comment from dgraph err: %+v",
 			err)
@@ -572,6 +604,11 @@ func UpdateCommentInPost(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorized",
 		})
+		return
+	}
+	// Nor while the people running a live call hold its chat: an edit shows in
+	// the call's chat as the reply's new words (calls meet-12).
+	if refusedForHeldChat(ctx, w, &userInfo, dgraphComment.Post.Uuid, "UpdateCommentInPost", "Your reply couldn't be changed. Try again in a moment.") {
 		return
 	}
 
@@ -622,7 +659,7 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 
 	dgraphPost, err := business.GetDgraphPostByUUID(ctx, commentInfo.PostUuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || !dgraphPost.Channel.DeletedAt.IsZero() {
+	if err != nil || channelGone(dgraphPost) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/AddCommentToPost Failed to get post info from dgraph err: %+v",
 			err)
@@ -644,6 +681,12 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 	// A deleted message takes no replies.
 	if helpers.IsSoftDeleted(dgraphPost.DeletedAt) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
+		return
+	}
+
+	// Nor does a live call's message while the people running the call hold
+	// its chat: the call's chat is this thread (calls meet-12).
+	if refusedForHeldChat(ctx, w, &userInfo, commentInfo.PostUuid, "AddCommentToPost", "Your reply couldn't be sent. Try again in a moment.") {
 		return
 	}
 
@@ -1004,7 +1047,7 @@ func DeletePost(w http.ResponseWriter, r *http.Request) {
 
 	dgraphPost, err := business.GetDgraphPostByUUID(ctx, postInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || dgraphPost == nil || dgraphPost.Channel == nil || !dgraphPost.Channel.DeletedAt.IsZero() {
+	if err != nil || channelGone(dgraphPost) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/DeletePost Failed to get dgraph post info err: %+v",
 			err)
@@ -1050,6 +1093,16 @@ func DeletePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A call's post goes only once its call has ended (calls CALLS-3b): the
+	// call's thread hangs off it while the call goes on.
+	if dgraphPost.Kind == helpers.KindHuddle {
+		if id, perr := uuid.Parse(dgraphPost.Uuid); perr == nil {
+			if live, lerr := callStateBusiness.IsLivePost(ctx, id); lerr != nil || live {
+				helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "This call is still going on. Its post can be deleted once the call ends."})
+				return
+			}
+		}
+	}
 	err = business.DeletePost(ctx, dgraphPost, channelUUID.String())
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1111,4 +1164,13 @@ func mayReadChannel(w http.ResponseWriter, r *http.Request, channel *dgraphStruc
 		return false
 	}
 	return true
+}
+
+// channelGone reports whether a post's channel is gone: no post, no channel,
+// or a deletion time (helpers.IsSoftDeleted, which reads the graph's zero time
+// as live). Every post route reads it this one way: read through the pointer,
+// a channel written without ch_deleted_at (an older import, a seed) panicked
+// the reply, reaction and edit routes.
+func channelGone(p *dgraphStruct.DgraphPost) bool {
+	return p == nil || p.Channel == nil || helpers.IsSoftDeleted(p.Channel.DeletedAt)
 }

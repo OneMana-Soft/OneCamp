@@ -18,6 +18,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
 )
 
@@ -28,9 +29,14 @@ var ErrRemovedFromCall = &helpers.CallRefusal{Code: "removed_from_call", Msg: Re
 
 // Why someone was put out of a call, as the removed person's client is told.
 const (
-	RemovedByHost       = "host"
-	RemovedLinkRevoked  = "link_revoked"
-	RemovedNotAMember   = "not_member"
+	RemovedByHost      = "host"
+	RemovedLinkRevoked = "link_revoked"
+	RemovedNotAMember  = "not_member"
+	// A breakout room someone's token was for: its rooms closed, or it isn't a
+	// room they may be in (calls package C). Their client goes back to the
+	// call's own room.
+	RemovedRoomClosed   = "room_closed"
+	RemovedNotYourRoom  = "not_your_room"
 	guestIdentityPrefix = "guest-"
 )
 
@@ -42,7 +48,7 @@ const CallControlTopic = "oc.call"
 
 // CallPacket is one message on CallControlTopic. T says what happened; the
 // rest is what it needs: who did it (a name), why, what was muted, the part
-// someone was given.
+// someone was given, what changed in the call's polls and questions.
 type CallPacket struct {
 	V      int    `json:"v"`
 	T      string `json:"t"`
@@ -50,6 +56,14 @@ type CallPacket struct {
 	Reason string `json:"reason,omitempty"`
 	Source string `json:"source,omitempty"`
 	Role   string `json:"role,omitempty"`
+	What   string `json:"what,omitempty"`
+	// A call's breakout rooms (calls package C): which room, its name, when
+	// everyone is called back (RFC 3339), and what someone running the call
+	// said to every room.
+	Room int    `json:"room,omitempty"`
+	Name string `json:"name,omitempty"`
+	At   string `json:"at,omitempty"`
+	Text string `json:"text,omitempty"`
 }
 
 // callPacketVersion is the packets' version: a client ignores a newer one it
@@ -134,9 +148,11 @@ func RemoveFromCall(ctx context.Context, roomName, identity string, by Remover, 
 }
 
 // markRemoved keeps a removed person out of the call going on in a room until
-// it ends, on their row in Call State, or answers ErrCallUnchecked: the record
-// didn't answer, or holds no call to keep them out of yet (its first join not
-// recorded), and they must not be put out only to come straight back.
+// it ends, on their row in Call State, and forgets any link's admission of
+// them into it, in one transaction, or answers ErrCallUnchecked and changes
+// neither: the record didn't answer, or holds no call to keep them out of yet
+// (its first join not recorded), and they must not be put out only to come
+// straight back.
 func markRemoved(ctx context.Context, roomName, identity string, by Remover) error {
 	s, err := callStateModel.OpenSessionOf(ctx, roomName)
 	if noRecord(err) {
@@ -156,7 +172,14 @@ func markRemoved(ctx context.Context, roomName, identity string, by Remover) err
 		if who == "" {
 			who = RemovedByHost
 		}
-		err = callStateModel.MarkRemoved(ctx, callStateModel.Attendee{SessionID: s.ID, Identity: identity, Role: role}, who, time.Now())
+		err = pgexec.InTx(ctx, func(ctx context.Context) error {
+			if err := callStateModel.MarkRemoved(ctx, callStateModel.Attendee{SessionID: s.ID, Identity: identity, Role: role}, who, time.Now()); err != nil {
+				return err
+			}
+			// An admission through a link counts them as maybe in the call (the
+			// in-call AI, the call's people): it goes with them (audit C10).
+			return callStateModel.ForgetAdmissionOf(ctx, roomName, identity)
+		})
 	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/RemoveFromCall could not keep %s out of %s: %+v", identity, roomName, err)

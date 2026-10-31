@@ -134,6 +134,12 @@ func ActingFor(ctx context.Context, userUUID string) context.Context {
 	return context.WithValue(ctx, actingKey, strings.ToLower(strings.TrimSpace(userUUID)))
 }
 
+// ActingAs is ActingFor the person u, known as a signed-in person is: by their
+// user id, else their profile's uuid.
+func ActingAs(ctx context.Context, u userModels.UserInfo) context.Context {
+	return ActingFor(ctx, idOf(u))
+}
+
 // ReaderOf is whose reads ctx carries: nobody's after AsNobody, else the
 // person ActingFor names, else the request's signed-in person (a token's call
 // is its owner's, as a member), else "".

@@ -20,6 +20,8 @@ const (
 	tLParen
 	tRParen
 	tComma
+	// tDot joins a link to a field of the rows it links: {Vendor}.{City}.
+	tDot
 )
 
 type token struct {
@@ -68,6 +70,20 @@ func lex(src string) ([]token, error) {
 		switch {
 		case unicode.IsSpace(r):
 			i++
+		case r == '/' && i+1 < len(rs) && rs[i+1] == '*':
+			// A comment, as Notion's formulas have: /* what this is for */.
+			// Kept in the formula as written; read as nothing.
+			end := -1
+			for j := i + 2; j+1 < len(rs); j++ {
+				if rs[j] == '*' && rs[j+1] == '/' {
+					end = j + 2
+					break
+				}
+			}
+			if end < 0 {
+				return nil, syntaxErr(i, "A comment has no closing */")
+			}
+			i = end
 		case unicode.IsDigit(r) || (r == '.' && i+1 < len(rs) && unicode.IsDigit(rs[i+1])):
 			start := i
 			for i < len(rs) && (unicode.IsDigit(rs[i]) || rs[i] == '.') {
@@ -126,6 +142,9 @@ func lex(src string) ([]token, error) {
 		case r == ',':
 			out = append(out, token{kind: tComma, text: ",", pos: i, end: i + 1})
 			i++
+		case r == '.' && i+1 < len(rs) && rs[i+1] == '{' && len(out) > 0 && out[len(out)-1].kind == tField:
+			out = append(out, token{kind: tDot, text: ".", pos: i, end: i + 1})
+			i++
 		default:
 			op := ""
 			if i+1 < len(rs) {
@@ -157,9 +176,15 @@ func quoted(rs []rune, i int, close rune) (string, int, bool) {
 		case '\\':
 			if j+1 < len(rs) {
 				j++
-				if rs[j] == 'n' {
+				switch {
+				case rs[j] == 'n':
 					b.WriteRune('\n')
-				} else {
+				case rs[j] == close || rs[j] == '\\' || rs[j] == '"' || rs[j] == '\'':
+					b.WriteRune(rs[j])
+				default:
+					// Any other escape keeps its backslash, so a pattern
+					// reads as written: "\d{3}" is RE2's \d{3}.
+					b.WriteRune('\\')
 					b.WriteRune(rs[j])
 				}
 			}

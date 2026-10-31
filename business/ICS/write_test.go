@@ -77,3 +77,22 @@ func TestACalAddressIsTheAddressAlone(t *testing.T) {
 		}
 	}
 }
+
+// A feed (calendar B8) names its calendar, which a calendar app shows it
+// as, and says how often to read it again; an invitation says neither.
+func TestAFeedNamesItsCalendarAndHowOftenToReadIt(t *testing.T) {
+	out := string(WriteMessage(Message{Method: "PUBLISH", Name: "Launch; Q4, planning", Refresh: time.Hour}))
+	for _, want := range []string{"X-WR-CALNAME:Launch\\; Q4\\, planning\r\n", "REFRESH-INTERVAL;VALUE=DURATION:PT1H\r\n", "X-PUBLISHED-TTL:PT1H\r\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+	if plain := string(WriteMessage(Message{Method: "REQUEST"})); strings.Contains(plain, "X-WR-CALNAME") || strings.Contains(plain, "REFRESH-INTERVAL") {
+		t.Errorf("an invitation named a calendar or a refresh:\n%s", plain)
+	}
+	for d, want := range map[time.Duration]string{time.Hour: "PT1H", 15 * time.Minute: "PT15M", 48 * time.Hour: "P2D"} {
+		if got := durationOf(d); got != want {
+			t.Errorf("%v is %s, want %s", d, got, want)
+		}
+	}
+}

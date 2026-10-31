@@ -75,7 +75,7 @@ func TestChangingSomeCellsLeavesTheRest(t *testing.T) {
 	if _, err := UpdateRow(ctx, table.Id, row.Id, RowInput{Values: map[string]interface{}{name: "Acme Ltd", stage: "Won"}, Position: at(9)}, actor); err != nil {
 		t.Fatalf("a person's edit: %v", err)
 	}
-	if err := writeCell(ctx, table, stale, &model.Field{Id: uuid.MustParse(notes), Name: "Notes", Type: model.FieldText}, "Big account", "", false); err != nil {
+	if err := writeCellInto(ctx, table, stale, &model.Field{Id: uuid.MustParse(notes), Name: "Notes", Type: model.FieldText}, "Big account", "", false, uuid.Nil); err != nil {
 		t.Fatalf("the fill: %v", err)
 	}
 	if v, pos := stored(); v[name] != "Acme Ltd" || v[stage] != "Won" || v[notes] != "Big account" || pos != 9 {

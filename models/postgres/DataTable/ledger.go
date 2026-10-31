@@ -26,6 +26,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -45,12 +46,19 @@ type ChangeSet struct {
 	// UndoneBy the one that undid this one.
 	Undoes   uuid.UUID
 	UndoneBy uuid.UUID
-	At       time.Time
+	// Operation is the change sets a person undoes as one, such as an
+	// import's (the change_set_operations migration); uuid.Nil for none.
+	Operation uuid.UUID
+	At        time.Time
 	// Rows and Fields are counted from Changes as it's stored: how many rows
 	// it changed, and which fields' cells or links.
 	Rows    int
 	Fields  []string
 	Changes []Change
+	// Append is a change set stored already (an AI column's fill, whose
+	// turns write into the one change set): its Changes are added to it,
+	// after those it has, and an undone one takes no more (ErrUndone).
+	Append bool
 }
 
 // Change is one change a change set made: a cell's value before and after
@@ -165,8 +173,14 @@ func ledgerTx(ctx context.Context, rows int, cs *ChangeSet, committing Committin
 		if cs == nil || len(cs.Changes) == 0 {
 			return nil
 		}
-		if err := recordTx(ctx, tx, cs); err != nil {
-			helpers.LogErrorWithContext(ctx, "models/ledger record err: %+v", err)
+		record := recordTx
+		if cs.Append {
+			record = appendTx
+		}
+		if err := record(ctx, tx, cs); err != nil {
+			if !errors.Is(err, ErrUndone) {
+				helpers.LogErrorWithContext(ctx, "models/ledger record err: %+v", err)
+			}
 			return err
 		}
 		if committing != nil {
@@ -198,9 +212,9 @@ func recordTx(ctx context.Context, tx *sql.Tx, cs *ChangeSet) error {
 		cs.ID = uuid.New()
 	}
 	cs.Rows, cs.Fields = rowsAndFields(cs.Changes)
-	if err := tx.QueryRowContext(ctx, `INSERT INTO data_table_change_sets (id, table_id, actor, agent, actor_kind, kind, rows, fields, undoes)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING at`,
-		cs.ID, cs.TableID, nullUUID(cs.Actor), nullUUID(cs.Agent), cs.ActorKind, cs.Kind, cs.Rows, pq.Array(cs.Fields), nullUUID(cs.Undoes)).Scan(&cs.At); err != nil {
+	if err := tx.QueryRowContext(ctx, `INSERT INTO data_table_change_sets (id, table_id, actor, agent, actor_kind, kind, rows, fields, undoes, operation)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING at`,
+		cs.ID, cs.TableID, nullUUID(cs.Actor), nullUUID(cs.Agent), cs.ActorKind, cs.Kind, cs.Rows, pq.Array(cs.Fields), nullUUID(cs.Undoes), nullUUID(cs.Operation)).Scan(&cs.At); err != nil {
 		return err
 	}
 	ids := make([]uuid.UUID, len(cs.Changes))
@@ -215,6 +229,54 @@ func recordTx(ctx context.Context, tx *sql.Tx, cs *ChangeSet) error {
 		SELECT $1, c.seq, $2, c.row_id, c.field, NULLIF(c.before, '')::jsonb, NULLIF(c.after, '')::jsonb, $3
 		FROM unnest($4::uuid[], $5::text[], $6::text[], $7::text[]) WITH ORDINALITY AS c(row_id, field, before, after, seq)`,
 		cs.ID, cs.TableID, cs.At, ids, fields, before, after)
+	return err
+}
+
+// appendTx adds cs's changes to the change set cs.ID, stored already, in tx,
+// after the changes it has, and counts them into its rows and fields. The
+// change set is locked first, as ApplyInverse locks it, so a write and an
+// undo of it take turns: one undone already takes nothing more (ErrUndone),
+// and the write rolls back with it. Each write of a fill is of rows it
+// hasn't written before (it walks the table once), so its rows are added
+// to the count as they come.
+func appendTx(ctx context.Context, tx *sql.Tx, cs *ChangeSet) error {
+	ctx = pgexec.WithTx(ctx, tx)
+	undone, _, err := pgexec.QueryOne(ctx, `SELECT undone_by FROM data_table_change_sets WHERE id = $1 AND table_id = $2 FOR UPDATE`,
+		func(r pgexec.Row) (uuid.NullUUID, error) {
+			var u uuid.NullUUID
+			return u, r.Scan(&u)
+		}, cs.ID, cs.TableID)
+	if err != nil {
+		return err
+	}
+	if undone.Valid {
+		return ErrUndone
+	}
+	rows, fields := rowsAndFields(cs.Changes)
+	// Its fields, in the order they first came, each once.
+	at, _, err := pgexec.QueryOne(ctx, `UPDATE data_table_change_sets SET rows = rows + $2,
+			fields = (SELECT COALESCE(array_agg(u.f ORDER BY u.o), '{}') FROM (
+				SELECT f, MIN(o) AS o FROM unnest(fields || $3::text[]) WITH ORDINALITY AS a(f, o) GROUP BY f) u)
+		WHERE id = $1 RETURNING at`, func(r pgexec.Row) (time.Time, error) {
+		var t time.Time
+		return t, r.Scan(&t)
+	}, cs.ID, rows, pq.Array(fields))
+	if err != nil {
+		return err
+	}
+	cs.At, cs.Rows, cs.Fields = at, rows, fields // this write's, as its observers hear it
+	ids := make([]uuid.UUID, len(cs.Changes))
+	names := make([]string, len(cs.Changes))
+	before := make([]string, len(cs.Changes))
+	after := make([]string, len(cs.Changes))
+	for i, c := range cs.Changes {
+		ids[i], names[i], before[i], after[i] = c.Row, c.Field, jsonText(c.Before), jsonText(c.After)
+	}
+	_, err = pgexec.Exec(ctx, `INSERT INTO data_table_changes (change_set, seq, table_id, row_id, field, before, after, at)
+		SELECT $1, (SELECT COALESCE(MAX(seq), 0) FROM data_table_changes WHERE change_set = $1) + c.seq, $2, c.row_id, c.field,
+			NULLIF(c.before, '')::jsonb, NULLIF(c.after, '')::jsonb, NOW()
+		FROM unnest($3::uuid[], $4::text[], $5::text[], $6::text[]) WITH ORDINALITY AS c(row_id, field, before, after, seq)`,
+		cs.ID, cs.TableID, ids, names, before, after)
 	return err
 }
 
@@ -454,7 +516,7 @@ type CellsPatch struct {
 // naming who wrote it ($5). A row over $4 bytes, or whose version isn't the
 // one its patch names, isn't written. Rows are locked in id order, so two
 // batches never each wait for the other.
-const patchRowsSQL = `WITH p AS (
+var patchRowsSQL = `WITH p AS (
 		SELECT * FROM unnest($1::uuid[], $3::text[], $7::bigint[]) AS p(id, cells, want)
 	), c AS (
 		SELECT r.id, r.values AS old, r.version FROM data_table_rows r
@@ -462,7 +524,7 @@ const patchRowsSQL = `WITH p AS (
 		ORDER BY r.id FOR UPDATE
 	), n AS (
 		SELECT c.id, c.old, c.version, p.want, c.old || p.cells::jsonb AS cells,
-			COALESCE(c.old -> '` + AIKeptKey + `', '[]'::jsonb) AS kept
+			` + fmt.Sprintf(keptSQL, "c.old") + ` AS kept
 		FROM c JOIN p ON p.id = c.id
 	), m AS (
 		SELECT id, old, version, want, cells, kept || COALESCE((SELECT jsonb_agg(f) FROM unnest($6::text[]) f
@@ -673,7 +735,17 @@ type Batch struct {
 	At     Place
 	Links  []FieldLinks
 	Patch  []CellsPatch
-	Delete []uuid.UUID
+	// RowLinks are rows' links changed through one field each (a patch's
+	// relation cells), as ChangeRowLinks changes one row's.
+	RowLinks []RowLinks
+	Delete   []uuid.UUID
+}
+
+// RowLinks is a change to one row's links: through Shown, the field the row
+// shows them in, stored as Links.Field's.
+type RowLinks struct {
+	Row, Shown uuid.UUID
+	Links      FieldLinks
 }
 
 // Size is how many rows the batch writes.
@@ -703,6 +775,11 @@ func ApplyBatch(ctx context.Context, table, by uuid.UUID, b Batch, aiFields []st
 		}
 		if done.Patched, err = patchRowsTx(ctx, tx, table, by, b.Patch, aiFields, maxBytes, cs); err != nil {
 			return err
+		}
+		for _, rl := range b.RowLinks {
+			if _, _, err := changeRowLinksTx(ctx, tx, rl.Row, rl.Shown, rl.Links, maxPerRow, cs); err != nil {
+				return err
+			}
 		}
 		if len(b.Delete) == 0 {
 			return nil
@@ -1079,25 +1156,8 @@ func ChangeRowLinks(ctx context.Context, row uuid.UUID, shown uuid.UUID, change 
 		return 0, 0, nil
 	}
 	err = ledgerTx(ctx, 1, cs, committing, func(ctx context.Context, tx *sql.Tx) error {
-		changes := []FieldLinks{change}
-		live, err := lockLinked(ctx, tx, changes)
-		if err != nil {
-			return err
-		}
-		gone, err := removeLinks(ctx, tx, change)
-		if err != nil {
-			return err
-		}
-		made, err := changeLinksMade(ctx, tx, []FieldLinks{{Field: change.Field, Add: change.Add}}, live, maxPerRow)
-		if err != nil {
-			return err
-		}
-		added, removed = len(made), len(gone)
-		if cs != nil && (len(made) > 0 || len(gone) > 0) {
-			cs.Changes = append(cs.Changes, Change{Row: row, Field: LinksPrefix + shown.String(),
-				After: asJSON(linkChange{Field: change.Field, Add: made, Remove: gone})})
-		}
-		return nil
+		added, removed, err = changeRowLinksTx(ctx, tx, row, shown, change, maxPerRow, cs)
+		return err
 	})
 	if err != nil {
 		if !errors.Is(err, ErrTooManyLinks) {
@@ -1106,6 +1166,28 @@ func ChangeRowLinks(ctx context.Context, row uuid.UUID, shown uuid.UUID, change 
 		return 0, 0, err
 	}
 	return added, removed, nil
+}
+
+// changeRowLinksTx is ChangeRowLinks's work in tx: row's links through
+// shown, removed then added, with one change in cs saying both.
+func changeRowLinksTx(ctx context.Context, tx *sql.Tx, row, shown uuid.UUID, change FieldLinks, maxPerRow int, cs *ChangeSet) (added, removed int, err error) {
+	live, err := lockLinked(ctx, tx, []FieldLinks{change})
+	if err != nil {
+		return 0, 0, err
+	}
+	gone, err := removeLinks(ctx, tx, change)
+	if err != nil {
+		return 0, 0, err
+	}
+	made, err := changeLinksMade(ctx, tx, []FieldLinks{{Field: change.Field, Add: change.Add}}, live, maxPerRow)
+	if err != nil {
+		return 0, 0, err
+	}
+	if cs != nil && (len(made) > 0 || len(gone) > 0) {
+		cs.Changes = append(cs.Changes, Change{Row: row, Field: LinksPrefix + shown.String(),
+			After: asJSON(linkChange{Field: change.Field, Add: made, Remove: gone})})
+	}
+	return len(made), len(gone), nil
 }
 
 // removeLinks takes away a field's links that change removes, in tx, and
@@ -1191,16 +1273,16 @@ func changeLinksMade(ctx context.Context, tx *sql.Tx, changes []FieldLinks, live
 
 // ───────────────────────── reading the ledger ─────────────────────────
 
-const changeSetColumns = `id, table_id, actor, agent, actor_kind, kind, rows, fields, undoes, undone_by, at`
+const changeSetColumns = `id, table_id, actor, agent, actor_kind, kind, rows, fields, undoes, undone_by, at, operation`
 
 func scanChangeSet(s scanner) (*ChangeSet, error) {
 	var cs ChangeSet
-	var actor, agent, undoes, undoneBy uuid.NullUUID
+	var actor, agent, undoes, undoneBy, operation uuid.NullUUID
 	var fields pq.StringArray
-	if err := s.Scan(&cs.ID, &cs.TableID, &actor, &agent, &cs.ActorKind, &cs.Kind, &cs.Rows, &fields, &undoes, &undoneBy, &cs.At); err != nil {
+	if err := s.Scan(&cs.ID, &cs.TableID, &actor, &agent, &cs.ActorKind, &cs.Kind, &cs.Rows, &fields, &undoes, &undoneBy, &cs.At, &operation); err != nil {
 		return nil, err
 	}
-	cs.Actor, cs.Agent, cs.Undoes, cs.UndoneBy = actor.UUID, agent.UUID, undoes.UUID, undoneBy.UUID
+	cs.Actor, cs.Agent, cs.Undoes, cs.UndoneBy, cs.Operation = actor.UUID, agent.UUID, undoes.UUID, undoneBy.UUID, operation.UUID
 	cs.Fields = []string(fields)
 	return &cs, nil
 }
@@ -1282,6 +1364,27 @@ func LatestToUndo(ctx context.Context, table, actor uuid.UUID) (*ChangeSet, erro
 		return nil, nil
 	}
 	return cs, err
+}
+
+// LatestOf is a person's newest change set on a table of any kind, made by
+// them (not by an automation for them): nil when there's none.
+func LatestOf(ctx context.Context, table, actor uuid.UUID) (*ChangeSet, error) {
+	cs, found, err := pgexec.QueryOne(ctx, `SELECT `+changeSetColumns+` FROM data_table_change_sets
+		WHERE table_id = $1 AND actor = $2 AND NOT actor_kind = ANY($3)
+		ORDER BY at DESC, id DESC LIMIT 1`, func(r pgexec.Row) (*ChangeSet, error) { return scanChangeSet(r) }, table, actor, pq.Array(notTheirOwn))
+	if err != nil || !found {
+		return nil, err
+	}
+	return cs, nil
+}
+
+// OperationSets are a person's change sets of operation op on a table that
+// aren't undone, newest first: what an undo or a redo of any of them
+// reverses.
+func OperationSets(ctx context.Context, table, actor, op uuid.UUID) ([]*ChangeSet, error) {
+	return pgexec.Query(ctx, `SELECT `+changeSetColumns+` FROM data_table_change_sets
+		WHERE table_id = $1 AND operation = $2 AND actor = $3 AND undone_by IS NULL
+		ORDER BY at DESC, id DESC`, func(r pgexec.Row) (*ChangeSet, error) { return scanChangeSet(r) }, table, op, actor)
 }
 
 // LatestToRedo is the undo a person's redo on a table redoes: their latest
@@ -1459,9 +1562,9 @@ func recordEmpty(ctx context.Context, tx *sql.Tx, cs *ChangeSet) error {
 	if cs.ID == uuid.Nil {
 		cs.ID = uuid.New()
 	}
-	return tx.QueryRowContext(ctx, `INSERT INTO data_table_change_sets (id, table_id, actor, agent, actor_kind, kind, rows, fields, undoes)
-		VALUES ($1, $2, $3, $4, $5, $6, 0, '{}', $7) RETURNING at`,
-		cs.ID, cs.TableID, nullUUID(cs.Actor), nullUUID(cs.Agent), cs.ActorKind, cs.Kind, nullUUID(cs.Undoes)).Scan(&cs.At)
+	return tx.QueryRowContext(ctx, `INSERT INTO data_table_change_sets (id, table_id, actor, agent, actor_kind, kind, rows, fields, undoes, operation)
+		VALUES ($1, $2, $3, $4, $5, $6, 0, '{}', $7, $8) RETURNING at`,
+		cs.ID, cs.TableID, nullUUID(cs.Actor), nullUUID(cs.Agent), cs.ActorKind, cs.Kind, nullUUID(cs.Undoes), nullUUID(cs.Operation)).Scan(&cs.At)
 }
 
 // reverseCells puts cells back to their values before changes, in one
@@ -1787,14 +1890,23 @@ func GetTrashedField(ctx context.Context, table, id uuid.UUID) (*Field, error) {
 func RestoreFields(ctx context.Context, fields ...*Field) error {
 	return postgresInit.InTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
 		for _, f := range fields {
-			if _, err := tx.ExecContext(ctx, `UPDATE data_table_fields SET deleted_at = NULL, deleted_by = NULL, updated_at = NOW()
-				WHERE id = $1 AND table_id = $2 AND deleted_at IS NOT NULL`, f.Id, f.TableId); err != nil {
-				helpers.LogErrorWithContext(ctx, "models/RestoreFields err: %+v", err)
+			if err := restoreField(ctx, tx, f); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+}
+
+// restoreField brings a field back from the trash on db; one that isn't in
+// the trash stays as it is.
+func restoreField(ctx context.Context, db execer, f *Field) error {
+	if _, err := db.ExecContext(ctx, `UPDATE data_table_fields SET deleted_at = NULL, deleted_by = NULL, updated_at = NOW()
+		WHERE id = $1 AND table_id = $2 AND deleted_at IS NOT NULL`, f.Id, f.TableId); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/RestoreFields err: %+v", err)
+		return err
+	}
+	return nil
 }
 
 // DeletedTables is the deleted tables a person may bring back (their own, or
@@ -1939,7 +2051,7 @@ func keyRowsWithoutTx(ctx context.Context, tx *sql.Tx, table uuid.UUID, keys Key
 		FROM unnest($1::uuid[], $2::text[]) AS p(id, k) WHERE r.id = p.id`, ids, ks); err != nil {
 		return 0, err
 	}
-	return len(ids), nil
+	return len(ids), SyncPlaces(pgexec.WithTx(ctx, tx), ids)
 }
 
 // PurgeTrash removes for good what has been in the trash since before
@@ -2045,6 +2157,54 @@ func (c Change) RowEvent() string {
 		return RowRestored
 	}
 	return RowCreated
+}
+
+// RowsByValue is a table's live rows by the text of their value of field (a
+// string as it is, a number as written) as text gives it, each text's first
+// row in the table's order (rowOrder). A row without one isn't among them.
+func RowsByValue(ctx context.Context, table, field uuid.UUID, text func(string) string) (map[string]uuid.UUID, error) {
+	type valued struct {
+		row   uuid.UUID
+		value string
+	}
+	rows, err := pgexec.Query(ctx, `SELECT id, values->>$2 FROM data_table_rows
+		WHERE table_id = $1 AND deleted_at IS NULL AND values->>$2 <> '' `+rowOrder,
+		func(r pgexec.Row) (valued, error) {
+			var v valued
+			return v, r.Scan(&v.row, &v.value)
+		}, table, field.String())
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]uuid.UUID, len(rows))
+	for _, r := range rows {
+		k := text(r.value)
+		if _, taken := out[k]; !taken {
+			out[k] = r.row
+		}
+	}
+	return out, nil
+}
+
+// LabelsHeld is which of labels a live row of table holds in field: a
+// select's cell is its option's label, a multi-select's a list of them.
+func LabelsHeld(ctx context.Context, table, field uuid.UUID, labels []string) (map[string]bool, error) {
+	held, err := pgexec.Query(ctx, `SELECT DISTINCT l FROM data_table_rows r
+		CROSS JOIN LATERAL jsonb_array_elements_text(CASE jsonb_typeof(r.values -> $2)
+			WHEN 'array' THEN r.values -> $2 ELSE jsonb_build_array(r.values ->> $2) END) l
+		WHERE r.table_id = $1 AND r.deleted_at IS NULL AND r.values -> $2 IS NOT NULL AND l = ANY($3)`,
+		func(r pgexec.Row) (string, error) {
+			var l string
+			return l, r.Scan(&l)
+		}, table, field.String(), pq.Array(labels))
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(held))
+	for _, l := range held {
+		out[l] = true
+	}
+	return out, nil
 }
 
 // ListRowsAfter is a window of a table's live rows in their order (rowOrder):

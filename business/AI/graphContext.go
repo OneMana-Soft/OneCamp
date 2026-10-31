@@ -245,14 +245,15 @@ func keepLiveLinksBy(ctx context.Context, links []workGraph.Link, read func(cont
 	return out
 }
 
-// graphCite is an item as a relationship line names it, by kind, title and
+// graphCite is an item as a relationship line names it, by what it is (a
+// doc's node kind when it isn't a page: folder, file or link), title and
 // uuid, so the model can cite it and a reader can open it.
 func graphCite(h workGraph.Hop) string {
 	t := strings.TrimSpace(strings.ReplaceAll(helpers.OneLine(h.Title, graphTitleMax), "\"", "'"))
 	if t == "" {
 		t = "untitled"
 	}
-	out := fmt.Sprintf("%s \"%s\" (id: %s)", h.Kind, t, h.ID)
+	out := fmt.Sprintf("%s \"%s\" (id: %s)", h.Noun(), t, h.ID)
 	// A message is said where it was said.
 	if ch, _ := h.Data["channel_name"].(string); h.Kind == "message" && strings.TrimSpace(ch) != "" {
 		out += " in #" + helpers.OneLine(ch, graphTitleMax)

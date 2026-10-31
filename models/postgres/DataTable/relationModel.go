@@ -225,7 +225,9 @@ func emptyIfBlank(values string) string {
 }
 
 // CellsOf returns the rows of a table among ids that haven't been deleted,
-// in no particular order, each with only its id and its cells keys.
+// in no particular order, each with only its id, its cells keys, and what a
+// field worked out from the row reads (its number, when it was made and last
+// changed, and by whom).
 func CellsOf(ctx context.Context, tableId uuid.UUID, ids []uuid.UUID, keys []string) ([]*Row, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -233,7 +235,8 @@ func CellsOf(ctx context.Context, tableId uuid.UUID, ids []uuid.UUID, keys []str
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	// The row's values read once: each -> reads all of them again.
-	const q = `SELECT id, COALESCE((SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(values) e WHERE e.key = ANY($3)), '{}'::jsonb)
+	const q = `SELECT id, row_no, created_by, created_at, updated_at, updated_by,
+		COALESCE((SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(values) e WHERE e.key = ANY($3)), '{}'::jsonb)
 		FROM data_table_rows WHERE table_id=$1 AND id = ANY($2) AND deleted_at IS NULL`
 	// The ids go to pgx as they are: through pq.Array, pgx writes out the
 	// whole list in an error before taking it, megabytes for a batch.
@@ -246,8 +249,17 @@ func CellsOf(ctx context.Context, tableId uuid.UUID, ids []uuid.UUID, keys []str
 	out := make([]*Row, 0, len(ids))
 	for rows.Next() {
 		r := &Row{TableId: tableId}
-		if err := rows.Scan(&r.Id, &r.Values); err != nil {
+		var rowNo sql.NullInt64
+		var createdBy, updatedBy uuid.NullUUID
+		if err := rows.Scan(&r.Id, &rowNo, &createdBy, &r.CreatedAt, &r.UpdatedAt, &updatedBy, &r.Values); err != nil {
 			return nil, err
+		}
+		r.RowNo = rowNo.Int64
+		if createdBy.Valid {
+			r.CreatedBy = &createdBy.UUID
+		}
+		if updatedBy.Valid {
+			r.UpdatedBy = &updatedBy.UUID
 		}
 		out = append(out, r)
 	}
@@ -330,29 +342,66 @@ func CreateFieldsWithIDs(ctx context.Context, fields ...*Field) error {
 // field, so restoring the field brings it back whole (RestoreFields); they go
 // with it when the trash is purged (PurgeTrash).
 func DeleteFieldPair(ctx context.Context, a, b *Field, by uuid.UUID) error {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	tx, err := postgresInit.DBConn.SqlDB.BeginTx(dbctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	const q = `UPDATE data_table_fields SET deleted_at=NOW(), updated_at=NOW(), deleted_by=$3 WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`
-	res, err := tx.ExecContext(dbctx, q, a.Id, a.TableId, nullUUID(by))
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/DeleteFieldPair err: %+v", err)
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return sql.ErrNoRows
-	}
-	if b != nil {
-		if _, err := tx.ExecContext(dbctx, q, b.Id, b.TableId, nullUUID(by)); err != nil {
-			helpers.LogErrorWithContext(ctx, "models/DeleteFieldPair other err: %+v", err)
+	return postgresInit.InTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
+		if err := deleteField(ctx, tx, a.TableId, a.Id, by); err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		if b != nil {
+			if err := deleteField(ctx, tx, b.TableId, b.Id, by); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ErrRelationGone is the field showing a relation's links brought back while
+// the relation is deleted.
+var ErrRelationGone = errors.New("the relation whose links it shows is deleted")
+
+// DeleteShowingField soft-deletes f, a field showing the links of a relation
+// field in table owners, in one transaction with every live field there that
+// says f shows its links ("inverse") no longer saying so. Their links stay,
+// shown in their own table alone. by is who deleted f.
+func DeleteShowingField(ctx context.Context, f *Field, owners, by uuid.UUID) error {
+	return postgresInit.InTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
+		if err := deleteField(ctx, tx, f.TableId, f.Id, by); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE data_table_fields SET config = config - 'inverse', updated_at = NOW()
+			WHERE table_id = $1 AND deleted_at IS NULL AND config ->> 'inverse' = $2`, owners, f.Id.String()); err != nil {
+			helpers.LogErrorWithContext(ctx, "models/DeleteShowingField relation err: %+v", err)
+			return err
+		}
+		return nil
+	})
+}
+
+// RestoreShowingField brings back from the trash f, a field showing the links
+// of relation field owner of table owners, in one transaction with owner
+// showing its links there again when it shows them in no other field. It is
+// ErrRelationGone when owner is deleted, as it can't show links then.
+func RestoreShowingField(ctx context.Context, f *Field, owner, owners uuid.UUID) error {
+	return postgresInit.InTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
+		var shown bool
+		err := tx.QueryRowContext(ctx, `SELECT config ? 'inverse' FROM data_table_fields
+			WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL FOR UPDATE`, owner, owners).Scan(&shown)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRelationGone
+		}
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "models/RestoreShowingField relation err: %+v", err)
+			return err
+		}
+		if !shown {
+			if _, err := tx.ExecContext(ctx, `UPDATE data_table_fields SET config = config || jsonb_build_object('inverse', $2::text), updated_at = NOW()
+				WHERE id = $1`, owner, f.Id.String()); err != nil {
+				helpers.LogErrorWithContext(ctx, "models/RestoreShowingField relation err: %+v", err)
+				return err
+			}
+		}
+		return restoreField(ctx, tx, f)
+	})
 }
 
 // vacuumTimeout is how long a vacuum of one of the insert-mostly tables may

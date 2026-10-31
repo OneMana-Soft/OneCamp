@@ -14,11 +14,13 @@ package Calendar
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"time"
 
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/google/uuid"
 )
 
 // Service is every read and write of an event, for the person asking; the
@@ -48,13 +50,21 @@ type Service interface {
 	Trash(ctx context.Context, who *model.UserInfo, before *time.Time) ([]Event, error)
 	// Respond is a guest's answer to an event they are on, for all of it.
 	Respond(ctx context.Context, who *model.UserInfo, id string, answer Answer) error
-	// Answer is a guest's answer with a note, for all of an event or series,
-	// or for one instance alone (Scope "this").
+	// Answer is a guest's answer with a note, and another time proposed, for
+	// all of an event or series, or for one instance alone (Scope "this").
 	Answer(ctx context.Context, who *model.UserInfo, id string, in AnswerInput) (*Event, error)
+	// DismissProposal sets aside a guest's proposal of another time (for
+	// whoever may change the event).
+	DismissProposal(ctx context.Context, who *model.UserInfo, id string, in DismissInput) (*Event, error)
 	// Nudge asks again every guest who hasn't answered (the organiser's).
 	Nudge(ctx context.Context, who *model.UserInfo, id string) (int, error)
 	// GuestLink is a guest by email's answer link (the organiser's).
 	GuestLink(ctx context.Context, who *model.UserInfo, id, email string) (string, error)
+	// AddCall gives an event (a series, from any of its instances) its own
+	// call, or answers the one it has; RemoveCall takes it off and ends it.
+	// Both for whoever may change the event (calendar B11, eventCall.go).
+	AddCall(ctx context.Context, who *model.UserInfo, id string) (*dgraphStruct.EventCall, error)
+	RemoveCall(ctx context.Context, who *model.UserInfo, id string) error
 	// Reminders is the person's own reminders for an event or series (an
 	// instance's are its series'), and whether they are the default's.
 	Reminders(ctx context.Context, who *model.UserInfo, id string) (Reminders, error)
@@ -63,6 +73,39 @@ type Service interface {
 	// Snooze brings a reminder of an occurrence back: in five minutes, when
 	// it starts, or a minute before. It says when.
 	Snooze(ctx context.Context, who *model.UserInfo, id string, until SnoozeFor) (time.Time, error)
+	// Export writes every event the person is on as one iCalendar file, and
+	// says how many events it holds.
+	Export(ctx context.Context, who *model.UserInfo, to io.Writer) (int, error)
+	// MoveFromGoogle starts moving every calendar of the person's Google link
+	// into OneCamp, and SyncStatus says where it stands.
+	MoveFromGoogle(ctx context.Context, who *model.UserInfo) (*SyncStatus, error)
+	// ProjectCalendarFor is a project's own calendar, made the first time,
+	// for someone who may see the project.
+	ProjectCalendarFor(ctx context.Context, who *model.UserInfo, projectUUID string) (uuid.UUID, error)
+	// Calendars are the calendars the person may see; CalendarEvents the
+	// events on those of them asked for, between from and to.
+	Calendars(ctx context.Context, who *model.UserInfo) ([]CalendarView, error)
+	CalendarEvents(ctx context.Context, who *model.UserInfo, ids []string, from, to time.Time) ([]Event, bool, error)
+	// PersonCalendar is a member's own calendar, to lay over the asker's;
+	// Shares and Share are who a calendar the asker manages is shared with.
+	PersonCalendar(ctx context.Context, who *model.UserInfo, personUUID string) (uuid.UUID, error)
+	Shares(ctx context.Context, who *model.UserInfo, id string) ([]CalendarShare, error)
+	Share(ctx context.Context, who *model.UserInfo, id, personUUID, level string) error
+	// UpdateCalendar renames or recolours a calendar the asker manages.
+	UpdateCalendar(ctx context.Context, who *model.UserInfo, id string, p CalendarPatch) error
+	// Secret feeds (calendar B8): whether who has one of a calendar, a new
+	// one (its link given once), none, and the calendar a link names.
+	Feed(ctx context.Context, who *model.UserInfo, id string) (*FeedView, error)
+	MakeFeed(ctx context.Context, who *model.UserInfo, id, scope string) (*FeedView, error)
+	StopFeed(ctx context.Context, who *model.UserInfo, id string) error
+	FeedICS(ctx context.Context, token string) ([]byte, error)
+	// Calendars read from an address (calendar B8): who's, one added (read
+	// once first), one read now, and one removed with everything on it.
+	Subscriptions(ctx context.Context, who *model.UserInfo) ([]SubscriptionView, error)
+	Subscribe(ctx context.Context, who *model.UserInfo, address, name, hue string) (*SubscriptionView, error)
+	RefreshSubscription(ctx context.Context, who *model.UserInfo, calendarID string) (*SubscriptionView, error)
+	Unsubscribe(ctx context.Context, who *model.UserInfo, calendarID string) error
+	SyncStatus(ctx context.Context, who *model.UserInfo) (*SyncStatus, error)
 }
 
 // DontSendIf is ctx for a write whose writer answered "Tell guests?" with
@@ -125,7 +168,9 @@ func (todaysStatuses) StatusFor(ctx context.Context, personUUID string, at time.
 	if err != nil {
 		return Status{}, err
 	}
-	return statusAt(events, personUUID, at), nil
+	// Away and focus first (their own events, as the push gate counts them),
+	// then a meeting they're in (calendar A3).
+	return meetingStatus(ctx, personUUID, at, statusAt(events, personUUID, at))
 }
 
 // statusAt is what events say of personUUID at at, as the push gate counts

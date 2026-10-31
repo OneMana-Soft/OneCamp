@@ -10,23 +10,16 @@ package integration_test
 // Run: integ_rel.sh <wt> <log> 'TestB3'
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	cycleController "github.com/akashc777/OneCamp/controllers/Cycle"
-	userDomain "github.com/akashc777/OneCamp/domain/User"
-	"github.com/akashc777/OneCamp/helpers"
-	customMiddleware "github.com/akashc777/OneCamp/middleware"
 	cycleModel "github.com/akashc777/OneCamp/models/postgres/Cycle"
-	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
@@ -38,6 +31,7 @@ type b3Answer struct {
 				Number   int    `json:"number"`
 				State    string `json:"state"`
 				Estimate int    `json:"estimate_minutes"`
+				Capacity *int   `json:"capacity_minutes"`
 				Tasks    []struct {
 					UUID string `json:"task_uuid"`
 				} `json:"tasks"`
@@ -57,22 +51,17 @@ type b3Answer struct {
 
 func b3Call(s *wa2Scale, who, method string, h http.HandlerFunc, cycle string) (int, string) {
 	s.t.Helper()
-	ctx := context.Background()
-	pg, err := userDomain.GetActiveUserWithAdminFlagByUserUUID(ctx, s.people[who])
-	if err != nil || pg == nil {
-		s.t.Fatalf("load %s: %v", who, err)
+	return b3Do(s, who, method, h, cycle, nil)
+}
+
+// b3Do is b3Call with a JSON body (nil for none).
+func b3Do(s *wa2Scale, who, method string, h http.HandlerFunc, cycle string, body any) (int, string) {
+	s.t.Helper()
+	raw := []byte{}
+	if body != nil {
+		raw, _ = json.Marshal(body)
 	}
-	gr, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, s.people[who].String())
-	if err != nil || gr == nil {
-		s.t.Fatalf("load %s's profile: %v", who, err)
-	}
-	rc := chi.NewRouteContext()
-	rc.URLParams.Add("project_uuid", s.project)
-	rc.URLParams.Add("cycle_id", cycle)
-	c := context.WithValue(context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}), chi.RouteCtxKey, rc)
-	rec := httptest.NewRecorder()
-	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(method, "/", nil).WithContext(s.request(c)))
-	return rec.Code, rec.Body.String()
+	return s.call(who, method, "/", h, map[string]string{"project_uuid": s.project, "cycle_id": cycle}, raw)
 }
 
 func b3Backlog(t *testing.T, s *wa2Scale, who string) b3Answer {
@@ -219,6 +208,64 @@ func TestB3BacklogIsTheOpenCyclesThenEverythingInNone(t *testing.T) {
 		t.Logf("the backlog sends Postgres %d statements with 60 tasks, %d with 600", few, many)
 		if many != few || many > 10 {
 			t.Fatalf("%d statements for 600 tasks, %d for 60 (at most 10)", many, few)
+		}
+	})
+
+	t.Run("only its admins change a project's cycles, nobody outside reads them, and a task goes only into its own project's", func(t *testing.T) {
+		for _, c := range []struct {
+			what string
+			h    http.HandlerFunc
+		}{
+			{"makes a cycle", cycleController.CreateCycle},
+			{"renames the next one", cycleController.RenameCycle},
+			{"completes it", cycleController.CompleteCycle},
+			{"deletes it", cycleController.DeleteCycle},
+			{"stops the schedule", cycleController.StopCycleSchedule},
+		} {
+			if code, out := b3Call(s, "ben", http.MethodPost, c.h, next.Id.String()); code != http.StatusForbidden {
+				t.Errorf("Ben, a member, %s: %d %s", c.what, code, out)
+			}
+		}
+		s.person("cy", false)
+		if code, out := b3Call(s, "cy", http.MethodGet, cycleController.ListCycles, ""); code != http.StatusNotFound {
+			t.Errorf("Cy, outside the project, lists its cycles: %d %s", code, out)
+		}
+		if code, out := b3Call(s, "cy", http.MethodGet, cycleController.CycleBurndown, cur.Id.String()); code != http.StatusNotFound {
+			t.Errorf("Cy reads a cycle's burndown: %d %s", code, out)
+		}
+		if code, out := s.readWith("cy", cycleController.GetTaskCycle, map[string]string{"task_uuid": s.tasks[0]}, ""); code != http.StatusNotFound {
+			t.Errorf("Cy reads a task's cycle: %d %s", code, out)
+		}
+		if code, out := s.postAs("cy", cycleController.SetTaskCycle, map[string]string{"task_uuid": s.tasks[0], "cycle_id": cur.Id.String()}); code != http.StatusNotFound {
+			t.Errorf("Cy puts a task in a cycle: %d %s", code, out)
+		}
+		elsewhere, err := cycleModel.Create(uuid.New(), "", now, now.AddDate(0, 0, 14), s.people["ana"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code, out := s.postAs("ana", cycleController.SetTaskCycle, map[string]string{"task_uuid": s.tasks[0], "cycle_id": elsewhere.Id.String()}); code != http.StatusBadRequest {
+			t.Errorf("a task put in another project's cycle: %d %s", code, out)
+		}
+		// Another project's cycle named under this project's URL isn't found,
+		// not even by one of this project's admins, and stays as it was. The
+		// delete goes last, so each leg finds the cycle there to refuse.
+		for _, c := range []struct {
+			what, method string
+			h            http.HandlerFunc
+		}{
+			{"renames", http.MethodPost, cycleController.RenameCycle},
+			{"completes", http.MethodPost, cycleController.CompleteCycle},
+			{"starts", http.MethodPost, cycleController.StartCycle},
+			{"reads the burndown of", http.MethodGet, cycleController.CycleBurndown},
+			{"deletes", http.MethodPost, cycleController.DeleteCycle},
+		} {
+			if code, out := b3Call(s, "ana", c.method, c.h, elsewhere.Id.String()); code != http.StatusNotFound {
+				t.Errorf("Ana, an admin here, %s another project's cycle: %d %s", c.what, code, out)
+			}
+		}
+		if got, err := cycleModel.Get(elsewhere.Id); err != nil || got == nil || got.Name != elsewhere.Name ||
+			!got.StartsAt.Equal(elsewhere.StartsAt) || !got.EndsAt.Equal(elsewhere.EndsAt) || got.CompletedAt != nil {
+			t.Errorf("another project's cycle changed: %+v %v", got, err)
 		}
 	})
 

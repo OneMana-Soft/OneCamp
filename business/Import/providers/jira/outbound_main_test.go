@@ -14,14 +14,14 @@ import (
 // network, with the production client's every other rule (redirects stay on
 // their origin); useProductionClient puts the real one back for a test.
 func TestMain(m *testing.M) {
-	siteClient = safefetch.NewClient(safefetch.Policy{AnyPort: true, PrivateNetwork: true}, 60*time.Second)
+	statusRules.Client = safefetch.NewClient(safefetch.Policy{AnyPort: true, PrivateNetwork: true}, 60*time.Second)
 	os.Exit(m.Run())
 }
 
 // useProductionClient sends this test's calls through SiteAPIClient, as a
 // running server does.
 func useProductionClient(t *testing.T) {
-	prev := siteClient
-	siteClient = importProvider.SiteAPIClient
-	t.Cleanup(func() { siteClient = prev })
+	prev := statusRules.Client
+	statusRules.Client = importProvider.SiteAPIClient
+	t.Cleanup(func() { statusRules.Client = prev })
 }

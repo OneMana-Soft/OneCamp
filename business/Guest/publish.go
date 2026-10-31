@@ -16,6 +16,7 @@ package business
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"unicode"
@@ -47,6 +48,9 @@ var (
 	ErrNotPublishable = errors.New("guest: only a doc's view-only link can be published")
 	// ErrPublishOff is a workspace that doesn't let pages be published.
 	ErrPublishOff = errors.New("guest: publishing pages is off for this workspace")
+	// ErrRoomsOff is a workspace that doesn't let its members have personal
+	// meeting rooms (calls CALLS-2).
+	ErrRoomsOff = errors.New("guest: personal meeting rooms are off for this workspace")
 )
 
 // PublishInvalid is publishing settings that can't be used, saying why.
@@ -64,6 +68,7 @@ var (
 	grantBySlug    = guestModel.GetLiveBySlug
 	grantByID      = guestModel.GetByID
 	publishGrant   = guestModel.Publish
+	slugFree       = guestModel.SlugFree
 	unpublishGrant = guestModel.Unpublish
 	docTitle       = func(ctx context.Context, docUUID string) string {
 		if d, err := docBusiness.GetSystemDocByUUID(ctx, docUUID); err == nil && d != nil {
@@ -147,10 +152,24 @@ type PublishSettings struct {
 	Password *string `json:"password,omitempty"`
 }
 
+// A page's password and a room's passcode are one kind of secret, under one
+// rule (audit A8): a new one has at least shortestSecret characters (four
+// were in reach of a guesser spread over many addresses) and at most
+// longestSecret. One set before the rule keeps opening its page or room:
+// PasswordOpens checks no shortest length.
 const (
-	shortestPassword = 4
-	longestPassword  = 128
+	shortestSecret = 6
+	longestSecret  = 128
 )
+
+// SecretProblem is what is wrong with a new password or passcode, named by
+// noun, or "" when it may be set.
+func SecretProblem(noun, secret string) string {
+	if n := utf8.RuneCountInString(secret); n < shortestSecret || n > longestSecret {
+		return fmt.Sprintf("A %s is %d to %d characters.", noun, shortestSecret, longestSecret)
+	}
+	return ""
+}
 
 // normaliseSlug is an address as typed, as a page keeps it: lower case, words
 // joined by dashes, nothing else, at most 64. Pure.
@@ -190,15 +209,33 @@ func slugFor(title string) string {
 	return base + "-" + tail
 }
 
-// PublishLink publishes a doc's view link as a web page, or changes how. The
-// caller has checked that by may share the doc outside the workspace (its
-// owner: the guest link rule); this checks the rest.
+// freshAddress is the address a link of kind k is first published at: its
+// base's words (a doc's title, a room owner's name) with a few random
+// letters; a room's bare words first, when they are free, asked first: a
+// taken address would end the transaction it is made in.
+func freshAddress(ctx context.Context, k Kind, g *guestModel.GuestGrant) (string, error) {
+	base := k.slugBase(ctx, g)
+	slug := slugFor(base)
+	if bare := normaliseSlug(base); k.bareFirst && slugShape.MatchString(bare) {
+		free, err := slugFree(ctx, bare, g.ResourceType, g.ResourceID)
+		if err != nil {
+			return "", err
+		}
+		if free {
+			slug = bare
+		}
+	}
+	return slug, nil
+}
+
+// PublishLink publishes a link at its kind's address, or changes how: a
+// doc's view link as a web page, a personal room's link as the room's
+// address (the kind table's addressed rows). The caller has checked that by
+// may (a doc's owner, by the guest link rule; a room's owner); this checks
+// the rest.
 func PublishLink(ctx context.Context, by uuid.UUID, grantID uuid.UUID, in PublishSettings) (*guestModel.GuestGrant, error) {
 	if !guestOn() {
 		return nil, ErrGuestDisabled
-	}
-	if !publishAllowed() {
-		return nil, ErrPublishOff
 	}
 	g, err := grantByID(ctx, grantID)
 	if err != nil {
@@ -207,8 +244,12 @@ func PublishLink(ctx context.Context, by uuid.UUID, grantID uuid.UUID, in Publis
 	if g == nil || g.RevokedAt != nil || grantExpired(ctx, g) {
 		return nil, ErrInvalidGrant
 	}
-	if g.ResourceType != guestModel.ResourceDoc || g.Capability != guestModel.CapabilityView {
+	k, ok := addressKind(g)
+	if !ok {
 		return nil, ErrNotPublishable
+	}
+	if !k.allowed() {
+		return nil, k.offErr
 	}
 	if err := grantLive(ctx, g); err != nil {
 		return nil, err
@@ -221,10 +262,15 @@ func PublishLink(ctx context.Context, by uuid.UUID, grantID uuid.UUID, in Publis
 	case slug == "" && g.Slug != nil:
 		slug = *g.Slug
 	case slug == "":
-		slug = slugFor(docTitle(ctx, g.ResourceID))
+		if slug, err = freshAddress(ctx, k, g); err != nil {
+			return nil, err
+		}
 	}
 	if !slugShape.MatchString(slug) {
 		return nil, &PublishInvalid{"An address is 1 to 64 letters, numbers and dashes, starting and ending with a letter or number."}
+	}
+	if !k.pageOptions {
+		in.Indexable, in.AllowCopies = false, false
 	}
 
 	p := guestModel.Publication{Slug: slug, Indexable: in.Indexable, AllowCopies: in.AllowCopies, PublishedBy: by,
@@ -235,9 +281,8 @@ func PublishLink(ctx context.Context, by uuid.UUID, grantID uuid.UUID, in Publis
 	case *in.Password == "":
 		p.NewUnlock = p.NewUnlock || g.PasswordHash != nil
 	default:
-		n := utf8.RuneCountInString(*in.Password)
-		if n < shortestPassword || n > longestPassword {
-			return nil, &PublishInvalid{"A password is 4 to 128 characters."}
+		if why := SecretProblem("password", *in.Password); why != "" {
+			return nil, &PublishInvalid{why}
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(*in.Password), bcrypt.DefaultCost)
 		if err != nil {
@@ -274,7 +319,7 @@ func UnpublishLink(ctx context.Context, grantID uuid.UUID) (*guestModel.GuestGra
 
 // PasswordOpens is whether password opens a grant's page.
 func PasswordOpens(g *guestModel.GuestGrant, password string) bool {
-	if g == nil || g.PasswordHash == nil || len(password) > 4*longestPassword {
+	if g == nil || g.PasswordHash == nil || len(password) > 4*longestSecret {
 		return false
 	}
 	return bcrypt.CompareHashAndPassword([]byte(*g.PasswordHash), []byte(password)) == nil

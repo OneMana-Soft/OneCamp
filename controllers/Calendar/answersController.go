@@ -1,7 +1,8 @@
 package Calendar
 
 // Answers and invitations over HTTP (business/Calendar attendance.go, calendar
-// A2): a member answers an event they are on; its organiser asks again those
+// A2): a member answers an event they are on, and may propose another time;
+// whoever may change it dismisses a proposal; its organiser asks again those
 // who haven't answered, and copies the answer link of a guest invited by
 // email. Signed-in members only (router/calendarAnswers.go).
 
@@ -34,6 +35,27 @@ func AnswerCalendarEvent(w http.ResponseWriter, r *http.Request) {
 	e, err := business.Events.Answer(r.Context(), who, chi.URLParam(r, "eventId"), in)
 	if err != nil {
 		writeCalendarError(w, r, "AnswerCalendarEvent", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": e})
+}
+
+// DismissCalendarProposal sets aside a guest's proposal of another time, for
+// whoever may change the event.
+// POST /calendar/events/{eventId}/proposal/dismiss {user_uuid | email}
+func DismissCalendarProposal(w http.ResponseWriter, r *http.Request) {
+	who, ok := member(w, r)
+	if !ok {
+		return
+	}
+	var in business.DismissInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, answerBodyLimit)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read whose proposal to dismiss."})
+		return
+	}
+	e, err := business.Events.DismissProposal(r.Context(), who, chi.URLParam(r, "eventId"), in)
+	if err != nil {
+		writeCalendarError(w, r, "DismissCalendarProposal", err)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": e})

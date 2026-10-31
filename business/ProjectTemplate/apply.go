@@ -144,7 +144,8 @@ func Apply(ctx context.Context, t Template, project *dgraphStruct.DgraphProject,
 		}
 	}
 	var made []string
-	ids, err := taskBusiness.CreateTasks(ctx, projectID, user, project, batch)
+	// An apply is a data move: the template's tasks start in its statuses (DataMove).
+	ids, err := taskBusiness.CreateTasks(taskBusiness.DataMove(ctx), projectID, user, project, batch)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/ProjectTemplate/Apply tasks err: %+v", err)
 		out.Failed += len(batch)

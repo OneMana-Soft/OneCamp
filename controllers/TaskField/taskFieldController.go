@@ -173,7 +173,7 @@ func DeleteField(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := business.Delete(r.Context(), id, fid); err != nil {
+	if err := business.Delete(r.Context(), id, fid, userOf(r).UserPostgresInfo.Id); err != nil {
 		fail(w, r, "DeleteField", err)
 		return
 	}

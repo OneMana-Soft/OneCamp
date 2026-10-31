@@ -355,6 +355,10 @@ var EventTypes = []string{
 	// Tables (business/DataTable ledger.go): one a change to a table's rows,
 	// naming every row it touched, ids alone.
 	"table.rows.changed",
+	// Calls (business/CallState webhooks.go): a call in a channel or a
+	// meeting began or ended, with its times and how many joined; a DM's or a
+	// group chat's call is sent nowhere.
+	"call.started", "call.ended",
 }
 
 // HandleGetWebhookEventTypes returns the supported event types (admin only).

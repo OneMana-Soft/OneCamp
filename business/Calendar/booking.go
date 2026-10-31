@@ -25,6 +25,7 @@ import (
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	userDgraphModels "github.com/akashc777/OneCamp/models/dgraph/User"
 	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
@@ -191,8 +192,12 @@ func loadPage(ctx context.Context, slug string) (*livePage, error) {
 		return nil, ErrNoPage
 	}
 	du, err := userDomain.GetDgraphUserInfoByUUID(ctx, p.UserId.String())
+	// A read that failed is tried again, never "no such page".
+	if err != nil && !errors.Is(err, userDgraphModels.ErrNotFound) {
+		return nil, err
+	}
 	// Someone who has left the workspace takes no more bookings.
-	if err != nil || du == nil || helpers.IsSoftDeleted(du.DeletedAt) {
+	if du == nil || helpers.IsSoftDeleted(du.DeletedAt) {
 		return nil, ErrNoPage
 	}
 	return &livePage{page: p, hours: hours, loc: loc, name: bookingOwnerName(du),
@@ -446,7 +451,10 @@ func Book(ctx context.Context, slug string, in BookInput, now time.Time) (*Booke
 		SyncToGoogleCalendar: true,
 	})
 	if err != nil {
-		_ = bookingModel.Forget(b.Id)
+		// Left behind, the booking would hold the slot with no meeting on it.
+		if ferr := bookingModel.Forget(b.Id); ferr != nil {
+			helpers.LogErrorWithContext(ctx, "business/Calendar/Book forget booking %s err: %+v", b.Id, ferr)
+		}
 		return nil, err
 	}
 	if id, err := uuid.Parse(ev.EventUuid); err == nil {

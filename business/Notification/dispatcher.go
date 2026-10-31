@@ -483,7 +483,7 @@ func parseHHMM(s string) (int, int, bool) {
 
 // brandLogoURL returns a public URL for the configured email logo, or "".
 func brandLogoURL() string {
-	cfg, err := configModels.GetConfigByKey("invitation_email_logo")
+	cfg, err := configModels.GetConfigByKey(configModels.EmailLogoKey)
 	if err != nil || cfg == nil || cfg.Value == "" {
 		return ""
 	}

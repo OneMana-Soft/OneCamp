@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
-	"sync"
 	"testing"
 	"time"
 
@@ -25,47 +24,30 @@ import (
 // A run's moments ("I need your input", "done") reach the person who set it
 // going, against real Postgres and Dgraph, only while they can still see where
 // it happened:
-//   - a delegated task's moment is pushed to whoever handed it over
-//     (pushToDelegator, their devices) while they may read the task; taken off
-//     its project since, they hear nothing, though the push would name the task;
+//   - a delegated task's moment reaches whoever handed it over by the one way
+//     a push goes out (notificationBusiness.Deliver), so someone with no
+//     device, who uses only the desktop app, is told too (it went to their
+//     devices alone, audit B3), while they may read the task; taken off its
+//     project since, they hear nothing, though the push would name the task;
 //   - a durable run's moment pings whoever asked in a channel or a group only
 //     while they can read the channel, or are in the group, now.
 //
-// This line's version of beta's tests (8a260528a, 38b378671). Here a delegated
-// task's moment is a push to the delegator's devices alone: the desktop app
-// half of beta's TestADelegatedTasksMomentReachesTheDesktopApp isn't on this
-// line, so its delegator legs are asserted on the push.
-//
-// Run: go test -tags=integration ./business/AIAgent/ -run 'TestADelegatedTasksMomentReachesOnlyWhoMayReadIt|TestARunsMomentPingsOnlyWhoCanStillSeeWhereTheyAsked' -v
-func TestADelegatedTasksMomentReachesOnlyWhoMayReadIt(t *testing.T) {
+// Run: go test -tags=integration ./business/AIAgent/ -run 'TestADelegatedTasksMomentReachesTheDesktopApp|TestARunsMomentPingsOnlyWhoCanStillSeeWhereTheyAsked' -v
+func TestADelegatedTasksMomentReachesTheDesktopApp(t *testing.T) {
 	ctx := context.Background()
 	env := integration.SetupEnv(t)
 	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
 		t.Fatal(err)
 	}
 	dg := integration.SetupDgraph(t)
-	integration.UseMqttClient(t, &typingBroker{})
+	broker := &recordingBroker{}
+	integration.UseMqttClient(t, broker)
 	savedName := delegatedTaskName
 	t.Cleanup(func() { delegatedTaskName = savedName })
 	delegatedTaskName = func(context.Context, *model.AiAgent, string) string { return "Book the launch retro" }
-	var mu sync.Mutex
-	pushed := map[string][]string{} // by person, each push's title
-	savedPush := pushToDelegator
-	t.Cleanup(func() { pushToDelegator = savedPush })
-	pushToDelegator = func(_ context.Context, userUUID string, data map[string]string) error {
-		mu.Lock()
-		defer mu.Unlock()
-		pushed[userUUID] = append(pushed[userUUID], data[firebaseInit.FIREBASE_PUSH_DATA_TITLE])
-		return nil
-	}
-	titles := func(who uuid.UUID) []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return slices.Clone(pushed[who.String()])
-	}
 
-	// Mo is in the task's project. Lou handed a task over too, and has been
-	// taken off the project since.
+	// Mo is in the task's project and has no device: the desktop app only.
+	// Lou handed a task over too, and has been taken off the project since.
 	mo, lou := uuid.New(), uuid.New()
 	for _, id := range []uuid.UUID{mo, lou} {
 		if _, err := env.PG.Exec(`INSERT INTO users (id, email_id) VALUES ($1, $2)`, id, id.String()[:8]+"@example.test"); err != nil {
@@ -83,18 +65,15 @@ func TestADelegatedTasksMomentReachesOnlyWhoMayReadIt(t *testing.T) {
 	agent := &model.AiAgent{Id: uuid.New(), Name: "Release Captain"}
 	notifyTaskDelegator(agent, task, mo.String(), "Done — booked for Friday.")
 	notifyTaskDelegator(agent, task, lou.String(), "Done — booked for Friday.")
-	// Each push goes on a goroutine of its own: wait for mo's, then as long
-	// again for lou's, when it goes.
-	for deadline := time.Now().Add(10 * time.Second); len(titles(mo)) == 0 && time.Now().Before(deadline); {
-		time.Sleep(50 * time.Millisecond)
+	if busy := helpers.SettleBackground(10 * time.Second); len(busy) > 0 {
+		t.Fatalf("still at work: %v", busy)
 	}
-	time.Sleep(time.Second)
 	want := []string{"Release Captain · Book the launch retro"}
-	if got := titles(mo); !slices.Equal(got, want) {
-		t.Errorf("the person who delegated the task was pushed %q, want %q", got, want)
+	if got := broker.noticeTitles(helpers.GetMqttTopicForUserActivity(mo.String())); !slices.Equal(got, want) {
+		t.Errorf("the desktop app of the person who delegated the task was told %q, want %q", got, want)
 	}
-	if got := titles(lou); len(got) != 0 {
-		t.Errorf("lou, taken off the task's project, was pushed %q", got)
+	if got := broker.noticeTitles(helpers.GetMqttTopicForUserActivity(lou.String())); len(got) != 0 {
+		t.Errorf("lou, taken off the task's project, was told %q", got)
 	}
 }
 
@@ -105,7 +84,7 @@ func TestARunsMomentPingsOnlyWhoCanStillSeeWhereTheyAsked(t *testing.T) {
 		t.Fatal(err)
 	}
 	dg := integration.SetupDgraph(t)
-	broker := &typingBroker{}
+	broker := &recordingBroker{}
 	integration.UseMqttClient(t, broker)
 
 	// Ana is in the private channel and in a group of four; Cy asked in both
@@ -168,8 +147,25 @@ func TestARunsMomentPingsOnlyWhoCanStillSeeWhereTheyAsked(t *testing.T) {
 	}
 }
 
+// noticeTitles is the title of each desktop notice published on topic.
+func (b *recordingBroker) noticeTitles(topic string) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var titles []string
+	for _, m := range b.sent {
+		var msg struct {
+			Type int8                         `json:"type"`
+			Data mqttStruct.MqttDesktopNotice `json:"data"`
+		}
+		if m.topic == topic && json.Unmarshal(m.body, &msg) == nil && msg.Type == mqttStruct.MESSAGE_DESKTOP_NOTICE {
+			titles = append(titles, msg.Data.Data[firebaseInit.FIREBASE_PUSH_DATA_TITLE])
+		}
+	}
+	return titles
+}
+
 // activities is how many live activity items were published on topic.
-func (b *typingBroker) activities(topic string) int {
+func (b *recordingBroker) activities(topic string) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	n := 0

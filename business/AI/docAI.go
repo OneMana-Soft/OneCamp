@@ -489,7 +489,9 @@ func DocHTMLFromMarkdown(md string) string {
 var errDocUnreadable = errors.New("the doc's text couldn't be read just now; try again in a moment")
 
 // liveDocHTML is a doc's body as its live copy holds it now, else as it was
-// last stored. A seam, so the rules are tested without the services.
+// last stored. Only a page has one: a folder, a file or a link answers
+// docBusiness.ErrNotAPage (docs F1), which the collaboration service refuses to
+// open too. A seam, so the rules are tested without the services.
 var liveDocHTML = func(ctx context.Context, docUUID string) (string, error) {
 	cur, err := collab.Read(ctx, docUUID)
 	if err == nil {
@@ -501,6 +503,9 @@ var liveDocHTML = func(ctx context.Context, docUUID string) (string, error) {
 	doc, derr := docBusiness.GetSystemDocByUUID(ctx, docUUID)
 	if derr != nil || doc == nil {
 		return "", fmt.Errorf("%w (%v)", errDocUnreadable, err)
+	}
+	if !docBusiness.IsPage(doc) {
+		return "", docBusiness.ErrNotAPage
 	}
 	return doc.Body, nil
 }

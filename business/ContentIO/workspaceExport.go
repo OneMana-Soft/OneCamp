@@ -2,12 +2,17 @@ package business
 
 // The workspace export: an admin's zip of every doc, as Markdown, in folders
 // that follow the page tree (a page's subpages sit in a folder with its name),
-// which an import of the zip reads back as the same tree.
+// which an import of the zip reads back as the same tree; and every board, as
+// an .excalidraw file in a Boards folder (boardFile.go), which Excalidraw
+// opens with its pictures.
 //
 // WHAT GOES IN. Every live doc the admin can open, and the private docs whose
 // owners let them in (doc_export_consents, migration 343: SetExportConsent).
 // Every other private doc is left out, and the job says how many; docs in the
-// trash or the archive are not live, so they aren't in it. Starting an export
+// trash or the archive are not live, so they aren't in it. Every live board
+// the admin may read is in it (CanRead, as the board opens for them); a
+// private board that isn't shared with them is left out, and counted, as
+// private docs are. Starting an export
 // and every consent are recorded in the admin audit log by the routes that
 // take them (controllers/ContentIO).
 //
@@ -28,8 +33,10 @@ import (
 	"time"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	contentcodec "github.com/akashc777/OneCamp/business/ContentCodec"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
+	boardDomain "github.com/akashc777/OneCamp/domain/Board"
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -78,7 +85,11 @@ var (
 		}
 		return out, nil
 	}
-	isAdmin = func(ctx context.Context, userUUID string) bool {
+	// The boards: every live board, a page at a time, and the titles of the
+	// ones someone may read.
+	boardUUIDPage    = boardDomain.GetLiveBoardUUIDPage
+	readableBoardsOf = boardBusiness.ReadableBoardTitles
+	isAdmin          = func(ctx context.Context, userUUID string) bool {
 		id, err := uuid.Parse(userUUID)
 		if err != nil {
 			return false
@@ -88,7 +99,7 @@ var (
 	}
 )
 
-// ExportWorkspace starts an admin's export of the workspace's docs. While an
+// ExportWorkspace starts an admin's export of the workspace's docs and boards. While an
 // export they started is still waiting or running, it answers that one with
 // ErrConflict instead of starting another.
 func ExportWorkspace(ctx context.Context, who accessBusiness.Subject) (Job, error) {
@@ -125,7 +136,8 @@ func WorkspaceExport(ctx context.Context, who accessBusiness.Subject, id string)
 	if row.Status != contentIOModels.StatusDone || row.OutputKey == nil {
 		return job, "", nil
 	}
-	url, err := store.PresignGet(ctx, *row.OutputKey, downloadFor, "workspace-docs.zip")
+	// Its docs and its boards: the download says the workspace, not "docs".
+	url, err := store.PresignGet(ctx, *row.OutputKey, downloadFor, "workspace-export.zip")
 	if err != nil {
 		return job, "", err
 	}
@@ -152,6 +164,9 @@ func RecentWorkspaceExports(ctx context.Context, who accessBusiness.Subject) ([]
 // exportDoc is one doc going into a workspace export.
 type exportDoc struct {
 	uuid, title, parent string
+	// dir is a folder (docs F1): a directory the pages under it sit in,
+	// written as no file of its own.
+	dir bool
 }
 
 // runWorkspaceExport does one workspace export, start to end. Like run, it
@@ -190,6 +205,18 @@ func (p *pipeline) runWorkspaceExport(ctx context.Context, row *contentIOModels.
 			Why:  "their owners haven't let them into workspace exports",
 		})
 	}
+	boards, boardsLeftOut, err := exportableBoards(ctx, who)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "content io: workspace export %s could not list the boards: %v", row.ID, err)
+		finish("The boards could not be read just now. Start the export again in a few minutes.")
+		return
+	}
+	if boardsLeftOut > 0 {
+		res.Skipped = append(res.Skipped, Skipped{
+			What: fmt.Sprintf("%d private %s", boardsLeftOut, plural(boardsLeftOut, "board", "boards")),
+			Why:  plural(boardsLeftOut, "it isn't shared with you", "they aren't shared with you"),
+		})
+	}
 	f, err := os.CreateTemp("", "workspace-export-*.zip")
 	if err != nil {
 		finish("The export could not be written on the server. Try again shortly.")
@@ -199,14 +226,14 @@ func (p *pipeline) runWorkspaceExport(ctx context.Context, row *contentIOModels.
 		f.Close()
 		os.Remove(f.Name())
 	}()
-	written, skipped, err := writeWorkspaceZip(ctx, f, who, docs, func(done int) { progress.set(scaled(done, len(docs), 30, 95)) })
+	written, writtenBoards, skipped, err := writeWorkspaceZip(ctx, f, who, docs, boards, func(done int) { progress.set(scaled(done, len(docs)+len(boards), 30, 95)) })
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "content io: workspace export %s could not be written: %v", row.ID, err)
 		finish("The export could not be written on the server. Try again shortly.")
 		return
 	}
 	res.Skipped = append(res.Skipped, skipped...)
-	res.Exported = written
+	res.Exported, res.ExportedBoards = written, writtenBoards
 	size, err := f.Seek(0, io.SeekCurrent)
 	if err == nil {
 		_, err = f.Seek(0, io.SeekStart)
@@ -260,8 +287,10 @@ func exportableDocs(ctx context.Context, who accessBusiness.Subject, report func
 		}
 		for _, d := range rows {
 			// A table row's body, or a row's page (a hosted doc, D-18), goes
-			// with its table, never as a doc of the workspace's.
-			if d == nil || d.Uuid == "" || helpers.IsSoftDeleted(d.DeletedAt) || helpers.IsSoftDeleted(d.ArchivedAt) || d.SpaceKind == "table" || docDomain.IsHosted(d) {
+			// with its table, never as a doc of the workspace's. A file or a
+			// link isn't exported until F1c puts files in it (docs F1).
+			if d == nil || d.Uuid == "" || helpers.IsSoftDeleted(d.DeletedAt) || helpers.IsSoftDeleted(d.ArchivedAt) || d.SpaceKind == "table" || docDomain.IsHosted(d) ||
+				d.NodeKind == docDomain.NodeFile || d.NodeKind == docDomain.NodeLink {
 				continue
 			}
 			decision := decisions[accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: d.Uuid}]
@@ -272,7 +301,9 @@ func exportableDocs(ctx context.Context, who accessBusiness.Subject, report func
 				leftOut++
 				continue
 			}
-			out = append(out, exportDoc{uuid: d.Uuid, title: d.Title, parent: parentUUID(d)})
+			// A folder is a directory: the pages under it keep their path, and
+			// it is written as no file of its own (writeWorkspaceZip).
+			out = append(out, exportDoc{uuid: d.Uuid, title: d.Title, parent: parentUUID(d), dir: !docDomain.IsPage(d)})
 		}
 		report(offset + len(ids))
 	}
@@ -295,16 +326,22 @@ func parentUUID(d *dgraphStruct.DgraphDoc) string {
 }
 
 // writeWorkspaceZip writes the docs as Markdown files, each in the folder of
-// the page it is under when that page is in the export too, and says how many
-// it wrote and which it couldn't read. An error is the zip itself failing
-// (the disk, or the export stopping): what it wrote is no export.
-func writeWorkspaceZip(ctx context.Context, w io.Writer, who accessBusiness.Subject, docs []exportDoc, report func(done int)) (written int, skipped []Skipped, err error) {
+// the page it is under when that page is in the export too, then the boards
+// as .excalidraw files in Boards/, and says how many of each it wrote and
+// which it couldn't read. An error is the zip itself failing (the disk, or the
+// export stopping): what it wrote is no export.
+func writeWorkspaceZip(ctx context.Context, w io.Writer, who accessBusiness.Subject, docs []exportDoc, boards []exportBoard, report func(done int)) (written, writtenBoards int, skipped []Skipped, err error) {
 	paths := exportPaths(docs)
 	zw := zip.NewWriter(w)
 	appURL := authService.FrontendBaseURL()
 	for i, d := range docs {
 		if err := ctx.Err(); err != nil {
-			return written, skipped, err
+			return written, writtenBoards, skipped, err
+		}
+		if d.dir {
+			// A folder: its pages are in its directory (exportPaths).
+			report(i + 1)
+			continue
 		}
 		title, stored, err := loadDoc(ctx, who, d.uuid)
 		var body *contentcodec.Node
@@ -322,12 +359,106 @@ func writeWorkspaceZip(ctx context.Context, w io.Writer, who accessBusiness.Subj
 			_, err = io.WriteString(fw, docMarkdown(title, body, appURL))
 		}
 		if err != nil {
-			return written, skipped, err
+			return written, writtenBoards, skipped, err
 		}
 		written++
 		report(i + 1)
 	}
-	return written, skipped, zw.Close()
+	names := exportPaths(boardsAsPaths(boards))
+	for i, b := range boards {
+		if err := ctx.Err(); err != nil {
+			return written, writtenBoards, skipped, err
+		}
+		file, pics, err := excalidrawFile(ctx, b.uuid, appURL, boardPictureBudget)
+		if err != nil {
+			helpers.LogWarnWithContext(ctx, "content io: workspace export left out board %s: %v", b.uuid, err)
+			// Its own reason, so a board is never listed as a doc that couldn't be read.
+			skipped = append(skipped, Skipped{What: exportTitle(b.title), Why: boardUnread})
+			report(len(docs) + i + 1)
+			continue
+		}
+		fw, err := zw.Create(path.Join(boardsFolder, names[b.uuid]+".excalidraw"))
+		if err == nil {
+			_, err = fw.Write(file)
+		}
+		if err != nil {
+			return written, writtenBoards, skipped, err
+		}
+		writtenBoards++
+		skipped = append(skipped, pictureSkips(b.title, pics)...)
+		report(len(docs) + i + 1)
+	}
+	return written, writtenBoards, skipped, zw.Close()
+}
+
+// boardsFolder is the zip's folder of boards.
+const boardsFolder = "Boards"
+
+// boardUnread is why a board isn't in the export: its drawing couldn't be
+// read. The web names such boards together, as it does the docs.
+const boardUnread = "the board could not be read"
+
+// exportBoard is one board going into a workspace export.
+type exportBoard struct{ uuid, title string }
+
+// exportableBoards is every live board who may read (CanRead, as the board
+// opens for them), in the graph's order, and how many live boards they may
+// not: private boards not shared with them.
+func exportableBoards(ctx context.Context, who accessBusiness.Subject) ([]exportBoard, int, error) {
+	var out []exportBoard
+	leftOut := 0
+	for offset := 0; ; offset += exportPage {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		ids, err := boardUUIDPage(ctx, offset, exportPage)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(ids) == 0 {
+			return out, leftOut, nil
+		}
+		titles, err := readableBoardsOf(ctx, ids, who.UserUUID)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, id := range ids {
+			title, ok := titles[strings.ToLower(id)]
+			if !ok {
+				leftOut++
+				continue
+			}
+			out = append(out, exportBoard{uuid: id, title: title})
+		}
+	}
+}
+
+// boardsAsPaths names the boards for exportPaths: all at the top of their
+// folder, two of one name told apart by a number.
+func boardsAsPaths(boards []exportBoard) []exportDoc {
+	out := make([]exportDoc, len(boards))
+	for i, b := range boards {
+		out[i] = exportDoc{uuid: b.uuid, title: b.title}
+	}
+	return out
+}
+
+// pictureSkips says which of a board's pictures its file left out, and why.
+func pictureSkips(title string, p boardPictures) []Skipped {
+	var out []Skipped
+	if p.overBudget > 0 {
+		out = append(out, Skipped{
+			What: fmt.Sprintf("%d %s on the board ‘%s’", p.overBudget, plural(p.overBudget, "picture", "pictures"), exportTitle(title)),
+			Why:  fmt.Sprintf("a board's file holds up to %d MB of pictures", boardPictureBudget>>20),
+		})
+	}
+	if p.unread > 0 {
+		out = append(out, Skipped{
+			What: fmt.Sprintf("%d %s on the board ‘%s’", p.unread, plural(p.unread, "picture", "pictures"), exportTitle(title)),
+			Why:  plural(p.unread, "its file couldn't be read", "their files couldn't be read"),
+		})
+	}
+	return out
 }
 
 // exportPaths is each doc's path in the zip, without its extension: its

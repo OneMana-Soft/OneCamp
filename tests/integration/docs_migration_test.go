@@ -149,17 +149,22 @@ func (w *docsWorld) subject(name string) accessBusiness.Subject {
 	return accessBusiness.Subject{UserUID: w.uids[name], UserUUID: w.people[name].String()}
 }
 
-// call runs a route's handler as a person, with body as its JSON and jobID as
-// its {job_id}.
-func (w *docsWorld) call(handler http.HandlerFunc, name, body, jobID string) *httptest.ResponseRecorder {
+// as is a request's context as sign-in leaves it for the person, with jobID
+// as its {job_id}.
+func (w *docsWorld) as(name, jobID string) context.Context {
 	info := userModels.UserInfo{}
 	info.UserPostgresInfo.Id = w.people[name]
 	info.UserPostgresInfo.EmailID = w.people[name].String() + "@example.test"
 	info.UserDgraphInfo = dgraphStruct.DgraphUser{Uid: w.uids[name], Uuid: w.people[name].String()}
 	route := chi.NewRouteContext()
 	route.URLParams.Add("job_id", jobID)
-	ctx := context.WithValue(context.WithValue(context.Background(), helpers.UserInfoContextKey, info), chi.RouteCtxKey, route)
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)).WithContext(ctx)
+	return context.WithValue(context.WithValue(context.Background(), helpers.UserInfoContextKey, info), chi.RouteCtxKey, route)
+}
+
+// call runs a route's handler as a person, with body as its JSON and jobID as
+// its {job_id}.
+func (w *docsWorld) call(handler http.HandlerFunc, name, body, jobID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)).WithContext(w.as(name, jobID))
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 	return rec
@@ -221,7 +226,45 @@ func TestAWorkspaceExportHoldsWhatItsAdminCanOpenAndWhatOwnersLetIn(t *testing.T
 	if _, err := contentIOBusiness.ExportWorkspace(ctx, w.subject("maya")); err != contentIOBusiness.ErrNotAdmin {
 		t.Fatalf("a member's workspace export: %v", err)
 	}
-	rec := w.call(contentIOController.StartWorkspaceExport, "ada", "", "")
+	job, _, files := w.exportWorkspace(ctx, t, "ada")
+	if job.Exported != 3 {
+		t.Fatalf("the export wrote %d docs: %+v", job.Exported, job)
+	}
+	rec := w.call(contentIOController.GetWorkspaceExport, "ada", "", job.ID)
+	var download struct {
+		URL string `json:"download_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &download); rec.Code != http.StatusOK || err != nil || !strings.HasPrefix(download.URL, "http") {
+		t.Fatalf("the download: %d %s", rec.Code, rec.Body)
+	}
+	// Starting it, letting a private doc in and downloading it are each in
+	// the audit log, by who did it.
+	for action, who := range map[string]string{"docs.export_consent": "maya", "docs.workspace_export": "ada", "docs.workspace_export_download": "ada"} {
+		w.audited(t, action, who)
+	}
+	if len(job.Skipped) != 1 || job.Skipped[0].What != "1 private doc" {
+		t.Fatalf("left out %+v", job.Skipped)
+	}
+
+	var names []string
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "Admin notes.md,Handbook.md,Plans.md" {
+		t.Fatalf("the zip holds %v", names)
+	}
+	if files["Plans.md"] != "# Plans\n\nBody of "+plans+"\n" || strings.Contains(strings.Join(names, ","), "Diary") {
+		t.Fatalf("Plans.md is %q", files["Plans.md"])
+	}
+}
+
+// exportWorkspace starts admin's workspace export through its route, has the
+// queue's runner take it, and waits for it to end done. It answers the job,
+// its download address, and the files its zip holds, by name.
+func (w *docsWorld) exportWorkspace(ctx context.Context, t *testing.T, admin string) (contentIOBusiness.Job, string, map[string]string) {
+	t.Helper()
+	rec := w.call(contentIOController.StartWorkspaceExport, admin, "", "")
 	var started struct{ Export contentIOBusiness.Job }
 	if err := json.Unmarshal(rec.Body.Bytes(), &started); rec.Code != http.StatusAccepted || err != nil {
 		t.Fatalf("starting the export: %d %s", rec.Code, rec.Body)
@@ -241,7 +284,7 @@ func TestAWorkspaceExportHoldsWhatItsAdminCanOpenAndWhatOwnersLetIn(t *testing.T
 	claimWithin := 5 * contentIOBusiness.QueuePollEvery
 	var err error
 	for claimBy := time.Now().Add(claimWithin); ; time.Sleep(100 * time.Millisecond) {
-		if job, _, err = contentIOBusiness.WorkspaceExport(ctx, w.subject("ada"), job.ID); err != nil {
+		if job, _, err = contentIOBusiness.WorkspaceExport(ctx, w.subject(admin), job.ID); err != nil {
 			t.Fatal(err)
 		}
 		if job.Status != contentIOBusiness.JobQueued {
@@ -254,7 +297,7 @@ func TestAWorkspaceExportHoldsWhatItsAdminCanOpenAndWhatOwnersLetIn(t *testing.T
 	var url string
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
-		job, url, err = contentIOBusiness.WorkspaceExport(ctx, w.subject("ada"), job.ID)
+		job, url, err = contentIOBusiness.WorkspaceExport(ctx, w.subject(admin), job.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -263,25 +306,9 @@ func TestAWorkspaceExportHoldsWhatItsAdminCanOpenAndWhatOwnersLetIn(t *testing.T
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	if job.Status != contentIOBusiness.JobDone || url == "" || job.Exported != 3 {
+	if job.Status != contentIOBusiness.JobDone || url == "" {
 		t.Fatalf("the export ended %+v, download %q", job, url)
 	}
-	rec = w.call(contentIOController.GetWorkspaceExport, "ada", "", job.ID)
-	var download struct {
-		URL string `json:"download_url"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &download); rec.Code != http.StatusOK || err != nil || !strings.HasPrefix(download.URL, "http") {
-		t.Fatalf("the download: %d %s", rec.Code, rec.Body)
-	}
-	// Starting it, letting a private doc in and downloading it are each in
-	// the audit log, by who did it.
-	for action, who := range map[string]string{"docs.export_consent": "maya", "docs.workspace_export": "ada", "docs.workspace_export_download": "ada"} {
-		w.audited(t, action, who)
-	}
-	if len(job.Skipped) != 1 || job.Skipped[0].What != "1 private doc" {
-		t.Fatalf("left out %+v", job.Skipped)
-	}
-
 	obj, err := minioInit.MinioClient.GetObject(ctx, helpers.UserUploadBucket(), "content-io/"+job.ID+"/workspace-docs.zip", minio.GetObjectOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -295,19 +322,11 @@ func TestAWorkspaceExportHoldsWhatItsAdminCanOpenAndWhatOwnersLetIn(t *testing.T
 		t.Fatal(err)
 	}
 	files := map[string]string{}
-	var names []string
 	for _, f := range zr.File {
 		rc, _ := f.Open()
 		b, _ := io.ReadAll(rc)
 		rc.Close()
 		files[f.Name] = string(b)
-		names = append(names, f.Name)
 	}
-	sort.Strings(names)
-	if strings.Join(names, ",") != "Admin notes.md,Handbook.md,Plans.md" {
-		t.Fatalf("the zip holds %v", names)
-	}
-	if files["Plans.md"] != "# Plans\n\nBody of "+plans+"\n" || strings.Contains(strings.Join(names, ","), "Diary") {
-		t.Fatalf("Plans.md is %q", files["Plans.md"])
-	}
+	return job, url, files
 }

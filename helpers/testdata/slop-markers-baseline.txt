@@ -1,0 +1,20 @@
+# Slop markers in production Go, per file: helpers/slopMarkersGuard_test.go.
+# A line is debt: lower it when you clear one (WRITE_SLOP_BASELINE=1 rewrites this file).
+# A new line needs a reason in its commit, never a habit.
+business/AIDrill/demoFixture.go print 2
+business/Archive/archiveBusiness.go todo-no-owner 1
+business/Channel/channelBusiness.go todo-no-owner 1
+business/Integration/googleCalendarBusiness.go todo-no-owner 1
+business/Project/projectBusiness.go commented-code 1
+controllers/Post/postController.go commented-code 1
+controllers/User/userController.go commented-code 3
+initializers/env/loadEnv.go print 3
+initializers/livekitInit/connectLivekit.go commented-code 1
+initializers/otelInit/otelInit.go print 7
+models/dgraph/struct.go commented-code 1
+models/postgres/AI/cryptoInit.go print 2
+models/postgres/GitHubImportJob/githubImportJobModel.go nolint-no-reason 1
+models/postgres/Import/tokenInit.go print 2
+models/postgres/User/totpInit.go print 2
+services/AI/reindex.go commented-code 1
+services/DemoSeed/main.go print 3

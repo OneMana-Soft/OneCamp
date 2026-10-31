@@ -5,13 +5,20 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 
+	archiveBusiness "github.com/akashc777/OneCamp/business/Archive"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
+	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	teamBusiness "github.com/akashc777/OneCamp/business/Team"
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
+	softDeleteModel "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
-	"github.com/lib/pq"
 )
 
 // RollbackImport soft-deletes everything the import created, in
@@ -57,7 +64,10 @@ func RollbackImport(ctx context.Context, jobId uuid.UUID) error {
 		if err := softDelete(ctx, tx, jobId, importModels.EntityTask, "tasks"); err != nil {
 			return err
 		}
-		if err := deleteUnusedFields(ctx, tx, jobId); err != nil {
+		if err := deleteUnusedMade(ctx, tx, jobId, importModels.EntityField); err != nil {
+			return err
+		}
+		if err := deleteUnusedMade(ctx, tx, jobId, importModels.EntityCycle); err != nil {
 			return err
 		}
 		if err := softDelete(ctx, tx, jobId, importModels.EntityFile, "attachments"); err != nil {
@@ -77,12 +87,26 @@ func RollbackImport(ctx context.Context, jobId uuid.UUID) error {
 	if err != nil {
 		return fmt.Errorf("the rollback stopped and took nothing away: %w", err)
 	}
+	// Boards and lists read the graph, and search keeps its own copy: what the
+	// transaction deleted goes from them too. What can't stays, and rolling
+	// back again tries it again.
+	if left, err := unmakeImported(ctx, job); err != nil || left > 0 {
+		helpers.LogErrorWithContext(ctx, "Import rollback of %s left %d of its tasks, projects and teams on the graph or in search: %+v", jobId, left, err)
+		if err != nil {
+			return fmt.Errorf("the import was rolled back, but its tasks, projects and teams could not all be taken off its boards, lists and search; roll it back again to try them again")
+		}
+		return fmt.Errorf("the import was rolled back, but %d of its tasks, projects and teams are still on its boards, lists or search; roll it back again to try them again", left)
+	}
 	// The docs live in the graph, outside the transaction: they go to the
 	// trash once the rest is done, where their owner can still restore them.
 	// What can't be moved stays, and rolling back again tries it again.
 	if left, err := trashImportedDocs(ctx, job); err != nil || left > 0 {
 		helpers.LogErrorWithContext(ctx, "Import rollback of %s left %d docs out of the trash: %+v", jobId, left, err)
 		return fmt.Errorf("the import was rolled back, but %d of its docs could not be moved to the trash; roll it back again to try them again", left)
+	}
+	// So do its boards (their pictures went with the attachments above).
+	if left := deleteImportedBoards(ctx, job); left > 0 {
+		return fmt.Errorf("the import was rolled back, but %d of its boards could not be deleted; roll it back again to try them again", left)
 	}
 
 	if err := DeleteStagedZip(ctx, jobId); err != nil {
@@ -129,25 +153,37 @@ func softDelete(ctx context.Context, tx *sql.Tx, importId uuid.UUID, entityType,
 	return nil
 }
 
-// deleteUnusedFields takes away the custom fields this import made, once its
-// tasks are gone, unless a task still in use has a value of one: a field
-// someone has started using stays.
-func deleteUnusedFields(ctx context.Context, tx *sql.Tx, importId uuid.UUID) error {
-	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, importModels.EntityField)
+// unusedMade is how a rollback takes away each kind of thing an import makes
+// in a project, once its tasks are gone, unless a task still in use holds it:
+// a field or cycle someone has started using stays. It goes softly, as a
+// person's delete takes one (SoftDelete, V-78): its task values or task links
+// stay, so its restore brings them back with it.
+var unusedMade = map[string]struct {
+	kind   softDeleteModel.Kind
+	unused string
+}{
+	importModels.EntityField: {softDeleteModel.Field, `NOT EXISTS (
+		SELECT 1 FROM task_field_values v JOIN tasks t ON t.id = v.task_uuid
+		WHERE v.field_id = task_fields.id AND t.deleted_at IS NULL)`},
+	importModels.EntityCycle: {softDeleteModel.Cycle, `NOT EXISTS (
+		SELECT 1 FROM task_cycles tc JOIN tasks t ON t.id = tc.task_uuid
+		WHERE tc.cycle_id = project_cycles.id AND t.deleted_at IS NULL)`},
+}
+
+// deleteUnusedMade takes away, in the rollback's transaction, the fields or
+// cycles (unusedMade) this import made that no task in use holds.
+func deleteUnusedMade(ctx context.Context, tx *sql.Tx, importId uuid.UUID, entityType string) error {
+	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, entityType)
 	if err != nil || len(entries) == 0 {
 		return err
 	}
-	ids := make([]string, 0, len(entries))
+	ids := make([]uuid.UUID, 0, len(entries))
 	for _, e := range entries {
-		ids = append(ids, e.OnecampUUID.String())
+		ids = append(ids, e.OnecampUUID)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM task_fields f
-		WHERE f.id = ANY($1::uuid[])
-		  AND NOT EXISTS (
-		      SELECT 1 FROM task_field_values v JOIN tasks t ON t.id = v.task_uuid
-		      WHERE v.field_id = f.id AND t.deleted_at IS NULL)`, pq.Array(ids)); err != nil {
-		return fmt.Errorf("rollback task fields: %w", err)
+	made := unusedMade[entityType]
+	if _, err := softDeleteModel.DeleteAll(pgexec.WithTx(ctx, tx), made.kind, ids, uuid.Nil, made.unused); err != nil {
+		return fmt.Errorf("rollback %s: %w", entityType, err)
 	}
 	return nil
 }
@@ -238,6 +274,205 @@ func tableNameWhitelist(t string) string {
 	}
 }
 
+// deleteImportedBoards deletes the boards the import made, as their owner
+// deletes one, and says how many it couldn't. A board deleted already is done.
+func deleteImportedBoards(ctx context.Context, job *importModels.Job) int {
+	entries, err := importModels.IdMappingsByTypeOwned(ctx, job.Id, importModels.EntityBoard)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "Import rollback of %s could not list its boards: %+v", job.Id, err)
+		return 1
+	}
+	left := 0
+	for _, e := range entries {
+		if err := deleteBoard(ctx, e.OnecampUUID.String()); err != nil {
+			helpers.LogWarnWithContext(ctx, "Import rollback could not delete board %s: %+v", e.OnecampUUID, err)
+			left++
+		}
+	}
+	return left
+}
+
+// unmakeImported takes what the rollback's transaction deleted off the graph
+// and search, kind by kind (subtasks before their tasks, tasks before their
+// projects, projects before their teams), and says how many it couldn't.
+// Tasks and subtasks go in bulk, as an archive run takes them; projects and
+// teams, which an import makes few of, each by its own delete. It reads as
+// whoever ran the import, and as the system: a task only a few may see is the
+// import's too. A bulk import's context: none of it raises an event or a
+// notification.
+func unmakeImported(ctx context.Context, job *importModels.Job) (int, error) {
+	kinds := []unmaker{unmakeSubtasks, unmakeTasks, unmakeProjects, unmakeTeams}
+	made := make([][]uuid.UUID, len(kinds))
+	some := false
+	for i, k := range kinds {
+		ids, err := importModels.MadeAndDeleted(ctx, job.Id, k.entityType())
+		if err != nil {
+			return 0, fmt.Errorf("list its %ss: %w", k.entityType(), err)
+		}
+		made[i], some = ids, some || len(ids) > 0
+	}
+	if !some {
+		return 0, nil
+	}
+	by, err := importRunner(ctx, job)
+	if err != nil {
+		return 0, err
+	}
+	ctx = importContext(ctx)
+	left := 0
+	for i, k := range kinds {
+		left += k.run(ctx, made[i], by)
+	}
+	return left, nil
+}
+
+// unmaker is one kind of what an import makes, as a rollback takes it off the
+// graph and search (unmaking).
+type unmaker interface {
+	entityType() string
+	run(ctx context.Context, ids []uuid.UUID, by *dgraphStruct.DgraphUser) (left int)
+}
+
+// unmaking is one kind of unmaker: live reads the nodes the graph still has
+// live of some of its ids (none for one the graph never had), and archive
+// takes those off the graph and search, saying how many it couldn't.
+type unmaking[N any] struct {
+	entity  string
+	live    func(ctx context.Context, ids []uuid.UUID, by *dgraphStruct.DgraphUser) (map[uuid.UUID]N, error)
+	archive func(ctx context.Context, nodes map[uuid.UUID]N) (left int)
+}
+
+// unmakeBatch is how many of a kind one read of the graph takes.
+const unmakeBatch = 500
+
+func (u unmaking[N]) entityType() string { return u.entity }
+
+// run takes those of ids the graph still has live off it and search, reading
+// them as by, and says how many it couldn't.
+func (u unmaking[N]) run(ctx context.Context, ids []uuid.UUID, by *dgraphStruct.DgraphUser) int {
+	left := 0
+	for batch := range slices.Chunk(ids, unmakeBatch) {
+		nodes, err := u.live(ctx, batch, by)
+		if err != nil {
+			helpers.LogWarnWithContext(ctx, "Import rollback could not read %d %ss in the graph: %+v", len(batch), u.entity, err)
+			left += len(batch)
+			continue
+		}
+		left += u.archive(ctx, nodes)
+	}
+	return left
+}
+
+var (
+	unmakeSubtasks = unmaking[*dgraphStruct.DgraphTask]{importModels.EntitySubtask, liveTasks, archiveTasks}
+	unmakeTasks    = unmaking[*dgraphStruct.DgraphTask]{importModels.EntityTask, liveTasks, archiveTasks}
+	unmakeProjects = unmaking[*dgraphStruct.DgraphProject]{importModels.EntityProject, liveProjects, oneByOne(importModels.EntityProject, projectBusiness.ArchiveProjectByProjectUUID)}
+	unmakeTeams    = unmaking[*dgraphStruct.DgraphTeam]{importModels.EntityTeam, liveTeams, oneByOne(importModels.EntityTeam, teamBusiness.ArchiveTeamByTeamUUID)}
+)
+
+// archiveTasks takes tasks off the graph and search as an archive run does:
+// one write of the graph for them all, and one update of search for them and
+// their comments, files and AI entries. A task's own delete is a write and an
+// update for each, and a large import's rollback ran past the request's time.
+func archiveTasks(ctx context.Context, tasks map[uuid.UUID]*dgraphStruct.DgraphTask) int {
+	ids := make([]string, 0, len(tasks))
+	for id := range tasks {
+		ids = append(ids, id.String())
+	}
+	if err := archiveBusiness.ArchiveInGraphAndSearch(ctx, "tasks", ids); err != nil {
+		helpers.LogWarnWithContext(ctx, "Import rollback could not take %d tasks off the graph and search: %+v", len(ids), err)
+		return len(ids)
+	}
+	return 0
+}
+
+// oneByOne takes each node of a kind off the graph and search by archive, the
+// kind's own delete.
+func oneByOne[N any](entity string, archive func(context.Context, uuid.UUID, N) error) func(context.Context, map[uuid.UUID]N) int {
+	return func(ctx context.Context, nodes map[uuid.UUID]N) int {
+		left := 0
+		for id, node := range nodes {
+			if err := archive(ctx, id, node); err != nil {
+				helpers.LogWarnWithContext(ctx, "Import rollback could not take %s %s off the graph and search: %+v", entity, id, err)
+				left++
+			}
+		}
+		return left
+	}
+}
+
+// liveTasks reads the tasks of ids the graph has and hasn't deleted, in one
+// read.
+func liveTasks(ctx context.Context, ids []uuid.UUID, by *dgraphStruct.DgraphUser) (map[uuid.UUID]*dgraphStruct.DgraphTask, error) {
+	keys := make([]string, len(ids))
+	for i, id := range ids {
+		keys[i] = id.String()
+	}
+	tasks, err := taskDomain.GetDgraphTasksForWrite(ctx, keys, by.Uid)
+	if err != nil {
+		return nil, err
+	}
+	live := make(map[uuid.UUID]*dgraphStruct.DgraphTask, len(tasks))
+	for _, t := range tasks {
+		if id, err := uuid.Parse(t.Uuid); err == nil && !helpers.IsSoftDeleted(t.DeletedAt) {
+			live[id] = t
+		}
+	}
+	return live, nil
+}
+
+// liveProjects reads the projects of ids the graph has and hasn't deleted,
+// one read each: an import makes few, and only an empty one is deleted. One
+// the graph doesn't have (a run that never reached it) is none.
+func liveProjects(ctx context.Context, ids []uuid.UUID, by *dgraphStruct.DgraphUser) (map[uuid.UUID]*dgraphStruct.DgraphProject, error) {
+	live := map[uuid.UUID]*dgraphStruct.DgraphProject{}
+	for _, id := range ids {
+		p, err := projectBusiness.GetDgraphProjectInfoAndTeamAdminFlag(ctx, id.String(), by.Uid)
+		if errors.Is(err, helpers.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if p != nil && p.Uuid != "" && !helpers.IsSoftDeleted(p.DeletedAt) {
+			live[id] = p
+		}
+	}
+	return live, nil
+}
+
+// liveTeams reads the teams of ids the graph has and hasn't deleted, one read
+// each, as liveProjects does.
+func liveTeams(ctx context.Context, ids []uuid.UUID, _ *dgraphStruct.DgraphUser) (map[uuid.UUID]*dgraphStruct.DgraphTeam, error) {
+	live := map[uuid.UUID]*dgraphStruct.DgraphTeam{}
+	for _, id := range ids {
+		tm, err := teamBusiness.GetDgraphTeamInfoByUUIDForArchivingAndUnarchivingTeam(ctx, id.String())
+		if errors.Is(err, helpers.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if tm != nil && tm.Uuid != "" && !helpers.IsSoftDeleted(tm.DeletedAt) {
+			live[id] = tm
+		}
+	}
+	return live, nil
+}
+
+// importRunner is whoever ran the import, in the graph: a rollback takes its
+// things away as them.
+func importRunner(ctx context.Context, job *importModels.Job) (*dgraphStruct.DgraphUser, error) {
+	if job.TriggeredBy == nil {
+		return nil, errors.New("the import names nobody who ran it")
+	}
+	by, err := userDomain.GetDgraphUserInfoByUUID(ctx, job.TriggeredBy.String())
+	if err != nil || by == nil {
+		return nil, fmt.Errorf("whoever ran it could not be read: %w", err)
+	}
+	return by, nil
+}
+
 // trashDoc puts a doc and the pages under it in the trash as one delete; a
 // seam for tests.
 var trashDoc = docBusiness.TrashSubtree
@@ -251,12 +486,9 @@ func trashImportedDocs(ctx context.Context, job *importModels.Job) (int, error) 
 	if err != nil || len(entries) == 0 {
 		return len(entries), err
 	}
-	if job.TriggeredBy == nil {
-		return len(entries), errors.New("the import names nobody who ran it")
-	}
-	by, err := userDomain.GetDgraphUserInfoByUUID(ctx, job.TriggeredBy.String())
-	if err != nil || by == nil {
-		return len(entries), fmt.Errorf("whoever ran it could not be read: %w", err)
+	by, err := importRunner(ctx, job)
+	if err != nil {
+		return len(entries), err
 	}
 	left := 0
 	for _, e := range entries {

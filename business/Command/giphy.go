@@ -3,15 +3,18 @@ package business
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
-	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 	slashModel "github.com/akashc777/OneCamp/models/postgres/SlashCommand"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
@@ -27,7 +30,30 @@ import (
 // "api_key". This keeps the platform generic — Giphy is just an installed app
 // whose command happens to be handled in-process for the best UX.
 
-const giphyAppSlug = "giphy"
+const (
+	giphyAppSlug = "giphy"
+	// giphyRating is the content rating every Giphy request asks for.
+	giphyRating = "pg-13"
+	// giphyCommandResults is how many GIFs /giphy loads to shuffle through.
+	giphyCommandResults = 15
+	// giphyPickerPage is one page of the composer picker's grid.
+	giphyPickerPage = 24
+	// giphyMaxTerm and giphyMaxOffset are Giphy's own limits on a search's
+	// length and on how deep its pages go.
+	giphyMaxTerm   = 50
+	giphyMaxOffset = 4999
+)
+
+// giphyAPI is Giphy's GIF API; a unit test points it at a stand-in.
+var giphyAPI = "https://api.giphy.com/v1/gifs"
+
+var (
+	// ErrGiphyBadRequest is a picker request Giphy can't serve: a search past
+	// giphyMaxTerm characters, or an offset outside 0..giphyMaxOffset.
+	ErrGiphyBadRequest = errors.New("giphy: bad request")
+	// ErrGiphyUnavailable is Giphy failing to answer, or refusing the key.
+	ErrGiphyUnavailable = errors.New("giphy: unavailable")
+)
 
 func init() {
 	Register("giphy", handleGiphy)
@@ -52,9 +78,13 @@ func handleGiphy(ctx context.Context, cc CommandContext) (*commandAdapter.Comman
 		return errorResponse("Giphy isn't configured. An admin can add the Giphy API key under Apps."), nil
 	}
 
-	urls, err := giphySearch(ctx, apiKey, term)
-	if err != nil || len(urls) == 0 {
+	gifs, _, err := giphyQuery(ctx, apiKey, term, 0, giphyCommandResults)
+	if err != nil || len(gifs) == 0 {
 		return ephemeral(fmt.Sprintf("No GIFs found for “%s”.", term)), nil
+	}
+	urls := make([]string, len(gifs))
+	for i, g := range gifs {
+		urls[i] = g.Send.URL
 	}
 
 	state := &giphyState{Query: term, URLs: urls, Index: 0}
@@ -159,83 +189,159 @@ func renderGiphyBlocks(s *giphyState) []commandAdapter.Block {
 }
 
 // giphyAPIKey reads the key from the installed "giphy" app's encrypted secret
-// bag. Returns "" if the app isn't installed or has no key.
+// bag. Returns "" if the app isn't installed, is turned off, or has no key.
 func giphyAPIKey(ctx context.Context) (string, error) {
 	app, err := slashModel.GetAppBySlug(ctx, giphyAppSlug)
-	if err != nil || app == nil {
+	if err != nil || app == nil || !app.IsEnabled {
 		return "", err
 	}
 	return GetAppSecret(ctx, app.Id, "api_key")
 }
 
-// giphySearch queries the Giphy search API and returns downsized GIF URLs.
-func giphySearch(ctx context.Context, apiKey, term string) ([]string, error) {
-	endpoint := "https://api.giphy.com/v1/gifs/search?" + url.Values{
-		"api_key": {apiKey},
-		"q":       {term},
-		"limit":   {"15"},
-		"rating":  {"pg-13"},
-	}.Encode()
+// giphyImage is one rendition as Giphy answers it, its sizes as strings.
+type giphyImage struct {
+	URL    string `json:"url"`
+	WebP   string `json:"webp"`
+	Width  string `json:"width"`
+	Height string `json:"height"`
+}
 
-	if _, err := helpers.ValidateOutboundURL(endpoint, false); err != nil {
-		return nil, err
+// rendition is the image's GIF, or its webp when webp is set and Giphy has one.
+func (i giphyImage) rendition(webp bool) commandAdapter.GiphyRendition {
+	u := i.URL
+	if webp && i.WebP != "" {
+		u = i.WebP
+	}
+	w, _ := strconv.Atoi(i.Width)
+	h, _ := strconv.Atoi(i.Height)
+	return commandAdapter.GiphyRendition{URL: u, Width: w, Height: h}
+}
+
+// giphyQuery asks Giphy for one page of GIFs from offset, trending when term
+// is empty and a search for it otherwise, and returns them with Giphy's total
+// for the query. /giphy, the picker and the key's Test all ask through it.
+func giphyQuery(ctx context.Context, apiKey, term string, offset, limit int) ([]commandAdapter.GiphyGIF, *int, error) {
+	params := url.Values{
+		"api_key": {apiKey},
+		"limit":   {strconv.Itoa(limit)},
+		"offset":  {strconv.Itoa(offset)},
+		"rating":  {giphyRating},
+	}
+	endpoint := giphyAPI + "/trending?"
+	if term != "" {
+		params.Set("q", term)
+		endpoint = giphyAPI + "/search?"
+	}
+	endpoint += params.Encode()
+	// Errors leave without the request's address: its query holds the
+	// workspace's key, and callers log them and show them to admins.
+	if err := forwardCheck(endpoint); err != nil {
+		return nil, nil, safefetch.UnwrapURLError(err)
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, safefetch.UnwrapURLError(err)
 	}
-	client := helpers.SSRFSafeClient(false)
-	client.Timeout = 8 * time.Second
-	resp, err := client.Do(req)
+	resp, err := forwardClient().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, safefetch.UnwrapURLError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("giphy returned %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("giphy returned %d", resp.StatusCode)
 	}
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var parsed struct {
 		Data []struct {
+			ID     string `json:"id"`
+			Title  string `json:"title"`
 			Images struct {
-				DownsizedLarge struct {
-					URL string `json:"url"`
-				} `json:"downsized_large"`
-				FixedHeight struct {
-					URL string `json:"url"`
-				} `json:"fixed_height"`
-				DownsizedMedium struct {
-					URL string `json:"url"`
-				} `json:"downsized_medium"`
-				Original struct {
-					URL string `json:"url"`
-				} `json:"original"`
+				FixedWidth      giphyImage `json:"fixed_width"`
+				FixedHeight     giphyImage `json:"fixed_height"`
+				DownsizedLarge  giphyImage `json:"downsized_large"`
+				DownsizedMedium giphyImage `json:"downsized_medium"`
+				Original        giphyImage `json:"original"`
 			} `json:"images"`
 		} `json:"data"`
+		Pagination struct {
+			TotalCount int `json:"total_count"`
+		} `json:"pagination"`
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, err
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&parsed); err != nil {
+		return nil, nil, err
 	}
 
-	var urls []string
+	gifs := make([]commandAdapter.GiphyGIF, 0, len(parsed.Data))
 	for _, d := range parsed.Data {
-		// Prefer a display-sized rendition: fixed_height (480p tall, sharp and
-		// reasonably small) → downsized_large → downsized_medium → original.
-		// downsized_medium alone is tiny (~200px), which made sent GIFs look
+		// A message sends a display-sized rendition: fixed_height (200 px
+		// tall), else downsized_large, downsized_medium, the original.
+		// downsized_medium alone is tiny (~200 px), which made sent GIFs look
 		// small.
-		u := helpers.FirstNonEmpty(
-			d.Images.FixedHeight.URL,
-			d.Images.DownsizedLarge.URL,
-			d.Images.DownsizedMedium.URL,
-			d.Images.Original.URL,
-		)
-		if u != "" {
-			urls = append(urls, u)
+		var send commandAdapter.GiphyRendition
+		for _, img := range []giphyImage{d.Images.FixedHeight, d.Images.DownsizedLarge, d.Images.DownsizedMedium, d.Images.Original} {
+			if img.URL != "" {
+				send = img.rendition(false)
+				break
+			}
 		}
+		if send.URL == "" {
+			continue
+		}
+		// The grid draws the 200 px wide rendition, as webp where Giphy has
+		// one, a fraction of the GIF's bytes.
+		preview := send
+		if d.Images.FixedWidth.URL != "" {
+			preview = d.Images.FixedWidth.rendition(true)
+		}
+		gifs = append(gifs, commandAdapter.GiphyGIF{ID: d.ID, Title: d.Title, Preview: preview, Send: send})
 	}
-	return urls, nil
+	// The next page starts after every GIF Giphy sent, the skipped ones too:
+	// counting only those kept repeated a page's last GIF on the next.
+	return gifs, nextGiphyOffset(offset, len(parsed.Data), parsed.Pagination.TotalCount), nil
+}
+
+// nextGiphyOffset is where the page after count GIFs from offset starts, or
+// nil when that was the last page Giphy will serve.
+func nextGiphyOffset(offset, count, total int) *int {
+	next := offset + count
+	if count == 0 || next >= total || next > giphyMaxOffset {
+		return nil
+	}
+	return &next
+}
+
+// GiphyPicker answers the composer's GIF picker: a page of trending GIFs, or
+// of a search for term, from offset. A page is kept for everyone for a few
+// minutes (registry.GiphyPage), so people browsing the same GIFs spend the
+// workspace's Giphy quota once. With no key, or the app turned off, it
+// answers Configured: false and asks Giphy nothing.
+func GiphyPicker(ctx context.Context, term string, offset int) (*commandAdapter.GiphyPage, error) {
+	if utf8.RuneCountInString(term) > giphyMaxTerm || offset < 0 || offset > giphyMaxOffset {
+		return nil, ErrGiphyBadRequest
+	}
+	apiKey, err := giphyAPIKey(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey == "" {
+		return &commandAdapter.GiphyPage{Items: []commandAdapter.GiphyGIF{}}, nil
+	}
+
+	args := []string{strings.ToLower(term), strconv.Itoa(offset)}
+	var page commandAdapter.GiphyPage
+	if found, _ := redisStore.GetJSON(ctx, registry.GiphyPage, args, &page); found {
+		return &page, nil
+	}
+	gifs, next, err := giphyQuery(ctx, apiKey, term, offset, giphyPickerPage)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrGiphyUnavailable, err)
+	}
+	page = commandAdapter.GiphyPage{Configured: true, Items: gifs, NextOffset: next}
+	_ = redisStore.SetJSON(ctx, registry.GiphyPage, args, &page)
+	return &page, nil
 }
 
 // testGiphy hits the Giphy search API with the stored key (registered as the
@@ -249,7 +355,7 @@ func testGiphy(ctx context.Context, appID uuid.UUID) *commandAdapter.AppTestResu
 	if key == "" {
 		return &commandAdapter.AppTestResult{Success: false, Message: "No API key set. Paste your Giphy API key and save first."}
 	}
-	urls, err := giphySearch(ctx, key, "hello")
+	gifs, _, err := giphyQuery(ctx, key, "hello", 0, giphyCommandResults)
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "401") || strings.Contains(msg, "403") {
@@ -257,7 +363,7 @@ func testGiphy(ctx context.Context, appID uuid.UUID) *commandAdapter.AppTestResu
 		}
 		return &commandAdapter.AppTestResult{Success: false, Message: fmt.Sprintf("Couldn't reach Giphy: %v", err)}
 	}
-	return &commandAdapter.AppTestResult{Success: true, Message: fmt.Sprintf("Success — Giphy returned %d results. Your key works.", len(urls))}
+	return &commandAdapter.AppTestResult{Success: true, Message: fmt.Sprintf("Success — Giphy returned %d results. Your key works.", len(gifs))}
 }
 
 func saveGiphyState(ctx context.Context, triggerID string, s *giphyState) {

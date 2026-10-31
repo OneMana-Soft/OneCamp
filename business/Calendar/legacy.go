@@ -10,6 +10,10 @@ package Calendar
 //   - a write is a whole replace, a guest list left out leaves the guests,
 //     focus and away are pointers (left out: unchanged), and there is no
 //     sequence to check: the last writer wins, as it always has;
+//   - focus and away are own time, which takes no guests (keepKind): since
+//     28 Oct, a create naming participants for either, an update adding one,
+//     or a change making an event with guests focus or away is refused with
+//     a 400 in words, where the old stores took them;
 //   - the web sends no zone, so an event is given its organiser's, and an
 //     all-day event comes as the sender's midnights (legacyWhen);
 //   - an all-day event is answered with its dates and midnight-UTC instants,
@@ -49,7 +53,8 @@ func zoneDates(date string, e *models.Event) time.Time {
 
 // legacyOf is an event in the /event routes' JSON, for reader. Pure.
 func legacyOf(e *models.Event, guests []models.Attendee, names map[string]*dgraphStruct.DgraphUser, reader uuid.UUID, at allDayAt) *dgraphStruct.DgraphEvent {
-	ev := &dgraphStruct.DgraphEvent{Uuid: e.ID.String(), Title: e.Title, Description: e.Notes, Hue: e.Hue, Location: e.Location}
+	ev := &dgraphStruct.DgraphEvent{Uuid: e.ID.String(), Title: e.Title, Description: e.Notes, Hue: e.Hue, Location: e.Location, CalendarID: e.CalendarID.String(),
+		ReadOnly: e.Source == sourceSubscribed}
 	if e.AllDay() {
 		start, end := at(e.StartDate, e), at(e.EndDate, e)
 		ev.StartTime, ev.EndTime = &start, &end
@@ -57,10 +62,15 @@ func legacyOf(e *models.Event, guests []models.Attendee, names map[string]*dgrap
 	} else {
 		start, end := *e.StartAt, *e.EndAt
 		ev.StartTime, ev.EndTime = &start, &end
+		ev.Zone, ev.EndZone = ownZones(e.TZ, e.EndTZ)
 	}
 	ev.CreatedBy = graphPerson(e.CreatedBy, names)
+	mayChangeIt := mayChange(roleOf(e, guests, reader), e) == nil
 	for _, a := range guestsShown(e, guests, reader) {
 		g := dgraphStruct.EventGuest{Role: a.Role, Response: a.Response, Note: a.Note}
+		if p := proposalShown(a, e, reader, mayChangeIt); p != nil {
+			g.Proposal = &dgraphStruct.EventProposal{Start: p.Start, End: p.End}
+		}
 		if a.UserID != nil {
 			ev.Participants = append(ev.Participants, graphPerson(*a.UserID, names))
 			g.UserUUID = a.UserID.String()
@@ -78,7 +88,30 @@ func legacyOf(e *models.Event, guests []models.Attendee, names map[string]*dgrap
 	}
 	focus, away := e.Kind == string(EventFocus), e.Kind == string(EventAway)
 	ev.IsFocus, ev.IsAway = &focus, &away
+	if e.Kind == string(EventWorkingLocation) {
+		ev.WorkingLocation = placeOf(e)
+	}
+	if e.CallRoom != "" {
+		// Its address comes with the read's others (withCalls).
+		ev.Call = &dgraphStruct.EventCall{Room: e.CallRoom}
+	}
 	return ev
+}
+
+// ownZones is a timed event's own zone and, when it ends in another, that
+// one, as its answer says them: UTC, what an event is given when none was
+// chosen (zoneOrUTC), says nothing. Pure.
+func ownZones(tz, endTZ string) (string, string) {
+	said := func(z string) string {
+		if z == "UTC" {
+			return ""
+		}
+		return z
+	}
+	if endTZ == "" || endTZ == tz {
+		return said(tz), ""
+	}
+	return said(tz), said(endTZ)
 }
 
 // graphPerson is someone as the graph's event named them.
@@ -183,7 +216,11 @@ func (s *service) legacyCreate(ctx context.Context, who *model.UserInfo, in adap
 	e.Kind = string(legacyKind(EventPlain, in.IsFocus, in.IsAway))
 	e.Title, e.Notes = in.Title, in.Description
 	legacyWhen(e, start, end, nil)
-	created, guests, err := s.create(ctx, who, e, guestInputs(in.Participants), in.SyncToGoogleCalendar)
+	wanted := guestInputs(in.Participants)
+	if err := keepKind(e, "", personOf(who), nil, &wanted); err != nil {
+		return nil, err
+	}
+	created, guests, err := s.create(ctx, who, e, wanted, in.SyncToGoogleCalendar)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +258,12 @@ func (s *service) legacyUpdateAt(ctx context.Context, ref string, in adapter.Cre
 	}
 	next := cloneEvent(inst.Event)
 	next.Kind = string(legacyKind(EventKind(inst.Kind), in.IsFocus, in.IsAway))
+	// A block made focus time or time off is no longer time for its task.
+	if EventKind(next.Kind) != EventTaskBlock {
+		next.TaskUUID = nil
+	}
 	next.Title = in.Title
+	next.Title = s.keptTitle(ctx, who, inst.Event, next)
 	// The web edits notes as the text it was given, so notes keep their
 	// format: HTML stays HTML, through the codec again.
 	if next.Notes, err = canonicalNotes(in.Description, inst.NotesFormat); err != nil {
@@ -239,6 +281,9 @@ func (s *service) legacyUpdateAt(ctx context.Context, ref string, in adapter.Cre
 			}
 		}
 		wanted = &g
+	}
+	if err := keepKind(next, inst.Kind, owner.CreatedBy, guests, wanted); err != nil {
+		return err
 	}
 	switch {
 	case inst.rid != nil:
@@ -327,6 +372,8 @@ func (s *service) legacyRange(ctx context.Context, who *model.UserInfo, from, to
 		out = append(out, legacyOfInstance(inst, occ, names, personOf(who), webDates))
 	}
 	s.withReminders(ctx, rows, occ, out, personOf(who))
+	s.withTasks(ctx, who, rows, out)
+	s.withCalls(ctx, out)
 	return out, nil
 }
 
@@ -344,6 +391,19 @@ func (s *service) legacyGet(ctx context.Context, who *model.UserInfo, id string)
 	occ := s.withAnswers(ctx, []instance{inst}, all)
 	out := []*dgraphStruct.DgraphEvent{legacyOfInstance(inst, occ, s.namesOf(ctx, []instance{inst}, all), personOf(who), webDates)}
 	s.withReminders(ctx, []instance{inst}, occ, out, personOf(who))
+	s.withTasks(ctx, who, []instance{inst}, out)
+	s.withCalls(ctx, out)
+	// A decline made by an out of office says so (head 5c).
+	var declined []string
+	for _, g := range out[0].Guests {
+		if g.Response == responseDeclined {
+			declined = append(declined, g.UserUUID)
+		}
+	}
+	away := s.awayDecliners(ctx, inst, declined)
+	for i := range out[0].Guests {
+		out[0].Guests[i].OutOfOffice = out[0].Guests[i].Response == responseDeclined && away[out[0].Guests[i].UserUUID]
+	}
 	return out[0], nil
 }
 

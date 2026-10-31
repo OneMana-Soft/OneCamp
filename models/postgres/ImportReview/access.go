@@ -24,9 +24,10 @@ import (
 // The gaps a review is of: what an import brought before its provider's fix
 // that the source keeps to some people.
 const (
-	GapJiraSecurity = "jira_security" // issues with a security level
-	GapJiraComments = "jira_comments" // comments kept to a role or group, and internal notes
-	GapLinearTeams  = "linear_teams"  // issues of teams Linear doesn't show everyone
+	GapJiraSecurity    = "jira_security"    // issues with a security level
+	GapJiraComments    = "jira_comments"    // comments kept to a role or group, and internal notes
+	GapLinearTeams     = "linear_teams"     // issues of teams Linear doesn't show everyone
+	GapBasecampClients = "basecamp_clients" // clients Basecamp keeps out of its projects, made members: people, not tasks
 )
 
 // Where a review stands.
@@ -270,4 +271,39 @@ func UndoAccessChanges(ctx context.Context, changeIDs []uuid.UUID) (int64, error
 		ids[i] = id.String()
 	}
 	return pgexec.Exec(ctx, `UPDATE import_access_changes SET undone_at = NOW() WHERE id = ANY($1::uuid[]) AND undone_at IS NULL`, pq.Array(ids))
+}
+
+// settledStates are where a review has settled: re-checked, kept as it is by
+// an admin, or its re-check undone by one, which puts back what was there
+// before as keeping it would. An import whose every review has settled is
+// as safe as its admins chose: its held-back comments go into search.
+var settledStates = []string{StateRechecked, StateKept, StateUndone}
+
+// SettledImports reads the imports whose every review has settled, as a set.
+func SettledImports(ctx context.Context) (map[uuid.UUID]bool, error) {
+	return pgexec.Pairs[uuid.UUID, bool](ctx, `
+		SELECT import_id, true FROM import_access_reviews
+		GROUP BY import_id HAVING bool_and(state = ANY($1))`, pq.Array(settledStates))
+}
+
+// UnreleasedImports reads the settled imports whose held-back comments
+// haven't been let into search since they settled (MarkReleased).
+func UnreleasedImports(ctx context.Context) ([]uuid.UUID, error) {
+	return pgexec.Query(ctx, `
+		SELECT import_id FROM import_access_reviews
+		GROUP BY import_id HAVING bool_and(state = ANY($1)) AND NOT bool_and(summary ? 'comments_released')
+		ORDER BY import_id`,
+		func(r pgexec.Row) (uuid.UUID, error) {
+			var id uuid.UUID
+			err := r.Scan(&id)
+			return id, err
+		}, pq.Array(settledStates))
+}
+
+// MarkReleased records that a settled import's held-back comments are let
+// into search.
+func MarkReleased(ctx context.Context, importID uuid.UUID) error {
+	_, err := pgexec.Exec(ctx, `UPDATE import_access_reviews SET summary = summary || '{"comments_released": true}'::jsonb, updated_at = NOW()
+		WHERE import_id = $1 AND state = ANY($2)`, importID, pq.Array(settledStates))
+	return err
 }

@@ -24,6 +24,8 @@ import (
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
+	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
+	callLobbyBusiness "github.com/akashc777/OneCamp/business/CallLobby"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	tableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
@@ -120,6 +122,13 @@ func CreateInstantMeeting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The meeting's home, whose lobby is on (guests wait to be let in).
+	if host, err := uuid.Parse(userInfo.UserDgraphInfo.Uuid); err == nil {
+		if err := callLobbyBusiness.SaveMeeting(ctx, meeting.MeetingID, host); err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/Guest/CreateInstantMeeting could not record the meeting %s: %+v", meeting.MeetingID, err)
+		}
+	}
+
 	auditBusiness.Record(r, "guest.meeting.create", auditBusiness.CategorySecurity,
 		"Started an instant meeting with a guest link",
 		map[string]interface{}{"room": meeting.Room, "grant_id": meeting.GrantID.String()})
@@ -141,48 +150,108 @@ func GetGuestMeeting(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	token := chi.URLParam(r, "token")
 
-	grant, err := guestBusiness.ValidateMeetingGrant(ctx, token)
+	door, err := guestBusiness.OpenDoor(ctx, token)
 	if err != nil {
 		guestReadFailed(w, r, "GetGuestMeeting", err, "")
 		return
 	}
-	// What the meeting has on, so the guest is told before joining that it
-	// is recorded or transcribed (no names of who is in it: a guest learns
-	// those by joining). A call server that can't answer leaves the notice
-	// to the call itself rather than failing the page.
-	read := map[string]interface{}{"available": true}
-	if view, verr := liveKitBusiness.ReadCallView(ctx, grant.ResourceID, false); verr == nil {
+	writeGuestRead(w, meetingRead(ctx, door))
+}
+
+// meetingRead is what a meeting's guest page is told before joining: that it
+// is available, what it is called, and whether it is recorded or transcribed
+// (no names of who is in it: a guest learns those by joining). A call server
+// that can't answer leaves the notice to the call itself rather than failing
+// the page.
+func meetingRead(ctx context.Context, door guestBusiness.Door) map[string]interface{} {
+	read := map[string]interface{}{"available": true, "title": callLobbyBusiness.Title(ctx, door.Room, door.Grant.CreatedBy)}
+	if view, verr := liveKitBusiness.ReadCallView(ctx, door.Room, false); verr == nil {
 		read["recording"] = view.Recording
 		read["transcription"] = view.Transcription
 	}
-	writeGuestRead(w, read)
+	return read
+}
+
+// joinBody is what a guest sends to join a meeting.
+type joinBody struct {
+	DisplayName string `json:"display_name"`
+	// What the guest speaks (their browser's), for the server's transcriber.
+	// audio_enabled / video_enabled may still be sent and are not read.
+	Language string `json:"language"`
+	// Invitation is an event invitee's own key, from their invitation's link
+	// (meet-02): at the event's call, it lets them in without knocking.
+	Invitation string `json:"invitation"`
 }
 
 // JoinGuestMeeting POST /guest/meet/{token}/join — mint a single-room guest
 // token after collecting a display name.
 func JoinGuestMeeting(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	token := chi.URLParam(r, "token")
-
-	var body struct {
-		DisplayName string `json:"display_name"`
-		// What the guest speaks (their browser's), for the server's
-		// transcriber. audio_enabled / video_enabled may still be sent and are
-		// not read.
-		Language string `json:"language"`
-	}
+	var body joinBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
 		return
 	}
-
-	grant, err := guestBusiness.ValidateMeetingGrant(ctx, token)
+	door, err := guestBusiness.OpenDoor(r.Context(), chi.URLParam(r, "token"))
 	if err != nil {
 		guestReadFailed(w, r, "JoinGuestMeeting", err, "")
 		return
 	}
+	joinMeeting(w, r, "JoinGuestMeeting", door, body)
+}
 
-	liveToken, room, err := guestBusiness.IssueGuestMeetingToken(ctx, grant, body.DisplayName, body.Language)
+// joinMeeting lets a guest into the call a door opens (a link's token, a
+// personal room's address and its unlock, a call's invite): they knock and
+// wait, or with the lobby off, or as an event's invitee at its call, get
+// their call token at once.
+func joinMeeting(w http.ResponseWriter, r *http.Request, where string, door guestBusiness.Door, body joinBody) {
+	ctx := r.Context()
+	grant := door.Grant
+	// An invitation that can't be read now counts as none: they knock.
+	invitee, err := calendarBusiness.InviteeAt(ctx, body.Invitation, door.Room, time.Now())
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/Guest/%s could not read an invitation for %s: %+v", where, door.Room, err)
+		invitee = nil
+	}
+	// The lobby (CALLS-2): unless the meeting lets anyone with the link in at
+	// once, or lets the event's invitees in, a guest knocks and waits for
+	// someone running the call to admit them (GuestKnockAnswer).
+	waits, err := callLobbyBusiness.Waits(ctx, door.Room, invitee != nil)
+	if err != nil {
+		guestReadFailed(w, r, where, err, "")
+		return
+	}
+	if waits {
+		name := guestBusiness.SanitizeGuestName(body.DisplayName)
+		if name == "" {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Please enter a display name."})
+			return
+		}
+		if !settingsBusiness.GuestAccessEnabled() {
+			guestReadFailed(w, r, where, guestBusiness.ErrGuestDisabled, "")
+			return
+		}
+		if err := liveKitBusiness.GuestMayEnter(ctx, door.Room); err != nil {
+			if helpers.WriteCallRefusal(w, err) {
+				return
+			}
+			guestReadFailed(w, r, where, err, "")
+			return
+		}
+		ticket, err := callLobbyBusiness.Knock(ctx, door.Room, grant.Id, name)
+		if err != nil {
+			guestReadFailed(w, r, where, err, "")
+			return
+		}
+		helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"data": map[string]interface{}{"waiting": true, "ticket": ticket.String()}})
+		return
+	}
+
+	// An invitee who typed no name is shown by their invitation's.
+	name := body.DisplayName
+	if strings.TrimSpace(name) == "" && invitee != nil {
+		name = invitee.Name
+	}
+	liveToken, room, err := guestBusiness.IssueGuestMeetingToken(ctx, door, name, body.Language)
 	if err != nil {
 		if helpers.WriteCallRefusal(w, err) {
 			return
@@ -193,13 +262,13 @@ func JoinGuestMeeting(w http.ResponseWriter, r *http.Request) {
 		}
 		// ErrGuestDisabled → uniform not-available; a call server that didn't
 		// answer → try again.
-		guestReadFailed(w, r, "JoinGuestMeeting", err, "")
+		guestReadFailed(w, r, where, err, "")
 		return
 	}
 
 	auditBusiness.Record(r, "guest.join", auditBusiness.CategorySecurity,
 		"A guest joined a meeting",
-		map[string]interface{}{"room": room, "grant_id": grant.Id.String()})
+		joined(room, grant.Id.String(), invitee))
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{
 		"token": liveToken,
@@ -239,7 +308,7 @@ func SetGuestPolicy(w http.ResponseWriter, r *http.Request) {
 			// Guests already in a meeting are put out of it: the policy was
 			// re-read only when a guest joined, and nothing put out the ones in.
 			helpers.GoSafeNamed("guest.policy-off", func() {
-				guestBusiness.RemoveAllMeetingGuests(context.WithoutCancel(ctx))
+				guestBusiness.RemoveAllLinkGuests(context.WithoutCancel(ctx))
 			})
 		}
 	}
@@ -266,6 +335,13 @@ func SetGuestPolicy(w http.ResponseWriter, r *http.Request) {
 			action, summary = "guest.rooms.enable", "Let personal meeting rooms open"
 		}
 		auditBusiness.Record(r, action, auditBusiness.CategorySecurity, summary, nil)
+		if !*body.Rooms {
+			// Every room's address stopped answering; the guests already in
+			// a room's call are put out of it, as for guest access.
+			helpers.GoSafeNamed("guest.rooms-off", func() {
+				guestBusiness.RemoveRoomGuests(context.WithoutCancel(ctx))
+			})
+		}
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{
 		"guest_access_enabled": settingsBusiness.GuestAccessEnabled(), "guest_publish_enabled": settingsBusiness.GuestPublishAllowed(),
@@ -306,36 +382,36 @@ func RevokeGuestGrant(w http.ResponseWriter, r *http.Request) {
 // meeting ever had, 404 "ended" for a meeting that is over (no live link),
 // 403 for anyone else's. Both 404s keep the status an older page reads as
 // "This meeting has ended"; the code is what tells them apart (F-54).
-func hostedMeeting(w http.ResponseWriter, r *http.Request) (userModels.UserInfo, string, time.Time, bool) {
+func hostedMeeting(w http.ResponseWriter, r *http.Request) (userModels.UserInfo, string, guestBusiness.Hosted, bool) {
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
 		helpers.WriteUnauthorized(w)
-		return userInfo, "", time.Time{}, false
+		return userInfo, "", guestBusiness.Hosted{}, false
 	}
 	room, ok := guestBusiness.MeetingRoom(chi.URLParam(r, "meeting_id"))
 	if !ok {
 		writeNoMeeting(w)
-		return userInfo, "", time.Time{}, false
+		return userInfo, "", guestBusiness.Hosted{}, false
 	}
-	until, err := guestBusiness.HostedMeeting(ctx, room, &userInfo.UserDgraphInfo)
+	hosted, err := guestBusiness.HostedMeeting(ctx, room, &userInfo.UserDgraphInfo)
 	switch {
 	case errors.Is(err, guestBusiness.ErrNotHost):
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "not_host", "msg": "Only the person who started this meeting can open it here."})
-		return userInfo, "", time.Time{}, false
+		return userInfo, "", guestBusiness.Hosted{}, false
 	// Before ErrNotFound, which it also is.
 	case errors.Is(err, guestBusiness.ErrNoMeeting):
 		writeNoMeeting(w)
-		return userInfo, "", time.Time{}, false
+		return userInfo, "", guestBusiness.Hosted{}, false
 	case errors.Is(err, guestBusiness.ErrNotFound):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"code": "ended", "msg": "This meeting has ended."})
-		return userInfo, "", time.Time{}, false
+		return userInfo, "", guestBusiness.Hosted{}, false
 	case err != nil:
 		helpers.LogErrorWithContext(ctx, "controllers/Guest/hostedMeeting err: %+v", err)
 		helpers.WriteRetryLater(w, "The server couldn't answer just now.")
-		return userInfo, "", time.Time{}, false
+		return userInfo, "", guestBusiness.Hosted{}, false
 	}
-	return userInfo, room, until, true
+	return userInfo, room, hosted, true
 }
 
 // writeNoMeeting answers a meeting id that no meeting ever had.
@@ -347,7 +423,7 @@ func writeNoMeeting(w http.ResponseWriter) {
 // stable page, for the person who started it: whether it is on, what it has
 // switched on, who is in it, and when its links stop working.
 func GetInstantMeeting(w http.ResponseWriter, r *http.Request) {
-	_, room, until, ok := hostedMeeting(w, r)
+	_, room, hosted, ok := hostedMeeting(w, r)
 	if !ok {
 		return
 	}
@@ -364,8 +440,19 @@ func GetInstantMeeting(w http.ResponseWriter, r *http.Request) {
 		"recording":     view.Recording,
 		"transcription": view.Transcription,
 		"participants":  view.Participants,
-		"expires_at":    until,
+		"expires_at":    hosted.Until,
+		// A personal room's address, where its guests come in: it has no end.
+		"address": roomAddress(hosted.Slug),
 	}})
+}
+
+// roomAddress is a personal room's address in the web app ("/r/<slug>"), ""
+// for an instant meeting.
+func roomAddress(slug string) string {
+	if slug == "" {
+		return ""
+	}
+	return guestBusiness.KindRoom.WebAddress(slug)
 }
 
 // RejoinInstantMeeting POST /meet/instant/{meeting_id}/join — the host's token
@@ -581,6 +668,11 @@ func GuestDocColabAuthorize(w http.ResponseWriter, r *http.Request) {
 			notAvailable(w)
 			return
 		}
+		// Only a page opens live (docs F1): a refusal the service keeps.
+		if errors.Is(err, docBusiness.ErrNotAPage) {
+			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "not_a_page", "msg": "That isn't a page."})
+			return
+		}
 		helpers.WriteUnauthorized(w)
 		return
 	}
@@ -598,7 +690,9 @@ func guestAuthorised(ctx context.Context, g *guestModel.GuestGrant) helpers.Envo
 	return out
 }
 
-// GuestBoardColabAuthorize POST /boardColab/guestAuthorize — board variant.
+// GuestBoardColabAuthorize POST /boardColab/guestAuthorize — board variant:
+// a call's guest on the board on its stage (who draws when the call lets
+// them), else a share link's guest (read-only).
 func GuestBoardColabAuthorize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -608,6 +702,21 @@ func GuestBoardColabAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
+		return
+	}
+	edit, err := guestBusiness.AuthorizeGuestCallBoard(ctx, bearer, body.BoardUUID)
+	switch {
+	case err == nil:
+		// No `until`: the call's end, their leaving and the board leaving
+		// the stage each close the board's sockets (collab.ReauthBoardLater).
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": edit})
+		return
+	case errors.Is(err, guestBusiness.ErrInvalidGrant), errors.Is(err, guestBusiness.ErrNotFound):
+		helpers.WriteUnauthorized(w)
+		return
+	case !errors.Is(err, guestBusiness.ErrNotCallToken):
+		helpers.LogErrorWithContext(ctx, "controllers/Guest/GuestBoardColabAuthorize couldn't check the board's calls err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't check the board's calls. Try again."})
 		return
 	}
 	g, err := guestBusiness.AuthorizeGuestCollab(ctx, bearer, "board", body.BoardUUID)
@@ -1186,4 +1295,78 @@ func RevokeResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 	auditBusiness.Record(r, "guest.link.revoke", auditBusiness.CategorySecurity, "Turned off an external share link",
 		map[string]interface{}{"resource_type": g.ResourceType, "resource_id": g.ResourceID, "grant_id": id.String()})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Turned off"})
+}
+
+// GuestKnockAnswer GET /guest/meet/{token}/knock/{ticket}?language= — what
+// came of a guest's knock: still waiting (asked again at once), let in (their
+// call token, as a join answers it), or turned away (403, code "denied").
+// DELETE on the same address records that they gave up waiting.
+func GuestKnockAnswer(w http.ResponseWriter, r *http.Request) {
+	door, err := guestBusiness.OpenDoor(r.Context(), chi.URLParam(r, "token"))
+	if err != nil {
+		guestReadFailed(w, r, "GuestKnockAnswer", err, "")
+		return
+	}
+	answerKnock(w, r, "GuestKnockAnswer", door)
+}
+
+// answerKnock answers a knock on a meeting by a grant already checked (a
+// link's token, or a personal room's address and its unlock): the ticket is
+// that grant's knock or none.
+func answerKnock(w http.ResponseWriter, r *http.Request, where string, door guestBusiness.Door) {
+	ctx := r.Context()
+	grant := door.Grant
+	ticket, err := uuid.Parse(chi.URLParam(r, "ticket"))
+	if err != nil {
+		guestReadFailed(w, r, where, guestBusiness.ErrNotFound, "")
+		return
+	}
+	if r.Method == http.MethodDelete {
+		if err := callLobbyBusiness.Leave(ctx, ticket, grant.Id); err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/Guest/%s leave: %+v", where, err)
+		}
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{"left": true}})
+		return
+	}
+	admitted, name, err := callLobbyBusiness.Answer(ctx, ticket, grant.Id)
+	if errors.Is(err, callLobbyBusiness.ErrDenied) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "denied", "msg": "Someone running the meeting didn't let you in."})
+		return
+	}
+	if errors.Is(err, callLobbyBusiness.ErrNoKnock) {
+		guestReadFailed(w, r, where, guestBusiness.ErrNotFound, "")
+		return
+	}
+	if err != nil {
+		guestReadFailed(w, r, where, err, "")
+		return
+	}
+	if !admitted {
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{"waiting": true, "ticket": ticket.String()}})
+		return
+	}
+	liveToken, room, err := guestBusiness.IssueGuestMeetingToken(ctx, door, name, r.URL.Query().Get("language"))
+	if err != nil {
+		if helpers.WriteCallRefusal(w, err) {
+			return
+		}
+		guestReadFailed(w, r, where, err, "")
+		return
+	}
+	auditBusiness.Record(r, "guest.join", auditBusiness.CategorySecurity, "A guest joined a meeting after being let in",
+		map[string]interface{}{"room": room, "grant_id": grant.Id.String(), "ticket": ticket.String()})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{"token": liveToken, "room": room}})
+}
+
+// joined is a guest join's audit details: the room and the grant, and for an
+// event's invitee, whose invitation let them in without knocking (the guest's
+// address and the event), since a forwarded link lets in whoever holds it.
+// Pure.
+func joined(room, grantID string, invitee *calendarBusiness.Invitee) map[string]interface{} {
+	m := map[string]interface{}{"room": room, "grant_id": grantID, "invited": invitee != nil}
+	if invitee != nil {
+		m["invitation_email"] = invitee.Email
+		m["invitation_event"] = invitee.EventID
+	}
+	return m
 }

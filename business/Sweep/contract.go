@@ -29,12 +29,31 @@ package business
 // the claim existed: a job stays harmless when two processes run it at once (a
 // purge finds nothing left to purge), and a sweep that stopped whenever Redis
 // blinked would be worse than one that, now and then, runs twice.
+//
+// WAKES. A job someone is waiting on runs when it's woken (Wake), not at its
+// next tick: a formula made over a 100,000-row table waited up to a minute for
+// the fill sweep's tick before its fill began, while its reader's view said
+// "starting" (V-114 (b)). In a process that runs the sweeps, a wake is a
+// signal to the job's own loop, which runs the pass between its ticks, so it
+// never runs beside another of its passes there; the loop holds one wake at
+// most, so the wakes that come while a pass runs are one more pass after it.
+// A process that runs none (SERVICE_ROLE=api) publishes the wake on Redis
+// (wakeChannel) to the ones that do; each of them asks for the claim above on
+// "wake-" and the wake's id, and the one that wins it runs the pass (every
+// one of them, for a job that claims its own work). Each reason wakes a job
+// once from a process (why: what its caller waits on, such as one change of a
+// field), so a view that asks again every few seconds wakes it once, and a
+// pass that can't finish what it was woken for is tried again by the ticks,
+// never one pass after another. The ticks run as they always have: a wake
+// lost on the way (no Redis, or nobody listening) costs only the wait for the
+// next one.
 
 import (
 	"context"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,9 +79,9 @@ type Job struct {
 	RunAtStart bool
 }
 
-// claimer says whether this instance runs job's pass for slot. ttl is how long a
-// won claim must last.
-type claimer func(ctx context.Context, job string, slot int64, ttl time.Duration) bool
+// claimer says whether this instance runs job's pass for slot: a tick's slot,
+// or "wake-" and a wake's id. ttl is how long a won claim must last.
+type claimer func(ctx context.Context, job string, slot string, ttl time.Duration) bool
 
 // Registry holds the jobs and starts them.
 type Registry struct {
@@ -70,8 +89,185 @@ type Registry struct {
 	jobs    []Job
 	names   map[string]bool
 	started context.Context // the context the running jobs were started under
-	// claim decides each tick; nil is the Redis claim.
+	// claim decides each tick and each wake from another instance; nil is the
+	// Redis claim.
 	claim claimer
+	// bus carries wakes between instances; nil is Redis's (redisWakes).
+	bus wakeBus
+	// wakes are the jobs' wakes, by name, each holding one at most.
+	wakes map[string]chan struct{}
+	// woken is the reasons this process has woken its jobs for, the latest
+	// wakeMemory of them.
+	woken recent
+}
+
+// wakeBus carries a wake from a process that runs no sweeps to the ones that
+// do: Redis's publish and subscribe, or a test's own.
+type wakeBus interface {
+	publish(ctx context.Context, msg string) error
+	// listen hands got each wake sent, until ctx is done.
+	listen(ctx context.Context, got func(msg string))
+}
+
+const (
+	// wakeMemory is how many reasons a process remembers having woken its
+	// jobs for: past it, the oldest is forgotten, and given again it wakes
+	// its job once more.
+	wakeMemory = 4096
+	// wakeSendFor is how long a wake has to reach Redis.
+	wakeSendFor = 5 * time.Second
+	// wakeClaimFor is how long a wake's claim lasts: past the moment every
+	// process that runs the sweeps has heard the wake and asked for it.
+	wakeClaimFor = time.Minute
+	// wakeChannel is the Redis channel wakes are published on.
+	wakeChannel = "sweep:wake"
+)
+
+// Wake asks for a pass of the job named now, rather than at its next tick, for
+// whys: what the caller waits on, such as the changes of the fields a read
+// waits for. A reason wakes the job once from this process, however often
+// it's given, so the job is woken when any of whys is new; with none, every
+// time. A name no job has wakes nothing. Wake never waits:
+// in a process that runs the sweeps the job's own loop runs the pass as soon
+// as it is free, and from one that runs none the wake is published on Redis
+// in the background, where one of the processes that run the sweeps claims
+// it (see the file's comment).
+func (r *Registry) Wake(name string, whys ...string) {
+	r.mu.Lock()
+	fresh := len(whys) == 0
+	for _, why := range whys {
+		if r.names[name] && r.woken.add(name+"\n"+why) {
+			fresh = true
+		}
+	}
+	if !r.names[name] || !fresh {
+		r.mu.Unlock()
+		return
+	}
+	wake, here, bus := r.wakeOf(name), r.running(), r.wakeBus()
+	r.mu.Unlock()
+	if here {
+		signal(wake)
+		return
+	}
+	msg := name + "\n" + uuid.NewString()
+	helpers.GoSafeNamed("sweep:wake:"+name, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), wakeSendFor)
+		defer cancel()
+		if err := bus.publish(ctx, msg); err != nil {
+			helpers.LogErrorWithContext(ctx, "sweep %s: the wake couldn't be published, so the job's next tick runs it: %v", name, err)
+		}
+	})
+}
+
+// woke is a wake another process published: this one runs the pass when the
+// job is one of its own and it wins the wake's claim, or, for a job that
+// claims its own work, at once.
+func (r *Registry) woke(ctx context.Context, claim claimer, msg string) {
+	name, id, ok := strings.Cut(msg, "\n")
+	if !ok || id == "" {
+		return
+	}
+	r.mu.Lock()
+	known, own := false, false
+	for _, j := range r.jobs {
+		if j.Name == name {
+			known, own = true, j.ClaimsItsOwnWork
+		}
+	}
+	wake := r.wakeOf(name)
+	r.mu.Unlock()
+	if known && (own || claim(ctx, name, "wake-"+id, wakeClaimFor)) {
+		signal(wake)
+	}
+}
+
+// wakeOf is job name's wake, made the first time it's asked for. Called with
+// mu held.
+func (r *Registry) wakeOf(name string) chan struct{} {
+	if r.wakes == nil {
+		r.wakes = map[string]chan struct{}{}
+	}
+	w, ok := r.wakes[name]
+	if !ok {
+		w = make(chan struct{}, 1)
+		r.wakes[name] = w
+	}
+	return w
+}
+
+func (r *Registry) wakeBus() wakeBus {
+	if r.bus != nil {
+		return r.bus
+	}
+	return redisWakes{}
+}
+
+// signal leaves a wake in w, unless one is waiting there already.
+func signal(w chan struct{}) {
+	select {
+	case w <- struct{}{}:
+	default:
+	}
+}
+
+// recent is a set of the latest wakeMemory strings added to it.
+type recent struct {
+	in    map[string]bool
+	order []string
+	next  int
+}
+
+// add puts s in the set, saying whether it wasn't there.
+func (c *recent) add(s string) bool {
+	if c.in[s] {
+		return false
+	}
+	if c.in == nil {
+		c.in, c.order = make(map[string]bool, wakeMemory), make([]string, wakeMemory)
+	}
+	if old := c.order[c.next]; old != "" {
+		delete(c.in, old)
+	}
+	c.order[c.next], c.in[s] = s, true
+	c.next = (c.next + 1) % wakeMemory
+	return true
+}
+
+// redisWakes is the wakes' bus between processes: Redis's publish and
+// subscribe on wakeChannel. With no Redis configured, nothing is published,
+// and there's nothing to listen to.
+type redisWakes struct{}
+
+func (redisWakes) publish(ctx context.Context, msg string) error {
+	rdb := redisInit.RedisClient
+	if rdb == nil {
+		return nil
+	}
+	return rdb.Publish(ctx, wakeChannel, msg).Err()
+}
+
+// listen subscribes until ctx is done; the client subscribes again by itself
+// after a lost connection.
+func (redisWakes) listen(ctx context.Context, got func(string)) {
+	rdb := redisInit.RedisClient
+	if rdb == nil {
+		return
+	}
+	sub := rdb.Subscribe(ctx, wakeChannel)
+	defer sub.Close()
+	msgs := sub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case m, ok := <-msgs:
+			if !ok {
+				return
+			}
+			got(m.Payload)
+		}
+	}
 }
 
 // Jobs is the server's one registry.
@@ -96,8 +292,8 @@ func (r *Registry) Register(j Job) {
 	r.names[j.Name] = true
 	r.jobs = append(r.jobs, j)
 	if r.running() {
-		started, claim := r.started, r.claimer()
-		helpers.GoSafeLoop("sweep:"+j.Name, func() { every(started, j, claim) })
+		started, claim, wake := r.started, r.claimer(), r.wakeOf(j.Name)
+		helpers.GoSafeLoop("sweep:"+j.Name, func() { every(started, j, claim, wake) })
 	}
 }
 
@@ -109,6 +305,7 @@ func (r *Registry) Register(j Job) {
 // integration tests start the sweeps under each test's own context, and after
 // one test's context ended, the content queue was never read again in that
 // process, so a later test's workspace export sat queued until it gave up.)
+// It also listens, as long, for the wakes processes that run no sweeps publish.
 func (r *Registry) StartAll(ctx context.Context) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -117,9 +314,13 @@ func (r *Registry) StartAll(ctx context.Context) {
 	}
 	r.started = ctx
 	for _, j := range r.jobs {
-		claim := r.claimer()
-		helpers.GoSafeLoop("sweep:"+j.Name, func() { every(ctx, j, claim) })
+		claim, wake := r.claimer(), r.wakeOf(j.Name)
+		helpers.GoSafeLoop("sweep:"+j.Name, func() { every(ctx, j, claim, wake) })
 	}
+	bus, claim := r.wakeBus(), r.claimer()
+	helpers.GoSafeLoop("sweep:wakes", func() {
+		bus.listen(ctx, func(msg string) { r.woke(ctx, claim, msg) })
+	})
 }
 
 // running says whether the jobs are running: started, under a context that
@@ -137,8 +338,9 @@ func (r *Registry) claimer() claimer {
 
 // every ticks j once per interval, the first time one interval after the start
 // (and at the start too for a RunAtStart job), until ctx is done, and runs it on
-// each tick whose slot it claims.
-func every(ctx context.Context, j Job, claim claimer) {
+// each tick whose slot it claims, and whenever it's woken (Wake: the wake was
+// claimed already when another process published it).
+func every(ctx context.Context, j Job, claim claimer, wake <-chan struct{}) {
 	if j.RunAtStart && ctx.Err() == nil {
 		tick(ctx, j, claim, time.Now())
 	}
@@ -150,13 +352,17 @@ func every(ctx context.Context, j Job, claim claimer) {
 			return
 		case now := <-t.C:
 			tick(ctx, j, claim, now)
+		case <-wake:
+			if ctx.Err() == nil {
+				runOnce(ctx, j)
+			}
 		}
 	}
 }
 
 // tick runs j for the slot now falls in, when this instance claims it.
 func tick(ctx context.Context, j Job, claim claimer, now time.Time) {
-	if j.ClaimsItsOwnWork || claim(ctx, j.Name, slotOf(now, j.Every), 2*j.Every) {
+	if j.ClaimsItsOwnWork || claim(ctx, j.Name, strconv.FormatInt(slotOf(now, j.Every), 10), 2*j.Every) {
 		runOnce(ctx, j)
 	}
 }
@@ -174,12 +380,12 @@ var instance = func() string {
 }()
 
 // claimInRedis is the claim across instances (see the file's comment).
-func claimInRedis(ctx context.Context, job string, slot int64, ttl time.Duration) bool {
+func claimInRedis(ctx context.Context, job string, slot string, ttl time.Duration) bool {
 	rdb := redisInit.RedisClient
 	if rdb == nil {
 		return true
 	}
-	won, err := rdb.SetNX(ctx, registry.SweepClaim.Build(job, strconv.FormatInt(slot, 10)), instance, ttl).Result()
+	won, err := rdb.SetNX(ctx, registry.SweepClaim.Build(job, slot), instance, ttl).Result()
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "sweep %s: the claim couldn't be asked for, so this pass runs unclaimed: %v", job, err)
 		return true

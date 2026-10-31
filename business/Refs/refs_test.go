@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,6 +36,8 @@ type fakes struct {
 	written    []domain.Fix
 	failWrites int
 	queued     []outboxBusiness.Entry
+	// enqueues is how many outbox writes the events took.
+	enqueues int
 }
 
 func install(t *testing.T) *fakes {
@@ -68,8 +71,9 @@ func install(t *testing.T) *fakes {
 		}
 		return out, nil
 	}
-	enqueueReady = func(_ context.Context, e outboxBusiness.Entry) error {
-		f.queued = append(f.queued, e)
+	enqueueReady = func(_ context.Context, es ...outboxBusiness.Entry) error {
+		f.enqueues++
+		f.queued = append(f.queued, es...)
 		return nil
 	}
 	return f
@@ -103,7 +107,7 @@ func TestANewBodyWithNoLinksWritesNoEvent(t *testing.T) {
 	}
 	Saved(ctx, Message, self, "<p>lunch?</p>", false)
 	Saved(ctx, Chat, docB, chip("doc", docA), true)
-	Saved(ctx, domain.KindTask, docB, chip("doc", docA), true) // not a source
+	Saved(ctx, domain.KindProject, docB, chip("doc", docA), true) // not a source: a project has no body
 	Saved(ctx, Message, "not-a-uuid", chip("doc", docA), true)
 	if len(f.queued) != 2 {
 		t.Fatalf("queued %d events, want 2: %+v", len(f.queued), f.queued)
@@ -111,6 +115,34 @@ func TestANewBodyWithNoLinksWritesNoEvent(t *testing.T) {
 	e := f.queued[1]
 	if e.Topic != Topic || e.Key != "refs:chat:"+docB || e.Entities["kind"] != "chat" || e.Entities["uuid"] != docB || len(e.Entities) != 2 {
 		t.Errorf("event %+v: it names the source by kind and uuid, never its body", e)
+	}
+}
+
+// TestNewSourcesMadeTogetherWriteTheirEventsInOneGo: CreateTasks' new tasks
+// tell the work graph with one outbox write, for those whose bodies link
+// something, each event named as Saved names one.
+func TestNewSourcesMadeTogetherWriteTheirEventsInOneGo(t *testing.T) {
+	f := install(t)
+	ctx := context.Background()
+	SavedMany(ctx, Task, []Body{
+		{ID: taskA, Text: chip("doc", docA)},
+		{ID: docB, Text: "<p>no links</p>"},
+		{ID: "not-a-uuid", Text: chip("doc", docA)},
+		{ID: strings.ToUpper(self), Text: chip("project", projA)},
+	})
+	if f.enqueues != 1 || len(f.queued) != 2 {
+		t.Fatalf("%d writes of %d events, want one write of 2: %+v", f.enqueues, len(f.queued), f.queued)
+	}
+	for i, id := range []string{taskA, self} {
+		e := f.queued[i]
+		if e.Topic != Topic || e.Kind != KindChanged || e.Key != "refs:task:"+id || e.Entities["kind"] != "task" || e.Entities["uuid"] != id || len(e.Entities) != 2 {
+			t.Errorf("event %+v: named as Saved names one, by kind and uuid", e)
+		}
+	}
+	SavedMany(ctx, Task, []Body{{ID: docB, Text: "<p>none</p>"}})
+	SavedMany(ctx, domain.KindProject, []Body{{ID: docB, Text: chip("doc", docA)}})
+	if f.enqueues != 1 {
+		t.Errorf("%d writes: a batch that links nothing, or of no source kind, writes nothing", f.enqueues)
 	}
 }
 
@@ -231,5 +263,19 @@ func TestTheReconcilerReportsAndFixesDriftWithinItsBounds(t *testing.T) {
 	}
 	if len(f.written) != 12 {
 		t.Errorf("%d fixes written, want 12", len(f.written))
+	}
+}
+
+// TestATaskIsKeptLikeAnyBody (DG15a): a task's description is a source the
+// sink keeps and the nightly pass repairs, and a task never links itself.
+func TestATaskIsKeptLikeAnyBody(t *testing.T) {
+	body := chip("doc", docA) + chip("task", self) + " https://x/app/project/" + projA
+	got := Want(domain.Source{Kind: domain.KindTask, UUID: self, Body: body}, nil)
+	want := []domain.Ref{{Kind: domain.KindDoc, UUID: docA}, {Kind: domain.KindProject, UUID: projA}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a task's description links %v, want %v", got, want)
+	}
+	if !slices.Contains(passKinds, domain.KindTask) {
+		t.Error("the nightly pass doesn't cover tasks' descriptions")
 	}
 }

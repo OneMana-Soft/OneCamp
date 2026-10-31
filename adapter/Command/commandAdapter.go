@@ -97,6 +97,15 @@ type CatalogCommand struct {
 	AppName     string `json:"app_name,omitempty"`
 	IconURL     string `json:"icon_url,omitempty"`
 	IsBuiltin   bool   `json:"is_builtin"`
+	// Setup is set, for an admin only, on a command whose app isn't set up
+	// yet: the menu offers to set the app up instead of running it.
+	Setup *CatalogSetup `json:"setup,omitempty"`
+}
+
+// CatalogSetup names the app an admin is offered to set up.
+type CatalogSetup struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
 }
 
 // --- Block Kit (Slack-compatible subset) ---
@@ -134,4 +143,31 @@ type BlockElement struct {
 type BlockOption struct {
 	Text  string `json:"text"`
 	Value string `json:"value"`
+}
+
+// GiphyPage is returned by GET /command/giphy: one page of the composer's GIF
+// picker. Configured is false when the workspace has no Giphy key or has
+// turned the app off, so members are offered no GIFs and an admin is offered
+// the setup. NextOffset is nil on the last page.
+type GiphyPage struct {
+	Configured bool       `json:"configured"`
+	Items      []GiphyGIF `json:"items"`
+	NextOffset *int       `json:"next_offset"`
+}
+
+// GiphyGIF is one GIF in the picker: a small rendition for the grid and the
+// one a message sends, each with its size, so the grid keeps its shape while
+// the images load.
+type GiphyGIF struct {
+	ID      string         `json:"id"`
+	Title   string         `json:"title"`
+	Preview GiphyRendition `json:"preview"`
+	Send    GiphyRendition `json:"send"`
+}
+
+// GiphyRendition is one of Giphy's renditions of a GIF.
+type GiphyRendition struct {
+	URL    string `json:"url"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
 }

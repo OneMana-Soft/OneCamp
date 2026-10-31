@@ -62,6 +62,9 @@ func newRefsWorld(t *testing.T) *refsWorld {
 		t.Fatal(err)
 	}
 	integration.StubMqttClient(t)
+	// Writes reach a search that takes them (a meeting's calendar entry, say),
+	// so the outbox events settleOutbox waits on are delivered.
+	integration.AcceptingOpenSearch(t)
 	w := &refsWorld{t: t, env: env, dg: integration.SetupDgraph(t), people: map[string]uuid.UUID{}, id: map[string]string{}, name: map[string]string{}}
 	zero := "0001-01-01T00:00:00Z"
 	var nodes []map[string]any
@@ -125,7 +128,17 @@ func (w *refsWorld) as(person string) context.Context {
 // out, as "kind name via rel>name", sorted, and the raw answer.
 func (w *refsWorld) connected(person, kind, key string) ([]string, string) {
 	w.t.Helper()
+	return w.connectedKinds(person, kind, key, "")
+}
+
+// connectedKinds is connected for the kinds named ("doc,event"; "" for the
+// panel's own).
+func (w *refsWorld) connectedKinds(person, kind, key, kinds string) ([]string, string) {
+	w.t.Helper()
 	q := url.Values{"kind": {kind}, "uuid": {w.id[key]}, "depth": {"1"}}
+	if kinds != "" {
+		q.Set("kinds", kinds)
+	}
 	req := httptest.NewRequest("GET", "/graph/connected?"+q.Encode(), nil)
 	rec := httptest.NewRecorder()
 	workGraphController.GetConnected(rec, req.WithContext(w.as(person)))
@@ -199,10 +212,47 @@ func (w *refsWorld) settleOutbox() {
 			return
 		}
 		if time.Now().After(deadline) {
-			w.t.Fatalf("%d outbox events still wait after 30 s", waiting)
+			w.t.Fatalf("%d outbox events still wait after 30 s:%s", waiting, w.waitingOutbox())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// waitingOutbox lists the events settleOutbox still waits on, so a timeout
+// names who wrote them (topic, kind, key) and why they wait: held by a writer
+// that never released them, ready but not due yet after a failed delivery, or
+// claimed by a delivery still running.
+func (w *refsWorld) waitingOutbox() string {
+	rows, err := w.env.PG.Query(`SELECT id, topic, kind, key, state, attempts,
+		EXTRACT(EPOCH FROM NOW() - created_at)::int,
+		EXTRACT(EPOCH FROM available_at - NOW())::int,
+		COALESCE(EXTRACT(EPOCH FROM claimed_until - NOW())::int, 0),
+		array_to_string(sinks, ','), array_to_string(sinks_done, ','), COALESCE(last_error, '')
+		FROM outbox WHERE state IN ('held', 'ready') OR claimed_until > NOW() ORDER BY id LIMIT 20`)
+	if err != nil {
+		return " (they couldn't be listed: " + err.Error() + ")"
+	}
+	defer rows.Close()
+	var b strings.Builder
+	for rows.Next() {
+		var id int64
+		var attempts, age, dueIn, claimedFor int
+		var topic, kind, key, state, sinks, done, lastErr string
+		if err := rows.Scan(&id, &topic, &kind, &key, &state, &attempts, &age, &dueIn, &claimedFor, &sinks, &done, &lastErr); err != nil {
+			return b.String() + " (a row couldn't be read: " + err.Error() + ")"
+		}
+		fmt.Fprintf(&b, "\n  #%d %s/%s key %q: %s, %d attempts, written %d s ago, due in %d s, claimed for %d s, sinks [%s] done [%s]", id, topic, kind, key, state, attempts, age, dueIn, claimedFor, sinks, done)
+		if lastErr != "" {
+			if len(lastErr) > 200 {
+				lastErr = lastErr[:200] + "…"
+			}
+			fmt.Fprintf(&b, ", last error: %s", lastErr)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(&b, " (the list stopped early: %v)", err)
+	}
+	return b.String()
 }
 
 func refsHas(list []string, s string) bool {

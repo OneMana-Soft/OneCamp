@@ -72,7 +72,9 @@ func ClassifyAPIError(err error) APIProblem {
 				if e.Reason == "accessNotConfigured" || serviceDisabled(e.Message) {
 					return ProblemAPIDisabled
 				}
-				if e.Reason == "rateLimitExceeded" || e.Reason == "userRateLimitExceeded" {
+				// A rate or a quota spent (a day's refills tomorrow): a wait, never a refusal.
+				switch e.Reason {
+				case "rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded", "dailyLimitExceeded":
 					return ProblemRateLimited
 				}
 			}

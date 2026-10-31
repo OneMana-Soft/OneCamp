@@ -6,8 +6,10 @@
 // tab could put any name on its cursor, steer whoever follows a presenter, or
 // tell every tab to drop its copy of the doc. Now the server decides:
 //   - who a tab is comes from its sign-in: a member's name as the API answers
-//     it (never an address);
-//   - a guest (a share link's, who may only look) publishes nothing;
+//     it (never an address), a guest's from their token, as "<name> (guest)";
+//   - a guest who may only look publishes nothing;
+//   - a call's guest who draws shows their pointer, nothing else (no presenter
+//     to follow);
 //   - a member who may only read keeps their presence (a doc's "viewing" list);
 //   - a tab speaks only for its own presence;
 //   - a client's broadcast reaches no other tab, and its socket stays open.
@@ -23,9 +25,10 @@ const COLOUR = /^#[0-9A-F]{6}$/
 
 const SAM = '{"sub":"u-sam"}'
 const MAYA = '{"sub":"u-maya"}'
-const LEE = '{"sub":"u-lee"}'
-// A share link's guest: guests only ever read here.
+// A share link's guest (the API answers read-only) and a call's guest, whose
+// token names them as the call does.
 const LINK_GUEST = '{"guest":true,"sub":"g-link","name":"Guest"}'
+const CALL_GUEST = '{"guest":true,"sub":"guest-kai","name":"Guest: Kai Lin","call":"s-1"}'
 
 async function room(name = BOARD) {
     const backend = new FakeBackend()
@@ -33,7 +36,6 @@ async function room(name = BOARD) {
     backend.doc(DOC, '<p>hello</p>')
     backend.names.set('u-sam', 'Sam Rivera')
     backend.names.set('u-maya', 'Maya Chen')
-    backend.names.set('u-lee', 'Lee Park')
     const collab = await startServer({ redis: new FakeRedis(), backend })
     const open = async (token, level) => {
         if (level) backend.levels.set(JSON.parse(token).sub, level)
@@ -54,29 +56,39 @@ test('a guest who may only look publishes nothing, whatever it sends', async () 
     assert.deepEqual(sam.others.get(guest.doc.clientID), {})
 })
 
-test("nobody wears another's name: a member is named by the API", async () => {
+test("nobody wears another's name: a member is named by the API, a drawing guest by their token", async () => {
     const { open } = await room()
     const sam = await open(SAM)
     const maya = await open(MAYA)
+    const kai = await open(CALL_GUEST, 'edit')
+    assert.equal(kai.scope, 'read-write')
     maya.presence({ user: { id: 'u-sam', name: 'Sam Rivera', color: '#000000', hue: 'red', profileKey: 'k-maya' }, pointer: { x: 3, y: 4 }, button: 'up', mode: 'editing' })
-    await until(() => sam.others.get(maya.doc.clientID)?.user, 3000, 'Sam hears Maya')
+    kai.presence({ user: { id: 'u-sam', name: 'Sam Rivera', profileKey: 'k-sam' }, pointer: { x: 5, y: 6 }, button: 'down', mode: 'editing' })
+    await until(() => sam.others.get(maya.doc.clientID)?.user && sam.others.get(kai.doc.clientID)?.user, 3000, 'Sam hears both')
 
     const m = sam.others.get(maya.doc.clientID)
     assert.deepEqual({ id: m.user.id, name: m.user.name, profileKey: m.user.profileKey, hue: m.user.hue }, { id: 'u-maya', name: 'Maya Chen', profileKey: 'k-maya', hue: undefined })
     assert.match(m.user.color, COLOUR)
     assert.notEqual(m.user.color, '#000000')
     assert.deepEqual({ pointer: m.pointer, button: m.button, mode: m.mode }, { pointer: { x: 3, y: 4 }, button: 'up', mode: 'editing' })
+
+    // A drawing guest: their pointer under the call's name for them, and nothing else.
+    const k = sam.others.get(kai.doc.clientID)
+    assert.deepEqual(Object.keys(k).sort(), ['button', 'pointer', 'user'])
+    assert.deepEqual(Object.keys(k.user).sort(), ['color', 'id', 'name'])
+    assert.deepEqual({ id: k.user.id, name: k.user.name }, { id: 'guest-kai', name: 'Kai Lin (guest)' })
+    assert.deepEqual({ pointer: k.pointer, button: k.button }, { pointer: { x: 5, y: 6 }, button: 'down' })
 })
 
 test("a guest's presenting leaves nobody a presenter to follow; a member's says who presents", async () => {
     const { open } = await room()
     const sam = await open(SAM)
     const maya = await open(MAYA)
-    const kai = await open(LINK_GUEST)
+    const kai = await open(CALL_GUEST, 'edit')
     kai.presence({ user: { name: 'Kai Lin (guest)' }, pointer: { x: 1, y: 1 }, presenting: { userId: 'u-sam', name: 'Sam Rivera', view: VIEW } })
     maya.presence({ user: { id: 'u-maya', name: 'Maya Chen' }, presenting: { userId: 'u-sam', name: 'Sam Rivera', view: VIEW } })
     sam.presence({ user: { id: 'u-sam', name: 'Sam Rivera' }, pointer: { x: 7, y: 8 }, button: 'up', presenting: { userId: 'u-sam', name: 'Sam Rivera', view: VIEW } })
-    await until(() => maya.others.has(kai.doc.clientID) && maya.others.get(sam.doc.clientID)?.user && sam.others.get(maya.doc.clientID)?.user, 3000, 'everyone heard')
+    await until(() => maya.others.get(kai.doc.clientID)?.user && maya.others.get(sam.doc.clientID)?.user && sam.others.get(maya.doc.clientID)?.user, 3000, 'everyone heard')
 
     // A board follows any state with presenting.view (boardFacilitation): a guest's has none.
     assert.equal(maya.others.get(kai.doc.clientID).presenting, undefined)
@@ -105,27 +117,22 @@ test("a tab speaks only for its own presence: nobody moves or removes another's 
     const { open } = await room()
     const sam = await open(SAM)
     const maya = await open(MAYA)
-    const lee = await open(LEE)
-    const guest = await open(LINK_GUEST)
+    const kai = await open(CALL_GUEST, 'edit')
     sam.presence({ user: { id: 'u-sam', name: 'Sam Rivera' }, pointer: { x: 1, y: 1 } })
     maya.presence({ user: { id: 'u-maya', name: 'Maya Chen' }, pointer: { x: 2, y: 2 } })
     await until(() => maya.others.get(sam.doc.clientID)?.pointer && sam.others.get(maya.doc.clientID)?.pointer, 3000, 'Sam and Maya hear each other')
 
-    // A member, and a share link's guest, each try to move Sam's cursor and remove Maya's.
-    for (const tab of [lee, guest]) {
-        tab.presence({ user: { id: 'u-sam', name: 'Sam Rivera' }, pointer: { x: 999, y: 999 } }, { clientId: sam.doc.clientID, clock: 1000 })
-        tab.presence(null, { clientId: maya.doc.clientID, clock: 1000 })
-    }
-    // Their own, after: their messages were all handled once each is heard.
-    guest.presence({ user: { name: 'Kai' }, pointer: { x: 4, y: 4 } })
-    lee.presence({ user: { name: 'Lee' }, pointer: { x: 3, y: 3 } })
-    await until(() => maya.others.get(lee.doc.clientID)?.pointer && maya.others.has(guest.doc.clientID), 3000, "Maya hears each one's own")
+    kai.presence({ user: { id: 'u-sam', name: 'Sam Rivera' }, pointer: { x: 999, y: 999 } }, { clientId: sam.doc.clientID, clock: 1000 })
+    kai.presence(null, { clientId: maya.doc.clientID, clock: 1000 })
+    // The guest's own, after: its messages were all handled once it is heard.
+    kai.presence({ user: { name: 'Kai' }, pointer: { x: 3, y: 3 } })
+    await until(() => maya.others.get(kai.doc.clientID)?.pointer, 3000, "Maya hears the guest's own")
     assert.deepEqual(maya.others.get(sam.doc.clientID).pointer, { x: 1, y: 1 })
     assert.deepEqual(sam.others.get(maya.doc.clientID)?.pointer, { x: 2, y: 2 })
 
     // Its own leaving is its own to say.
-    lee.presence(null)
-    await until(() => !maya.others.has(lee.doc.clientID), 3000, 'Lee leaves')
+    kai.presence(null)
+    await until(() => !maya.others.has(kai.doc.clientID), 3000, 'the guest leaves')
 })
 
 test("a client's broadcast reaches no other tab, and its socket stays open", async () => {

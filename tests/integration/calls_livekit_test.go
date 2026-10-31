@@ -141,17 +141,17 @@ func TestCallAMutedJoinerCanUnmuteAndTurnTheCameraOn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	listenerToken, err := livekitInit.LiveKitService.GenerateToken(room, "0xa0", "Listener", false, "")
+	listenerToken, err := livekitInit.LiveKitService.GenerateToken(room, "0xa0", "Listener", false, "", livekitInit.CallPublishSources)
 	if err != nil {
 		t.Fatal(err)
 	}
 	listener := join(t, env, listenerToken)
 
-	member, err := livekitInit.LiveKitService.GenerateToken(room, "0xa1", "Maya", false, "en-US")
+	member, err := livekitInit.LiveKitService.GenerateToken(room, "0xa1", "Maya", false, "en-US", livekitInit.CallPublishSources)
 	if err != nil {
 		t.Fatal(err)
 	}
-	guest, err := livekitInit.LiveKitService.GenerateGuestToken(room, "guest-"+uuid.NewString()+"-x", "Guest: Ann", "")
+	guest, err := livekitInit.LiveKitService.GenerateGuestToken(room, "guest-"+uuid.NewString()+"-x", "Guest: Ann", "", livekitInit.CallPublishSources)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,16 +238,24 @@ func TestCallAHostCanPutSomeoneOut(t *testing.T) {
 	if _, err := livekitInit.LiveKitService.CreateRoom(ctx, room); err != nil {
 		t.Fatal(err)
 	}
-	token, err := livekitInit.LiveKitService.GenerateToken(room, uids["s"], "Sam", false, "")
+	token, err := livekitInit.LiveKitService.GenerateToken(room, uids["s"], "Sam", false, "", livekitInit.CallPublishSources)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sam := join(t, env, token)
 	joinSettled(t, room, uids["s"], sam)
 	sid := connected(t, ctx, room, uids["s"]) // what LiveKit's webhook tells the server
+	// Sam came in through a link, as himself: an admission that counts him as maybe in the call.
+	if err := callStateModel.Admit(ctx, callStateModel.Admission{Room: room, UserUUID: samUUID, Identity: uids["s"], GrantID: uuid.New(), At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := liveKitBusiness.RemoveFromCall(ctx, room, uids["s"], liveKitBusiness.Remover{Identity: "0xa1", Name: "Maya Chen"}, liveKitBusiness.RemovedByHost); err != nil {
 		t.Fatal(err)
+	}
+	// Put out, he no longer counts as maybe in it (audit C10).
+	if left, err := callStateModel.AdmittedIn(ctx, room); err != nil || len(left) != 0 {
+		t.Errorf("admissions after the removal: %+v, %v", left, err)
 	}
 	eventually(t, "Sam to be disconnected", func() bool { return sam.disconnected.Load() != nil })
 	if reason := sam.disconnected.Load().(lksdk.DisconnectionReason); reason != lksdk.ParticipantRemoved {
@@ -347,9 +355,9 @@ func TestCallPeopleArePutOutWhenTheirRightGoes(t *testing.T) {
 		var token string
 		var err error
 		if guest {
-			token, err = livekitInit.LiveKitService.GenerateGuestToken(room, identity, "Guest", "")
+			token, err = livekitInit.LiveKitService.GenerateGuestToken(room, identity, "Guest", "", livekitInit.CallPublishSources)
 		} else {
-			token, err = livekitInit.LiveKitService.GenerateToken(room, identity, "Member", false, "")
+			token, err = livekitInit.LiveKitService.GenerateToken(room, identity, "Member", false, "", livekitInit.CallPublishSources)
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -375,7 +383,7 @@ func TestCallPeopleArePutOutWhenTheirRightGoes(t *testing.T) {
 		t.Errorf("revoking one link put out more than its guests: left %v", got)
 	}
 
-	guestBusiness.RemoveAllMeetingGuests(ctx) // guest access turned off
+	guestBusiness.RemoveAllLinkGuests(ctx) // guest access turned off
 	eventually(t, "every guest to be put out", func() bool { return b.disconnected.Load() != nil })
 	if got := stillIn(ctx, meeting.Room); len(got) != 1 || got[0] != host.Uid {
 		t.Errorf("with guest access off, left in the meeting: %v, want only its host", got)
@@ -455,6 +463,7 @@ func TestCallWhoHostsByRule(t *testing.T) {
 // everyone in it, and a recording stopping in the same call leaves it alone
 // (StopRecording used to write the whole metadata as {"isRecording": false}).
 func TestCallTranscriptionIsTheCallsSwitch(t *testing.T) {
+	integration.ConnectServerPostgres(t)
 	env := integration.SetupLiveKit(t)
 	integration.SetupRedis(t)
 	t.Setenv("TRANSCRIPTION_MODE", "frontend")
@@ -463,7 +472,7 @@ func TestCallTranscriptionIsTheCallsSwitch(t *testing.T) {
 	if _, err := livekitInit.LiveKitService.CreateRoom(ctx, room); err != nil {
 		t.Fatal(err)
 	}
-	token, _ := livekitInit.LiveKitService.GenerateToken(room, "0xc3", "Maya", false, "")
+	token, _ := livekitInit.LiveKitService.GenerateToken(room, "0xc3", "Maya", false, "", livekitInit.CallPublishSources)
 	join(t, env, token)
 
 	sw, err := liveKitBusiness.SetTranscription(ctx, room, "0xc3", "Maya", true)
@@ -527,6 +536,7 @@ func TestCallTranscriptionIsTheCallsSwitch(t *testing.T) {
 // there, and reached by retention. The repair at boot ends old transcripts and
 // only counts ones nobody can reach: it deletes nothing (calls O3).
 func TestCallATranscriptIsKeptOnlyWhileOnAndIsListedDeletableAndRetained(t *testing.T) {
+	integration.ConnectServerPostgres(t)
 	env := integration.SetupLiveKit(t)
 	integration.SetupRedis(t)
 	dg := integration.SetupDgraph(t)
@@ -544,7 +554,7 @@ func TestCallATranscriptIsKeptOnlyWhileOnAndIsListedDeletableAndRetained(t *test
 	if _, err := livekitInit.LiveKitService.CreateRoom(ctx, channelUUID); err != nil {
 		t.Fatal(err)
 	}
-	token, _ := livekitInit.LiveKitService.GenerateToken(channelUUID, maya, "Maya", false, "")
+	token, _ := livekitInit.LiveKitService.GenerateToken(channelUUID, maya, "Maya", false, "", livekitInit.CallPublishSources)
 	join(t, env, token)
 	room, err := livekitInit.LiveKitService.GetRoom(ctx, channelUUID)
 	if err != nil {

@@ -37,7 +37,7 @@ const KindDoc = "doc"
 
 // validKind is a kind of template this package publishes and lists: the
 // model's kinds, and doc.
-func validKind(k string) bool { return model.ValidKind(k) || k == KindDoc }
+func validKind(k string) bool { return model.ValidKind(k) || k == KindDoc || k == KindBoard }
 
 // DocPayload is a doc template's payload. A list carries Preview and no Body;
 // one template read on its own carries Body.
@@ -181,18 +181,31 @@ func fullPayload(p DocPayload) string {
 	return string(b)
 }
 
-// asListed gives a doc template, as stored, its list form. Other kinds are
-// left as they are.
+// listedForm is a template's list form: a doc's preview in place of its body,
+// a board's drawing in place of its elements, other kinds as they are. It is
+// kept when the template is saved (listed_payload), so the Templates list
+// never reads a payload, which may be a megabyte (audit C11).
+func listedForm(kind, payload string) string {
+	switch {
+	case kind == KindBoard:
+		return listedBoardPayload(payload)
+	case kind == KindDoc:
+		p, err := readDocPayload(payload)
+		if err != nil {
+			return "{}"
+		}
+		return listedPayload(p)
+	case strings.TrimSpace(payload) == "":
+		return "{}"
+	}
+	return payload
+}
+
+// asListed gives a template read whole its list form.
 func asListed(t *model.Template) *model.Template {
-	if t == nil || t.Kind != KindDoc {
-		return t
+	if t != nil {
+		t.Payload = listedForm(t.Kind, t.Payload)
 	}
-	p, err := readDocPayload(t.Payload)
-	if err != nil {
-		t.Payload = "{}"
-		return t
-	}
-	t.Payload = listedPayload(p)
 	return t
 }
 
@@ -329,7 +342,7 @@ func PublishDocTemplate(ctx context.Context, createdBy uuid.UUID, name, descript
 	if len(raw) > maxPayloadBytes {
 		return nil, ErrTemplateTooLarge
 	}
-	stored, err := model.CreateTemplate(ctx, KindDoc, name, optStr(description), optStr(icon), string(raw), createdBy)
+	stored, err := model.CreateTemplate(ctx, KindDoc, name, optStr(description), optStr(icon), string(raw), listedPayload(p), createdBy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to publish template")
 	}

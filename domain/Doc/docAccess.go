@@ -86,6 +86,7 @@ const accessScalars = `
 	doc_space_uuid
 	doc_host_kind
 	doc_host_uuid
+	doc_node_kind
 	doc_deleted_at
 	doc_archived_at`
 

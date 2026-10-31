@@ -155,11 +155,15 @@ Incoming webhooks are rate-limited to **30 requests per minute** per token.
 
 1. **Name**: A descriptive name for the webhook
 2. **Target URL**: Your HTTPS endpoint that will receive events
-3. **Events**: Which event types to subscribe to (see below)
+3. **Events**: Which event types it is sent (see below); at least one. An outgoing webhook is sent only
+   the events it names, so creating or changing one with none is refused. An older webhook with none
+   is listed as "Sends nothing: no kinds ticked" until an admin edits it and ticks one.
 4. **Scope**: Limit events to a specific channel or project, or receive all org-wide
 5. **Trigger Words** (optional): Only dispatch when the message contains specific words
 
-### Available Event Types (20 total)
+### Available Event Types (23 total)
+
+The list is the code's `EventTypes` (controllers/Webhook/webhookController.go), which `GET /admin/webhooks/event-types` answers; this page follows it.
 
 #### Posts
 | Event | Description |
@@ -182,6 +186,7 @@ Incoming webhooks are rate-limited to **30 requests per minute** per token.
 | `task.status_changed` | A task's status changes |
 | `task.deleted` | A task is archived / soft-deleted |
 | `task.restored` | A task is unarchived / restored |
+| `task.changed` | A task's priority, due date, tags or name changed, with the field, what it was and what it is |
 
 #### Channels
 | Event | Description |
@@ -215,6 +220,16 @@ carries ids, never the doc's text, and a private doc's title is never in it.
 
 A bulk change sends one `table.rows.changed` that names every row it touched, in place
 of one event a row (see its payload below). It carries ids, never a cell's value.
+
+#### Calls
+| Event | Description |
+|-------|-------------|
+| `call.started` | A call in a channel or a meeting began |
+| `call.ended` | A call in a channel or a meeting ended, with its times and how many joined |
+
+A call's event goes to a webhook only for calls in channels and meetings the person who
+set the webhook up can open. It carries ids, times and how many joined, never a name or
+anything said. A call in a DM or a group chat is never sent.
 
 ### Payload Format
 
@@ -341,6 +356,44 @@ it changed. A webhook sent only ids keeps every key here but `table_name` and
 }
 ```
 
+**call.started** (a call starting in a channel) and **call.ended** (a meeting's call ending):
+
+```json
+{
+  "event": "call.started",
+  "timestamp": "2026-11-02T10:00:03Z",
+  "data": {
+    "session_id": "3f2b8c1e-5d4a-4f6b-9c2d-7e8f9a0b1c2d",
+    "channel_id": "c9f0f895-fb98-4b91-8e1f-2d3c4b5a6978",
+    "actor_uuid": "45c48cce-2e2d-4fbd-a2b1-6f7e8d9c0b1a",
+    "started_at": "2026-11-02T10:00:02.418329Z"
+  }
+}
+```
+
+```json
+{
+  "event": "call.ended",
+  "timestamp": "2026-11-02T10:31:07Z",
+  "data": {
+    "session_id": "3f2b8c1e-5d4a-4f6b-9c2d-7e8f9a0b1c2d",
+    "meeting_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "started_at": "2026-11-02T10:00:02.418329Z",
+    "ended_at": "2026-11-02T10:31:06.902114Z",
+    "duration_s": 1864,
+    "people": 6,
+    "reason": "last_left"
+  }
+}
+```
+
+Both carry `session_id` (the call: its two events share it), `started_at`, and the call's
+`channel_id` or `meeting_id`. `actor_uuid` is who started the call, or the host who ended it
+for everyone; it is absent when a call ended by itself. `call.ended` adds `ended_at`,
+`duration_s`, `people` (how many joined) and `reason`: `host_ended`, `last_left`,
+`room_finished`, or `reconciled` (OneCamp found the call had already ended, as after a
+restart). The fields are business/CallState/webhooks.go's.
+
 ### Headers Sent by OneCamp
 
 | Header | Description |
@@ -349,67 +402,76 @@ it changed. A webhook sent only ids keeps every key here but `table_name` and
 | `User-Agent` | `OneCamp-Webhook/1.0` |
 | `X-OneCamp-Event` | The event type (e.g., `task.status_changed`) |
 | `X-OneCamp-Webhook-Id` | The webhook's UUID |
-| `X-OneCamp-Delivery` | A unique ID for each delivery attempt |
-| `X-OneCamp-Retry-Num` | Retry attempt number (`0` = first try) |
-| `X-OneCamp-Signature` | HMAC-SHA256 signature (if a secret is configured) |
-| `X-OneCamp-Timestamp` | Unix epoch timestamp used in signature |
+| `X-OneCamp-Delivery` | The event's id: the same on every try and every replay, so you can drop a repeat |
+| `X-OneCamp-Retry-Num` | `0` on the first try, then `1`, `2` and so on |
+| `X-OneCamp-Signature` | `v1=` and the HMAC-SHA256 signature, in lowercase hex (below) |
+| `X-OneCamp-Timestamp` | When this try was signed, in Unix seconds |
 
 ### Verifying Signatures
 
-If you configured a **secret** for the webhook, OneCamp signs each payload:
+Each outgoing webhook gets its own signing secret when it is made: **Admin → Webhooks** shows it,
+and **Regenerate Secret** replaces it. Every delivery is signed:
 
 ```
-X-OneCamp-Signature: v1=<base64>
+X-OneCamp-Signature: v1=<hex>
 X-OneCamp-Timestamp: 1710508200
 ```
 
-The signature is computed over the canonical string:
+The signature is the HMAC-SHA256, in lowercase hex, keyed with the secret, of the canonical string:
 
 ```
-v1:<timestamp>:<payload_bytes>
+v1:<timestamp>:<body>
 ```
 
-**Verify in your service:**
+where `<timestamp>` is the `X-OneCamp-Timestamp` header and `<body>` is the raw request body.
+Compute it over the body's bytes exactly as they arrived, compare in constant time, and refuse
+an old timestamp (for example, one more than five minutes old) so a captured request can't be
+replayed. The code that signs is `Sign` in business/Hooks/deliveries.go.
+
+**Python:**
 
 ```python
-import hmac, hashlib, base64
+import hashlib
+import hmac
 
-def verify_signature(payload_body, signature_header, timestamp_header, secret):
-    version, received_b64 = signature_header.split("=", 1)
+
+def verify(body: bytes, signature: str, timestamp: str, secret: str) -> bool:
+    version, _, received = signature.partition("=")
     if version != "v1":
         return False
-
-    canonical = f"v1:{timestamp_header}:".encode() + payload_body
-    expected = base64.b64encode(
-        hmac.new(secret.encode(), canonical, hashlib.sha256).digest()
-    ).decode()
-
-    return hmac.compare_digest(expected, received_b64)
+    expected = hmac.new(secret.encode(), f"v1:{timestamp}:".encode() + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, received)
 ```
 
-```javascript
-const crypto = require('crypto');
+**Node.js:**
 
-function verifySignature(payload, signatureHeader, timestampHeader, secret) {
-    const [version, received] = signatureHeader.split('=');
-    if (version !== 'v1') return false;
+```js
+const crypto = require("crypto")
 
-    const canonical = `v1:${timestampHeader}:${payload}`;
-    const expected = crypto
-        .createHmac('sha256', secret)
-        .update(canonical)
-        .digest('base64');
-
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(received));
+// body is the raw request body, as a Buffer.
+function verify(body, signature, timestamp, secret) {
+  const [version, received] = signature.split("=")
+  if (version !== "v1" || !received) return false
+  const expected = crypto.createHmac("sha256", secret).update(`v1:${timestamp}:`).update(body).digest("hex")
+  return received.length === expected.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(received))
 }
 ```
 
 ### Reliability & Retry
 
-- OneCamp retries failed deliveries **up to 3 times** with exponential backoff (1s, 2s, 4s)
-- After **10 consecutive failures**, the webhook is automatically disabled
-- You'll see failure counts and logs in **Admin → Webhooks → View Logs**
-- A **delivery ID** (`X-OneCamp-Delivery`) uniquely identifies each attempt
+- Answer with any `2xx` within 10 seconds. Any other answer, or none, is a failed try.
+- A failed delivery is tried again, up to **10 tries** in all over about a day: after 10 seconds,
+  1 minute, 5 minutes and 30 minutes, then 1, 2, 4, 6 and 8 hours, each a little later at random
+  so webhooks that failed together come back apart. After its last try it is kept 30 days in
+  **Admin → Webhooks**, where it can be sent again.
+- After **50 failed tries in a row**, the webhook pauses itself and OneCamp emails the person who
+  set it up. **Admin → Webhooks** says why, with **Resume**. A paused webhook's deliveries wait
+  (up to 30 days) and go when it is resumed.
+- Every try and every replay of an event carries the same body and the same `X-OneCamp-Delivery`,
+  the event's id.
+- **Admin → Webhooks → View Logs** shows each delivery and its answer.
+- These numbers are the code's: `retrySchedule`, `MaxTries` and `PauseAfter` in
+  business/Hooks/deliveries.go.
 
 ### Scope Filtering
 
@@ -465,10 +527,10 @@ Logs are available at **Admin → Webhooks → View Logs** for each webhook.
 
 1. **Respond quickly** — OneCamp has a 10-second timeout. Acknowledge the event and process it asynchronously
 2. **Return 2xx** — Any 2xx status code counts as success. Non-2xx counts as failure
-3. **Verify signatures** — If you set a secret, verify the `X-OneCamp-Signature` header to ensure the request came from OneCamp
+3. **Verify signatures** — Check the `X-OneCamp-Signature` header (above) to make sure the request came from OneCamp
 4. **Use HTTPS** — Target URLs must use HTTPS
-5. **Be idempotent** — The same event may be delivered more than once. Use the delivery ID to deduplicate
-6. **Monitor failures** — Check the webhook logs periodically. After 10 failures, the webhook auto-disables
+5. **Be idempotent** — The same event may be delivered more than once. `X-OneCamp-Delivery` is the event's id: use it to drop a repeat
+6. **Monitor failures** — Check the webhook logs periodically. After 50 failed tries in a row, the webhook pauses itself until it is resumed
 
 ---
 

@@ -701,7 +701,8 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		}
 
 		var mentionsUsers []*dgraphStruct.DgraphUser
-		taskUUID, err := taskBusiness.CreateTask(ctx, link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, mentionsUsers)
+		// A sync is a data move: the issue's state is the task's status (DataMove).
+		taskUUID, err := taskBusiness.CreateTask(taskBusiness.DataMove(ctx), link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, mentionsUsers)
 		if err != nil {
 			return fmt.Errorf("failed to auto-create task from issue: %v", err)
 		}
@@ -1092,7 +1093,8 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 						GitHubPRURL:     &event.PullRequest.HTMLURL,
 					}
 					var mentionsUsers []*dgraphStruct.DgraphUser
-					taskUUID, err := taskBusiness.CreateTask(ctx, link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, mentionsUsers)
+					// A sync is a data move: the pull request's state is the task's status (DataMove).
+					taskUUID, err := taskBusiness.CreateTask(taskBusiness.DataMove(ctx), link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, mentionsUsers)
 					if err != nil {
 						helpers.LogErrorWithContext(ctx, "business/handlePullRequestEvent Failed to auto-create task for PR #%d: %v", event.PullRequest.Number, err)
 					} else {

@@ -153,21 +153,6 @@ func collabAnswer(token string) int {
 // Deactivated, or taken off the team or project a doc reached them through:
 // every live socket the person has open closes, and the reconnect is
 // refused.
-// livePeople are accounts, one for each name.
-func livePeople(t *testing.T, env *integration.Env, names ...string) map[string]uuid.UUID {
-	t.Helper()
-	out := map[string]uuid.UUID{}
-	for _, n := range names {
-		id := uuid.New()
-		if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, NOW(), NOW())`, id, id.String()+"@example.test", n+"-"+id.String()[:8], n); err != nil {
-			t.Fatalf("seed %s: %v", n, err)
-		}
-		out[n] = id
-	}
-	return out
-}
-
 func TestLiveSessionsEndWhenSomeoneLosesTheirPlace(t *testing.T) {
 	env, dg := liveSessionStores(t)
 	live := recordLiveOps(t)
@@ -404,7 +389,7 @@ func TestLiveSessionsOfAGuestEndWhenTheirLinkStops(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = settingsBusiness.SetGuestAccessEnabled(true) })
-		guestBusiness.RemoveAllMeetingGuests(ctx)
+		guestBusiness.RemoveAllLinkGuests(ctx)
 		if !live.closedEverywhere(guest(onDoc)) || !live.closedEverywhere(guest(onBoard)) {
 			t.Fatal("turning guest access off left guests' live sockets open")
 		}

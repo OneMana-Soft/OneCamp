@@ -63,6 +63,11 @@ const (
 
 	sourceOneCamp = "onecamp"
 	sourceMoved   = "moved"
+	// sourceICS is an event a calendar file brought in (importICS.go), and
+	// sourceSubscribed one a calendar read from an address keeps in step
+	// (subscriptions.go): the address's, never the person's to change.
+	sourceICS        = "ics"
+	sourceSubscribed = "subscribed"
 )
 
 // Limits on what one event holds (BE-F-15: the web capped titles, the server
@@ -108,6 +113,8 @@ type Person struct {
 // the occurrence read (an instance answered on its own says so); Invite, for
 // the organiser alone, says whether a guest by email was emailed their
 // invitation (sent, not_sent: this server sends no such email, failed).
+// Proposal is another time they proposed, for its proposer and whoever may
+// change the event alone (proposals.go).
 type Attendee struct {
 	Person
 	Email       string     `json:"email,omitempty"`
@@ -116,6 +123,10 @@ type Attendee struct {
 	Note        string     `json:"note,omitempty"`
 	RespondedAt *time.Time `json:"responded_at,omitempty"`
 	Invite      string     `json:"invite,omitempty"`
+	Proposal    *Proposal  `json:"proposal,omitempty"`
+	// OutOfOffice says a member's decline is their out of office's: they
+	// were away with a rule that declines when the occurrence starts (head 5c).
+	OutOfOffice bool `json:"out_of_office,omitempty"`
 }
 
 // Recurrence is how a series repeats: its RFC 5545 rule and the rule in
@@ -131,6 +142,9 @@ type Recurrence struct {
 type Event struct {
 	ID         string `json:"id"`
 	CalendarID string `json:"calendar_id"`
+	// ReadOnly is an event a subscribed calendar brought (calendar B8): its
+	// reader sees it whole and changes it only where it is published.
+	ReadOnly bool `json:"read_only,omitempty"`
 	// SeriesID and RecurrenceID, for an instance, name its series and the
 	// start it has in the series (which a change by hand never moves).
 	SeriesID     string `json:"series_id,omitempty"`
@@ -162,9 +176,15 @@ type Event struct {
 	ICalUID        string                     `json:"ical_uid"`
 	GoogleEventID  string                     `json:"google_event_id,omitempty"`
 	Booking        *dgraphStruct.EventBooking `json:"booking,omitempty"`
-	CreatedAt      time.Time                  `json:"created_at"`
-	UpdatedAt      time.Time                  `json:"updated_at"`
-	DeletedAt      *time.Time                 `json:"deleted_at,omitempty"`
+	// Task is a task block's task: its uuid, and its name, where it stands
+	// and its project when the reader may read it.
+	Task      *dgraphStruct.EventTask `json:"task,omitempty"`
+	CreatedAt time.Time               `json:"created_at"`
+	UpdatedAt time.Time               `json:"updated_at"`
+	DeletedAt *time.Time              `json:"deleted_at,omitempty"`
+	// OutOfOffice is an out-of-office event's decline rule, read by its
+	// owner alone (head 5b).
+	OutOfOffice *OOOView `json:"out_of_office,omitempty"`
 }
 
 // GuestInput is a guest named in a write: a workspace member by id, or
@@ -200,10 +220,18 @@ type EventInput struct {
 	Recurrence *Recurrence `json:"recurrence"`
 	// SyncToGoogle copies it to the organiser's Google Calendar when linked.
 	SyncToGoogle bool `json:"sync_to_google"`
+	// CalendarID puts it on a calendar the writer may edit (a project's);
+	// empty, on their own.
+	CalendarID string `json:"calendar_id"`
 	// Notify is "none" for Don't send (D-CAL-5); empty sends.
 	Notify string `json:"notify"`
 	// EmailOnAnswers is the organiser's "Email me when guests answer".
 	EmailOnAnswers *bool `json:"email_on_answers"`
+	// TaskUUID is a task block's task (kind task_block): one the writer may
+	// read. The block takes the task's name when it is given none.
+	TaskUUID string `json:"task_uuid"`
+	// OutOfOffice is an out-of-office event's decline rule (head 5b).
+	OutOfOffice *OOOInput `json:"out_of_office"`
 }
 
 // EventPatch is a change to an event (CAL2): a field left out stays as it
@@ -236,16 +264,20 @@ type EventPatch struct {
 	Notify string `json:"notify"`
 	// EmailOnAnswers is the organiser's "Email me when guests answer".
 	EmailOnAnswers *bool `json:"email_on_answers"`
+	// OutOfOffice sets an out-of-office event's decline rule (head 5b).
+	OutOfOffice *OOOInput `json:"out_of_office"`
 }
 
 // AnswerInput is a guest's answer: yes, no or maybe, with a note, for a whole
 // event or series, or (Scope "this") for one instance of a series alone. An
 // answer that leaves its note out keeps the note as it was: the event card
 // answers with a tap, and only the panel and the guest's page write a note.
+// A proposal of another time is kept the same way (proposals.go).
 type AnswerInput struct {
-	Answer Answer  `json:"answer"`
-	Note   *string `json:"note"`
-	Scope  string  `json:"scope"`
+	Answer   Answer         `json:"answer"`
+	Note     *string        `json:"note"`
+	Scope    string         `json:"scope"`
+	Proposal *ProposalInput `json:"proposal"`
 }
 
 // noteOr is the note an answer sends, trimmed, or kept when it sends none.
@@ -400,6 +432,14 @@ func utcMidnightOf(date string) time.Time {
 func checkKindRules(e *models.Event) error {
 	if !eventKinds[EventKind(e.Kind)] {
 		return inputError("That isn't a kind of event.")
+	}
+	// A task block is time for its task (486_calendar_task_blocks): it names
+	// one, and nothing else names one.
+	if (EventKind(e.Kind) == EventTaskBlock) != (e.TaskUUID != nil) {
+		if e.TaskUUID == nil {
+			return inputError("A task block needs its task.")
+		}
+		return inputError("Only a task block is time for a task.")
 	}
 	if e.NotesFormat != notesText && e.NotesFormat != notesHTML {
 		return inputError("Notes are text or html.")

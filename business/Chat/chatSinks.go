@@ -106,6 +106,7 @@ func asCreated(kind string, c *dgraphStruct.DgraphChat) createdChat {
 	out := createdChat{
 		kind: kind, id: c.Uuid, html: c.Body, files: c.MediaObj,
 		author: userOrEmpty(c.From), to: userOrEmpty(c.To), replyTo: chatReplyOf(c),
+		msgKind: c.Kind, system: c.System,
 	}
 	if c.CreatedAt != nil {
 		out.at = *c.CreatedAt

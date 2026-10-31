@@ -43,6 +43,23 @@ type Busy struct {
 	// or in part: the time it would block is unknown. A caller that must never
 	// call unknown time free checks it.
 	GoogleUnread bool
+	// Spans are the same time unmerged, each with what it is (calendar A3):
+	// what says why a time isn't free, and the status chat shows, never a title.
+	Spans []BusySpan
+}
+
+// What a busy span is: never its title.
+const (
+	BusyMeeting = "meeting"
+	BusyFocus   = "focus"
+	BusyAway    = "away"
+	BusyGoogle  = "google"
+)
+
+// BusySpan is a stretch someone is busy, and what kind of busy it is.
+type BusySpan struct {
+	Interval
+	Kind string
 }
 
 // BusyOptions changes what ReadBusy counts.
@@ -62,6 +79,7 @@ func ReadBusy(ctx context.Context, userUUID string, from, to time.Time, opts Bus
 		return Busy{}, err
 	}
 	var busy []Interval
+	var spans []BusySpan
 	for _, e := range events {
 		if e == nil || e.StartTime == nil || e.EndTime == nil {
 			continue
@@ -73,24 +91,35 @@ func ReadBusy(ctx context.Context, userUUID string, from, to time.Time, opts Bus
 			continue
 		}
 		busy = append(busy, Interval{Start: *e.StartTime, End: *e.EndTime})
+		kind := BusyMeeting
+		if e.IsAway != nil && *e.IsAway {
+			kind = BusyAway
+		} else if e.IsFocus != nil && *e.IsFocus {
+			kind = BusyFocus
+		}
+		spans = append(spans, BusySpan{Interval: Interval{Start: *e.StartTime, End: *e.EndTime}, Kind: kind})
 	}
 	out := Busy{}
 	if id, err := uuid.Parse(userUUID); err == nil {
-		spans, gerr := googleBusyOf(ctx, id, from, to)
+		gspans, gerr := googleBusyOf(ctx, id, from, to)
 		if gerr != nil {
 			helpers.LogErrorWithContext(ctx, "business/Calendar/ReadBusy google err: %+v", gerr)
 			out.GoogleUnread = true
 		}
-		google := make([]Interval, 0, len(spans))
-		for _, s := range spans {
+		google := make([]Interval, 0, len(gspans))
+		for _, s := range gspans {
 			google = append(google, Interval{Start: s.Start, End: s.End})
 		}
 		if e := opts.Except; e != nil && e.GoogleCalendarEventId != nil && *e.GoogleCalendarEventId != "" && e.StartTime != nil && e.EndTime != nil {
 			google = CutBusy(google, Interval{Start: *e.StartTime, End: *e.EndTime})
 		}
 		busy = append(busy, google...)
+		for _, g := range google {
+			spans = append(spans, BusySpan{Interval: g, Kind: BusyGoogle})
+		}
 	}
 	out.Intervals = MergeBusy(busy)
+	out.Spans = spans
 	return out, nil
 }
 

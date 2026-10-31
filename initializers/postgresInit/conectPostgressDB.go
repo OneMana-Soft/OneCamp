@@ -7,6 +7,8 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -31,15 +33,14 @@ const maxDbLifetime = 5 * time.Minute
 const dbTimeout = time.Second * 3
 
 func ConnectPostgres(ctx context.Context, dsn string) error {
-
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-
+	cfg, err := sessionConfig(dsn)
 	if err != nil {
 		return err
 	}
-
-	sqlDB, err := db.DB()
+	sqlDB := stdlib.OpenDB(*cfg)
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{})
 	if err != nil {
+		_ = sqlDB.Close()
 		return err
 	}
 
@@ -57,6 +58,26 @@ func ConnectPostgres(ctx context.Context, dsn string) error {
 	DBConn.DBTimeout = dbTimeout
 
 	return nil
+}
+
+// sessionConfig is dsn's connection config with the settings every session
+// of the pool starts with: they go in its startup message, so no statement
+// ever runs before them, on a session the pool makes at any time.
+//
+// jit off: Postgres compiles a statement whose estimated cost passes
+// jit_above_cost before it reads a row, which pays back only on long
+// analytical queries the app doesn't send. A table's three sums over 100k
+// rows spent 1.5-1.8 s of their 3-4.7 s compiling on a half-CPU Postgres,
+// past their 2 s budget (V-114). A DSN that sets jit keeps its own.
+func sessionConfig(dsn string) (*pgx.ConnConfig, error) {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if _, set := cfg.RuntimeParams["jit"]; !set {
+		cfg.RuntimeParams["jit"] = "off"
+	}
+	return cfg, nil
 }
 
 func testDB(ctx context.Context, d *sql.DB) error {

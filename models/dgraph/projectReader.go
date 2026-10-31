@@ -33,6 +33,10 @@ type ProjectAccess struct {
 	Manage       bool   `json:"manage"`
 	ManagePeople bool   `json:"manage_people"`
 	Archive      bool   `json:"archive"`
+	// MoveInto is, for each status with a rule on who moves tasks there,
+	// whether the reader may (business/Approvals MoveInto): a board's read
+	// only, never stored.
+	MoveInto map[string]bool `json:"move_into,omitempty"`
 }
 
 // TaskAccess is what someone may do with one task (task_access): the

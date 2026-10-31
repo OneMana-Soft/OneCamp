@@ -16,6 +16,7 @@ import (
 	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	policyBusiness "github.com/akashc777/OneCamp/business/Policy"
 	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
+	rowQuery "github.com/akashc777/OneCamp/business/RowQuery"
 	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
@@ -124,6 +125,10 @@ type BatchInput struct {
 	Patch  []PatchInput `json:"patch"`
 	Delete []uuid.UUID  `json:"delete"`
 	Kind   string       `json:"kind,omitempty"`
+	// Operation joins the batch's change set to the others of a write too
+	// big for one, which an undo takes together (an import): set by the
+	// server's own writers, never by a request.
+	Operation uuid.UUID `json:"-"`
 }
 
 // BatchResult is what a batch wrote: its change set, the rows made and
@@ -204,6 +209,7 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 	}
 	var b model.Batch
 	b.At, b.Delete = at, in.Delete
+	files := filesOf(ctx, tableId)
 	var linkedTables []uuid.UUID
 	for i, r := range in.Create {
 		values := r.Values
@@ -217,7 +223,7 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 			refuse(&i, uuid.Nil, err)
 			continue
 		}
-		cells, err := storedCells(fields, values, fieldTypes.Input{New: true, Complete: completeWrite(actor)})
+		cells, err := storedCells(fields, values, fieldTypes.Input{New: true, Complete: completeWrite(actor), Files: files})
 		if err != nil {
 			i := i
 			refuse(&i, uuid.Nil, err)
@@ -227,12 +233,52 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 		b.Links = append(b.Links, links...)
 		linkedTables = append(linkedTables, tables...)
 	}
+	// A patch's links are written apart from its cells, so its row is
+	// checked to be this table's here, as patchRowsTx checks a cell's.
+	var patched []uuid.UUID
 	for _, p := range in.Patch {
-		values := p.Values
-		if values == nil {
-			values = map[string]interface{}{}
+		patched = append(patched, p.Row)
+	}
+	ours, err := model.RowsIn(ctx, tableId, patched)
+	if err != nil {
+		return nil, errRowsUnavailable
+	}
+	// The patches' cells linking to tables are read for all their rows at
+	// once, each against the links its row has now (linkCellsOf).
+	vals := make([]map[string]interface{}, len(in.Patch))
+	wrote := make([]int, len(in.Patch))
+	linked := make([]rowCells, 0, len(in.Patch))
+	for i, p := range in.Patch {
+		if vals[i] = p.Values; vals[i] == nil {
+			vals[i] = map[string]interface{}{}
 		}
-		cells, err := storedCells(fields, values, fieldTypes.Input{})
+		wrote[i] = len(vals[i])
+		if live, found := ours[p.Row]; found && live {
+			linked = append(linked, rowCells{row: p.Row, values: vals[i]})
+		}
+	}
+	linkCellsOf(ctx, actor, fields, linked, true)
+	next := 0
+	for i, p := range in.Patch {
+		values := vals[i]
+		if live, found := ours[p.Row]; !found || !live {
+			refuse(nil, p.Row, errRowNotFound)
+			continue
+		}
+		rc := linked[next]
+		next++
+		if rc.err != nil {
+			refuse(nil, p.Row, rc.err)
+			continue
+		}
+		for _, c := range rc.cells {
+			b.RowLinks = append(b.RowLinks, c.RowLinks)
+			linkedTables = append(linkedTables, c.table)
+		}
+		if len(values) == 0 && wrote[i] > 0 {
+			continue // only its links: no cell to write
+		}
+		cells, err := storedCells(fields, values, fieldTypes.Input{Files: files})
 		switch {
 		case err != nil:
 			refuse(nil, p.Row, err)
@@ -247,6 +293,7 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 		return nil, problems
 	}
 	cs := newChangeSet(ctx, tableId, actor, batchKind(in))
+	cs.Operation = in.Operation
 	done, err := model.ApplyBatch(ctx, tableId, actor.UserID, b, aiColumns(fields), maxValuesBytes, maxLinks, keys, cs, observe)
 	if err != nil {
 		return nil, batchErr(err)
@@ -261,7 +308,7 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 	}
 	withComputed(ctx, fields, append(append([]*model.Row{}, done.Created...), done.Patched...))
 	announce(ctx, t, cs, liveAndHooks)
-	tellTables(linkedTables...)
+	tellTables(ctx, linkedTables...)
 	if done.Linked || len(b.Patch) > 0 {
 		tellLinkedLater(ctx, tableId)
 	}
@@ -361,7 +408,8 @@ type UndoResult struct {
 }
 
 // Undo reverses one of actor's own change sets on a table: the one named, or
-// their latest (among their last 100) that isn't undone. Only what still
+// the rest of an operation their last undo stopped short of (unfinished),
+// else their latest (among their last 100) that isn't undone. Only what still
 // holds the change is put back (model.ApplyInverse); what changed again since
 // is left, and counted. An undo is itself a change set, which Redo reverses;
 // naming an undo is a redo.
@@ -371,6 +419,7 @@ func Undo(ctx context.Context, tableId uuid.UUID, changeSet *uuid.UUID, actor Ac
 		return nil, err
 	}
 	var target *model.ChangeSet
+	op := uuid.Nil
 	if changeSet != nil {
 		if target, err = model.GetChangeSet(ctx, tableId, *changeSet); err != nil {
 			return nil, fmt.Errorf("failed to read the change")
@@ -381,8 +430,13 @@ func Undo(ctx context.Context, tableId uuid.UUID, changeSet *uuid.UUID, actor Ac
 		if target.Actor != actor.UserID {
 			return nil, errNotYours
 		}
-	} else if target, err = model.LatestToUndo(ctx, tableId, actor.UserID); err != nil {
-		return nil, fmt.Errorf("failed to read your changes")
+	} else {
+		if target, op, err = unfinished(ctx, tableId, rowLedger.ChangeUndo, actor); err == nil && target == nil {
+			target, err = model.LatestToUndo(ctx, tableId, actor.UserID)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read your changes")
+		}
 	}
 	if target == nil {
 		return nil, errNothingToUndo
@@ -391,32 +445,108 @@ func Undo(ctx context.Context, tableId uuid.UUID, changeSet *uuid.UUID, actor Ac
 	if target.Kind == string(rowLedger.ChangeUndo) {
 		kind = rowLedger.ChangeRedo
 	}
-	return reverse(ctx, t, target, kind, actor)
+	if target.Kind == string(rowLedger.ChangeAI) {
+		// An AI column's fill still running is stopped first, so no turn
+		// writes after its undo (a write into an undone change set is
+		// refused all the same: model.ErrUndone).
+		if fill, err := model.StopAIFillOf(ctx, tableId, target.ID, actor.UserID); err != nil {
+			return nil, fmt.Errorf("failed to stop the fill")
+		} else if fill != nil {
+			broadcastFill(tableId.String(), fill)
+		}
+	}
+	return reverseWhole(ctx, t, target, kind, op, actor)
 }
 
 // Redo reverses actor's latest undo on a table, when they've changed nothing
-// on it since: the change it undid comes back where it still can.
+// on it since: the change it undid comes back where it still can. The rest
+// of an operation their last redo stopped short of comes first (unfinished).
 func Redo(ctx context.Context, tableId uuid.UUID, actor Actor) (*UndoResult, error) {
 	t, err := loadViewable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}
-	target, err := model.LatestToRedo(ctx, tableId, actor.UserID)
+	target, op, err := unfinished(ctx, tableId, rowLedger.ChangeRedo, actor)
+	if err == nil && target == nil {
+		target, err = model.LatestToRedo(ctx, tableId, actor.UserID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to read your changes")
 	}
 	if target == nil {
 		return nil, errNothingToRedo
 	}
-	return reverse(ctx, t, target, rowLedger.ChangeRedo, actor)
+	return reverseWhole(ctx, t, target, rowLedger.ChangeRedo, op, actor)
 }
 
-// reverse undoes target as a change set of kind (undo or redo).
-func reverse(ctx context.Context, t *model.DataTable, target *model.ChangeSet, kind rowLedger.ChangeKind, actor Actor) (*UndoResult, error) {
+// unfinished is what actor's last reversal of kind on a table stopped short
+// of: when their newest change set is a reversal of kind in an operation, and
+// the operation of the change set it reversed has sets of theirs left, the
+// newest of those, with the reversal's operation for the rest to join. The
+// rest can be past what LatestToUndo and LatestToRedo look at, since the
+// reversals and the change sets they reversed fill those 100 two to one. nil
+// when the last reversal was whole.
+func unfinished(ctx context.Context, tableId uuid.UUID, kind rowLedger.ChangeKind, actor Actor) (*model.ChangeSet, uuid.UUID, error) {
+	last, err := model.LatestOf(ctx, tableId, actor.UserID)
+	if err != nil || last == nil || last.Kind != string(kind) || last.Operation == uuid.Nil {
+		return nil, uuid.Nil, err
+	}
+	reversed, err := model.GetChangeSet(ctx, tableId, last.Undoes)
+	if err != nil || reversed == nil || reversed.Operation == uuid.Nil {
+		return nil, uuid.Nil, err
+	}
+	left, err := model.OperationSets(ctx, tableId, actor.UserID, reversed.Operation)
+	if err != nil || len(left) == 0 {
+		return nil, uuid.Nil, err
+	}
+	return left[0], last.Operation, nil
+}
+
+// reverseWhole undoes target as a change set of kind (undo or redo), with
+// the rest of its operation when it has one: each of actor's change sets of
+// the operation not undone yet, newest first, their reversals joining
+// operation op (a new one for uuid.Nil), so the next redo or undo takes them
+// together. Each reversal commits on its own, so one that fails, or a
+// request cut off, leaves the rest, which the next reversal of the same kind
+// finishes (unfinished).
+func reverseWhole(ctx context.Context, t *model.DataTable, target *model.ChangeSet, kind rowLedger.ChangeKind, op uuid.UUID, actor Actor) (*UndoResult, error) {
+	if target.Operation == uuid.Nil {
+		return reverse(ctx, t, target, kind, uuid.Nil, actor)
+	}
+	sets, err := model.OperationSets(ctx, t.Id, actor.UserID, target.Operation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read your changes")
+	}
+	if len(sets) == 0 {
+		return nil, errUndoneAlready
+	}
+	if op == uuid.Nil {
+		op = uuid.New()
+	}
+	var out *UndoResult
+	for _, set := range sets {
+		r, err := reverse(ctx, t, set, kind, op, actor)
+		if err != nil {
+			return nil, err
+		}
+		if out == nil {
+			out = r
+			continue
+		}
+		out.ChangeSet, out.Changes, out.Skipped = r.ChangeSet, out.Changes+r.Changes, out.Skipped+r.Skipped
+	}
+	out.Reversed = target.ID
+	return out, nil
+}
+
+// reverse undoes target as a change set of kind (undo or redo), in
+// operation op (uuid.Nil for none).
+func reverse(ctx context.Context, t *model.DataTable, target *model.ChangeSet, kind rowLedger.ChangeKind, op uuid.UUID, actor Actor) (*UndoResult, error) {
 	if target.Kind == string(rowLedger.ChangeField) {
 		return nil, errFieldUndo
 	}
 	cs := newChangeSet(ctx, t.Id, actor, kind)
+	cs.Operation = op
 	done, err := model.ApplyInverse(ctx, t.Id, actor.UserID, target.ID, maxLinks, cs, observe)
 	switch {
 	case errors.Is(err, model.ErrUndone):
@@ -714,10 +844,10 @@ func RestoreFromTrash(ctx context.Context, tableId uuid.UUID, in RestoreInput, a
 	return out, nil
 }
 
-// restoreField brings a field of t back from the trash: with the field showing
-// its links from the other table when it's a relation field that has one, or,
-// for the field showing another's links, only while that one is there, which
-// shows its links again.
+// restoreField brings a field of t back from the trash, in one transaction:
+// with the field showing its links from the other table when it's a relation
+// field that has one, or, for the field showing another's links, only while
+// that one is there, which shows its links again.
 func restoreField(ctx context.Context, t *model.DataTable, id uuid.UUID, actor Actor) error {
 	f, err := model.GetTrashedField(ctx, t.Id, id)
 	if err != nil {
@@ -727,56 +857,41 @@ func restoreField(ctx context.Context, t *model.DataTable, id uuid.UUID, actor A
 		return fmt.Errorf("That field isn't in this table's trash")
 	}
 	both := []*model.Field{f}
-	if l, ok := linkOf(f); ok {
-		switch {
-		case l.inverseOf != "":
-			owner, err := liveField(ctx, l.table, l.inverseOf)
-			if err != nil {
-				return err
-			}
-			if owner == nil {
-				return fmt.Errorf("Bring back the field %q shows links of first", f.Name)
-			}
-			if ol, ok := linkOf(owner); ok && ol.inverse == "" {
-				var cfg map[string]interface{}
-				_ = json.Unmarshal([]byte(owner.Config), &cfg)
-				cfg["inverse"] = f.Id.String()
-				b, _ := json.Marshal(cfg)
-				owner.Config = string(b)
-				if err := model.UpdateField(ctx, owner); err != nil {
-					return fmt.Errorf("failed to bring the field back")
-				}
-			}
-		case l.inverse != "":
-			if other, err := uuid.Parse(l.inverse); err == nil {
-				if g, err := model.GetTrashedField(ctx, l.table, other); err == nil && g != nil {
-					both = append(both, g)
-				}
+	l, _ := linkOf(f)
+	if l.inverseOf != "" {
+		owner, ok := l.linkField()
+		if ok {
+			err = model.RestoreShowingField(ctx, f, owner, l.table)
+		}
+		if !ok || errors.Is(err, model.ErrRelationGone) {
+			return fmt.Errorf("Bring back the field %q shows links of first", f.Name)
+		}
+	} else {
+		if other, err := uuid.Parse(l.inverse); err == nil {
+			if g, err := model.GetTrashedField(ctx, l.table, other); err == nil && g != nil {
+				both = append(both, g)
 			}
 		}
+		err = model.RestoreFields(ctx, both...)
 	}
-	if err := model.RestoreFields(ctx, both...); err != nil {
+	if err != nil {
 		return fmt.Errorf("failed to bring the field back")
+	}
+	// Rows made while it was in the trash have no entry of it yet.
+	for _, g := range both {
+		if err := rowQuery.IndexField(ctx, g.TableId, g.Id); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/DataTable restoreField index %s: %v", g.Id, err)
+			_ = model.MarkCellIndexStale(ctx, g.TableId)
+		}
 	}
 	for _, g := range both[1:] {
 		tellFieldsChanged(g.TableId)
 	}
+	if l.inverseOf != "" {
+		// The relation there says where its links show again.
+		tellFieldsChanged(l.table)
+	}
 	return nil
-}
-
-// liveField is a table's field that isn't deleted, by id; nil when there's
-// none such.
-func liveField(ctx context.Context, table uuid.UUID, id string) (*model.Field, error) {
-	fields, err := model.ListFields(ctx, table)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load fields")
-	}
-	for _, f := range fields {
-		if f.Id.String() == id {
-			return f, nil
-		}
-	}
-	return nil, nil
 }
 
 // TrashTable is a deleted table, as the tables' trash lists it.

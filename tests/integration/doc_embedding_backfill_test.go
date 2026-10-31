@@ -4,7 +4,7 @@
 package integration_test
 
 // The one-time rewrite of private docs' privacy onto their AI search entries
-// (business/Doc.RunEmbeddingAccessBackfill), against Postgres, Dgraph and
+// (business/Doc EmbeddingAccessBackfill), against Postgres, Dgraph and
 // OpenSearch: entries an earlier version left saying "public" are put right
 // from the docs, a doc's comments with it, a public doc isn't touched, and
 // once it has run it doesn't run again.
@@ -114,9 +114,9 @@ func TestPrivateDocsEmbeddingBackfill(t *testing.T) {
 	// Every doc is checked; the entries that said "public" for a private doc
 	// (plans, its comment, notes) are corrected, and the public doc's entry,
 	// which was right, is left alone.
-	checked, corrected, err := docBusiness.RunEmbeddingAccessBackfill(ctx)
-	if err != nil || checked != 3 || corrected != 3 {
-		t.Fatalf("repair checked %d docs and corrected %d entries (%v), want 3 and 3", checked, corrected, err)
+	first, _, err := docBusiness.EmbeddingAccessBackfill.Run(ctx)
+	if err != nil || first.Docs != 3 || first.Corrected != 3 {
+		t.Fatalf("repair checked %d docs and corrected %d entries (%v), want 3 and 3", first.Docs, first.Corrected, err)
 	}
 	for who, want := range map[string]string{
 		stranger:        "handbook",
@@ -129,18 +129,18 @@ func TestPrivateDocsEmbeddingBackfill(t *testing.T) {
 	}
 
 	var state string
-	if err := env.PG.QueryRow(`SELECT value FROM system_configs WHERE key = 'ai_embeddings_doc_access_v2'`).Scan(&state); err != nil || state != "done" {
+	if err := env.PG.QueryRow(`SELECT value FROM system_configs WHERE key = 'ai_embeddings_doc_access_v2'`).Scan(&state); err != nil || !strings.HasPrefix(state, "done") {
 		t.Errorf("the backfill didn't record that it ran: %q %v", state, err)
 	}
-	if again, fixed, err := docBusiness.RunEmbeddingAccessBackfill(ctx); err != nil || again != 0 || fixed != 0 {
-		t.Errorf("a second run checked %d docs and corrected %d (%v), want none", again, fixed, err)
+	if again, ran, err := docBusiness.EmbeddingAccessBackfill.Run(ctx); err != nil || ran || again.Docs != 0 || again.Corrected != 0 {
+		t.Errorf("a second run (ran %v) checked %d docs and corrected %d (%v), want none", ran, again.Docs, again.Corrected, err)
 	}
 	// Run by hand past the record, it finds nothing left to correct.
 	if _, err := env.PG.Exec(`DELETE FROM system_configs WHERE key = 'ai_embeddings_doc_access_v2'`); err != nil {
 		t.Fatal(err)
 	}
-	if again, fixed, err := docBusiness.RunEmbeddingAccessBackfill(ctx); err != nil || again != 3 || fixed != 0 {
-		t.Errorf("a forced second run checked %d docs and corrected %d (%v), want 3 and 0", again, fixed, err)
+	if again, _, err := docBusiness.EmbeddingAccessBackfill.Run(ctx); err != nil || again.Docs != 3 || again.Corrected != 0 {
+		t.Errorf("a forced second run checked %d docs and corrected %d (%v), want 3 and 0", again.Docs, again.Corrected, err)
 	}
 
 	// From here, the live path: the owner changes who may see the doc, and

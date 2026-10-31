@@ -15,6 +15,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -48,6 +49,30 @@ const (
 	// {"relation": "<relation field id>", "field": "<field id in the linked
 	// table>", "aggregate": "<how>"}; its cells are never stored.
 	FieldRollup = "rollup"
+
+	// The kinds tables B1 adds (D-TB-3), each a business/FieldTypes kind.
+	// Stored: a status is a select whose options sit in groups (to do,
+	// doing, done); people are links to members, stored as a relation to
+	// people is ([{id, type: "user"}]); a long text keeps its lines; a phone
+	// number its characters; a duration its seconds; a rating its stars. A
+	// currency and a percent stay a number's format.
+	FieldStatus   = "status"
+	FieldPeople   = "people"
+	FieldLongText = "long_text"
+	FieldPhone    = "phone"
+	FieldDuration = "duration"
+	FieldRating   = "rating"
+	// FieldAttachment is files ([{id, name, size, mime}]): its table's
+	// files (attachments whose place is the table), shown as Files.
+	FieldAttachment = "attachment"
+	// Worked out from the row on each read, never stored: its number in the
+	// table (with the field's prefix, an id like DEAL-12), when it was made
+	// and last changed, and by whom.
+	FieldAutonumber   = "autonumber"
+	FieldCreatedTime  = "created_time"
+	FieldCreatedBy    = "created_by"
+	FieldModifiedTime = "modified_time"
+	FieldModifiedBy   = "modified_by"
 )
 
 // View type constants.
@@ -55,6 +80,13 @@ const (
 	ViewGrid     = "grid"
 	ViewBoard    = "board"
 	ViewCalendar = "calendar"
+	ViewChart    = "chart"
+	// B4's layouts: cards, a list of rows, bars across their dates, and the
+	// bars with the links that say what waits on what (migration 927).
+	ViewGallery  = "gallery"
+	ViewList     = "list"
+	ViewTimeline = "timeline"
+	ViewGantt    = "gantt"
 )
 
 // ValidVisibility / ValidViewType validate inputs. Which kinds a field may be
@@ -63,7 +95,7 @@ func ValidVisibility(v string) bool { return v == VisibilityPrivate || v == Visi
 
 func ValidViewType(t string) bool {
 	switch t {
-	case ViewGrid, ViewBoard, ViewCalendar:
+	case ViewGrid, ViewBoard, ViewCalendar, ViewChart, ViewGallery, ViewList, ViewTimeline, ViewGantt:
 		return true
 	default:
 		return false
@@ -163,7 +195,9 @@ func liftAIKept(r *Row) {
 	}
 }
 
-// View mirrors a row of data_table_views.
+// View mirrors a row of data_table_views. Owner is the person whose own view
+// it is (migration 512); a view with none is shared with everyone who reads
+// the table, and a locked one takes no change until it's unlocked.
 type View struct {
 	Id        uuid.UUID  `json:"id"`
 	TableId   uuid.UUID  `json:"table_id"`
@@ -171,6 +205,8 @@ type View struct {
 	Type      string     `json:"type"`
 	Config    string     `json:"config"` // raw JSON object
 	Position  float64    `json:"position"`
+	Owner     *uuid.UUID `json:"owner_id,omitempty"`
+	Locked    bool       `json:"locked"`
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
@@ -349,6 +385,16 @@ func scanField(s scanner) (*Field, error) {
 }
 
 const fieldColumns = `id, table_id, name, type, config, position, description, required, default_value, is_primary, created_at, updated_at, deleted_at`
+
+// Every write to data_table_fields, by the functions below or any other,
+// fires the Computed Store's trigger (data_table_computed_field_written:
+// migration 535's, airtable-03; 538's since V-108): a formula or rollup is
+// held from the moment it is made, and a field made or deleted, or changed in
+// type, config, deleted_at or is_primary, raises in the writer's own
+// transaction the generation of every kept value it can change, which is
+// then filled again. A new writer gets that without a call. A new column that
+// changes what a formula or rollup gives must join the trigger's WHEN list,
+// in a migration of its own.
 
 // CreateField inserts a column.
 func CreateField(ctx context.Context, f *Field) (uuid.UUID, error) {
@@ -687,15 +733,19 @@ func SetPrimary(ctx context.Context, tableId, fieldId uuid.UUID) error {
 func DeleteField(ctx context.Context, tableId, fieldId, by uuid.UUID) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
-	const q = `UPDATE data_table_fields SET deleted_at=NOW(), updated_at=NOW(), deleted_by=$3
-		WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, fieldId, tableId, nullUUID(by))
+	return deleteField(dbctx, postgresInit.DBConn.SqlDB, tableId, fieldId, by)
+}
+
+// deleteField soft-deletes a live field of a table on db; by is who deleted
+// it. It is sql.ErrNoRows when there's no such field.
+func deleteField(ctx context.Context, db execer, tableId, fieldId, by uuid.UUID) error {
+	res, err := db.ExecContext(ctx, `UPDATE data_table_fields SET deleted_at=NOW(), updated_at=NOW(), deleted_by=$3
+		WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`, fieldId, tableId, nullUUID(by))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/DeleteField err: %+v", err)
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if n, _ := res.RowsAffected(); n == 0 {
 		return sql.ErrNoRows
 	}
 	return nil
@@ -816,11 +866,11 @@ var ErrRowTooLarge = errors.New("row is too large")
 // be mistaken for theirs, and two writes can't each mark over the other. It
 // adds one to the row's version and names who wrote it ($7), and returns the
 // row and its values as they were (WriteRow).
-const writeCellsSQL = `WITH c AS (
+var writeCellsSQL = `WITH c AS (
 		SELECT id, values AS old FROM data_table_rows
 		WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL FOR UPDATE
 	), n AS (
-		SELECT id, old, %s AS cells, COALESCE(old -> '` + AIKeptKey + `', '[]'::jsonb) AS kept FROM c
+		SELECT id, old, %s AS cells, ` + fmt.Sprintf(keptSQL, "old") + ` AS kept FROM c
 	), m AS (
 		SELECT id, old, cells, kept || COALESCE((SELECT jsonb_agg(f) FROM unnest($6::text[]) f
 			WHERE (cells -> f) IS DISTINCT FROM (old -> f) AND NOT kept ? f), '[]'::jsonb) AS kept
@@ -845,6 +895,10 @@ var ErrAIKept = errors.New("a person wrote this cell")
 // model answered: a person's correction, an agent's write, or a newer fill;
 // or for a row whose cells the answer was worked out from changed meanwhile.
 var ErrCellChanged = errors.New("the cell changed while the AI answered")
+
+// keptSQL is the cells of a row's values (%s) a person wrote (AIKeptKey), a
+// JSON array of their fields: none when there's no list.
+const keptSQL = `COALESCE(%s -> '` + AIKeptKey + `', '[]'::jsonb)`
 
 // unchangedSQL is whether a row's values (%s) still hold the cells $N names
 // ({field: value}, JSON null for one the row didn't have) as they were read.
@@ -872,7 +926,7 @@ func WriteAICell(ctx context.Context, tableId, rowId uuid.UUID, field, cellJSON 
 		reads = inputs
 	}
 	q := `WITH c AS (
-			SELECT id, values AS old, COALESCE(values -> '` + AIKeptKey + `', '[]'::jsonb) AS kept FROM data_table_rows
+			SELECT id, values AS old, ` + fmt.Sprintf(keptSQL, "values") + ` AS kept FROM data_table_rows
 			WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL FOR UPDATE
 		)
 		UPDATE data_table_rows r SET
@@ -891,7 +945,7 @@ func WriteAICell(ctx context.Context, tableId, rowId uuid.UUID, field, cellJSON 
 		if errors.Is(err, sql.ErrNoRows) {
 			var kept, same bool
 			if qerr := tx.QueryRowContext(dbctx,
-				`SELECT COALESCE(values -> '`+AIKeptKey+`', '[]'::jsonb) ? $3, (values -> $3::text) IS NOT DISTINCT FROM $4::jsonb
+				`SELECT `+fmt.Sprintf(keptSQL, "values")+` ? $3, (values -> $3::text) IS NOT DISTINCT FROM $4::jsonb
 					AND `+fmt.Sprintf(unchangedSQL, "$5", "values")+`
 				FROM data_table_rows WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`,
 				rowId, tableId, field, was, reads).Scan(&kept, &same); qerr == nil {
@@ -975,6 +1029,41 @@ func ListRows(ctx context.Context, tableId uuid.UUID, limit, offset int) ([]*Row
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// emptyCellSQL is whether r's cell of the field $2 holds nothing (none, null
+// or "") and no person wrote it (AIKeptKey): what a fill of an AI column
+// writes.
+var emptyCellSQL = `COALESCE(r."values" ->> $2::text, '') = '' AND NOT ` + fmt.Sprintf(keptSQL, `r."values"`) + ` ? $2::text`
+
+// fillableSQL is the rows a column's fill takes, as it counts them and as it
+// reads them (CountRowsToFill, RowsToFillAfter): live, with a key (a row with
+// none yet has no place for a fill's cursor to walk past), and an empty cell
+// no person wrote. One predicate, so a fill's total is what it walks.
+var fillableSQL = `r.deleted_at IS NULL AND r.position_key IS NOT NULL AND ` + emptyCellSQL
+
+// RowsToFill is up to limit of a table's rows whose cell of field is empty
+// and no person's (emptyCellSQL), in the table's order.
+func RowsToFill(ctx context.Context, tableId uuid.UUID, field string, limit int) ([]*Row, error) {
+	rows, err := pgexec.Query(ctx, `SELECT `+rowColumns+` FROM data_table_rows r
+		WHERE r.table_id = $1 AND r.deleted_at IS NULL AND `+emptyCellSQL+` `+rowOrder+` LIMIT $3`,
+		func(r pgexec.Row) (*Row, error) { return scanRow(r) }, tableId, field, limit)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/RowsToFill err: %+v", err)
+		return nil, err
+	}
+	return rows, nil
+}
+
+// CountRowsToFill is how many of a table's rows a column's fill takes
+// (fillableSQL): its total.
+func CountRowsToFill(ctx context.Context, tableId uuid.UUID, field string) (int, error) {
+	n, err := pgexec.Scalar[int](ctx, `SELECT COUNT(*) FROM data_table_rows r
+		WHERE r.table_id = $1 AND `+fillableSQL, tableId, field)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CountRowsToFill err: %+v", err)
+	}
+	return n, err
 }
 
 // CountRows returns the number of non-deleted rows in a table.
@@ -1100,12 +1189,16 @@ func ListRowsFiltered(ctx context.Context, tableId uuid.UUID, likeSubstrings []s
 func scanView(s scanner) (*View, error) {
 	var v View
 	var deletedAt sql.NullTime
+	var owner uuid.NullUUID
 	if err := s.Scan(&v.Id, &v.TableId, &v.Name, &v.Type, &v.Config, &v.Position,
-		&v.CreatedAt, &v.UpdatedAt, &deletedAt); err != nil {
+		&v.CreatedAt, &v.UpdatedAt, &deletedAt, &owner, &v.Locked); err != nil {
 		return nil, err
 	}
 	if deletedAt.Valid {
 		v.DeletedAt = &deletedAt.Time
+	}
+	if owner.Valid {
+		v.Owner = &owner.UUID
 	}
 	if strings.TrimSpace(v.Config) == "" {
 		v.Config = "{}"
@@ -1113,7 +1206,7 @@ func scanView(s scanner) (*View, error) {
 	return &v, nil
 }
 
-const viewColumns = `id, table_id, name, type, config, position, created_at, updated_at, deleted_at`
+const viewColumns = `id, table_id, name, type, config, position, created_at, updated_at, deleted_at, owner_id, locked`
 
 // CreateView inserts a saved view.
 func CreateView(ctx context.Context, v *View) (uuid.UUID, error) {
@@ -1123,9 +1216,13 @@ func CreateView(ctx context.Context, v *View) (uuid.UUID, error) {
 		v.Config = "{}"
 	}
 	id := uuid.New()
-	const q = `INSERT INTO data_table_views (id, table_id, name, type, config, position)
-		VALUES ($1,$2,$3,$4,$5,$6)`
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, v.TableId, v.Name, v.Type, v.Config, v.Position)
+	const q = `INSERT INTO data_table_views (id, table_id, name, type, config, position, owner_id, locked)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
+	var owner any
+	if v.Owner != nil {
+		owner = *v.Owner
+	}
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, v.TableId, v.Name, v.Type, v.Config, v.Position, owner, v.Locked)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateView err: %+v", err)
 		return uuid.Nil, err
@@ -1133,7 +1230,9 @@ func CreateView(ctx context.Context, v *View) (uuid.UUID, error) {
 	return id, nil
 }
 
-// UpdateView updates a saved view's editable attributes.
+// UpdateView updates a saved view's editable attributes, unless it's locked:
+// the lock holds here, in the write, so one that lands after a caller's check
+// still does. No view changed is sql.ErrNoRows.
 func UpdateView(ctx context.Context, v *View) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -1141,7 +1240,7 @@ func UpdateView(ctx context.Context, v *View) error {
 		v.Config = "{}"
 	}
 	const q = `UPDATE data_table_views SET name=$2, type=$3, config=$4, position=$5, updated_at=NOW()
-		WHERE id=$1 AND table_id=$6 AND deleted_at IS NULL`
+		WHERE id=$1 AND table_id=$6 AND deleted_at IS NULL AND NOT locked`
 	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, v.Id, v.Name, v.Type, v.Config, v.Position, v.TableId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/UpdateView err: %+v", err)
@@ -1154,12 +1253,41 @@ func UpdateView(ctx context.Context, v *View) error {
 	return nil
 }
 
-// DeleteView soft-deletes a saved view.
+// LockView locks a saved view, or unlocks it.
+func LockView(ctx context.Context, tableId, viewId uuid.UUID, locked bool) error {
+	n, err := pgexec.Exec(ctx, `UPDATE data_table_views SET locked=$3, updated_at=NOW()
+		WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`, viewId, tableId, locked)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/LockView err: %+v", err)
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// GetView is one of a table's saved views; nil when it has none by that id.
+func GetView(ctx context.Context, tableId, viewId uuid.UUID) (*View, error) {
+	v, found, err := pgexec.QueryOne(ctx, `SELECT `+viewColumns+` FROM data_table_views
+		WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`, func(r pgexec.Row) (*View, error) { return scanView(r) }, viewId, tableId)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/GetView err: %+v", err)
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	return v, nil
+}
+
+// DeleteView soft-deletes a saved view, unless it's locked (as UpdateView).
+// No view deleted is sql.ErrNoRows.
 func DeleteView(ctx context.Context, tableId, viewId uuid.UUID) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	const q = `UPDATE data_table_views SET deleted_at=NOW(), updated_at=NOW()
-		WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`
+		WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL AND NOT locked`
 	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, viewId, tableId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/DeleteView err: %+v", err)
@@ -1172,13 +1300,15 @@ func DeleteView(ctx context.Context, tableId, viewId uuid.UUID) error {
 	return nil
 }
 
-// ListViews returns a table's saved views in position order.
-func ListViews(ctx context.Context, tableId uuid.UUID) ([]*View, error) {
+// ListViews returns a table's saved views that reader sees, in position
+// order: those shared, and their own.
+func ListViews(ctx context.Context, tableId, reader uuid.UUID) ([]*View, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	q := `SELECT ` + viewColumns + ` FROM data_table_views
-		WHERE table_id=$1 AND deleted_at IS NULL ORDER BY position ASC, created_at ASC`
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, tableId)
+		WHERE table_id=$1 AND deleted_at IS NULL AND (owner_id IS NULL OR owner_id=$2)
+		ORDER BY position ASC, created_at ASC`
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, tableId, reader)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/ListViews err: %+v", err)
 		return nil, err

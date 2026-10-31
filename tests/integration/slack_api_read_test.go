@@ -44,6 +44,9 @@ import (
 type slackFromExport struct {
 	token   string
 	self    string
+	team    string            // the workspace's id, as auth.test says it
+	people  map[string]string // other tokens Slack takes, by token: whose
+	bots    map[string]bool   // tokens that are an app's
 	users   []any
 	kinds   map[string][]any // conversations.list, by type
 	members map[string][]any
@@ -55,6 +58,7 @@ type slackFromExport struct {
 
 	mu    sync.Mutex
 	asked []string
+	of    []string // what each method was asked about: its channel or types
 }
 
 func newSlackFromExport(t *testing.T, dir, token, self string) *slackFromExport {
@@ -68,7 +72,8 @@ func newSlackFromExport(t *testing.T, dir, token, self string) *slackFromExport 
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
-	s := &slackFromExport{token: token, self: self, kinds: map[string][]any{}, members: map[string][]any{}, pins: map[string][]any{},
+	s := &slackFromExport{token: token, self: self, team: "T0ACME001", people: map[string]string{}, bots: map[string]bool{},
+		kinds: map[string][]any{}, members: map[string][]any{}, pins: map[string][]any{},
 		history: map[string][]any{}, replies: map[string][]any{}, byTs: map[string]map[string]any{}, files: map[string][]byte{}}
 	read("users.json", &s.users)
 	// A conversation as conversations.list gives it (no people, no pins: the
@@ -152,7 +157,12 @@ func (s *slackFromExport) attach(ts string, file map[string]any) {
 }
 
 func (s *slackFromExport) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	signedIn := r.Header.Get("Authorization") == "Bearer "+s.token
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	whose, other := s.people[token]
+	signedIn := token == s.token || other
+	if token == s.token {
+		whose = s.self
+	}
 	if body, ok := s.files[r.URL.Path]; ok {
 		if !signedIn {
 			w.Header().Set("Content-Type", "text/html")
@@ -167,6 +177,7 @@ func (s *slackFromExport) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	s.mu.Lock()
 	s.asked = append(s.asked, method)
+	s.of = append(s.of, method+" "+r.Form.Get("channel")+r.Form.Get("types"))
 	s.mu.Unlock()
 	answer := func(v any) {
 		w.Header().Set("Content-Type", "application/json")
@@ -192,7 +203,11 @@ func (s *slackFromExport) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ch := r.Form.Get("channel")
 	switch method {
 	case "auth.test":
-		answer(map[string]any{"ok": true, "user_id": s.self})
+		reply := map[string]any{"ok": true, "user_id": whose, "team_id": s.team}
+		if s.bots[token] {
+			reply["bot_id"] = "B0GITHUB1"
+		}
+		answer(reply)
 	case "users.list":
 		page("members", s.users)
 	case "conversations.list":
@@ -220,13 +235,19 @@ func TestASlackWorkspaceReadThroughTheAPIComesAcross(t *testing.T) {
 	slackapi.Base = srv.URL + "/api/"
 	t.Cleanup(func() { slackapi.Base = was })
 
-	// Ada's house rules carry a file only the token opens; Standup carries one
-	// shared from Google Drive, which stays there.
+	// Ada's house rules carry a file only the token opens, and so does Bo's
+	// answer in their DM; Standup carries one shared from Google Drive, which
+	// stays there.
 	rules := []byte("1. Be kind.\n2. Ship on Fridays.\n")
 	slack.files["/files-pri/T0ACME-F0RULES01/house-rules.txt"] = rules
 	slack.attach("1759309260.000200", map[string]any{"id": "F0RULES01", "name": "house-rules.txt", "title": "House rules", "mimetype": "text/plain",
 		"size": len(rules), "mode": "hosted", "url_private": srv.URL + "/files-pri/T0ACME-F0RULES01/house-rules.txt",
 		"url_private_download": srv.URL + "/files-pri/T0ACME-F0RULES01/house-rules.txt?download=1"})
+	rota := []byte("Mon Ada\nTue Bo\n")
+	slack.files["/files-pri/T0ACME-F0ROTA001/rota.txt"] = rota
+	slack.attach("1759309960.000200", map[string]any{"id": "F0ROTA001", "name": "rota.txt", "title": "Rota", "mimetype": "text/plain",
+		"size": len(rota), "mode": "hosted", "url_private": srv.URL + "/files-pri/T0ACME-F0ROTA001/rota.txt",
+		"url_private_download": srv.URL + "/files-pri/T0ACME-F0ROTA001/rota.txt?download=1"})
 	slack.attach("1759309680.000600", map[string]any{"id": "F0GDOC001", "name": "Q4 plan", "mode": "external", "is_external": true,
 		"external_type": "gdrive", "url_private": "https://docs.google.com/document/d/q4-plan"})
 
@@ -271,7 +292,7 @@ func TestASlackWorkspaceReadThroughTheAPIComesAcross(t *testing.T) {
 		} `json:"read"`
 	}
 	_ = json.Unmarshal([]byte(progress), &read)
-	if r := read.Read; r.Users != 4 || r.Channels != 3 || r.Groups != 1 || r.DMs != 1 || r.MPIMs != 1 || r.Conversations != 6 || r.Of != 6 || r.Files != 1 || r.Replies != 3 {
+	if r := read.Read; r.Users != 4 || r.Channels != 3 || r.Groups != 1 || r.DMs != 1 || r.MPIMs != 1 || r.Conversations != 6 || r.Of != 6 || r.Files != 2 || r.Replies != 3 {
 		t.Errorf("what the read found: %+v (%s)", r, progress)
 	}
 	readNotes := codes(t, w.e, job)
@@ -290,13 +311,45 @@ func TestASlackWorkspaceReadThroughTheAPIComesAcross(t *testing.T) {
 	integration.Settle(t)
 	notes := w.cameAcross(t, job, time.Since(start))
 
-	// The file the token opened, from the export, in the store as the
-	// admin's upload; the Drive file noted, and no link fetched.
-	var objKey string
-	if err := w.e.PG.QueryRow(`SELECT obj_key FROM attachments WHERE obj_key LIKE '%house-rules.txt'`).Scan(&objKey); err != nil {
-		t.Errorf("the file's attachment: %v", err)
-	} else if body, ok := w.e.store.Written("userFileUpload/" + objKey); !ok || string(body) != string(rules) {
-		t.Errorf("the file in the store at %s: %q (%v)", objKey, body, w.e.store.Keys())
+	// The files the token opened, from the export, each in the store as the
+	// admin's upload and one node in the graph: made by the admin's own node
+	// (a maker named by uuid alone is a new, stray user node), and listed
+	// once by its post or chat. The Drive file is noted, and no link fetched.
+	for name, f := range map[string]struct {
+		body   []byte
+		holder string
+	}{"house-rules.txt": {rules, "post"}, "rota.txt": {rota, "chat"}} {
+		var id uuid.UUID
+		var objKey string
+		if err := w.e.PG.QueryRow(`SELECT id, obj_key FROM attachments WHERE obj_key LIKE '%' || $1`, name).Scan(&id, &objKey); err != nil {
+			t.Errorf("%s's attachment: %v", name, err)
+			continue
+		}
+		if body, ok := w.e.store.Written("userFileUpload/" + objKey); !ok || string(body) != string(f.body) {
+			t.Errorf("%s in the store at %s: %q (%v)", name, objKey, body, w.e.store.Keys())
+		}
+		var graph struct {
+			Nodes []struct {
+				By struct {
+					Uid string `json:"uid"`
+				} `json:"attachment_created_by"`
+			} `json:"nodes"`
+			Holders []struct {
+				Files []struct {
+					Uid string `json:"uid"`
+				} `json:"files"`
+			} `json:"holders"`
+		}
+		raw := w.dg.Query(t, `{
+			nodes(func: eq(attachment_uuid, "`+id.String()+`")) { attachment_created_by { uid } }
+			holders(func: has(`+f.holder+`_attachments)) @cascade { files: `+f.holder+`_attachments @filter(eq(attachment_uuid, "`+id.String()+`")) { uid } }
+		}`)
+		if err := json.Unmarshal(raw, &graph); err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		if len(graph.Nodes) != 1 || graph.Nodes[0].By.Uid != w.admin.UserDgraphInfo.Uid || len(graph.Holders) != 1 || len(graph.Holders[0].Files) != 1 {
+			t.Errorf("%s in the graph: %s; want one node, made by the admin's (%s), listed once by one %s", name, raw, w.admin.UserDgraphInfo.Uid, f.holder)
+		}
 	}
 	if notes["FILE_NOT_READ"] != 1 || notes["FILE_GONE"] != 0 || notes["FILE_BLOCKED_URL"] != 0 {
 		t.Errorf("the run's file notes: %v, want the Drive file's FILE_NOT_READ alone", notes)

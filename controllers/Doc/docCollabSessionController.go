@@ -98,6 +98,12 @@ func DocCollabSession(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Unauthorized doc access"})
 		return
 	}
+	// Only a page opens in the editor (docs F1): a folder, a file or a link,
+	// told only to someone who may open it.
+	if d.NodeKind != "" {
+		notAPage(w)
+		return
+	}
 	s := sessionFor(d)
 	s.Name = presenceName(ctx, userInfo.UserPostgresInfo.Id)
 	helpers.WriteJSON(w, http.StatusOK, s)

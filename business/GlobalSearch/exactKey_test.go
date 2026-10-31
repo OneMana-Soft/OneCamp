@@ -46,7 +46,7 @@ func TestAKeyTypedIntoSearchFindsItsTaskFirst(t *testing.T) {
 	if hit == nil || hit.Task == nil || hit.Task.Uuid != task.String() || hit.Task.TaskProjectName != "Q4 launch" {
 		t.Fatalf("the key's hit: %+v", hit)
 	}
-	page := withExactKey(hit, []*openSearchStruct.GlobalSearchOpenSearchResp{
+	page := withExact(hit, []*openSearchStruct.GlobalSearchOpenSearchResp{
 		{Type: openSearchStruct.DOC_TYPE},
 		{Type: openSearchStruct.TASK_TYPE, Task: &openSearchStruct.OpenSearchTask{Uuid: task.String()}},
 	})

@@ -25,7 +25,6 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Doc"
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	"github.com/akashc777/OneCamp/business/Access/level"
-	adminAuditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	business "github.com/akashc777/OneCamp/business/Doc"
@@ -582,59 +581,6 @@ func TransferDoc(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Handed over.", "data": helpers.Envolope{"doc_uuid": in.DocUUID, "owner": strings.ToLower(in.ToUserUUID)}})
 }
 
-// RecoverDoc has a workspace admin take over a doc, or hand it to someone
-// (POST /admin/docs/recover {doc_uuid, to_user_uuid?, reason}), when its owner
-// has left or can't be reached. Loud: recorded in the admin audit log and on
-// the doc, where its owner and full-access people see it, and told to the
-// owner before.
-func RecoverDoc(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	_, who := accessBusiness.RequestSubject(r)
-	var in struct {
-		DocUUID    string `json:"doc_uuid"`
-		ToUserUUID string `json:"to_user_uuid"`
-		Reason     string `json:"reason"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || !helpers.IsCanonicalUUID(in.DocUUID) || (in.ToUserUUID != "" && !helpers.IsCanonicalUUID(strings.ToLower(in.ToUserUUID))) {
-		badRequest(w, "Say which doc to recover, and who to hand it to.")
-		return
-	}
-	if !who.ActingAdmin() {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only a workspace admin can recover a doc."})
-		return
-	}
-	if strings.TrimSpace(in.Reason) == "" {
-		badRequest(w, "Say why the doc is being recovered: its owner will see it.")
-		return
-	}
-	to := strings.ToLower(in.ToUserUUID)
-	if to != "" {
-		member, err := activeMember(ctx, to)
-		if err != nil {
-			accessFailed(ctx, w, "RecoverDoc", err)
-			return
-		}
-		if !member {
-			badRequest(w, "A doc can be handed only to someone in this workspace.")
-			return
-		}
-	}
-	rec, err := accessBusiness.Recover(ctx, who, docRes(in.DocUUID), to, in.Reason)
-	if err != nil {
-		accessFailed(ctx, w, "RecoverDoc", err)
-		return
-	}
-	from := ""
-	if rec.FromOwnerUUID != nil {
-		from = rec.FromOwnerUUID.String()
-	}
-	adminAuditBusiness.Record(r, "doc.recover", adminAuditBusiness.CategorySecurity,
-		"Recovered a doc from its owner", map[string]interface{}{
-			"doc_uuid": in.DocUUID, "from_owner_uuid": from, "to_owner_uuid": rec.ToOwnerUUID.String(), "reason": rec.Reason,
-		})
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Recovered.", "data": rec})
-}
-
 // LockDoc sets or lifts a doc's lock (POST /doc/lock {doc_uuid, lock:
 // soft|hard|none}). A soft lock is anyone's who may edit; a hard lock, set or
 // lifted, is the owner's or full access's (D-12).
@@ -1080,6 +1026,11 @@ func AuthorizeDocSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	if d.Level < accessBusiness.LevelEdit {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Unauthorized doc access"})
+		return
+	}
+	// Only a page opens in the editor (docs F1), as the session decides.
+	if d.NodeKind != "" {
+		notAPage(w)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{

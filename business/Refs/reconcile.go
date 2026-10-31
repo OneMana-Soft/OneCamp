@@ -51,8 +51,9 @@ const (
 	fixesPerWrite = 100
 )
 
-// The kinds in the order a pass reads them.
-var passKinds = []domain.Kind{Message, Chat, Comment, Doc}
+// The kinds whose bodies a pass reads, in its order; the projected kinds
+// (passNodes) follow them.
+var passKinds = []domain.Kind{Message, Chat, Comment, Doc, Task}
 
 // Report is one kind's pass: what it read and the drift it found (and fixed,
 // when it applied).
@@ -107,9 +108,9 @@ var (
 )
 
 // ReconcileAll is one pass over every kind (opts.Kinds, or all): the mirror
-// of doc_task_links first, then each kind's sources in pages. A page that
-// fails stops its kind's pass (the cursor stays before it) and the next kind
-// goes on; the error is the first one.
+// of doc_task_links first, then each kind's sources in pages, then each
+// projected kind's nodes. A page that fails stops its kind's pass (the cursor
+// stays before it) and the next kind goes on; the error is the first one.
 func ReconcileAll(ctx context.Context, opts Options) ([]Report, error) {
 	start := reconcileClock()
 	over := func() bool {
@@ -117,7 +118,7 @@ func ReconcileAll(ctx context.Context, opts Options) ([]Report, error) {
 	}
 	kinds := opts.Kinds
 	if len(kinds) == 0 {
-		kinds = passKinds
+		kinds = append(append([]domain.Kind(nil), passKinds...), projectedKinds()...)
 	}
 	var firstErr error
 	keep := func(err error) {
@@ -132,7 +133,11 @@ func ReconcileAll(ctx context.Context, opts Options) ([]Report, error) {
 		out = append(out, r)
 	}
 	for _, k := range kinds {
-		r, err := passKind(ctx, k, opts, over)
+		run := passKind
+		if domain.IsProjected(k) {
+			run = passNodes
+		}
+		r, err := run(ctx, k, opts, over)
 		keep(err)
 		out = append(out, r)
 		if over() {
@@ -145,32 +150,45 @@ func ReconcileAll(ctx context.Context, opts Options) ([]Report, error) {
 // passKind reads k's sources from its cursor, page by page, within bounds.
 func passKind(ctx context.Context, k domain.Kind, opts Options, over func() bool) (Report, error) {
 	rep := Report{Kind: k, Applied: opts.Apply}
-	after := ""
-	if opts.Cursor != nil {
-		after = opts.Cursor.Load(ctx, k)
-	}
 	size := PageSize
 	if k == Doc {
 		size = DocPageSize
+	}
+	err := pass(ctx, k, opts, over, size, &rep, func(after string, n int) (string, error) {
+		page, err := readPage(ctx, k, after, n)
+		if err != nil {
+			return "", err
+		}
+		if err := fixPage(ctx, k, page, opts.Apply, &rep); err != nil {
+			return "", err
+		}
+		if len(page) < n {
+			return "", nil
+		}
+		return page[len(page)-1].UID, nil
+	})
+	return rep, err
+}
+
+// pass is one kind's pages from its cursor, within opts' bounds and the
+// clock: page reads and fixes at most n after the cursor and answers the
+// cursor after them ("" once it reached the end, so the next pass starts
+// again from the beginning). A page that fails leaves the cursor before it.
+func pass(ctx context.Context, k domain.Kind, opts Options, over func() bool, size int, rep *Report, page func(after string, n int) (string, error)) error {
+	after := ""
+	if opts.Cursor != nil {
+		after = opts.Cursor.Load(ctx, k)
 	}
 	for !over() && (opts.PerKind <= 0 || rep.Read < opts.PerKind) {
 		n := size
 		if opts.PerKind > 0 && opts.PerKind-rep.Read < n {
 			n = opts.PerKind - rep.Read
 		}
-		page, err := readPage(ctx, k, after, n)
+		next, err := page(after, n)
 		if err != nil {
-			return rep, err
+			return err
 		}
-		if err := fixPage(ctx, k, page, opts.Apply, &rep); err != nil {
-			return rep, err
-		}
-		if len(page) < n {
-			rep.Wrapped = true
-			after = ""
-		} else {
-			after = page[len(page)-1].UID
-		}
+		after, rep.Wrapped = next, next == ""
 		if opts.Cursor != nil {
 			opts.Cursor.Save(ctx, k, after)
 		}
@@ -184,7 +202,7 @@ func passKind(ctx context.Context, k domain.Kind, opts Options, over func() bool
 			}
 		}
 	}
-	return rep, nil
+	return nil
 }
 
 // mirrorDocTasks re-reads the docs that hold a to-do for a task, so each
@@ -293,7 +311,9 @@ type redisCursor struct {
 
 func (c *redisCursor) Load(ctx context.Context, k domain.Kind) string {
 	if rdb := redisInit.RedisClient; rdb != nil {
-		if v, err := rdb.Get(ctx, registry.WorkGraphRefsCursor.Build(string(k))).Result(); err == nil && helpers.IsDgraphUID(v) {
+		// A body kind's cursor is a graph uid; a projected kind's is its
+		// projector's own.
+		if v, err := rdb.Get(ctx, registry.WorkGraphRefsCursor.Build(string(k))).Result(); err == nil && (domain.IsProjected(k) || helpers.IsDgraphUID(v)) {
 			return v
 		}
 	}
@@ -408,8 +428,8 @@ func init() {
 	helpers.RegisterSystemCheck(helpers.SystemCheck{
 		Name: "work-graph-links",
 		Kind: helpers.CheckKindBehaviour,
-		Describe: "Reads the last nightly reconcile of the work graph's links (what messages, comments and docs link to): " +
-			"how many it read and the drift it found and fixed. It reads nothing itself.",
+		Describe: "Reads the last nightly reconcile of the work graph's links (what messages, comments and docs link to) " +
+			"and of its meetings' nodes: how many it read and the drift it found and fixed. It reads nothing itself.",
 		Probe: probe,
 	})
 }

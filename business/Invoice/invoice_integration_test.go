@@ -60,7 +60,7 @@ func TestInvoiceLife(t *testing.T) {
 	if _, err := Update(ctx, project, draft.ID, change); !errors.Is(err, ErrNotDraft) {
 		t.Errorf("changing a sent invoice: %v", err)
 	}
-	if err := Delete(ctx, project, draft.ID); !errors.Is(err, ErrNotDraft) {
+	if err := Delete(ctx, project, draft.ID, by); !errors.Is(err, ErrNotDraft) {
 		t.Errorf("deleting a sent invoice: %v", err)
 	}
 
@@ -78,7 +78,7 @@ func TestInvoiceLife(t *testing.T) {
 	if fixed, err := Update(ctx, project, draft.ID, input()); err != nil || fixed.Number != "QL-0001" || len(fixed.Lines) != 2 {
 		t.Errorf("fixing a draft that was sent, number kept: %+v %v", fixed, err)
 	}
-	if err := Delete(ctx, project, draft.ID); !errors.Is(err, ErrWasSent) {
+	if err := Delete(ctx, project, draft.ID, by); !errors.Is(err, ErrWasSent) {
 		t.Errorf("deleting a draft that was sent: %v, want ErrWasSent", err)
 	}
 	if _, next, _ := List(ctx, project, "Q4 launch"); next != "QL-0002" {
@@ -119,7 +119,7 @@ func TestInvoiceLife(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Delete(ctx, project, d2.ID); err != nil {
+	if err := Delete(ctx, project, d2.ID, by); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Get(ctx, project, d2.ID); !errors.Is(err, ErrNotFound) {
@@ -127,5 +127,19 @@ func TestInvoiceLife(t *testing.T) {
 	}
 	if _, next, _ := List(ctx, project, "Q4 launch"); next != "QL-0002" {
 		t.Errorf("a deleted draft's number is the next again: %s", next)
+	}
+
+	// V-78: the delete was soft. Another draft takes QL-0002, so the deleted
+	// one's restore brings it back as the next number, with its lines.
+	d3, err := Create(ctx, project, second, by)
+	if err != nil || d3.Number != "QL-0002" {
+		t.Fatalf("the next draft: %+v %v", d3, err)
+	}
+	if err := Restore(ctx, d2.ID); err != nil {
+		t.Fatal(err)
+	}
+	back, err := Get(ctx, project, d2.ID)
+	if err != nil || back.Number != "QL-0003" || back.TotalCents != d2.TotalCents {
+		t.Fatalf("the restored draft: %+v %v", back, err)
 	}
 }

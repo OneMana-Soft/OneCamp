@@ -381,6 +381,25 @@ func TestAStoredCommentChangesAsItsRulesSay(t *testing.T) {
 		t.Errorf("a doc comment edited here: %v", err)
 	}
 
+	// A reaction is taken back only by whoever made it, while they can still see the row.
+	five := rw.start(t, maya, "<p>Seen</p>")
+	fc := five.Comments[0].ID
+	bos, err := rw.changes.React(bg, who(bo), five.ID, fc, "eyes")
+	if err != nil {
+		t.Fatalf("Bo reacting: %v", err)
+	}
+	if err := rw.changes.Unreact(bg, who(maya), five.ID, fc, bos); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Maya takes back Bo's reaction: %v", err)
+	}
+	rw.row.levels[bo] = accessBusiness.LevelNone
+	if err := rw.changes.Unreact(bg, who(bo), five.ID, fc, bos); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Bo, who can't see the row any more, takes back his reaction: %v", err)
+	}
+	rw.row.levels[bo] = accessBusiness.LevelEdit
+	if err := rw.changes.Unreact(bg, who(bo), five.ID, fc, bos); err != nil {
+		t.Errorf("Bo takes back his own reaction: %v", err)
+	}
+
 	// A row in the trash takes no change.
 	four := rw.start(t, maya, "<p>Later</p>")
 	rw.row.deleted = true

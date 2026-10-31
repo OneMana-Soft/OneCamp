@@ -903,6 +903,30 @@ func handOffMentionToDurable(ctx context.Context, a *model.AiAgent, channelID, p
 	return true
 }
 
+// agentRunContext is the context a run gets, detached from its caller's.
+//
+// Who the run is for: a mention is asked for by its author (for a delegated
+// hop, the person at the root of the chain): the run reaches only what they
+// and the sponsor both can, and an author that cannot be identified refuses
+// rather than borrowing the sponsor's reach. An event's is the event loop's
+// to say (handleAgentEvent binds every one). A schedule has nobody, and
+// clears anything the dispatching context carried.
+//
+// No run keeps a batch's open tasks (helpers.WithOpenTasks): one that a
+// batch's task.created started can go on long after it, and what it says of
+// those tasks reads their restriction, which may have been set meanwhile.
+func agentRunContext(ctx context.Context, triggerSource, triggeredBy string) context.Context {
+	runCtx := helpers.WithOpenTasks(context.WithoutCancel(ctx))
+	switch triggerSource {
+	case model.TriggerMention:
+		runCtx = askedBy(runCtx, triggeredBy)
+	case model.TriggerEvent:
+	default:
+		runCtx = ai.WithoutRunRequester(runCtx)
+	}
+	return runCtx
+}
+
 // launchAgent runs an agent in the background under a detached context, with a
 // per-agent in-flight guard (drop if already running) and a panic guard. Writes
 // performed by the agent are loop-safe (RunAgent tags the context).
@@ -920,20 +944,7 @@ func handOffMentionToDurable(ctx context.Context, a *model.AiAgent, channelID, p
 // falls back to a top-level post if the comment can't be written, so an
 // @mention is never dropped.
 func launchAgent(ctx context.Context, a *model.AiAgent, triggerSource, prompt, replyChannelID, replyPostID string, postChannelIDs []string, triggeredBy string) {
-	runCtx := context.WithoutCancel(ctx)
-	// Who the run is for. A mention is asked for by its author (for a delegated
-	// hop, the person at the root of the chain): the run reaches only what they
-	// and the sponsor both can, and an author that cannot be identified refuses
-	// rather than borrowing the sponsor's reach. An event's is the event loop's
-	// to say (handleAgentEvent binds every one). A schedule has nobody, and
-	// clears anything the dispatching context carried.
-	switch triggerSource {
-	case model.TriggerMention:
-		runCtx = askedBy(runCtx, triggeredBy)
-	case model.TriggerEvent:
-	default:
-		runCtx = ai.WithoutRunRequester(runCtx)
-	}
+	runCtx := agentRunContext(ctx, triggerSource, triggeredBy)
 	serialKey, maxInFlight := agentLaunchSerialKey(a.Id, triggerSource, replyChannelID)
 	go func() {
 		defer func() {

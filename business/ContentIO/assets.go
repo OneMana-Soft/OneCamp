@@ -15,13 +15,10 @@ import (
 	contentcodec "github.com/akashc777/OneCamp/business/ContentCodec"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/helpers/avscan"
 	"github.com/akashc777/OneCamp/helpers/uploadsafe"
-	minioInit "github.com/akashc777/OneCamp/initializers/minioInit"
 	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
 	authService "github.com/akashc777/OneCamp/services/Auth"
 	"github.com/google/uuid"
-	"github.com/minio/minio-go/v7"
 )
 
 // The asset uploader: an imported page's images go to the doc's attachments,
@@ -45,39 +42,31 @@ var uploadFile = func(ctx context.Context, userID uuid.UUID, docUUID, name strin
 	return storeAttachment(ctx, userID, docUUID, name, r, size, false)
 }
 
-// storeAttachment checks, scans and stores one file as a doc's attachment;
-// image is a picture the doc shows, which must be one.
+// notAnImage refuses what isn't a picture a doc may show (an SVG never is).
+func notAnImage(contentType string) error {
+	if !strings.HasPrefix(contentType, "image/") || strings.Contains(contentType, "svg") {
+		return fmt.Errorf("not an image (%s)", contentType)
+	}
+	return nil
+}
+
+// storeAttachment checks, scans and stores one file as a doc's attachment
+// through the one upload store (attachmentBusiness.StoreUpload); image is a
+// picture the doc shows, which must be one.
 func storeAttachment(ctx context.Context, userID uuid.UUID, docUUID, name string, r io.Reader, size int64, image bool) (objID, src, contentType string, err error) {
-	safe, err := uploadsafe.PrepareUpload(r, name, uploadsafe.Options{AllowInlineImages: image})
+	opts := attachmentBusiness.StoreOptions{Safe: uploadsafe.Options{AllowInlineImages: image}}
+	if image {
+		opts.Accept = notAnImage
+	}
+	stored, err := attachmentBusiness.StoreUpload(ctx, r, size, name, userID, opts)
 	if err != nil {
 		return "", "", "", err
 	}
-	if image && (!strings.HasPrefix(safe.ContentType, "image/") || strings.Contains(safe.ContentType, "svg")) {
-		return "", "", "", fmt.Errorf("not an image (%s)", safe.ContentType)
-	}
-	if minioInit.MinioClient == nil {
-		return "", "", "", ErrUnavailable
-	}
-	id := uuid.New()
-	objName := fmt.Sprintf("%v/%v_%v", userID, id, safe.SafeName)
-	full := "userFileUpload/" + objName
-	bucket := helpers.UserUploadBucket()
-	_, scan, err := attachmentBusiness.SafeUploadToMinio(ctx, safe.Reader, attachmentBusiness.SafeUploadOptions{
-		Bucket: bucket, ObjectName: full, ContentType: safe.ContentType,
-		ContentDisposition: safe.ContentDisposition, Size: size,
-	})
-	if err != nil {
+	if err := attachmentBusiness.CreateAttachment(ctx, stored.ID, stored.ObjKey, userID, postgresStruct.ATTACHMENT_SRC_DOC, docUUID); err != nil {
+		_ = attachmentBusiness.RemoveStored(ctx, stored.ObjKey)
 		return "", "", "", err
 	}
-	if scan.Verdict == avscan.VerdictInfected {
-		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucket, full, minio.RemoveObjectOptions{})
-		return "", "", "", fmt.Errorf("blocked: it carries a virus signature (%s)", scan.Signature)
-	}
-	if err := attachmentBusiness.CreateAttachment(ctx, id, objName, userID, postgresStruct.ATTACHMENT_SRC_DOC, docUUID); err != nil {
-		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucket, full, minio.RemoveObjectOptions{})
-		return "", "", "", err
-	}
-	return id.String(), authService.BackendBaseURL() + "/doc/getDocAttachment/" + docUUID + "/" + id.String(), safe.ContentType, nil
+	return stored.ID.String(), authService.BackendBaseURL() + "/doc/getDocAttachment/" + docUUID + "/" + stored.ID.String(), stored.ContentType, nil
 }
 
 // uploadImages uploads a page's images, from the import (a file beside it)

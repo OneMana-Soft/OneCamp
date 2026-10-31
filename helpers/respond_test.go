@@ -33,3 +33,40 @@ func TestPageAndUUIDParams(t *testing.T) {
 		t.Fatalf("not an id: %v %d", ok, rec.Code)
 	}
 }
+
+// A log line names a request by the route it matched, through a mounted
+// router too, and never by its path: one that matched nothing (yet) is
+// "(no route)".
+func TestRouteOfNamesTheRouteNotThePath(t *testing.T) {
+	var named []string
+	name := func(_ http.ResponseWriter, r *http.Request) { named = append(named, RouteOf(r)) }
+	v1 := chi.NewRouter()
+	v1.Get("/docs/{doc_uuid}", name)
+	router := chi.NewRouter()
+	router.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			name(w, r) // before routing
+			next.ServeHTTP(w, r)
+		})
+	})
+	router.Get("/guest/m/{token}", name)
+	router.Mount("/v1", v1)
+
+	for _, path := range []string{"/guest/m/a-link-token", "/v1/docs/7c9e6679-7425-40de-944b-e07fc1f90ae7", "/nothing/here"} {
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+	want := []string{"(no route)", "/guest/m/{token}", "(no route)", "/v1/docs/{doc_uuid}", "(no route)"}
+	if len(named) != len(want) {
+		t.Fatalf("named %q, want %q", named, want)
+	}
+	for i := range want {
+		if named[i] != want[i] {
+			t.Errorf("named %q, want %q", named, want)
+			break
+		}
+	}
+	outside := httptest.NewRequest(http.MethodGet, "/guest/m/a-link-token", nil).WithContext(context.Background())
+	if got := RouteOf(outside); got != "(no route)" {
+		t.Errorf("a request no router saw is %q, want (no route)", got)
+	}
+}

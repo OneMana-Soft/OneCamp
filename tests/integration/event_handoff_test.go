@@ -13,6 +13,8 @@ package integration_test
 //   - nothing runs where the event was raised, and it waits for a worker;
 //   - a worker's listener gets it with its data, and with where it came from
 //     (a GitHub change is never taken to be a member's ask);
+//   - a task a batch just made reaches it marked open, so the worker reads no
+//     restriction of it (the A4 cost fix's mark);
 //   - a listener that fails is tried again, and one that already had the
 //     event doesn't get it twice;
 //   - the system check says whether a worker is taking events.
@@ -52,6 +54,7 @@ func TestEventsCrossFromAnAPIServerToAWorker(t *testing.T) {
 		kind   string
 		data   map[string]interface{}
 		github bool
+		open   bool // the event's task is marked open (helpers.WithOpenTasks)
 	}
 	var mu sync.Mutex
 	var steady []heard // every event of this test the steady listener had
@@ -61,8 +64,9 @@ func TestEventsCrossFromAnAPIServerToAWorker(t *testing.T) {
 		if data["marker"] != marker {
 			return
 		}
+		task, _ := data["task_id"].(string)
 		mu.Lock()
-		steady = append(steady, heard{kind, data, helpers.IsGitHubOrigin(c)})
+		steady = append(steady, heard{kind, data, helpers.IsGitHubOrigin(c), helpers.TasksOpen(c, task)})
 		mu.Unlock()
 	})
 	webhookBusiness.RegisterEventListener(func(_ context.Context, kind string, data map[string]interface{}) {
@@ -115,6 +119,19 @@ func TestEventsCrossFromAnAPIServerToAWorker(t *testing.T) {
 		}
 		if !h.github {
 			t.Error("a change from GitHub reached the listener as a member's")
+		}
+		waitFor(t, "the event to be acknowledged", func() bool {
+			p, err := rdb.XPending(ctx, "events:handoff", "listeners").Result()
+			return err == nil && p.Count == 0
+		})
+	})
+
+	t.Run("a task a batch just made reaches it marked open", func(t *testing.T) {
+		made := uuid.New()
+		webhookBusiness.DispatchEvent(helpers.WithOpenTasks(ctx, made), "task.created", map[string]interface{}{"marker": marker, "task_id": made.String()})
+		waitFor(t, "the worker to run the task's event", func() bool { return len(steadyHeard("task.created")) == 1 })
+		if !steadyHeard("task.created")[0].open {
+			t.Error("the batch's task reached the worker unmarked, so its restriction is read again there")
 		}
 		waitFor(t, "the event to be acknowledged", func() bool {
 			p, err := rdb.XPending(ctx, "events:handoff", "listeners").Result()

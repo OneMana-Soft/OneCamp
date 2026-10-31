@@ -301,6 +301,9 @@ func updateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc, yjsStat
 			case domain.IsHosted(stored):
 				// A hosted doc (a table row's page) is in no docs index, the
 				// AI's included: it is found through its host (D-18).
+			case !domain.IsPage(stored):
+				// A folder, a file or a link has no text to embed (docs F1): a
+				// rename is a title its search entry carries, not a page.
 			default:
 				// Plain text, for the same reason the indexed body is plain text —
 				// and one more: this text is what the embedding VECTOR is computed

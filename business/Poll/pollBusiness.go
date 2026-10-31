@@ -159,8 +159,7 @@ func Create(ctx context.Context, user *userModels.UserInfo, in NewPoll) (*View, 
 		return nil, fmt.Errorf("post poll: %w", err)
 	}
 	if postID, perr := uuid.Parse(post.Uuid); perr == nil {
-		_ = pollModel.SetPost(ctx, p.ID, postID)
-		p.PostID = &postID
+		linkPost(ctx, p, postID)
 	}
 	return view(p, &pollModel.Tally{Counts: map[string]int{}}, user.UserPostgresInfo.Id, true), nil
 }
@@ -179,6 +178,10 @@ type View struct {
 	Closed    bool         `json:"closed"`
 	CanClose  bool         `json:"can_close"`
 	CreatedBy string       `json:"created_by"`
+	// A call's poll's (call.go): nobody can tell whose its votes are, and
+	// its counts held back for whoever runs the call until shared.
+	Anonymous     bool `json:"anonymous,omitempty"`
+	ResultsHidden bool `json:"results_hidden,omitempty"`
 }
 
 // OptionView is one option with its count.

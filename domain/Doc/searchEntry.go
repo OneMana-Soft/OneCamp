@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	openSearchGlobalSearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
@@ -84,6 +85,12 @@ func DocSearchEntryOf(doc *dgraphStruct.DgraphDoc) *openSearchStruct.OpenSearchD
 		// markup ("<p xmlns=…>"), which a result would show as such.
 		e.DocSnippet = helpers.TruncateRunes(helpers.HTMLToPlainText(e.DocSnippet), searchSnippetRunes)
 	}
+	if !IsPage(doc) {
+		// A folder's or a link's entry has its title alone (docs F1): neither
+		// has a body, and a link's text is another site's. A file has no doc
+		// entry at all (OwnSearchEntry).
+		e.DocBody, e.DocSnippet = "", ""
+	}
 	if e.DocUpdatedAt == 0 {
 		e.DocUpdatedAt = e.DocCreatedAt
 	}
@@ -115,6 +122,15 @@ func DocSearchEntryOf(doc *dgraphStruct.DgraphDoc) *openSearchStruct.OpenSearchD
 		e.DocDeletedAt = &at
 	}
 	return e
+}
+
+// OwnSearchEntry is whether a doc has an entry of its own in the docs index:
+// every page, folder and link. A hosted doc reaches search through its host
+// (D-18), and a file through its current version's entry in the attachments
+// index, which carries its title and sharing as a doc's files' entries do
+// (docs F1). Its comments' and files' entries are written either way.
+func OwnSearchEntry(doc *dgraphStruct.DgraphDoc) bool {
+	return doc != nil && !IsHosted(doc) && doc.NodeKind != NodeFile
 }
 
 // docSearchSync is what is waiting to be written for one doc: a write is
@@ -221,6 +237,29 @@ func writeDocSearchInTurn(docUUID string, children bool) error {
 	return writeDocSearch(ctx, docUUID, children)
 }
 
+// WriteDocSearchNow writes a doc's search entry from the doc, and with
+// children its comments' and files' entries, in its turn among the background
+// writes, and returns once the next search sees them: for a change that took
+// the doc from someone (business/Doc SettleAccessIndexes).
+func WriteDocSearchNow(ctx context.Context, docUUID string, children bool) error {
+	select {
+	case docSearchSlots <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-docSearchSlots }()
+	if err := writeDocSearch(ctx, docUUID, children); err != nil {
+		return err
+	}
+	return refreshDocSearch(ctx)
+}
+
+// refreshDocSearch makes the docs index's writes visible (the comments' and
+// files' entries are, once their settled update returns). A seam for tests.
+var refreshDocSearch = func(ctx context.Context) error {
+	return opensearchInit.RefreshIndices(ctx, openSearchStruct.DOC_INDEX)
+}
+
 // WaitDocSearchWrites waits until no doc's search entry is being written or
 // waiting its turn, for at most timeout or until ctx ends, and returns how
 // many docs' still are (0: all written). For a command that changed docs and
@@ -256,13 +295,17 @@ var writeDocSearch = func(ctx context.Context, docUUID string, children bool) er
 	if IsHosted(doc) {
 		return nil
 	}
-	if err := IndexDocEntry(ctx, DocSearchEntryOf(doc)); err != nil {
-		return err
+	e := DocSearchEntryOf(doc)
+	// A file is found by its versions' entries in the attachments index,
+	// written below with its title and sharing, never by a doc entry.
+	if OwnSearchEntry(doc) {
+		if err := IndexDocEntry(ctx, e); err != nil {
+			return err
+		}
 	}
 	if !children {
 		return nil
 	}
-	e := DocSearchEntryOf(doc)
 	return openSearchGlobalSearchModels.SyncDocMetadataInOpenSearch(ctx, doc.Uuid, &e.DocTitle, &e.DocPrivate,
 		e.DocReadingUsers, e.DocEditingUsers, e.DocCommentingUsers, e.DocCreatedByUserUuid)
 }

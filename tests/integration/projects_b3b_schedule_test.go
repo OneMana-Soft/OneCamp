@@ -10,24 +10,17 @@ package integration_test
 // Run: integ_rel.sh <wt> <log> 'TestB3bTheSchedulerRunsAProjectsCycles'
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
 	cycleController "github.com/akashc777/OneCamp/controllers/Cycle"
-	userDomain "github.com/akashc777/OneCamp/domain/User"
-	"github.com/akashc777/OneCamp/helpers"
-	customMiddleware "github.com/akashc777/OneCamp/middleware"
-	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
@@ -35,22 +28,8 @@ import (
 // route parameter.
 func (s *wa2Scale) postAs(who string, h http.HandlerFunc, body any) (int, string) {
 	s.t.Helper()
-	ctx := context.Background()
-	pg, err := userDomain.GetActiveUserWithAdminFlagByUserUUID(ctx, s.people[who])
-	if err != nil || pg == nil {
-		s.t.Fatalf("load %s: %v", who, err)
-	}
-	gr, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, s.people[who].String())
-	if err != nil || gr == nil {
-		s.t.Fatalf("load %s's profile: %v", who, err)
-	}
 	raw, _ := json.Marshal(body)
-	rc := chi.NewRouteContext()
-	rc.URLParams.Add("project_uuid", s.project)
-	c := context.WithValue(context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}), chi.RouteCtxKey, rc)
-	rec := httptest.NewRecorder()
-	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw)).WithContext(s.request(c)))
-	return rec.Code, rec.Body.String()
+	return s.call(who, http.MethodPost, "/", h, map[string]string{"project_uuid": s.project}, raw)
 }
 
 type b3bCycle struct {

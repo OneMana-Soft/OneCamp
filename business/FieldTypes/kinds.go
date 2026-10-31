@@ -69,7 +69,7 @@ func toCheckbox(v any, _ formula.NumberSigns) (any, bool, int) {
 	if b, ok := v.(bool); ok {
 		return b, true, 0
 	}
-	if b, ok := truth(fmt.Sprint(v)); ok && b {
+	if b, ok := Truth(fmt.Sprint(v)); ok && b {
 		return true, false, 0
 	}
 	return nil, false, 1
@@ -118,14 +118,14 @@ func toText(v any, _ formula.NumberSigns) (any, bool, int) {
 	return nil, false, 1
 }
 
-// truth reads text as a box ticked or not: "true", "yes", "1" and "✓" tick
-// it, "false", "no", "0" and nothing leave it unticked. ok is false for
-// anything else. Pure.
-func truth(s string) (ticked, ok bool) {
+// Truth reads text as a box ticked or not, in any case: "true", "yes", "y",
+// "1", "✓" and "✔" tick it, "false", "no", "n", "0", "✗", "✘" and nothing
+// leave it unticked. ok is false for anything else. Pure.
+func Truth(s string) (ticked, ok bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "true", "yes", "1", "✓":
+	case "true", "yes", "y", "1", "✓", "✔":
 		return true, true
-	case "false", "no", "0", "":
+	case "false", "no", "n", "0", "✗", "✘", "":
 		return false, true
 	}
 	return false, false
@@ -193,7 +193,7 @@ func coerceCheckbox(f *model.Field, v any, _ Input) (any, error) {
 			return x == 1, nil
 		}
 	case string:
-		if b, ok := truth(x); ok {
+		if b, ok := Truth(x); ok {
 			return b, nil
 		}
 	}

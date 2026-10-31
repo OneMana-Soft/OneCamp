@@ -31,6 +31,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	docAdapter "github.com/akashc777/OneCamp/adapter/Doc"
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	globalSearchBusiness "github.com/akashc777/OneCamp/business/GlobalSearch"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
@@ -78,7 +79,7 @@ func TestGlobalSearchFindsDocsByWhoMayReadThemNow(t *testing.T) {
 	// finds: does a search for text, as the person, return the object?
 	finds := func(who, text, id string) bool {
 		t.Helper()
-		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, people[who].String(), people[who].String()+"@example.test", nil, nil, nil, text)
+		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, accessBusiness.Subject{UserUUID: people[who].String()}, people[who].String()+"@example.test", nil, nil, nil, text)
 		if err != nil {
 			t.Fatalf("searching %q as %s: %v", text, who, err)
 		}
@@ -261,7 +262,7 @@ func TestGlobalSearchFindsDocsByWhoMayReadThemNow(t *testing.T) {
 			t.Fatal("the broken entries were findable before the repair; the test isn't testing it")
 		}
 
-		rep, ran, err := docBusiness.RunDocSearchRepair(ctx)
+		rep, ran, err := docBusiness.SearchRepair.Run(ctx)
 		if err != nil || !ran {
 			t.Fatalf("the repair: ran %v, %v (%s)", ran, err, rep)
 		}
@@ -277,7 +278,7 @@ func TestGlobalSearchFindsDocsByWhoMayReadThemNow(t *testing.T) {
 		}
 
 		// Recorded, so later starts skip it; and run again, it finds nothing to change.
-		if _, ran, err := docBusiness.RunDocSearchRepair(ctx); err != nil || ran {
+		if _, ran, err := docBusiness.SearchRepair.Run(ctx); err != nil || ran {
 			t.Errorf("a second start ran the repair again (%v, %v)", ran, err)
 		}
 		again, err := docBusiness.RepairDocSearch(ctx)

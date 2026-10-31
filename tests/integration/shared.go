@@ -25,8 +25,8 @@ package integration
 // When a test ends, the project's clients reach nothing again, as when its
 // own container went. The tests run one at a time (they share the project's
 // package-level clients), so no two tests use a server at once. The
-// containers go when the binary ends: TestMain stops them, and
-// testcontainers' reaper removes them if the binary dies first.
+// containers go when the binary's tests have run: Main (main.go) stops them,
+// and testcontainers' reaper removes them if the binary dies first.
 
 import (
 	"context"
@@ -42,6 +42,13 @@ type shared[T any] struct {
 	mu   sync.Mutex
 	srv  *T
 	stop func()
+}
+
+// add keeps a started server's stop for Main to call (main.go stopServers).
+func (s *stopList) add(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fns = append(s.fns, fn)
 }
 
 // get is the server, started with start if there is none yet. start returns
@@ -94,32 +101,6 @@ func (s *shared[T]) prepared(start func() (*T, func(), error), prepare func(*T) 
 		return nil, err
 	}
 	return srv, nil
-}
-
-// stopList is the started servers' stops, in the order the servers started.
-type stopList struct {
-	mu  sync.Mutex
-	fns []func()
-}
-
-var stops stopList
-
-func (s *stopList) add(fn func()) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.fns = append(s.fns, fn)
-}
-
-// stopServers stops every server the binary started, the last started first.
-// TestMain calls it once every test has run.
-func stopServers() {
-	stops.mu.Lock()
-	fns := stops.fns
-	stops.fns = nil
-	stops.mu.Unlock()
-	for i := len(fns) - 1; i >= 0; i-- {
-		fns[i]()
-	}
 }
 
 // terminate removes a container, giving it 30 s.

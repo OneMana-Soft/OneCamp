@@ -20,6 +20,7 @@ import (
 func TestAProjectsTopicNeverNamesARestrictedTask(t *testing.T) {
 	const secret = "6c1f9a52-3b7e-4d0a-9e21-5f8b7c6d4e3a"
 	const open = "0b4e7c1d-2a9f-4e6b-8d3c-1f0a9b8c7d6e"
+	const first = "9d2e4f60-1a3b-4c5d-8e7f-0a1b2c3d4e5f"
 	prevSend, prevHidden := sendToProject, restrictedAmong
 	t.Cleanup(func() { sendToProject, restrictedAmong = prevSend, prevHidden })
 	var told []string
@@ -46,6 +47,9 @@ func TestAProjectsTopicNeverNamesARestrictedTask(t *testing.T) {
 		},
 		"its dates": func(task string) {
 			PublishTaskDates(&mqttStruct.MqttTaskDates{TaskUuid: task, ProjectUuid: "p", DueDate: "2026-11-02"})
+		},
+		"a chain's dates": func(task string) {
+			PublishTaskDatesMany("p", "ana", []mqttStruct.MqttTaskDate{{TaskUuid: first, DueDate: "2026-11-01"}, {TaskUuid: task, DueDate: "2026-11-02"}})
 		},
 		"a field": func(task string) {
 			PublishTaskField(&mqttStruct.MqttTaskField{TaskUuid: task, ProjectUuid: "p", FieldID: "f", Value: json.RawMessage(`"Signed"`)})

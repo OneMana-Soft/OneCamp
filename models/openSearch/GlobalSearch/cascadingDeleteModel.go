@@ -25,11 +25,11 @@ func exactClauses(field string, ids []string) []string {
 	}
 }
 
-// entryDeletedPainless is true, in an update-by-query's script, for an entry
+// EntryDeletedPainless is true, in an update-by-query's script, for an entry
 // deleted already. A deletion time below 1 was never a deletion (a doc's new
 // comments were once written with -1, and a team's restore writes -1): such
-// an entry is live, and is marked like one.
-const entryDeletedPainless = `(ctx._source.deleted_date != null && !(ctx._source.deleted_date instanceof Number && ((Number) ctx._source.deleted_date).longValue() < 1))`
+// an entry is live.
+const EntryDeletedPainless = `(ctx._source.deleted_date != null && !(ctx._source.deleted_date instanceof Number && ((Number) ctx._source.deleted_date).longValue() < 1))`
 
 // cascadeDeleteScript marks an entry deleted by a cascade from its parent (a
 // doc, post, chat, task, channel or project going away), unless the entry is
@@ -38,7 +38,7 @@ const entryDeletedPainless = `(ctx._source.deleted_date != null && !(ctx._source
 // marked "cascade", and restoring the parent, which clears what the cascade
 // marked, brought the comment back to search for everyone who may read the
 // parent.
-const cascadeDeleteScript = `if ` + entryDeletedPainless + ` { ctx.op = 'noop'; return; }
+const cascadeDeleteScript = `if ` + EntryDeletedPainless + ` { ctx.op = 'noop'; return; }
 ctx._source.deleted_date = params.deleted_at;
 ctx._source.deleted_by = params.deleted_by;`
 
@@ -46,9 +46,10 @@ ctx._source.deleted_by = params.deleted_by;`
 // cascadeDeleteScript it leaves an entry a person deleted as it is, but it
 // takes over a cascade's mark: a comment of a trashed task is marked
 // "cascade", which restoring the task clears, and that would bring back what
-// was hidden under it. entryDeletedPainless is one parenthesised expression,
-// so the whole condition gets the if's own parentheses.
-const hideScript = `if (` + entryDeletedPainless + ` && ctx._source.deleted_by != 'cascade') { ctx.op = 'noop'; return; }
+// was hidden under it. EntryDeletedPainless is one parenthesised expression,
+// so the whole condition needs its own parentheses, or the script doesn't
+// compile and every hide fails.
+const hideScript = `if (` + EntryDeletedPainless + ` && ctx._source.deleted_by != 'cascade') { ctx.op = 'noop'; return; }
 ctx._source.deleted_date = params.deleted_at;
 ctx._source.deleted_by = params.deleted_by;`
 
@@ -117,7 +118,9 @@ func anyOf(clauses []string) string {
 // in indices that name parentID in any of parentFields, except those deleted
 // already (cascadeDeleteScript). deletedBy tags the deletion: "cascade" for a
 // parent going away, which restoring the parent clears; "user" for an item
-// deleted by itself, which nothing brings back.
+// deleted by itself, which nothing brings back. Every cascade here runs under
+// its caller's ctx, so a settle's time limit holds (business/Board
+// settleBoardDelete, business/Doc searchFollowsTrash).
 func SyncCascadingDeletionInOpenSearch(ctx context.Context, parentFields []string, parentID string, deletedAt int64, indices []string, deletedBy string) error {
 	if len(parentFields) == 0 || parentID == "" || len(indices) == 0 {
 		return nil
@@ -130,7 +133,7 @@ func SyncCascadingDeletionInOpenSearch(ctx context.Context, parentFields []strin
 
 	body := cascadeDeleteBody(anyOf(shouldClauses), deletedAt, deletedBy)
 
-	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
+	if _, err := updateByQuerySettled(ctx, indices, body); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SyncCascadingDeletionInOpenSearch failed: %v", err)
 		return err
 	}
@@ -168,7 +171,7 @@ func SyncCascadingUnarchiveInOpenSearch(ctx context.Context, parentFields []stri
 		}
 	}`, deletedBy, strings.Join(shouldClauses, ","))
 
-	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
+	if _, err := updateByQuerySettled(ctx, indices, body); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SyncCascadingUnarchiveInOpenSearch failed: %v", err)
 		return err
 	}
@@ -238,7 +241,7 @@ func SyncCascadingDeletionInOpenSearchMulti(ctx context.Context, parentField str
 	fieldJSON, _ := json.Marshal(parentField)
 	body := cascadeDeleteBody(fmt.Sprintf(`{"terms": {%s: %s}}`, fieldJSON, idsJSON), deletedAt, deletedBy)
 
-	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
+	if _, err := updateByQuerySettled(ctx, indices, body); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SyncCascadingDeletionInOpenSearchMulti failed: %v", err)
 		return err
 	}
@@ -267,7 +270,7 @@ func SyncCascadingUnarchiveInOpenSearchMulti(ctx context.Context, parentField st
 		}
 	}`, deletedBy, parentField, string(idsJSON))
 
-	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
+	if _, err := updateByQuerySettled(ctx, indices, body); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SyncCascadingUnarchiveInOpenSearchMulti failed: %v", err)
 		return err
 	}
@@ -288,7 +291,7 @@ func SyncCascadingDeletionInOpenSearchCombined(ctx context.Context, fieldIDs map
 
 	body := cascadeDeleteBody(anyOf(termsClauses), deletedAt, deletedBy)
 
-	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
+	if _, err := updateByQuerySettled(ctx, indices, body); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SyncCascadingDeletionInOpenSearchCombined failed: %v", err)
 		return err
 	}
@@ -322,7 +325,7 @@ func SyncCascadingUnarchiveInOpenSearchCombined(ctx context.Context, fieldIDs ma
 		}
 	}`, deletedBy, strings.Join(termsClauses, ","))
 
-	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
+	if _, err := updateByQuerySettled(ctx, indices, body); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SyncCascadingUnarchiveInOpenSearchCombined failed: %v", err)
 		return err
 	}

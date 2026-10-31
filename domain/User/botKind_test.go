@@ -38,6 +38,7 @@ func TestClassifyBotAndBotNameFollowTheEdition(t *testing.T) {
 			AgentBotEmail(agentID):          BotKindAgent,
 			SlackBridgeBotEmail:             BotKindBridge,
 			CheckInBotEmail:                 BotKindCheckIn,
+			UpgradeRepairBotEmail:           BotKindRepair,
 			"someone@example.com":           "",
 			"":                              "",
 			"unrecognised" + BotEmailDomain: BotKindUnknown,

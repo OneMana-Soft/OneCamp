@@ -80,6 +80,9 @@ func TestClassifyAPIError(t *testing.T) {
 		{"api off", &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "accessNotConfigured"}}}, ProblemAPIDisabled},
 		{"api off text", &googleapi.Error{Code: 403, Message: "Gmail API has not been used in project 1"}, ProblemAPIDisabled},
 		{"quota as 403", &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "userRateLimitExceeded"}}}, ProblemRateLimited},
+		// A day's or a project's quota spent is a wait, never a refusal: sync sends it again later (C9).
+		{"daily quota", &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "dailyLimitExceeded"}}}, ProblemRateLimited},
+		{"project quota", &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "quotaExceeded"}}}, ProblemRateLimited},
 		{"429", &googleapi.Error{Code: 429}, ProblemRateLimited},
 		{"gone", fmt.Errorf("gmail thread: %w", &googleapi.Error{Code: 404}), ProblemNotFound},
 		{"outage", &googleapi.Error{Code: 503}, ProblemUnknown},

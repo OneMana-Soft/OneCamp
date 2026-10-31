@@ -82,19 +82,7 @@ func storeLoopScan(t *testing.T) (map[string]bool, int) {
 				return err
 			}
 			rel := filepath.ToSlash(strings.TrimPrefix(path, "../"))
-			lf := &loopFile{path: rel, pkg: modulePath + "/" + filepath.ToSlash(filepath.Dir(rel)), imports: map[string]string{}, ast: f}
-			for _, im := range f.Imports {
-				p := strings.Trim(im.Path.Value, `"`)
-				name := filepath.Base(p)
-				if im.Name != nil {
-					name = im.Name.Name
-				} else if strings.Contains(p, "go-redis") {
-					name = "redis"
-				} else if strings.HasPrefix(p, "github.com/dgraph-io/dgo") {
-					name = "dgo"
-				}
-				lf.imports[name] = p
-			}
+			lf := &loopFile{path: rel, pkg: modulePath + "/" + filepath.ToSlash(filepath.Dir(rel)), imports: importPaths(f), ast: f}
 			files = append(files, lf)
 			for _, decl := range f.Decls {
 				// A package variable holding a function (a seam tests replace:

@@ -45,3 +45,32 @@ func TestSlacksChannelEventsAreTheChangesALineSays(t *testing.T) {
 		}
 	}
 }
+
+// Slack's system notices come across only as a channel's lines: its history
+// follows the operator's choice, and the notices no line says never come, in a
+// channel or a conversation, whatever the option.
+func TestSlacksSystemNoticesComeAcrossOnlyAsAChannelsLines(t *testing.T) {
+	for _, c := range []struct {
+		subtype         string
+		skip, linesHere bool
+		out             bool
+	}{
+		{"channel_join", false, true, false},
+		{"group_topic", false, true, false},
+		{"channel_join", true, true, true},
+		{"group_topic", true, true, true},
+		{"channel_join", false, false, true},
+		{"channel_purpose", false, true, true},
+		{"pinned_item", false, true, true},
+		{"reminder_add", false, true, true},
+		{"bot_add", false, false, true},
+		{"", false, true, false},
+		{"", true, false, false},
+		{"bot_message", false, true, false},
+		{"thread_broadcast", true, true, false},
+	} {
+		if got := leftOut(c.subtype, c.skip, c.linesHere); got != c.out {
+			t.Errorf("%q (skip %v, lines here %v): left out %v, want %v", c.subtype, c.skip, c.linesHere, got, c.out)
+		}
+	}
+}

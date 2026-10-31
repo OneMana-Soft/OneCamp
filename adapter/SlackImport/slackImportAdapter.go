@@ -13,9 +13,11 @@ import (
 // JobOptions are operator-tunable knobs for a single import. Stored in
 // slack_import_jobs.options as JSONB, decoded back here when read.
 type JobOptions struct {
-	// SkipSubtypes drops noisy system messages (channel_join, channel_leave,
-	// channel_topic, channel_purpose, etc.) from the import. Default true.
-	// Operators rarely want to keep "Akash has joined the channel" noise.
+	// SkipSubtypes leaves out a channel's history: its joins, leaves, topic
+	// changes, renames and archives. Default false: kept, they arrive as quiet
+	// lines in the channel. Slack's other system notices (a purpose set, a pin
+	// notice, reminders, integrations) never come across; a pin arrives as the
+	// pin itself.
 	SkipSubtypes *bool `json:"skip_subtypes,omitempty"`
 
 	// SendInvites, when true, queues an invitation email to provisioned
@@ -27,6 +29,11 @@ type JobOptions struct {
 	// avoid collisions with existing OneCamp channels. Empty means no
 	// prefix; collisions are resolved by suffixing "-from-slack".
 	ChannelPrefix string `json:"channel_prefix,omitempty"`
+
+	// MemberDMs is a member's read of their own Slack conversations
+	// (business/SlackImport member_read.go): planned and run as it ends, and
+	// shown to admins without what's in it.
+	MemberDMs bool `json:"member_dms,omitempty"`
 
 	// MaxFileBytes caps individual file downloads from Slack. Larger
 	// files become placeholder attachments with the original Slack URL
@@ -94,8 +101,11 @@ type JobView struct {
 	// AI off, or an older job) from "the model returned nothing".
 	Digest      *string    `json:"digest,omitempty"`
 	TriggeredBy *uuid.UUID `json:"triggered_by,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	// MemberName is whose own Slack DMs a member's read brought, for the
+	// admins' history to say who (options.member_dms).
+	MemberName string    `json:"member_name,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 	// Live counts (denormalised from chunks for the FE; cheap to compute).
 	ChunksTotal   int `json:"chunks_total"`
 	ChunksDone    int `json:"chunks_done"`

@@ -21,6 +21,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -38,6 +39,13 @@ var personNamePattern = regexp.MustCompile(`^[\p{L}\p{M}\p{N} .'’-]+$`)
 // é, and looks and sorts as one. Pure.
 func NormalizePersonName(name string) string {
 	return norm.NFC.String(strings.TrimSpace(name))
+}
+
+// PersonNameKey is a name as two are compared to say they're one person's:
+// its kept form (NormalizePersonName) with its inner spaces collapsed and its
+// case folded, so "Ana  Lima" and "ana lima" are one name. "" for none. Pure.
+func PersonNameKey(name string) string {
+	return cases.Fold().String(strings.Join(strings.Fields(NormalizePersonName(name)), " "))
 }
 
 // IsValidPersonName reports whether name, in its kept form

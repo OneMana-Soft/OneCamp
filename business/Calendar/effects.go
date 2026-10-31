@@ -62,7 +62,7 @@ func (l liveEffects) created(ctx context.Context, who *model.UserInfo, e *models
 		return
 	}
 	in, user, id := legacyInput(e, guests), *who, e.ID
-	in.SyncToGoogleCalendar = true
+	in.Title, in.SyncToGoogleCalendar = l.s.titler(ctx, subjectOf(who), []*models.Event{e})(e), true
 	helpers.GoSafeNamed("business/Calendar/googleCreate", func() {
 		ctx, cancel := outbound(ctx)
 		defer cancel()
@@ -77,6 +77,7 @@ func (l liveEffects) created(ctx context.Context, who *model.UserInfo, e *models
 func (l liveEffects) updated(ctx context.Context, who *model.UserInfo, before, after *models.Event, guestsBefore, guestsAfter []models.Attendee, guestsSent bool, removed []string) {
 	if gid := before.GoogleEventID; gid != "" {
 		in, user, id := legacyInput(after, guestIDs(guestsAfter)), *who, after.ID
+		in.Title = l.s.titler(ctx, subjectOf(who), []*models.Event{after})(after)
 		helpers.GoSafeNamed("business/Calendar/googleUpdate", func() {
 			ctx, cancel := outbound(ctx)
 			defer cancel()

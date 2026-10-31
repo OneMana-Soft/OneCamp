@@ -11,6 +11,7 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	followBusiness "github.com/akashc777/OneCamp/business/Follow"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -28,6 +29,7 @@ var (
 	noticeAccount   = userDomain.GetActiveUserWithAdminFlagByUserUUID
 	noticeDecideAll = accessBusiness.ResolveAll
 	noticeTaskNames = taskDomain.TaskNames
+	noticeNamed     = taskKeys.NamedAll
 )
 
 func taskNotices(ctx context.Context, readerUUID string, ids []string) (map[string]bool, map[string]string, error) {
@@ -66,7 +68,8 @@ func taskNotices(ctx context.Context, readerUUID string, ids []string) (map[stri
 	if err != nil {
 		return nil, nil, err
 	}
-	for id, name := range names {
+	// Each by its key first, as its live notice was (Q4-12 Fix the login).
+	for id, name := range noticeNamed(ctx, names) {
 		if readable[id] {
 			titles[id] = name
 		}

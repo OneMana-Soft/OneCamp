@@ -81,7 +81,7 @@ func ReadCallView(ctx context.Context, roomName string, withPeople bool) (CallVi
 		return view, err
 	}
 	for _, p := range people {
-		if p == nil || IsAgentIdentity(p.Identity) || (p.Permission != nil && p.Permission.Hidden) {
+		if !livekitInit.IsPerson(p) {
 			continue
 		}
 		view.Active = true

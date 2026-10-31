@@ -84,6 +84,7 @@ var (
 	insertThread = models.Insert
 	addPeople    = models.AddParticipants
 	touchReply   = models.TouchReply
+	lastReplyAt  = models.LastReplyAt
 	followersOf  = models.Followers
 	now          = func() time.Time { return time.Now().UTC() }
 )
@@ -203,6 +204,16 @@ func Replied(ctx context.Context, r Reply) {
 	if err := replied(ctx, r); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/ThreadIndex Replied: thread %s in %s %s: %+v", r.Root, r.Kind, r.ID, err)
 	}
+}
+
+// LatestReply is when the thread rooted at root last had a reply, as the index
+// has it: zero for none, or for a root that isn't one.
+func LatestReply(ctx context.Context, root string) (time.Time, error) {
+	id, err := uuid.Parse(root)
+	if err != nil {
+		return time.Time{}, nil
+	}
+	return lastReplyAt(ctx, id)
 }
 
 func replied(ctx context.Context, r Reply) error {

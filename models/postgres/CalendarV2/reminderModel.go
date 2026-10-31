@@ -169,7 +169,7 @@ func CancelReminderJobsExcept(ctx context.Context, db DB, event uuid.UUID, keep 
 // and have no reminder waiting for anyone: those a write made with nobody
 // told (an import, the move, the demo's seeding), for the planner to reach.
 func UnplannedEvents(ctx context.Context, db DB, from, to time.Time, limit int) ([]uuid.UUID, error) {
-	rows, err := db.QueryContext(ctx, `SELECT e.id FROM events e
+	return queryIDs(ctx, db, "UnplannedEvents", `SELECT e.id FROM events e
 		WHERE e.deleted_at IS NULL AND e.series_id IS NULL AND e.status <> 'cancelled'
 		  AND (
 		    (e.rrule = '' AND (e.start_at BETWEEN $1 AND $2 OR e.start_date BETWEEN ($1::timestamptz)::date AND ($2::timestamptz)::date))
@@ -180,18 +180,4 @@ func UnplannedEvents(ctx context.Context, db DB, from, to time.Time, limit int) 
 		      AND j.payload->>'event_id' = e.id::text)
 		ORDER BY coalesce(e.start_at, e.start_date::timestamptz)
 		LIMIT $3`, from, to, limit)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/CalendarV2.UnplannedEvents err: %+v", err)
-		return nil, err
-	}
-	defer rows.Close()
-	var out []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
 }

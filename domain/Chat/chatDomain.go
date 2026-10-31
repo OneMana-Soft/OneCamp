@@ -109,7 +109,7 @@ func GetLatestChatMessageCountByUserID(ctx context.Context, userID uuid.UUID) (c
 	// The rule above is the read state's (models/postgres/ReadState), so the
 	// count, the first unread and Mark unread agree.
 	query := `
-		SELECT lsc.grp_id, COUNT(m.id) AS chat_count
+		SELECT lsc.grp_id, COUNT(m.id) AS chat_count, MAX(m.created_at) AS last_unread_at
 		FROM last_seen_chat lsc
 		LEFT JOIN chats m ON ` + readStateModels.Chat.Unread() + `
 		WHERE lsc.user_id = $1
@@ -251,6 +251,7 @@ func GetDgraphChatBasicByUUID(ctx context.Context, chatUUID string, userDgraphUI
 	query := `query ChatInfo($id: string, $userId: string){
 				chatInfo(func: eq(chat_uuid, $id)) {
 					uid
+					chat_kind
 					chat_from {
 						uid
 						user_uuid
@@ -303,6 +304,7 @@ func GetDgraphChatByUUID(ctx context.Context, chatUUID string) (dgraphChat *dgra
 	variables["$id"] = chatUUID
 	query := `query ChatInfo($id: string){
 				chatInfo(func: eq(chat_uuid, $id)) {
+					chat_kind
 					uid
 					chat_from {
 						uid
@@ -410,48 +412,7 @@ func GetUserChatListWithLatestChat(ctx context.Context, userUUID string) (dgraph
 				userInfo(func: eq(user_uuid, $user_id)) {
 					user_uuid
 					user_dms @cascade(dm_chats){
-						dm_grouping_id
-						dm_name
-						dm_participants @filter(` + dmParticipantVisible + `) {
-							user_uuid
-							user_name
-							user_full_name
-							user_profile_object_key
-							is_bot
-							user_device_connected
-							user_status
-						}
-						dm_chats @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z")) (orderdesc:chat_created_at, first: 1) @cascade( chat_from){
-							chat_uuid
-							chat_body_text
-							chat_created_at
-							chat_kind
-							chat_system
-							chat_copy_of
-							chat_from {
-								user_uuid
-								user_name
-								user_full_name
-								user_profile_object_key
-								is_bot
-								user_device_connected
-								user_status
-							}
-							
-							chat_attachments {
-								attachment_uuid
-								attachment_file_name
-								attachment_obj_key
-								attachment_width
-								attachment_height
-								attachment_size
-								attachment_raw_type
-								attachment_type
-								attachment_duration
-								attachment_created_at
-							}
-						}
-					}
+` + dmListFields + `					}
 			  	}
 			}`
 
@@ -1334,37 +1295,6 @@ func BulkRestoreChatsInDgraph(ctx context.Context, chatUUIDs []string) error {
 			helpers.LogErrorWithContext(ctx, "domain/BulkRestoreChatsInDgraph failed for batch %d-%d: %v", start, end, err)
 			return err
 		}
-	}
-	return nil
-}
-
-// AddAttachmentToChatInDgraph appends a single DgraphAttachment to a
-// chat's MediaObj edge. Used by the Slack-import retrofit pass after a
-// historical attachment is downloaded.
-//
-// Implementation pattern mirrors AddAttachmentToPostInDgraph in the
-// post domain: upsert by chat_uuid, append the new edge.
-func AddAttachmentToChatInDgraph(ctx context.Context, chatUUID string, att *dgraphStruct.DgraphAttachment) error {
-	if att == nil {
-		return nil
-	}
-
-	query := fmt.Sprintf(`query {
-									  cha as var(func: eq(chat_uuid, "%s"))
-								  }`, chatUUID)
-
-	dgraphChat := &dgraphStruct.DgraphChat{
-		Uid:      "uid(cha)",
-		Uuid:     chatUUID,
-		DType:    []string{"Chat"},
-		MediaObj: []*dgraphStruct.DgraphAttachment{att},
-	}
-
-	if err := dgraphModels.UpdateChat(ctx, query, dgraphChat, ""); err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/AddAttachmentToChatInDgraph failed chat=%s att=%s err=%+v",
-			chatUUID, att.Uuid, err)
-		return err
 	}
 	return nil
 }

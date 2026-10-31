@@ -75,7 +75,8 @@ const (
 var maxTreePages = 1000
 
 // Seams for tests: where a picture is read from, how a database becomes a
-// table, the import's id map, and where a note to the importer goes.
+// table, the import's id map, and where notes to the importer go (several at
+// once, in one statement).
 var (
 	fetchPicture = func(ctx context.Context, address string) (*safefetch.Response, error) {
 		return safefetch.Fetch(ctx, address, safefetch.Options{MaxBytes: maxPictureBytes, Timeout: pictureTimeout, Accept: "image/*"})
@@ -84,9 +85,11 @@ var (
 		return safefetch.Fetch(ctx, address, safefetch.Options{MaxBytes: maxFileBytes, Timeout: fileTimeout})
 	}
 	tableFromDatabase = notionAdapter.TableFromDatabase
+	importActor       = dataTableBusiness.ImportActor
 	lookupMapped      = importModels.LookupIdMapping
+	mappedOf          = importModels.IdMapOf
 	recordMapped      = importModels.UpsertIdMappingWithOwnership
-	noteImport        = importModels.LogImportError
+	noteImport        = importModels.LogImportErrors
 )
 
 // pagesOn is whether an import brings pages (its "pages" option).
@@ -268,6 +271,9 @@ type tree struct {
 	// noComments is set once the connection is found unable to read
 	// comments, which it then isn't asked for again.
 	noComments bool
+	// people are the users the import brought Notion's people across as, by
+	// their Notion id (peopleAcross): nil until read.
+	people map[string]uuid.UUID
 }
 
 func (t *tree) get(path string, out any) error {
@@ -288,13 +294,19 @@ func (t *tree) post(path string, body, out any) error {
 // shared, gone, or of a kind the API won't give), as opposed to the API or
 // the token failing the whole tree.
 func unreadable(err error) bool {
-	var api *apiError
-	return errors.As(err, &api) && api.Status >= 400 && api.Status < 500
+	var answer *importProvider.StatusError
+	return errors.As(err, &answer) && answer.Code < 500 && !errors.Is(err, importProvider.ErrTokenRejected)
 }
 
 // note tells the person importing about something left in Notion.
 func (t *tree) note(sourceID, code, msg string) {
-	noteImport(t.ctx, t.job.Id, nil, importModels.EntityDoc, sourceID, importModels.SeverityWarning, code, msg, nil)
+	noteImport(t.ctx, t.job.Id, []importModels.ImportError{leftInNotion(sourceID, code, msg)})
+}
+
+// leftInNotion is a note about something left in Notion, as the report keeps
+// it. Pure.
+func leftInNotion(sourceID, code, msg string) importModels.ImportError {
+	return importModels.ImportError{EntityType: importModels.EntityDoc, SourceID: sourceID, Severity: importModels.SeverityWarning, Code: code, Message: msg}
 }
 
 // page reads a page, then the pages under it, in the order they stand in it.
@@ -553,20 +565,31 @@ func (t *tree) table(dataSource, title, icon string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	table, leftOut, err := tableFromDatabase(t.ctx, dataTableBusiness.Actor{UserID: *t.job.TriggeredBy}, notionAdapter.Database{
+	actor, err := importActor(t.ctx, *t.job.TriggeredBy)
+	if err != nil {
+		return "", err
+	}
+	table, notes, err := tableFromDatabase(t.ctx, actor, notionAdapter.Database{
 		Title: title, Icon: icon, Columns: columns(src.Properties), Rows: rows, Private: true,
 	})
 	if err != nil {
 		return "", err
 	}
-	if leftOut > 0 {
-		t.note(dataSource, "TABLE_ROWS_LEFT_OUT", fmt.Sprintf("%d rows of %q couldn't be added to its table.", leftOut, title))
+	// Every row comes across; what didn't is in the report, a note each,
+	// written together: a value no column kind took names its field and the
+	// value, as does one that became an option.
+	said := make([]importModels.ImportError, 0, len(notes)+2)
+	for _, n := range notes {
+		said = append(said, leftInNotion(dataSource, n.Code, fmt.Sprintf("%q: %s", title, n.Msg)))
 	}
 	if err := recordMapped(t.ctx, t.job.Id, importModels.EntityTable, dataSource, table.Id, nil, nil, true); err != nil {
-		t.note(dataSource, "TABLE_NOT_RECORDED", fmt.Sprintf("The table %q came across, but the import couldn't note it, so a roll back leaves it in place.", title))
+		said = append(said, leftInNotion(dataSource, "TABLE_NOT_RECORDED", fmt.Sprintf("The table %q came across, but the import couldn't note it, so a roll back leaves it in place.", title)))
 	}
 	if more {
-		t.note(dataSource, "TABLE_ROWS_LEFT_OUT", fmt.Sprintf("%q has more than %d rows; the first %d came across.", title, maxTableRows, maxTableRows))
+		said = append(said, leftInNotion(dataSource, "TABLE_ROWS_LEFT_OUT", fmt.Sprintf("%q has more than %d rows; the first %d came across.", title, maxTableRows, maxTableRows)))
+	}
+	if len(said) > 0 {
+		noteImport(t.ctx, t.job.Id, said)
 	}
 	return table.Id.String(), nil
 }
@@ -756,6 +779,21 @@ func (t *tree) pageHref(id string) string {
 	return ""
 }
 
+// peopleAcross is who the import brought Notion's people across as, by their
+// Notion id: the users stage's id map, read once a tree. When it can't be
+// read, the tree's people mentioned stay their names, and the import says so.
+func (t *tree) peopleAcross() map[string]uuid.UUID {
+	if t.people == nil {
+		people, err := mappedOf(t.ctx, t.job.Id, importModels.EntityUser)
+		if err != nil {
+			t.note("", "people_unread", "People mentioned in these pages came across as their names: who the import brought across couldn't be read.")
+			people = map[string]uuid.UUID{}
+		}
+		t.people = people
+	}
+	return t.people
+}
+
 // linkHref is where a piece of rich text links to: a page of the import, or
 // any other address as it is.
 func (t *tree) linkHref(rt notionRichText) string {
@@ -775,6 +813,7 @@ func (t *tree) linkHref(rt notionRichText) string {
 
 // text writes rich text as inline HTML.
 func (t *tree) text(rts []notionRichText) string {
+	people := t.peopleAcross()
 	var b strings.Builder
 	for _, rt := range rts {
 		if rt.Type == "equation" && rt.Equation != nil {
@@ -787,6 +826,15 @@ func (t *tree) text(rts []notionRichText) string {
 			if rt.Mention != nil && rt.Mention.Date != nil && len(rt.Mention.Date.Start) >= 10 {
 				fmt.Fprintf(&b, `<time data-type="date-mention" datetime="%s">%s</time>`, html.EscapeString(rt.Mention.Date.Start[:10]), s)
 				continue
+			}
+			// A person the import brought across is a mention of them, which
+			// the doc keeps (N1 gap 1); anyone else stays their name.
+			if rt.Mention != nil && rt.Mention.User != nil {
+				if who, ok := people[rt.Mention.User.ID]; ok && who != uuid.Nil {
+					name := html.EscapeString(strings.TrimPrefix(rt.PlainText, "@"))
+					fmt.Fprintf(&b, `<span data-type="mention" data-id="%s" data-label="%s">@%s</span>`, who, name, name)
+					continue
+				}
 			}
 			if rt.Mention != nil && rt.Mention.Page != nil {
 				if href := t.pageHref(rt.Mention.Page.ID); href != "" {

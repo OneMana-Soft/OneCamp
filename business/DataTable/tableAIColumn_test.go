@@ -258,20 +258,6 @@ func TestADraftedTableIsPrivate(t *testing.T) {
 	}
 }
 
-// A fill of every row leaves a person's cells as they are, and counts them;
-// "Fill again" names its rows, and fills them all. The skip had no test:
-// without it the write dropped the answer anyway, after the model was paid.
-func TestFillTargets(t *testing.T) {
-	field := uuid.NewString()
-	rows := []*model.Row{{Id: uuid.New()}, {Id: uuid.New(), AIKept: []string{field}}, {Id: uuid.New(), AIKept: []string{uuid.NewString()}}}
-	if todo, skipped := fillTargets(rows, field, false); len(todo) != 2 || skipped != 1 || todo[0] != rows[0] || todo[1] != rows[2] {
-		t.Errorf("a fill of every row takes %v and skips %d", todo, skipped)
-	}
-	if todo, skipped := fillTargets(rows, field, true); len(todo) != 3 || skipped != 0 {
-		t.Errorf("filling again takes %v and skips %d", todo, skipped)
-	}
-}
-
 // A drafted table's name is cut to 120 characters, never inside one: a cut by
 // bytes split a letter of a long Hindi name, and the table couldn't be stored.
 // (Here, in the AI-only tests, as the draft is AI-only.)

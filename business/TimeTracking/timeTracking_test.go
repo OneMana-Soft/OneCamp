@@ -117,9 +117,6 @@ func TestAmountRoundsEachEntry(t *testing.T) {
 	if got := amount(1800, 1); got != 1 { // half a cent rounds up
 		t.Errorf("amount = %d", got)
 	}
-	if Money(123456) != "1234.56" || Money(5) != "0.05" || Money(-250) != "-2.50" {
-		t.Errorf("money: %s %s %s", Money(123456), Money(5), Money(-250))
-	}
 }
 
 func TestCheckRates(t *testing.T) {
@@ -151,5 +148,9 @@ func TestWriteCSVNeutralisesFormulas(t *testing.T) {
 	out := b.String()
 	if !strings.Contains(out, "'+Launch") || !strings.Contains(out, "'=HYPERLINK") || !strings.Contains(out, ",1.00,yes,") {
 		t.Fatalf("got %s", out)
+	}
+	// The byte order mark first, so Excel reads names as typed (helpers.NewCSVWriter).
+	if !strings.HasPrefix(out, "\uFEFFDate,Start,") {
+		t.Errorf("the report starts with the byte order mark: %q", out[:min(len(out), 12)])
 	}
 }

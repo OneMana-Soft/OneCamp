@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	xhtml "golang.org/x/net/html"
 )
 
 // Plain text as people type it, shown as HTML: paragraphs split by a blank
@@ -45,6 +47,92 @@ func listItem(line string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// HTMLToText is rich text (a task's description) as plain text that
+// PlainTextToHTML reads back the same: a paragraph, heading, quote or code
+// block ends with a blank line, a line break is one, and a list item is a line
+// of its own, "- " (numbered in an ordered list; "[x] " or "[ ] " after it in a
+// to-do list). Other markup goes, entities are decoded, and white space
+// collapses as HTML shows it, except in a code block. For text read outside
+// the app and brought back in (a task list's CSV).
+func HTMLToText(s string) string {
+	var sb strings.Builder
+	// lists holds each open list's next number: 0 for one with bullets.
+	var lists []int
+	pre := 0
+	lineStart := func() bool {
+		out := sb.String()
+		return out == "" || out[len(out)-1] == '\n'
+	}
+	z := xhtml.NewTokenizer(strings.NewReader(s))
+	for {
+		switch z.Next() {
+		case xhtml.ErrorToken:
+			return NormaliseText(sb.String())
+		case xhtml.TextToken:
+			text := string(z.Text())
+			if pre == 0 {
+				text = collapseSpaces(text)
+				if lineStart() {
+					text = strings.TrimLeft(text, " ")
+				}
+			}
+			sb.WriteString(text)
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+			name, more := z.TagName()
+			switch string(name) {
+			case "br":
+				sb.WriteString("\n")
+			case "pre":
+				pre++
+			case "ul":
+				lists = append(lists, 0)
+			case "ol":
+				lists = append(lists, 1)
+			case "li":
+				if n := len(lists); n > 0 && lists[n-1] > 0 {
+					sb.WriteString("\n" + strconv.Itoa(lists[n-1]) + ". ")
+					lists[n-1]++
+				} else {
+					sb.WriteString("\n- ")
+				}
+				for more {
+					var key, val []byte
+					key, val, more = z.TagAttr()
+					if string(key) != "data-checked" {
+						continue
+					}
+					if string(val) == "true" {
+						sb.WriteString("[x] ")
+					} else {
+						sb.WriteString("[ ] ")
+					}
+				}
+			}
+		case xhtml.EndTagToken:
+			name, _ := z.TagName()
+			switch string(name) {
+			case "ul", "ol":
+				if len(lists) > 0 {
+					lists = lists[:len(lists)-1]
+				}
+				if len(lists) == 0 {
+					sb.WriteString("\n\n")
+				}
+			case "pre":
+				pre = max(pre-1, 0)
+				sb.WriteString("\n\n")
+			case "p", "div", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6":
+				// A list item's paragraphs stay on its line.
+				if len(lists) > 0 {
+					sb.WriteString(" ")
+				} else {
+					sb.WriteString("\n\n")
+				}
+			}
+		}
+	}
 }
 
 // PlainTextToHTML is the text as escaped HTML: paragraphs, line breaks and

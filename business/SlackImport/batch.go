@@ -136,23 +136,24 @@ func (mm *messageMaps) prefetch(ctx context.Context, entityType string, batch []
 }
 
 // ownMapping is what this import made for the message at ts, or uuid.Nil.
-func (mm *messageMaps) ownMapping(ctx context.Context, entityType, ts string) uuid.UUID {
+// A read that fails is an error: read as nothing made, the message was made
+// again.
+func (mm *messageMaps) ownMapping(ctx context.Context, entityType, ts string) (uuid.UUID, error) {
 	key := mm.key(ts)
 	if mm.own != nil && mm.ownType == entityType {
-		return mm.own[key]
+		return mm.own[key], nil
 	}
-	id, _ := importModels.LookupIdMapping(ctx, mm.importId, entityType, key)
-	return id
+	return importModels.LookupIdMapping(ctx, mm.importId, entityType, key)
 }
 
-// workspaceMapping is what an earlier import of the workspace made for the message at ts.
-func (mm *messageMaps) workspaceMapping(ctx context.Context, entityType, ts string) uuid.UUID {
+// workspaceMapping is what an earlier import of the workspace made for the
+// message at ts, or uuid.Nil; a read that fails is an error.
+func (mm *messageMaps) workspaceMapping(ctx context.Context, entityType, ts string) (uuid.UUID, error) {
 	key := mm.key(ts)
 	if mm.workspace != nil && mm.ownType == entityType {
-		return mm.workspace[key]
+		return mm.workspace[key], nil
 	}
-	id, _ := importModels.LookupWorkspaceMapping(ctx, mm.workspaceName, entityType, key)
-	return id
+	return importModels.LookupWorkspaceMapping(ctx, mm.workspaceName, entityType, key)
 }
 
 // parentMapping is the message a thread reply answers, or uuid.Nil.
@@ -226,14 +227,14 @@ func (mm *messageMaps) recordCreated(ctx context.Context, entityType, ts string,
 
 // find is what this import, or an earlier import of the workspace, made for
 // the message at ts, read now (an edit or a deletion names a message of any
-// batch), or uuid.Nil.
-func (mm *messageMaps) find(ctx context.Context, entityType, ts string) uuid.UUID {
+// batch), or uuid.Nil; a read that fails is an error.
+func (mm *messageMaps) find(ctx context.Context, entityType, ts string) (uuid.UUID, error) {
 	key := mm.key(ts)
-	id, _ := importModels.LookupIdMapping(ctx, mm.importId, entityType, key)
-	if id == uuid.Nil && mm.workspaceName != "" {
-		id, _ = importModels.LookupWorkspaceMapping(ctx, mm.workspaceName, entityType, key)
+	id, err := importModels.LookupIdMapping(ctx, mm.importId, entityType, key)
+	if err != nil || id != uuid.Nil || mm.workspaceName == "" {
+		return id, err
 	}
-	return id
+	return importModels.LookupWorkspaceMapping(ctx, mm.workspaceName, entityType, key)
 }
 
 // placeholder maps the message at ts, for this import alone, to an id it

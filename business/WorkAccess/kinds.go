@@ -87,6 +87,25 @@ func projectStandings(ctx context.Context, who accessBusiness.Subject, ids []str
 	return OfMany(ctx, who.UserUUID, projects)
 }
 
+// ProjectsViewable is which of ids (project uuids) the person userUUID (graph
+// uid userUID) may see, by lower-case id: the check a project's own routes
+// make of one (NeedView), for many in one read of the projects and one of
+// their roles, so a read across projects asks once however many it names.
+// Ids that name no project are left out.
+func ProjectsViewable(ctx context.Context, userUUID, userUID string, ids []string) (map[string]bool, error) {
+	standings, err := projectStandings(ctx, accessBusiness.Subject{UserUUID: userUUID, UserUID: userUID}, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(standings))
+	for key, s := range standings {
+		if s.Can(NeedView) {
+			out[key] = true
+		}
+	}
+	return out, nil
+}
+
 // projectDecision is the resolver's decision for standing s on a project.
 // Pure.
 func projectDecision(s Standing) accessBusiness.Decision {

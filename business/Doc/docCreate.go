@@ -49,6 +49,21 @@ type NewDoc struct {
 	// Place is "first" or "last" (the default) among its siblings, when no
 	// AfterUUID is named.
 	Place string `json:"place,omitempty"`
+	// Placed says the maker puts the page's block in its parent's body itself
+	// (the editor's "/page"), so PlaceInParent adds none.
+	Placed bool `json:"placed,omitempty"`
+	// Kind is the kind of node the request asks for (docs F1): "folder" or
+	// "link", or none for a page. The controller maps it onto NodeKind, the
+	// kind made, which is never read from a request as it is: a file is made
+	// through AddFile.
+	Kind     string `json:"node_kind,omitempty"`
+	NodeKind string `json:"-"`
+	// LinkURL is a link's address, checked by the caller
+	// (domain/Doc CheckLinkURL, and again as the node is written).
+	LinkURL string `json:"link_url,omitempty"`
+	// UUID is the node's id when the server chose it first: a file's, which
+	// its version 1 is recorded under before its node is made.
+	UUID string `json:"-"`
 }
 
 // TemplateSource gives a doc template's body (the editor's HTML). B5 sets
@@ -76,7 +91,8 @@ const siblingCap = 5000
 // to the trash meanwhile; ErrNotSibling when after names no sibling.
 func CreateDocInTree(ctx context.Context, by *dgraphStruct.DgraphUser, in NewDoc, parent *dgraphStruct.DgraphDoc) (*dgraphStruct.DgraphDoc, error) {
 	var template string
-	if in.TemplateID != "" {
+	// A template is a page's.
+	if in.TemplateID != "" && in.NodeKind == "" {
 		body, err := Templates.Body(ctx, in.TemplateID)
 		if err != nil {
 			return nil, err
@@ -91,6 +107,9 @@ func CreateDocInTree(ctx context.Context, by *dgraphStruct.DgraphUser, in NewDoc
 	defer unlock()
 
 	newUUID := uuid.NewString()
+	if id, err := uuid.Parse(in.UUID); err == nil {
+		newUUID = id.String()
+	}
 	now := time.Now()
 	zero := time.Time{}
 	private := in.Private == nil || *in.Private
@@ -99,6 +118,8 @@ func CreateDocInTree(ctx context.Context, by *dgraphStruct.DgraphUser, in NewDoc
 		DType:         []string{"Doc"},
 		Uuid:          newUUID,
 		Title:         strings.TrimSpace(in.Title),
+		NodeKind:      in.NodeKind,
+		LinkURL:       in.LinkURL,
 		Icon:          in.Icon,
 		CreatedBy:     &dgraphStruct.DgraphUser{Uid: by.Uid},
 		Owner:         &dgraphStruct.DgraphUser{Uid: by.Uid},
@@ -170,13 +191,16 @@ func CreateDocInTree(ctx context.Context, by *dgraphStruct.DgraphUser, in NewDoc
 	// A template's body is seeded, which indexes the doc with it; a blank doc
 	// is indexed here.
 	if template != "" {
-		if err := seedBody(ctx, newUUID, template, by.Uuid); err != nil {
+		if _, err := seedBodyWith(ctx, newUUID, template, collab.Options{By: collab.By{UserUUID: by.Uuid}}); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/CreateDocInTree: seeding the template of %s: %v", newUUID, err)
 		}
 		doc.Body = template
 	} else {
 		syncDocSearch(newUUID, false)
-		ai.EmbedDocContent(doc.Title, "", newUUID, by.Uuid, by.DisplayName(), private, by.Uuid, nil, []string{by.Uuid}, nil)
+		// Only a page is embedded: a folder or a link has no text (docs F1).
+		if domain.IsPage(doc) {
+			ai.EmbedDocContent(doc.Title, "", newUUID, by.Uuid, by.DisplayName(), private, by.Uuid, nil, []string{by.Uuid}, nil)
+		}
 	}
 	resourceEventBusiness.Bus.Emit(ctx, resourceEventBusiness.Event{
 		Kind: resourceEventBusiness.DocCreated, ResourceKind: "doc", ResourceUUID: newUUID,
@@ -184,16 +208,6 @@ func CreateDocInTree(ctx context.Context, by *dgraphStruct.DgraphUser, in NewDoc
 		Data: map[string]string{"parent": parentUUID},
 	})
 	return doc, nil
-}
-
-// seedBody gives a doc nobody has opened its first body (a template's, a
-// duplicate's) through the Live Doc Writer's seed (SeedBodyLive): it refuses a
-// doc that already holds anything, so two tabs never both insert a template,
-// and with the collaboration service unreachable it writes only a doc that is
-// still blank.
-func seedBody(ctx context.Context, docUUID, html, byUUID string) error {
-	_, err := SeedBodyLive(ctx, docUUID, html, collab.By{UserUUID: byUUID})
-	return err
 }
 
 // EmitMoved records that a doc moved (I14): to a new parent, or ("") to the

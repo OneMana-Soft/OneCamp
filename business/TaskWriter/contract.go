@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"time"
 
+	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
@@ -104,7 +105,7 @@ var (
 	unseeing     = taskBusiness.Unseeing
 	setDates     = taskBusiness.UpdateTaskDates
 	isMember     = projectBusiness.HasMember
-	personByUUID = userDomain.GetActiveDgraphUserInfoByUUID
+	personByUUID = userDomain.GetDgraphUserInfoByUUID
 	reorder      = taskBusiness.Reorder
 )
 
@@ -191,9 +192,10 @@ func (todaysWrites) Apply(ctx context.Context, who *userModels.UserInfo, taskID 
 			return nil, nil, err
 		}
 	}
-	// An assignee is someone in the task's project who may see the task (its
-	// restriction may keep one of its people out), checked for them all before
-	// anything changes.
+	// An assignee is someone in the task's project who can be given work
+	// (their account isn't deactivated: the refusal says so by name) and who
+	// may see the task (its restriction may keep one of its people out),
+	// checked for them all before anything changes.
 	projectID := ""
 	if task != nil && task.Project != nil {
 		projectID = task.Project.Uuid
@@ -213,6 +215,9 @@ func (todaysWrites) Apply(ctx context.Context, who *userModels.UserInfo, taskID 
 		person, err := personByUUID(ctx, a.Uuid)
 		if err != nil || person == nil {
 			return task, nil, ErrNotInProject
+		}
+		if err = principalBusiness.Unassignable(person, principalBusiness.Assigned); err != nil {
+			return task, nil, err
 		}
 		// One of its people may still be one its restriction keeps out.
 		if err = unseeing(ctx, taskID.String(), task, person); err != nil {

@@ -4,7 +4,9 @@ package business
 // unit test that touches code which LOGS (the concurrent lookup pre-pass, the
 // steering drain, compaction) fails on its assertion rather than panicking on a
 // nil logger. Mirrors services/AI's test bootstrap; output is discarded to keep
-// test logs readable.
+// test logs readable. The tests run through integration.Main, which stops the
+// harness's servers once an integration run's tests are done (a unit run starts
+// none).
 
 import (
 	"context"
@@ -15,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/google/uuid"
 )
 
@@ -30,5 +33,5 @@ func TestMain(m *testing.M) {
 	// an agent an admin added may reach: these tests' agents are an admin's
 	// unless a test says otherwise.
 	creatorIsAdmin = func(context.Context, *uuid.UUID) bool { return true }
-	os.Exit(m.Run())
+	os.Exit(integration.Main(m))
 }

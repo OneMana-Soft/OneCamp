@@ -38,7 +38,8 @@ func TestARecordingOpenedByTheWrongRouteIsNotFound(t *testing.T) {
 }
 
 // What the player is told when there is nothing to play: still being saved,
-// failed, or a call's transcript with no recording (CALL-BUG-16, CALL-BUG-3).
+// failed, nothing captured (V-32), or a call's transcript with no recording
+// (CALL-BUG-16, CALL-BUG-3).
 // None of these carries a link.
 func TestARecordingWithNothingToPlaySaysWhy(t *testing.T) {
 	ended := time.Now()
@@ -50,6 +51,7 @@ func TestARecordingWithNothingToPlaySaysWhy(t *testing.T) {
 		{&dgraphStruct.DgraphRecording{}, "recording"},
 		{&dgraphStruct.DgraphRecording{EndedAt: &time.Time{}}, "recording"},
 		{&dgraphStruct.DgraphRecording{EndedAt: &ended, Status: "failed"}, "failed"},
+		{&dgraphStruct.DgraphRecording{EndedAt: &ended, Status: "empty"}, "empty"},
 	} {
 		w := httptest.NewRecorder()
 		writeRecordingURL(w, httptest.NewRequest(http.MethodGet, "/", nil), c.rec)

@@ -84,6 +84,9 @@ func addChannelMembersBulk(ctx context.Context, importId uuid.UUID, channelUUID 
 		if dgUser == nil {
 			continue
 		}
+		// Not principalBusiness.CanBeAssigned: an import copies who was in the
+		// channel, as deactivating someone keeps their places, so a match whose
+		// account is deactivated keeps their history beside their messages.
 		if err := channelBusiness.AddChannelMemberEdge(ctx, channelUUID, dgUser, ocUUID); err != nil {
 			helpers.LogWarnWithContext(ctx,
 				"SlackImport.addChannelMembersBulk add failed channel=%s user=%s err=%+v",

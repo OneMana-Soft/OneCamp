@@ -27,6 +27,9 @@ const (
 	ReasonInterval   = "interval"
 	ReasonMassDelete = "mass_delete"
 	ReasonManual     = "manual"
+	// ReasonGuests is the board as it was when a call's guests could start
+	// drawing on it (calls package B): what "Undo guests' drawing" goes back to.
+	ReasonGuests = "guests"
 )
 
 // BoardSnapshot is the in-memory form of a board_snapshots row.
@@ -68,18 +71,19 @@ func CreateSnapshot(ctx context.Context, s *BoardSnapshot) (uuid.UUID, error) {
 	return id, nil
 }
 
-// GetLatestSnapshot returns the most recent snapshot for a board, or nil when
-// none exist. Used for cadence and mass-delete comparisons.
-func GetLatestSnapshot(ctx context.Context, boardUUID string) (*BoardSnapshot, error) {
+// GetLatestSnapshot returns the most recent snapshot for a board, of one of
+// reasons when any are given, or nil when none exist. Used for cadence and
+// mass-delete comparisons, and for the version before a call's guests drew.
+func GetLatestSnapshot(ctx context.Context, boardUUID string, reasons ...string) (*BoardSnapshot, error) {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
 	row := postgresInit.DBConn.SqlDB.QueryRowContext(cctx,
 		`SELECT id, board_uuid, object_key, element_count, state_bytes, reason, contributor_uuids, created_at
 		   FROM board_snapshots
-		  WHERE board_uuid = $1
+		  WHERE board_uuid = $1 AND ($2::text[] IS NULL OR reason = ANY($2))
 		  ORDER BY created_at DESC
-		  LIMIT 1`, boardUUID)
+		  LIMIT 1`, boardUUID, pq.Array(reasons))
 
 	s, err := scanSnapshot(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -148,7 +152,10 @@ func GetSnapshotByID(ctx context.Context, id uuid.UUID, boardUUID string) (*Boar
 
 // PruneBoardSnapshots deletes the board's snapshots beyond the most recent
 // `keep` and returns the object keys of the deleted rows so the caller can
-// remove the backing MinIO objects. Bounds per-board storage.
+// remove the backing MinIO objects. Bounds per-board storage. The newest
+// 'guests' version is spared for a day: a long call's interval versions would
+// otherwise push out what "Undo guests' drawing" goes back to (a day outlasts
+// any call; reading call state here would tie versions to calls).
 func PruneBoardSnapshots(ctx context.Context, boardUUID string, keep int) ([]string, error) {
 	if keep < 1 {
 		keep = 1
@@ -163,6 +170,12 @@ func PruneBoardSnapshots(ctx context.Context, boardUUID string, keep int) ([]str
 		       WHERE board_uuid = $1
 		       ORDER BY created_at DESC
 		       OFFSET $2
+		  )
+		    AND id IS DISTINCT FROM (
+		      SELECT id FROM board_snapshots
+		       WHERE board_uuid = $1 AND reason = 'guests' AND created_at > now() - interval '1 day'
+		       ORDER BY created_at DESC
+		       LIMIT 1
 		  )
 		  RETURNING object_key`, boardUUID, keep)
 	if err != nil {

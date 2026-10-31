@@ -39,6 +39,8 @@ func fail(w http.ResponseWriter, err error) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Not found, or not yours."})
 	case errors.Is(err, contentIOBusiness.ErrConflict):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "This import has already ended."})
+	case errors.Is(err, contentIOBusiness.ErrBadChoices):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "The choices for this import couldn't be read."})
 	case errors.Is(err, contentIOBusiness.ErrUnavailable):
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Imports and exports are not available on this server right now."})
 	default:
@@ -49,7 +51,7 @@ func fail(w http.ResponseWriter, err error) {
 // ImportDoc takes a file sent with the request (multipart: file, and
 // parent_uuid for where its pages go) and starts its import.
 //
-// POST /doc/import → 202 {job}
+// POST /doc/import (multipart: parent_uuid or into, choices, then file) → 202 {job}
 func ImportDoc(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
@@ -61,7 +63,8 @@ func ImportDoc(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Send the file as multipart form data."})
 		return
 	}
-	var parent string
+	var parent, into string
+	var choices json.RawMessage
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
@@ -80,12 +83,19 @@ func ImportDoc(w http.ResponseWriter, r *http.Request) {
 		case "parent_uuid":
 			b, _ := io.ReadAll(io.LimitReader(part, 64))
 			parent = strings.TrimSpace(string(b))
+		case "into":
+			b, _ := io.ReadAll(io.LimitReader(part, 32))
+			into = strings.TrimSpace(string(b))
+		case "choices":
+			choices, _ = io.ReadAll(io.LimitReader(part, maxStartChoices))
 		case "file":
 			job, err := contentIOBusiness.Pipeline.Import(r.Context(), who, contentIOBusiness.ImportRequest{
 				Filename:   part.FileName(),
 				MediaType:  part.Header.Get("Content-Type"),
 				ParentUUID: parent,
+				Into:       into,
 				Size:       -1,
+				Choices:    choices,
 				Body:       part,
 			})
 			if err != nil {
@@ -100,21 +110,33 @@ func ImportDoc(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Send the file (after parent_uuid, when there is one)."})
+	helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Send the file (after parent_uuid, into or choices, when there are any)."})
 }
+
+// maxStartChoices bounds the choices an import starts with: how its first
+// preview reads the file (number signs, the order of a date's day and month,
+// a zone), which a few lines hold. A preview's answer (ChooseImport) may name
+// every column of every sheet.
+const maxStartChoices = 8 << 10
 
 type presignBody struct {
 	Filename   string `json:"filename"`
 	MediaType  string `json:"media_type"`
 	Size       int64  `json:"size"`
 	ParentUUID string `json:"parent_uuid"`
+	// Into is what the import makes: "" docs, "calendar" a calendar's
+	// events, "table" a spreadsheet's tables.
+	Into string `json:"into"`
+	// Choices are how a preview first reads the file, for an import into
+	// what is previewed (a spreadsheet's tables).
+	Choices json.RawMessage `json:"choices"`
 }
 
 // PresignImport starts the import of a file too large to send with a
 // request: the browser puts it at the answer's address, then calls
 // StartImport.
 //
-// POST /doc/import/presign {filename, media_type, size, parent_uuid} → 201 {job, upload}
+// POST /doc/import/presign {filename, media_type, size, parent_uuid, into, choices} → 201 {job, upload}
 func PresignImport(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
@@ -122,12 +144,13 @@ func PresignImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body presignBody
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&body); err != nil || strings.TrimSpace(body.Filename) == "" || body.Size <= 0 {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxStartChoices+(4<<10))).Decode(&body); err != nil || strings.TrimSpace(body.Filename) == "" || body.Size <= 0 {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Say the file's name and size."})
 		return
 	}
 	job, upload, err := contentIOBusiness.Pipeline.PrepareUpload(r.Context(), who, contentIOBusiness.ImportRequest{
-		Filename: body.Filename, MediaType: body.MediaType, ParentUUID: body.ParentUUID, Size: body.Size,
+		Filename: body.Filename, MediaType: body.MediaType, ParentUUID: body.ParentUUID, Into: body.Into, Size: body.Size,
+		Choices: body.Choices,
 	})
 	if err != nil {
 		fail(w, err)
@@ -146,6 +169,40 @@ func StartImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job, err := contentIOBusiness.Pipeline.StartUploaded(r.Context(), who, chi.URLParam(r, "job_id"))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"job": job})
+}
+
+// chooseBody is a person's answer to a ready import's preview: their
+// choices, and whether they confirm them (else the file is previewed again,
+// read as they say).
+type chooseBody struct {
+	Choices json.RawMessage `json:"choices"`
+	Confirm bool            `json:"confirm"`
+}
+
+// ChooseImport answers a ready import's preview.
+//
+// POST /doc/import/{job_id}/choose {choices, confirm} → 202 {job}
+func ChooseImport(w http.ResponseWriter, r *http.Request) {
+	who, _, ok := whoIs(r)
+	if !ok {
+		helpers.WriteUnauthorized(w)
+		return
+	}
+	var body chooseBody
+	if err := json.NewDecoder(io.LimitReader(r.Body, 512<<10)).Decode(&body); err != nil {
+		fail(w, contentIOBusiness.ErrBadChoices)
+		return
+	}
+	job, err := contentIOBusiness.Pipeline.Choose(r.Context(), who, chi.URLParam(r, "job_id"), body.Choices, body.Confirm)
+	if errors.Is(err, contentIOBusiness.ErrConflict) {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "This import isn't waiting for an answer any more.", "job": job})
+		return
+	}
 	if err != nil {
 		fail(w, err)
 		return

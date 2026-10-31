@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	domain "github.com/akashc777/OneCamp/domain/Task"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
@@ -44,9 +45,14 @@ func assigneeWrite(taskUUID string, from, to, by *dgraphStruct.DgraphUser, at, d
 // assignee, with its deletion time as it was, so a restore brings it back as
 // left. An old import's re-check takes off an assignee its source doesn't let
 // in, and an admin's undo of it puts them back, whatever the task's state
-// (business/Import recheck.go), which skips a person whose account is
-// deactivated.
+// (business/Import recheck.go). Handed only to someone who can be given work,
+// as every path that assigns.
 func AssignInTrash(ctx context.Context, task *dgraphStruct.DgraphTask, to, by *dgraphStruct.DgraphUser) error {
+	if to != nil {
+		if err := principalBusiness.Unassignable(to, principalBusiness.Assigned); err != nil {
+			return err
+		}
+	}
 	from := ""
 	if task.Assignee != nil {
 		from = task.Assignee.Uid

@@ -78,9 +78,10 @@ type SourceFieldValue struct {
 	InDescription bool
 }
 
-// PointsValue is a task's points (Linear's estimate, ClickUp's sprint points):
-// a number field, Points, as OneCamp's estimates are in time. Every provider
-// names it the same so a team moving from two sources has one field.
+// PointsValue is a task's points with no scale (ClickUp's sprint points): a
+// number field, Points, that every such provider names the same, so a team
+// moving from two sources has one field. Points on a scale (Linear's) are the
+// task's own (SourceTask.EstimatePoints).
 func PointsValue(points float64) SourceFieldValue {
 	return SourceFieldValue{
 		Field: SourceField{SourceID: "points", Name: "Points", Type: FieldNumber},

@@ -192,15 +192,53 @@ func TestCustomFields(t *testing.T) {
 		t.Errorf("copied %v, want %v", got, want)
 	}
 
-	// Deleting a field takes its values with it.
-	if err := Delete(ctx, project, budget.ID); err != nil {
+	// Deleting a field is soft (V-78): every task keeps its value, unseen
+	// until the field is restored.
+	kept := func() int {
+		var n int
+		if err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_field_values WHERE field_id = $1`, budget.ID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	valued := kept()
+	if valued == 0 {
+		t.Fatal("no task has a budget to keep")
+	}
+	if err := Delete(ctx, project, budget.ID, admin); err != nil {
 		t.Fatal(err)
 	}
+	if n := kept(); n != valued {
+		t.Fatalf("the deleted field's values: %d kept of %d", n, valued)
+	}
 	if v, _ := model.ValueOf(ctx, uuid.MustParse(t1.Uuid), budget.ID); v != nil {
-		t.Errorf("the deleted field's value: %s", v)
+		t.Errorf("the deleted field's value reads: %s", v)
+	}
+	if values, _ := model.ValuesFor(ctx, []uuid.UUID{uuid.MustParse(t1.Uuid)}); values[t1.Uuid][budget.ID.String()] != nil {
+		t.Errorf("the deleted field's value is listed")
 	}
 	if fields, _ := List(ctx, project); len(fields) != 4 {
 		t.Errorf("%d fields left, want 4", len(fields))
+	}
+	// Its name is free while it's deleted; its restore waits for the new one to go.
+	again, err := Create(ctx, project, Input{Name: "budget", Type: TypeText}, admin, "")
+	if err != nil {
+		t.Fatalf("a new field takes the deleted one's name: %v", err)
+	}
+	if err := Restore(ctx, budget.ID); !errors.Is(err, ErrNameTaken) {
+		t.Fatalf("restoring Budget while budget lives: %v", err)
+	}
+	if err := Delete(ctx, project, again.ID, admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := Restore(ctx, budget.ID); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := model.ValueOf(ctx, uuid.MustParse(t1.Uuid), budget.ID); v == nil {
+		t.Errorf("the restored field's value is back: none")
+	}
+	if fields, _ := List(ctx, project); len(fields) != 5 {
+		t.Errorf("%d fields after the restore, want 5", len(fields))
 	}
 }
 

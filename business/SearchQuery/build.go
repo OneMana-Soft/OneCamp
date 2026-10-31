@@ -764,11 +764,17 @@ func (b *builder) refused(n *Node) (*querySpec.Filter, *Field) {
 	start := b.runeAt(n.Span[0])
 	sub := newSource(b.typed(n.Span))
 	var kids []querySpec.Filter
-	for _, t := range lex(sub) {
+	toks := lex(sub)
+	for i, t := range toks {
 		if t.kind != tWord && t.kind != tQuoted {
 			continue // operators, brackets and commas say nothing as words
 		}
 		if strings.TrimSpace(t.text) == "" {
+			continue
+		}
+		// A field's name alone, before the quoted value it was given
+		// (in:"Q4 launch"), says nothing as a word; the value does.
+		if name, ok := strings.CutSuffix(t.text, ":"); ok && t.kind == tWord && isIdent(name) && i+1 < len(toks) && toks[i+1].kind == tQuoted && toks[i+1].start == t.end {
 			continue
 		}
 		span := querySpec.Span{b.src.u16[start+t.start], b.src.u16[start+t.end]}

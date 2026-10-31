@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
@@ -49,6 +50,9 @@ func fakeBasecamp(t *testing.T) (*httptest.Server, *int32) {
 			fmt.Fprint(w, `[{"id":12,"name":"Cleo","email_address":"cleo@client.test","personable_type":"User","client":true,"company":{"id":3,"name":"Client Co"}},
 				{"id":13,"name":"Gone","personable_type":"Tombstone"},
 				{"id":14,"name":"Helper","personable_type":"Agent"}]`)
+		},
+		"/999/projects/77.json": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound) // deleted since, or hidden from the sign-in
 		},
 		"/999/projects.json": func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("status") == "archived" {
@@ -209,7 +213,7 @@ func TestBasecampTasks(t *testing.T) {
 	build := by["111"]
 	if build.Name != "Build the page" || build.Status != statusOpen || build.Completed ||
 		strings.Join(build.Labels, ",") != "Website" || strings.Join(build.AssigneeIds, ",") != "10,11" ||
-		build.CreatedBy != "10" || build.StartDate == nil || build.DueDate == nil || build.DueDate.Format("2006-01-02") != "2026-02-10" ||
+		build.CreatedBy != "10" || build.StartDay.IsZero() || build.DueDate != nil || build.DueDay.String() != "2026-02-10" ||
 		build.CommentCount != 2 || build.SubtaskCount != 1 || build.ProjectSourceID != "1" {
 		t.Fatalf("Build the page %+v", build)
 	}
@@ -291,6 +295,11 @@ func TestBasecampRefusals(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/todos.json") {
+			w.Header().Set("Retry-After", time.Now().Add(40*time.Second).UTC().Format(http.TimeFormat))
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
@@ -301,6 +310,12 @@ func TestBasecampRefusals(t *testing.T) {
 	err := p.getAll(context.Background(), "tok", srv.URL+"/999/people.json", &people)
 	if d, ok := importProvider.IsRateLimited(err); !ok || d.Seconds() != 7 {
 		t.Fatalf("429 is %v", err)
+	}
+	// Retry-After may be an HTTP date as well as seconds.
+	var todos []json.RawMessage
+	err = p.getAll(context.Background(), "tok", srv.URL+"/999/todos.json", &todos)
+	if d, ok := importProvider.IsRateLimited(err); !ok || d < 38*time.Second || d > 40*time.Second {
+		t.Fatalf("429 with a date is %v (%v)", err, d)
 	}
 	var projects []bcProject
 	if err := p.getAll(context.Background(), "tok", srv.URL+"/999/projects.json", &projects); !errors.Is(err, importProvider.ErrTokenRejected) {

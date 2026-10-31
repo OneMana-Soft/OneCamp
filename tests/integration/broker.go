@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -62,17 +61,17 @@ const brokerConnectTry = 10 * time.Second
 // real CONNECT and CONNACK, made the way the server makes its own
 // (mqttInit.ConnectWithBackoff). Tests share it without meeting: every client
 // id carries the test's own uuids, and what a test does at the broker reaches
-// only its own clients and topics. The container goes when the binary exits
-// (testcontainers' reaper).
+// only its own clients and topics. The container goes when the binary's tests
+// have run, as the other servers' do (shared.go).
 func SetupBroker(t *testing.T) *BrokerEnv {
 	t.Helper()
 	guardTestState(t)
 	ensureLoggers()
-	shared, err := theBroker()
+	srv, err := theBroker.get(startBroker)
 	if err != nil {
 		t.Fatalf("start the broker: %v", err)
 	}
-	env := *shared // the test's own copy: its console login is its own
+	env := *srv // the test's own copy: its console login is its own
 	t.Setenv("EMQX_API_URL", env.API)
 	t.Setenv("EMQX_DASHBOARD_DEFAULT_USERNAME", "console")
 	t.Setenv("EMQX_DASHBOARD_DEFAULT_PASSWORD", env.password)
@@ -98,30 +97,12 @@ func newBrokerClient(addr, idPrefix string) MQTT.Client {
 		SetAutoReconnect(false).SetConnectTimeout(brokerConnectTry))
 }
 
-var theOneBroker struct {
-	mu  sync.Mutex
-	env *BrokerEnv
-}
+var theBroker shared[BrokerEnv]
 
-// theBroker is the binary's broker, started on first use. A start that failed
-// leaves none, and the next test that asks starts one again.
-func theBroker() (*BrokerEnv, error) {
-	theOneBroker.mu.Lock()
-	defer theOneBroker.mu.Unlock()
-	if theOneBroker.env == nil {
-		env, err := startBroker()
-		if err != nil {
-			return nil, err
-		}
-		theOneBroker.env = env
-	}
-	return theOneBroker.env, nil
-}
-
-// startBroker starts EMQX and waits until it lets a client in and its console
-// takes a login. Nothing else is waited on: the status page and an open port
-// come before either, and say less.
-func startBroker() (*BrokerEnv, error) {
+// startBroker starts the binary's EMQX and waits until it lets a client in and
+// its console takes a login. Nothing else is waited on: the status page and an
+// open port come before either, and say less.
+func startBroker() (*BrokerEnv, func(), error) {
 	ctx, cancel := context.WithTimeout(context.Background(), brokerReadyWait)
 	defer cancel()
 	raw := make([]byte, 12)
@@ -140,7 +121,7 @@ func startBroker() (*BrokerEnv, error) {
 		Started: true,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	env := &BrokerEnv{container: c, password: password}
 	ready := func() error {
@@ -168,12 +149,10 @@ func startBroker() (*BrokerEnv, error) {
 		return env.waitForConsole(ctx)
 	}
 	if err := ready(); err != nil {
-		stop, cancelStop := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancelStop()
-		_ = c.Terminate(stop)
-		return nil, err
+		terminate(c)
+		return nil, nil, err
 	}
-	return env, nil
+	return env, func() { terminate(c) }, nil
 }
 
 // waitForConsole waits until the console takes a login, or ctx ends.

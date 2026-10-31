@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	model "github.com/akashc777/OneCamp/models/postgres/Invoice"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 )
 
@@ -230,6 +231,32 @@ func List(ctx context.Context, project uuid.UUID, projectName string) ([]*model.
 	return invoices, NextNumber(prefix, taken), nil
 }
 
+// Restore brings a deleted draft back (POST /restore/invoice/{id}). Its
+// delete gave its number back, so when another invoice has taken it since,
+// the draft comes back as the next number of its prefix.
+func Restore(ctx context.Context, id uuid.UUID) error {
+	err := softDelete.RestoreAs(ctx, softDelete.Invoice, id, nil)
+	if !errors.Is(err, softDelete.ErrTaken) {
+		return err
+	}
+	number, err := model.DeletedNumber(ctx, id)
+	if err != nil {
+		return err
+	}
+	m := numbered.FindStringSubmatch(number)
+	if m == nil {
+		return ErrNumberTaken
+	}
+	taken, err := model.Numbers(ctx, m[1])
+	if err != nil {
+		return err
+	}
+	if err := model.Renumber(ctx, id, NextNumber(m[1], taken)); err != nil {
+		return err
+	}
+	return softDelete.RestoreAs(ctx, softDelete.Invoice, id, ErrNumberTaken)
+}
+
 // Get is one of a project's invoices.
 func Get(ctx context.Context, project, id uuid.UUID) (*model.Invoice, error) {
 	return model.Get(ctx, project, id)
@@ -291,9 +318,10 @@ func SetStatus(ctx context.Context, project, id uuid.UUID, status string) (*mode
 	return out, err
 }
 
-// Delete removes a draft.
-func Delete(ctx context.Context, project, id uuid.UUID) error {
-	err := model.Delete(ctx, project, id)
+// Delete deletes a draft softly, by whom (V-78): its restore brings it back
+// with its number, which no other invoice takes meanwhile.
+func Delete(ctx context.Context, project, id, by uuid.UUID) error {
+	err := model.Delete(ctx, project, id, by)
 	if errors.Is(err, model.ErrNotFound) {
 		return notDraft(ctx, project, id)
 	}

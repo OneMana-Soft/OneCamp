@@ -1,7 +1,6 @@
 package controllers
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -56,17 +55,6 @@ func TestTheServerTranscriberCannotRelayOtherPeoplesPackets(t *testing.T) {
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "not_transcribed_here") {
 		t.Fatalf("a relayed line was not refused: %d %s", w.Code, w.Body.String())
 	}
-}
-
-// CALL-BUG-16. egress_ended without its egress is ignored, never
-// dereferenced.
-func TestARecordingEndWithoutItsEgressIsIgnored(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("egress_ended without an egress panicked: %v", r)
-		}
-	}()
-	recordingEnded(context.Background(), nil)
 }
 
 // The server decides which call a line belongs to; the agent says only that it

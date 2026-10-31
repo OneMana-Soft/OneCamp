@@ -48,6 +48,7 @@ import (
 	globalSearchController "github.com/akashc777/OneCamp/controllers/GlobalSearch"
 	projectController "github.com/akashc777/OneCamp/controllers/Project"
 	savedItemController "github.com/akashc777/OneCamp/controllers/SavedItem"
+	queryController "github.com/akashc777/OneCamp/controllers/SearchQuery"
 	taskController "github.com/akashc777/OneCamp/controllers/Task"
 	taskRestrictionController "github.com/akashc777/OneCamp/controllers/TaskRestriction"
 	timeEntryController "github.com/akashc777/OneCamp/controllers/TimeEntry"
@@ -390,6 +391,9 @@ func TestWA2ARestrictedTaskIsSeenOnlyByItsPeople(t *testing.T) {
 		}, false},
 		{"the search", func(who string) string {
 			return body(who, globalSearchController.GetUnifiedGlobalSearch, nil, "", map[string]string{"global_search_text": "zephyr"})
+		}, false},
+		{"the grammar's search", func(who string) string {
+			return body(who, queryController.SearchQuery, nil, "", map[string]string{"q": "zephyr"})
 		}, false},
 		{"the API's search", func(who string) string {
 			return body(who, v1Controller.SearchV1, nil, "?q=zephyr", nil)

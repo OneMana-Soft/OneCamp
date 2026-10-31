@@ -2,6 +2,7 @@ package ai
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,7 +20,7 @@ import (
 // into a driver error; Go tighter refuses a value the schema allows; FE tighter blocks a
 // legal value with no way to override it from the UI.
 func TestLimitBoundsAgreeAcrossSchemaGoAndFrontend(t *testing.T) {
-	migration := readFileOrSkip(t, "../../migrations/140_add_authorized_model_limits.up.sql")
+	migration := readFile(t, "../../migrations/140_add_authorized_model_limits.up.sql")
 
 	// The CHECK constraints, read out of the migration rather than restated here — a copy
 	// in this test would be a fourth place to drift.
@@ -44,7 +45,7 @@ func TestLimitBoundsAgreeAcrossSchemaGoAndFrontend(t *testing.T) {
 	}
 
 	// The frontend's copy, for the same reason.
-	fe := readFileOrSkip(t, "../../../onecamp-fe/services/aiModelService.ts")
+	fe := webAppFile(t, "services/aiModelService.ts")
 	for _, c := range []struct {
 		field    string
 		min, max int
@@ -97,7 +98,7 @@ func TestStatedWindowReachesBothTheBudgetAndTheClient(t *testing.T) {
 // reload an admin raises a window, sees the new value, and every request keeps running at
 // the old one until the next restart.
 func TestSettingLimitsReloadsTheService(t *testing.T) {
-	src := readFileOrSkip(t, "../../business/AI/authorizedModels.go")
+	src := readFile(t, "../../business/AI/authorizedModels.go")
 	body := funcBody(t, src, "func SetAuthorizedModelLimits(")
 	if !strings.Contains(body, "ReloadAIService") {
 		t.Error("business.SetAuthorizedModelLimits must call ai.ReloadAIService — a cached client " +
@@ -107,15 +108,27 @@ func TestSettingLimitsReloadsTheService(t *testing.T) {
 
 // --- helpers -----------------------------------------------------------------
 
-func readFileOrSkip(t *testing.T, path string) string {
+// readFile reads a file the test checks. One that can't be read fails the test: a
+// renamed migration or a moved function would otherwise end the check unnoticed.
+func readFile(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
-		// The frontend is a sibling checkout and may be absent in some environments.
-		// Skipping is honest; silently passing would not be.
-		t.Skipf("cannot read %s (%v)", path, err)
+		t.Fatalf("cannot read %s (%v)", path, err)
 	}
 	return string(b)
+}
+
+// webAppFile reads a file of the web app that ONECAMP_FE_DIR names (every gate sets
+// it, as for business/Board/scene's note colours). Unset, the test skips, after its
+// own repository's checks have run; set, a file that isn't there fails it.
+func webAppFile(t *testing.T, rel string) string {
+	t.Helper()
+	dir := os.Getenv("ONECAMP_FE_DIR")
+	if dir == "" {
+		t.Skip("ONECAMP_FE_DIR names the web app to check against")
+	}
+	return readFile(t, filepath.Join(dir, rel))
 }
 
 // betweenBounds pulls "BETWEEN <min> AND <max>" out of a named CHECK constraint.

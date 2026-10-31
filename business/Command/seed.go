@@ -18,7 +18,8 @@ type builtinSpec struct {
 
 // builtinCatalog is the source of truth for the org-scoped built-in commands
 // surfaced in the composer typeahead. Handlers are wired in builtins.go;
-// reminder/poll have their own files. Keep this list in sync with Register().
+// reminder/poll have their own files. Each has its handler in the build
+// (catalogEdition_test.go).
 var builtinCatalog = []builtinSpec{
 	{"remind", "Set a reminder for yourself, a person, or a channel", "[me|@who|#channel] <what> <when>", slashModel.ExecDeferred, "ephemeral"},
 	{"dm", "Send a direct message from anywhere", "@person [message]", slashModel.ExecInline, "ephemeral"},
@@ -36,15 +37,18 @@ var builtinCatalog = []builtinSpec{
 	{"expand", "Expand collapsed images and link previews", "", slashModel.ExecInline, "ephemeral"},
 	{"poll", "Create a quick poll", `"Question?" "Option 1" "Option 2"`, slashModel.ExecInteractive, "in_channel"},
 	{"giphy", "Search and send a GIF", "<search term>", slashModel.ExecInteractive, "ephemeral"},
-	{"ask", "Ask OneCamp AI a quick question", "<your question>", slashModel.ExecInline, "ephemeral"},
 	{"feedback", "Send feedback to the workspace admins", "<message>", slashModel.ExecInline, "ephemeral"},
 }
 
 // SeedBuiltinCommands upserts the org-scoped built-in command catalog at
 // startup. Idempotent: re-running updates descriptions/usage without
 // duplicating rows (the unique index on command+scope handles conflicts).
+// A built-in an earlier build seeded and this one doesn't leaves every "/"
+// menu: the edition without AI kept offering /ask, which nothing answered.
 func SeedBuiltinCommands(ctx context.Context) {
+	seeded := make([]string, 0, len(builtinCatalog))
 	for _, b := range builtinCatalog {
+		seeded = append(seeded, b.command)
 		usage := b.usageHint
 		cmd := &slashModel.SlashCommand{
 			Command:      b.command,
@@ -62,5 +66,11 @@ func SeedBuiltinCommands(ctx context.Context) {
 			helpers.LogErrorWithContext(ctx, "business/Command/SeedBuiltinCommands upsert %s err: %+v", b.command, err)
 		}
 	}
-	helpers.MessageLogs.InfoLog.Printf("Seeded %d built-in slash commands", len(builtinCatalog))
+	retired, err := slashModel.RetireBuiltinCommandsExcept(ctx, seeded)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Command/SeedBuiltinCommands retire err: %+v", err)
+	} else if retired > 0 {
+		bumpCatalogVersion(ctx)
+	}
+	helpers.MessageLogs.InfoLog.Printf("Seeded %d built-in slash commands, retired %d", len(builtinCatalog), retired)
 }

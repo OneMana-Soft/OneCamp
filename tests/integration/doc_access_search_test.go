@@ -82,10 +82,11 @@ func TestGlobalSearchFindsDocsThroughTeamsAndSpaces(t *testing.T) {
 
 	finds := func(who, text, id string, teams []*dgraphStruct.DgraphTeam, projects []*dgraphStruct.DgraphProject) bool {
 		t.Helper()
-		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, people[who].String(), people[who].String()+"@example.test", nil, projects, teams, text)
+		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, accessBusiness.Subject{UserUUID: people[who].String()}, people[who].String()+"@example.test", nil, projects, teams, text)
 		if err != nil {
 			t.Fatalf("searching %q as %s: %v", text, who, err)
 		}
+		countsOnlyWhatShows(t, who+" searching "+text, p)
 		for _, h := range p.Page {
 			if h.Doc != nil && h.Doc.Uuid == id {
 				return true

@@ -49,6 +49,11 @@ func BuildPlan(ctx context.Context, jobId uuid.UUID) (*importProvider.Plan, erro
 	if plan == nil {
 		return nil, fmt.Errorf("provider returned nil plan")
 	}
+	plan.StatusProposals = importProvider.ProposeStatuses(plan.StatusValues,
+		importProvider.StatusDefaults(prov.DefaultStatusMap(), plan.StatusKinds))
+	if err := previewPeople(ctx, job, plan.People); err != nil {
+		return nil, err
+	}
 
 	planJSON, _ := json.Marshal(plan)
 	if err := importModels.SavePlan(ctx, jobId, planJSON, chunks); err != nil {

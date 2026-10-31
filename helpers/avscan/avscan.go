@@ -77,6 +77,15 @@ type Result struct {
 // errors.Is.
 var ErrInfected = errors.New("the file carries a virus signature")
 
+// Infected is that refusal naming the signature the scanner found, for a
+// report that says which (an import's issues). errors.Is(err, ErrInfected)
+// holds for it.
+type Infected struct{ Signature string }
+
+func (e *Infected) Error() string { return ErrInfected.Error() + " (" + e.Signature + ")" }
+
+func (e *Infected) Unwrap() error { return ErrInfected }
+
 // Scanner is the interface upload paths consume. Implementations must
 // be safe for concurrent use.
 type Scanner interface {
@@ -89,24 +98,24 @@ type Scanner interface {
 
 // ─── default singleton ─────────────────────────────────────────────
 
-var defaultScanner atomic.Value // holds Scanner; nil-typed initially
+var defaultScanner atomic.Value // holds a scannerBox; empty initially
+
+// scannerBox is what defaultScanner holds: atomic.Value refuses a nil value,
+// and any value of another concrete type than the first it held, so storing
+// nil to turn scanning off, or one kind of scanner after another, panicked.
+// One box type, with s nil for none, can always be stored.
+type scannerBox struct{ s Scanner }
 
 // SetDefault swaps in a global Scanner. Called once at startup. Pass
 // nil to disable scanning (the equivalent of never calling SetDefault).
 func SetDefault(s Scanner) {
-	if s == nil {
-		defaultScanner.Store((Scanner)(nil))
-		return
-	}
-	defaultScanner.Store(s)
+	defaultScanner.Store(scannerBox{s: s})
 }
 
 // Default returns whatever scanner SetDefault stored, or nil.
 func Default() Scanner {
-	if v := defaultScanner.Load(); v != nil {
-		if s, ok := v.(Scanner); ok {
-			return s
-		}
+	if box, ok := defaultScanner.Load().(scannerBox); ok {
+		return box.s
 	}
 	return nil
 }

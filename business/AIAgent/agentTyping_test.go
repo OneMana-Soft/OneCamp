@@ -21,9 +21,9 @@ import (
 // message about it (onecamp-fe lib/typingTiming.ts, TYPING_EXPIRY_MS).
 const appTypingExpiry = 6 * time.Second
 
-// typingBroker stands in for the MQTT broker: it keeps every message
+// recordingBroker stands in for the MQTT broker: it keeps every message
 // published, and when.
-type typingBroker struct {
+type recordingBroker struct {
 	MQTT.Client
 	mu   sync.Mutex
 	sent []brokerMessage
@@ -35,7 +35,7 @@ type brokerMessage struct {
 	body  []byte
 }
 
-func (b *typingBroker) Publish(topic string, _ byte, _ bool, payload interface{}) MQTT.Token {
+func (b *recordingBroker) Publish(topic string, _ byte, _ bool, payload interface{}) MQTT.Token {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	body, _ := payload.([]byte)
@@ -48,7 +48,7 @@ func (b *typingBroker) Publish(topic string, _ byte, _ bool, payload interface{}
 // again often enough that the app never drops it between two messages, even
 // one that arrives late.
 func TestAgentTypingSaysAgentAndNeverLapses(t *testing.T) {
-	broker := &typingBroker{}
+	broker := &recordingBroker{}
 	was := mqttInit.MqttClient
 	mqttInit.MqttClient = broker
 	t.Cleanup(func() { mqttInit.MqttClient = was })

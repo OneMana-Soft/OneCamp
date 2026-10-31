@@ -24,4 +24,18 @@ func init() {
 	Kinds.Register(Kind{ID: model.FieldRelation, Stored: true, FormulaKind: formula.KindText, Coerce: coerceRelation, NoDefault: true})
 	Kinds.Register(Kind{ID: model.FieldFormula, FormulaKind: formula.KindText})
 	Kinds.Register(Kind{ID: model.FieldRollup, FormulaKind: formula.KindText})
+	// Tables B1's kinds (kindsMore.go).
+	Kinds.Register(Kind{ID: model.FieldStatus, Stored: true, HasOptions: true, FormulaKind: formula.KindText, Coerce: coerceSelect, Convert: toSelect, Config: statusConfig})
+	Kinds.Register(Kind{ID: model.FieldPeople, Stored: true, FormulaKind: formula.KindText, Coerce: coercePeople, Convert: toPeople, NoDefault: true, Config: peopleConfig})
+	Kinds.Register(Kind{ID: model.FieldLongText, Stored: true, FormulaKind: formula.KindText, Coerce: coerceText, Convert: toText})
+	Kinds.Register(Kind{ID: model.FieldPhone, Stored: true, FormulaKind: formula.KindText, Coerce: coercePhone, Convert: toPhone})
+	Kinds.Register(Kind{ID: model.FieldDuration, Stored: true, FormulaKind: formula.KindNumber, Coerce: coerceDuration, Convert: toDuration, Config: durationConfig})
+	Kinds.Register(Kind{ID: model.FieldRating, Stored: true, FormulaKind: formula.KindNumber, Coerce: coerceRating, Convert: toRating, Config: ratingConfig})
+	Kinds.Register(Kind{ID: model.FieldAutonumber, FormulaKind: formula.KindNumber, FromRow: rowNumber, Config: autonumberConfig})
+	Kinds.Register(Kind{ID: model.FieldCreatedTime, FormulaKind: formula.KindDate, FromRow: rowCreatedTime})
+	Kinds.Register(Kind{ID: model.FieldCreatedBy, FormulaKind: formula.KindText, FromRow: rowCreatedBy})
+	Kinds.Register(Kind{ID: model.FieldModifiedTime, FormulaKind: formula.KindDate, FromRow: rowModifiedTime})
+	Kinds.Register(Kind{ID: model.FieldModifiedBy, FormulaKind: formula.KindText, FromRow: rowModifiedBy})
+	// Tables B1's files (kindsFiles.go).
+	Kinds.Register(Kind{ID: model.FieldAttachment, Stored: true, FormulaKind: formula.KindText, Coerce: coerceFiles, NoDefault: true})
 }

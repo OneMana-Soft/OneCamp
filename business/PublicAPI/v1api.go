@@ -6,8 +6,9 @@
 //   - its scope (or, for MCP, the handler's own per-tool scopes);
 //   - a limit per token and route, beside the token's own (ApiTokenRateLimit),
 //     with Retry-After;
-//   - Idempotency-Key on writes: the same key with the same body is answered
-//     from the first answer, with another body refused, for 24 hours;
+//   - Idempotency-Key on writes (helpers/idempotency): the same key with the
+//     same body is answered from the first answer, with another body refused,
+//     for 24 hours;
 //   - for routes in the new shape: one error body ({"error": {code, message,
 //     hint}}), one page (Page: items, next_cursor), and an ETag where the
 //     value has a version (the page and If-Match readers arrive with the
@@ -26,24 +27,19 @@
 package business
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
-	"time"
 
 	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
 	appBusiness "github.com/akashc777/OneCamp/business/App"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/idempotency"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/google/uuid"
@@ -58,12 +54,6 @@ const (
 	DefaultReadsPerMinute  = 600
 	DefaultWritesPerMinute = 120
 )
-
-// How long a write's answer is kept under its Idempotency-Key.
-const idempotencyFor = 24 * time.Hour
-
-// maxIdempotencyKey bounds the header a client sends.
-const maxIdempotencyKey = 200
 
 // Limit is a route's own allowance per token.
 type Limit struct {
@@ -99,7 +89,7 @@ type Route struct {
 	// Use runs before the handler, after the scope and the limit (a policy gate).
 	Use []func(http.Handler) http.Handler
 	// Reach names the resource a request touches (its kind and id, from the
-	// path, or from the body through PeekBody): an app's call is refused unless
+	// path, or from the body through helpers.PeekBody): an app's call is refused unless
 	// the app was added there (business/App MayReach). A person's or an agent's
 	// token is unaffected.
 	Reach func(r *http.Request) (kind, id string)
@@ -265,7 +255,7 @@ func chain(res Resource, rt Route, mw Middleware) http.Handler {
 		h = serve(rt)
 	}
 	if rt.Write {
-		h = idempotent(rt, h)
+		h = idempotency.Middleware(routeKey(rt), refuseKey)(h)
 	}
 	for i := len(rt.Use) - 1; i >= 0; i-- {
 		h = rt.Use[i](h)
@@ -315,20 +305,22 @@ func reached(rt Route, next http.Handler) http.Handler {
 					"%s", rt.AppsRefused))
 				return
 			}
+			r = r.WithContext(context.WithValue(r.Context(), appKey{}, app))
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-// PeekBody is a request's body, read and put back for the handler, as a Reach
-// that takes its place from a write's body reads it.
-func PeekBody(r *http.Request) ([]byte, error) {
-	if r.Body == nil {
-		return nil, nil
-	}
-	body, err := io.ReadAll(r.Body)
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return body, err
+// appKey holds the app reached resolved for a request, so a handler that
+// holds the app itself (AppsInside) reads that one: one read per call, and one
+// refusal when it can't be read.
+type appKey struct{}
+
+// AppOf is the app a request's token belongs to, as reached resolved it: nil
+// for any other token.
+func AppOf(r *http.Request) *appBusiness.Identity {
+	app, _ := r.Context().Value(appKey{}).(*appBusiness.Identity)
+	return app
 }
 
 // stamp puts the API's version and a request id on the answer.
@@ -382,98 +374,22 @@ func limited(rt Route, next http.Handler) http.Handler {
 	})
 }
 
-// kept is a write's answer under its Idempotency-Key.
-type kept struct {
-	Pending     bool   `json:"pending,omitempty"`
-	BodyHash    string `json:"body_hash"`
-	Status      int    `json:"status,omitempty"`
-	ContentType string `json:"content_type,omitempty"`
-	Body        []byte `json:"body,omitempty"`
-}
-
-// idempotent answers a write sent again under the same Idempotency-Key from
-// its first answer, and refuses the key with another body. A write in
-// progress under the key is a 409. A first answer of 5xx isn't kept, so the
-// write can be tried again. Without Redis the write simply runs.
-func idempotent(rt Route, next http.Handler) http.Handler {
-	route := routeKey(rt)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-		token := helpers.GetApiTokenID(r.Context())
-		if key == "" || token == "" || !redisStore.IsAvailable() {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if len(key) > maxIdempotencyKey {
-			writeError(w, Errorf(http.StatusBadRequest, "idempotency_key_too_long", "use a UUID",
-				"an Idempotency-Key is at most %d characters", maxIdempotencyKey))
-			return
-		}
-		body, err := PeekBody(r)
-		if err != nil {
-			writeError(w, Errorf(http.StatusBadRequest, "unreadable_body", "", "the request's body couldn't be read: %v", err))
-			return
-		}
-		sum := sha256.Sum256(body)
-		hash := hex.EncodeToString(sum[:])
-		args := []string{token, route, key}
-
-		pending, _ := json.Marshal(kept{Pending: true, BodyHash: hash})
-		claimed, _ := redisStore.SetStringIfAbsent(r.Context(), registry.ApiIdempotency, args, string(pending), idempotencyFor)
-		if !claimed {
-			raw, found, _ := redisStore.GetString(r.Context(), registry.ApiIdempotency, args)
-			var k kept
-			if found && json.Unmarshal([]byte(raw), &k) == nil {
-				switch {
-				case k.BodyHash != hash:
-					writeError(w, Errorf(http.StatusUnprocessableEntity, "idempotency_key_reused", "send a new Idempotency-Key with a different request",
-						"this Idempotency-Key was sent with another body in the last 24 hours"))
-				case k.Pending:
-					writeError(w, Errorf(http.StatusConflict, "in_progress", "wait a moment, then send it again with the same key",
-						"a request with this Idempotency-Key is still being answered"))
-				default:
-					if k.ContentType != "" {
-						w.Header().Set("Content-Type", k.ContentType)
-					}
-					w.Header().Set("Idempotent-Replayed", "true")
-					w.WriteHeader(k.Status)
-					_, _ = w.Write(k.Body)
-				}
-				return
-			}
-			// Gone between the claim and the read: run it as a first send.
-		}
-		rec := &recorder{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(rec, r)
-		if rec.status >= 500 {
-			_ = redisStore.Delete(context.WithoutCancel(r.Context()), registry.ApiIdempotency, args)
-			return
-		}
-		done, _ := json.Marshal(kept{BodyHash: hash, Status: rec.status, ContentType: w.Header().Get("Content-Type"), Body: rec.body.Bytes()})
-		_ = redisStore.SetStringWithTTL(context.WithoutCancel(r.Context()), registry.ApiIdempotency, args, string(done), idempotencyFor)
-	})
-}
-
-// recorder keeps a copy of what a handler wrote.
-type recorder struct {
-	http.ResponseWriter
-	status int
-	body   bytes.Buffer
-	wrote  bool
-}
-
-func (r *recorder) WriteHeader(status int) {
-	if !r.wrote {
-		r.status = status
-		r.wrote = true
+// refuseKey answers a write its Idempotency-Key refuses (helpers/idempotency),
+// in the one error body.
+func refuseKey(w http.ResponseWriter, why idempotency.Refusal, err error) {
+	switch why {
+	case idempotency.KeyTooLong:
+		writeError(w, Errorf(http.StatusBadRequest, "idempotency_key_too_long", "use a UUID",
+			"an Idempotency-Key is at most %d characters", idempotency.MaxKey))
+	case idempotency.Unreadable:
+		writeError(w, Errorf(http.StatusBadRequest, "unreadable_body", "", "the request's body couldn't be read: %v", err))
+	case idempotency.Reused:
+		writeError(w, Errorf(http.StatusUnprocessableEntity, "idempotency_key_reused", "send a new Idempotency-Key with a different request",
+			"this Idempotency-Key was sent with another body in the last 24 hours"))
+	case idempotency.InProgress:
+		writeError(w, Errorf(http.StatusConflict, "in_progress", "wait a moment, then send it again with the same key",
+			"a request with this Idempotency-Key is still being answered"))
 	}
-	r.ResponseWriter.WriteHeader(status)
-}
-
-func (r *recorder) Write(b []byte) (int, error) {
-	r.wrote = true
-	r.body.Write(b)
-	return r.ResponseWriter.Write(b)
 }
 
 // serve runs a route in the new shape: its value as JSON, its error as the

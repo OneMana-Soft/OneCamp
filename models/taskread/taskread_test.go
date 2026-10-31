@@ -279,6 +279,15 @@ func TestAToolReadsAsThePersonItActsFor(t *testing.T) {
 	if ReaderOf(AsNobody(acting)) != "" || ReaderOf(ActingFor(ctx, "")) != "" {
 		t.Fatal("nobody is nobody, acting for anyone or no one")
 	}
+	// Acting as a person reads as them, known as a signed-in person is.
+	profileOnly := userModels.UserInfo{}
+	profileOnly.UserDgraphInfo.Uuid = strings.ToUpper(asker)
+	if got := ReaderOf(ActingAs(acting, admin)); got != signedIn.String() {
+		t.Fatalf("acting as the signed-in person reads as %q", got)
+	}
+	if got := ReaderOf(ActingAs(ctx, profileOnly)); got != asker {
+		t.Fatalf("acting as someone known by their profile reads as %q", got)
+	}
 }
 
 // A restricted task the reader may see carries the lock (task_restricted,

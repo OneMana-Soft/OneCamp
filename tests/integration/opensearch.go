@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
@@ -72,6 +73,25 @@ func UseOpenSearchClient(t *testing.T, c *opensearchapi.Client) {
 	opensearchInit.OpenSearchClient = c
 	t.Cleanup(func() { opensearchInit.OpenSearchClient = unreachableOpenSearch() })
 	settleBeforeTeardown(t)
+}
+
+// AcceptingOpenSearch makes the server's search client, for the rest of the
+// test, one that takes every write: a stub that answers each request with an
+// empty bulk reply that refused nothing. It's for tests that index in passing
+// (an outbox's search sinks, say) and don't ask what the index then holds; a
+// sink that writes to it delivers, so the work the test waits on settles.
+func AcceptingOpenSearch(t *testing.T) {
+	t.Helper()
+	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"took":1,"errors":false,"items":[],"updated":0,"failures":[]}`)
+	}))
+	t.Cleanup(search.Close)
+	c, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{search.URL}}})
+	if err != nil {
+		t.Fatalf("integration: a search client that takes every write: %v", err)
+	}
+	UseOpenSearchClient(t, c)
 }
 
 // OpenSearchEnv carries the live OpenSearch for one test.

@@ -8,8 +8,8 @@ package integration_test
 // takes the files it holds off with it, as taking a file off a task does:
 // their rows are stamped deleted, so every read by id answers what a file that
 // isn't there answers (404), and the purge takes their bytes. Deleting a
-// message used to mark its files deleted in search only, and the purge never
-// took them.
+// message used to mark its files deleted in search only, so everyone in the
+// place kept opening them by id, and the purge never took them.
 //
 // A file a deleted message shares with one still there stays while a holder
 // the server made shows it: a reply sent to its channel too is the reply and

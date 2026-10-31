@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	outboxBusiness "github.com/akashc777/OneCamp/business/Outbox"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
+	workGraph "github.com/akashc777/OneCamp/domain/WorkGraph"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
 	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
@@ -93,6 +95,11 @@ type harness struct {
 	active  map[string]bool
 	mu      sync.Mutex
 	emitted []resourceEventBusiness.Event
+	// graphTold is the events an import or Google's changes told the work
+	// graph of (graphNodes.go), in order; searchTold those search was asked
+	// to write the entries of (searchEntries.go).
+	graphTold  []string
+	searchTold []string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -133,9 +140,25 @@ func newHarness(t *testing.T) *harness {
 	// Reminders in memory too (reminders_test.go).
 	s.rem = newMemReminders()
 	h.s = s
-	prev := upcomingBookings
+	prev, prevNodes := upcomingBookings, nodesChanged
 	upcomingBookings = func(uuid.UUID, time.Time) ([]bookingModel.BookedEvent, error) { return nil, nil }
-	t.Cleanup(func() { upcomingBookings = prev })
+	nodesChanged = func(_ context.Context, k workGraph.Kind, ids []string) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if k == workGraph.KindEvent {
+			h.graphTold = append(h.graphTold, ids...)
+		}
+	}
+	prevSearch := enqueueSearch
+	enqueueSearch = func(_ context.Context, es ...outboxBusiness.Entry) error {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for _, e := range es {
+			h.searchTold = append(h.searchTold, strings.Split(e.Entities["ids"], ",")...)
+		}
+		return nil
+	}
+	t.Cleanup(func() { upcomingBookings, nodesChanged, enqueueSearch = prev, prevNodes, prevSearch })
 	return h
 }
 

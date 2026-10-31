@@ -59,6 +59,12 @@ type Change struct {
 	// (RegisterAlsoHosted), so a hook added later puts no hosted doc where
 	// docs are found (the AI index, mention notices) without asking to.
 	Hosted bool
+	// Quiet is a save holding a quiet write (a copy's body, an import's): who
+	// its body mentions is kept and nobody is told (docMentions.go), and its
+	// hooks and its doc.updated run as a bulk import's do
+	// (helpers.BulkImportContextKey), so of the event sinks only those that
+	// take an import's events hear it.
+	Quiet bool
 }
 
 // SaveHook is one thing to do after a save.

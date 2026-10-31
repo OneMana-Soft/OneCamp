@@ -125,4 +125,7 @@ type ProviderInfo struct {
 type SignInInfo struct {
 	Configured bool   `json:"configured"`
 	Setup      string `json:"setup,omitempty"`
+	// Optional is a provider that also takes a pasted token (Jira): its
+	// sign-in goes beside the token form, not in place of it.
+	Optional bool `json:"optional,omitempty"`
 }

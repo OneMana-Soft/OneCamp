@@ -77,28 +77,32 @@ func resolveUsers(ctx context.Context, importId uuid.UUID, workspaceName string,
 	if err != nil {
 		members = nil
 	}
-	ownMapping := func(id string) uuid.UUID {
+	// Each read says what it found, uuid.Nil for nothing. A read that fails
+	// fails the step: read as "not brought across yet", it set out to make
+	// again a person an earlier run had brought, and failed on their taken
+	// address with "could not create external user".
+	ownMapping := func(id string) (uuid.UUID, error) {
 		if own != nil {
-			return own[id]
+			return own[id], nil
 		}
-		u, _ := importModels.LookupIdMapping(ctx, importId, importModels.EntityUser, id)
-		return u
+		return importModels.LookupIdMapping(ctx, importId, importModels.EntityUser, id)
 	}
-	workspaceMapping := func(id string) uuid.UUID {
+	workspaceMapping := func(id string) (uuid.UUID, error) {
 		if workspace != nil || workspaceName == "" {
-			return workspace[id]
+			return workspace[id], nil
 		}
-		u, _ := importModels.LookupWorkspaceMapping(ctx, workspaceName, importModels.EntityUser, id)
-		return u
+		return importModels.LookupWorkspaceMapping(ctx, workspaceName, importModels.EntityUser, id)
 	}
-	member := func(email string) uuid.UUID {
+	member := func(email string) (uuid.UUID, error) {
 		if members != nil {
-			return members[email]
+			return members[email], nil
 		}
-		if u, _ := userBusiness.GetUserByEmailId(ctx, &email); u != nil {
-			return u.Id
+		// An address nobody has answers a zero user.
+		u, err := userBusiness.GetUserByEmailId(ctx, &email)
+		if err != nil {
+			return uuid.Nil, err
 		}
-		return uuid.Nil
+		return u.Id, nil
 	}
 
 	for i := range users {
@@ -116,7 +120,11 @@ func resolveUsers(ctx context.Context, importId uuid.UUID, workspaceName string,
 		}
 
 		// 1. Already mapped within this import? (re-runnable per-import idempotency)
-		if existing := ownMapping(su.ID); existing != uuid.Nil {
+		existing, err := ownMapping(su.ID)
+		if err != nil {
+			return stats, fmt.Errorf("reading what this import made for %s: %w", su.ID, err)
+		}
+		if existing != uuid.Nil {
 			stats.Reused++
 			continue
 		}
@@ -125,7 +133,10 @@ func resolveUsers(ctx context.Context, importId uuid.UUID, workspaceName string,
 		// Cross-import dedup: a re-export of the same workspace points
 		// at the same Slack user ids; we reuse the OneCamp user we
 		// already provisioned and only record the per-import mapping.
-		if existing := workspaceMapping(su.ID); existing != uuid.Nil {
+		if existing, err = workspaceMapping(su.ID); err != nil {
+			return stats, fmt.Errorf("reading what an earlier import made for %s: %w", su.ID, err)
+		}
+		if existing != uuid.Nil {
 			if err := importModels.UpsertIdMappingWithOwnership(ctx, importId,
 				importModels.EntityUser, su.ID, existing, nil,
 				mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}),
@@ -140,7 +151,9 @@ func resolveUsers(ctx context.Context, importId uuid.UUID, workspaceName string,
 		matched := uuid.Nil
 		if email != "" {
 			// 3. Match by email against any OneCamp user.
-			matched = member(email)
+			if matched, err = member(email); err != nil {
+				return stats, fmt.Errorf("reading the member at %s: %w", email, err)
+			}
 		}
 
 		if matched != uuid.Nil {
@@ -167,7 +180,11 @@ func resolveUsers(ctx context.Context, importId uuid.UUID, workspaceName string,
 			// Email exists in Slack but not in OneCamp; check the synth
 			// space wasn't already taken (rare collision with an earlier
 			// import). If so, suffix.
-			if member(emailToUse) != uuid.Nil {
+			taken, err := member(emailToUse)
+			if err != nil {
+				return stats, fmt.Errorf("reading the member at %s: %w", emailToUse, err)
+			}
+			if taken != uuid.Nil {
 				emailToUse = collisionSuffix(emailToUse, su.ID)
 			}
 		}

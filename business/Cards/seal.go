@@ -6,9 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"time"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // CardRef is where a card lives: its host's kind ("ephemeral" for a command's
@@ -53,25 +54,18 @@ var (
 	ErrNoTrigger = errors.New("cards: that trigger was used or has expired")
 )
 
-// cardKey is the key cards are sealed with, derived from the server's secret
-// for this purpose alone (a card's token is never a session's).
-var cardKey = func() []byte {
-	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		return nil
-	}
-	m := hmac.New(sha256.New, []byte(secret))
-	m.Write([]byte("onecamp.cards.v1"))
-	return m.Sum(nil)
-}
+// cardPurpose names the key cards are sealed with: the server's secret for
+// this purpose alone (helpers.PurposeKey), so a card's token is never a
+// session's.
+const cardPurpose = "onecamp.cards.v1"
 
 var b64 = base64.RawURLEncoding
 
 // Seal makes the token a card is shown with: the web sends it back with an
 // action, and Act trusts nothing else about the card.
 func Seal(ref CardRef, owner Owner, card Card, actors []string, ttl time.Duration) (string, error) {
-	key := cardKey()
-	if key == nil {
+	key, err := helpers.PurposeKey(cardPurpose)
+	if err != nil {
 		return "", ErrNoSecret
 	}
 	s := sealed{Ref: ref, Owner: owner, Actors: actors, Exp: now().Add(ttl).Unix()}
@@ -91,8 +85,8 @@ func Seal(ref CardRef, owner Owner, card Card, actors []string, ttl time.Duratio
 
 // open reads a token Seal made, refusing a forged or expired one.
 func open(token string) (sealed, error) {
-	key := cardKey()
-	if key == nil {
+	key, err := helpers.PurposeKey(cardPurpose)
+	if err != nil {
 		return sealed{}, ErrNoSecret
 	}
 	body64, sig64, ok := strings.Cut(token, ".")

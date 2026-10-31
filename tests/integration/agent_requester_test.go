@@ -1164,7 +1164,7 @@ func TestAnAgentSeesOnlyWhatItsAskerCan(t *testing.T) {
 		// The sponsor's intake form on the project both people are in, filing
 		// what anyone sends to the agent, as the sponsor.
 		form := func(assignee string) string {
-			f, err := formBusiness.Save(uuid.MustParse(sharedProject), formBusiness.Input{
+			f, err := formBusiness.Save(ctx, uuid.MustParse(sharedProject), formBusiness.Input{
 				Title: "Requests", TitleField: "what", AssigneeUUID: assignee, Active: true,
 				Fields: []formBusiness.Field{
 					{Id: "what", Label: "What do you need?", Type: formBusiness.ShortText, Required: true},
@@ -1182,7 +1182,7 @@ func TestAnAgentSeesOnlyWhatItsAskerCan(t *testing.T) {
 		}
 
 		obs := brain.run(t, func() {
-			if err := formBusiness.Submit(ctx, form(bot.UUID), sent, formula.NumberSigns{}, time.Now()); err != nil {
+			if err := formBusiness.Submit(ctx, form(bot.UUID), sent, formula.NumberSigns{}, "", "", time.Now()); err != nil {
 				t.Fatalf("submit: %v", err)
 			}
 			brain.waitForAll(t)
@@ -1211,7 +1211,7 @@ func TestAnAgentSeesOnlyWhatItsAskerCan(t *testing.T) {
 		setAgent(t, `UPDATE ai_agents SET trigger_type = 'event', trigger_config = '{"event":"task.created"}' WHERE id = $1`)
 		defer setAgent(t, `UPDATE ai_agents SET trigger_type = 'mention', trigger_config = '{}' WHERE id = $1`)
 		obs = brain.run(t, func() {
-			if err := formBusiness.Submit(ctx, form(""), sent, formula.NumberSigns{}, time.Now()); err != nil {
+			if err := formBusiness.Submit(ctx, form(""), sent, formula.NumberSigns{}, "", "", time.Now()); err != nil {
 				t.Fatalf("submit: %v", err)
 			}
 			brain.waitForAll(t)

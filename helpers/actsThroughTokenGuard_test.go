@@ -45,7 +45,9 @@ import (
 // arrive there, so it decides nothing by an admin role either.
 // Who knows (DG9): the AI's find_people asks it for whoever MCP or an agent
 // acts for.
-var tokenReachableRoots = []string{"../controllers/V1", "../business/MCPServer", "../business/AI", "../business/Send", "../business/Reach", "../business/App", "../business/PublicAPI", "../business/Hooks", "../business/WhoKnows", "../controllers/WhoKnows"}
+// Person Preferences (calendar A3): a person reads and sets only their own,
+// whoever asks for them.
+var tokenReachableRoots = []string{"../controllers/V1", "../business/MCPServer", "../business/AI", "../business/Send", "../business/Reach", "../business/App", "../business/PublicAPI", "../business/Hooks", "../business/WhoKnows", "../controllers/WhoKnows", "../business/Preferences", "../controllers/Preferences"}
 
 // reachFunc is MCP's reach, which asks viaToken once at its top: its cases are
 // checked one by one (reachWritesByRoleWithoutTheToken), not as one function.

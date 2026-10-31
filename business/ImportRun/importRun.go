@@ -40,7 +40,39 @@ var (
 	// held, when set, keeps every lease taken while it is set until it is
 	// closed (HoldRunsForTest).
 	held chan struct{}
+
+	// idle, while something waits for no run to be alive (Idle), is closed
+	// when the last lease is given back.
+	idle chan struct{}
 )
+
+// Idle waits until no import run is alive, whichever job's, or ctx ends, and
+// says whether one was (it waited). A run records each task it makes as its
+// own (import_id_map) only after writing it, and has recorded them all once
+// its lease is back, so what judges data an import may be making waits here
+// after reading it, and reads it again if it waited, since the data may have
+// changed meanwhile: the upgrade's assignee step (business/AssigneeRepair),
+// after each page it reads. It holds no run back.
+func Idle(ctx context.Context) (waited bool, err error) {
+	for {
+		mu.Lock()
+		if len(live) == 0 {
+			mu.Unlock()
+			return waited, nil
+		}
+		if idle == nil {
+			idle = make(chan struct{})
+		}
+		wait := idle
+		mu.Unlock()
+		waited = true
+		select {
+		case <-ctx.Done():
+			return true, ctx.Err()
+		case <-wait:
+		}
+	}
+}
 
 // Lease is a job's run lease, taken before its run starts, for work that has
 // to happen with no run alive (retrying failed chunks resets them to pending,
@@ -142,6 +174,10 @@ func (l *Lease) end() {
 		mu.Lock()
 		if live[l.jobId] == l {
 			delete(live, l.jobId)
+		}
+		if len(live) == 0 && idle != nil {
+			close(idle)
+			idle = nil
 		}
 		mu.Unlock()
 	})

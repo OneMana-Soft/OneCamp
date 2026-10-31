@@ -26,11 +26,12 @@ func goneFor(couldSee bool) error {
 	return ErrNotFound
 }
 
-// CheckDocLive says whether a doc is there to be opened: nil for a live doc,
-// ErrNotFound for none, ErrDocDeleted for one in the trash, and a read that
-// failed as it is. For the paths that hold a doc's id without reading the
-// doc for anyone, a guest's link.
-func CheckDocLive(ctx context.Context, docUUID string) error {
+// CheckPageLive says whether a page is there to be opened live: nil for a
+// live page, ErrNotFound for none, ErrDocDeleted for one in the trash,
+// ErrNotAPage for a folder, a file or a link (docs F1: only a page opens in
+// the editor), and a read that failed as it is. For the paths that hold a
+// doc's id without reading the doc for anyone: a guest's live connection.
+func CheckPageLive(ctx context.Context, docUUID string) error {
 	doc, err := domain.GetDocDeletion(ctx, docUUID)
 	switch {
 	case errors.Is(err, ErrNotFound) || (err == nil && (doc == nil || doc.Uuid == "")):
@@ -39,6 +40,8 @@ func CheckDocLive(ctx context.Context, docUUID string) error {
 		return err
 	case IsDeleted(doc):
 		return ErrDocDeleted
+	case !IsPage(doc):
+		return ErrNotAPage
 	}
 	return nil
 }

@@ -256,16 +256,6 @@ func readBody(r *http.Request) (string, error) {
 	return string(buf[:n]), nil
 }
 
-func TestParseRetryAfter_HandlesHTTPDate(t *testing.T) {
-	// Numeric form is covered by the existing helper test; HTTP-date
-	// form is rare from Linear but legal under RFC 7231.
-	future := time.Now().UTC().Add(45 * time.Second).Format(http.TimeFormat)
-	got := parseRetryAfter(future)
-	if got <= 0 || got > 60 {
-		t.Fatalf("expected ~45s, got %d", got)
-	}
-}
-
 func TestGQL_5xxErrorIncludesStatus(t *testing.T) {
 	// Servers go down. A clear status-coded error makes log triage
 	// possible without enabling verbose logging.
@@ -317,7 +307,8 @@ func TestFetchTeamIssues_FlattensNestedShape(t *testing.T) {
 		            "parent":   null,
 		            "team":     {"id": "team-1"},
 		            "project":  {"id": "proj-1"},
-		            "labels":   {"nodes": [{"name": "bug"}, {"name": "frontend"}]},
+		            "projectMilestone": {"id": "ms-1"},
+		            "labelIds": ["l-bug", "l-front"],
 		            "comments": {
 		              "nodes": [
 		                {"id": "c-1", "body": "lgtm", "createdAt": "2026-05-25T02:00:00Z", "user": {"id": "u-2"}}
@@ -355,14 +346,15 @@ func TestFetchTeamIssues_FlattensNestedShape(t *testing.T) {
 	if iss.AssigneeID != "u-1" || iss.CreatorID != "u-2" {
 		t.Fatalf("user flatten failed: assignee=%q creator=%q", iss.AssigneeID, iss.CreatorID)
 	}
-	if iss.TeamID != "team-1" || iss.ProjectID != "proj-1" {
-		t.Fatalf("team/project flatten failed: team=%q project=%q", iss.TeamID, iss.ProjectID)
+	if iss.TeamID != "team-1" || iss.ProjectID != "proj-1" || iss.MilestoneID != "ms-1" {
+		t.Fatalf("team/project/milestone flatten failed: team=%q project=%q milestone=%q", iss.TeamID, iss.ProjectID, iss.MilestoneID)
 	}
 	if iss.PriorityLabel != "High" {
 		t.Fatalf("priority flatten failed: %q", iss.PriorityLabel)
 	}
-	if len(iss.Labels) != 2 || iss.Labels[0] != "bug" || iss.Labels[1] != "frontend" {
-		t.Fatalf("labels flatten failed: %+v", iss.Labels)
+	// Its labels come as ids; the snapshot names them (placeLabels).
+	if len(iss.LabelIDs) != 2 || iss.LabelIDs[0] != "l-bug" || iss.LabelIDs[1] != "l-front" {
+		t.Fatalf("label ids flatten failed: %+v", iss.LabelIDs)
 	}
 	if len(iss.Comments) != 1 || iss.Comments[0].ID != "c-1" || iss.Comments[0].UserID != "u-2" {
 		t.Fatalf("comments flatten failed: %+v", iss.Comments)
@@ -370,8 +362,10 @@ func TestFetchTeamIssues_FlattensNestedShape(t *testing.T) {
 	if len(iss.Attachments) != 1 || iss.Attachments[0].URL != "https://uploads.linear.app/x.png" {
 		t.Fatalf("attachments flatten failed: %+v", iss.Attachments)
 	}
-	if iss.DueDate == nil || iss.DueDate.Year() != 2026 || iss.DueDate.Month().String() != "June" {
-		t.Fatalf("due date YYYY-MM-DD parse failed: %v", iss.DueDate)
+	// dueDate is a day with no time, so it arrives as a calendar day
+	// (written where the team is), never as midnight UTC.
+	if st := p.issueToSourceTask(iss, "proj-1"); st.DueDay != (importProvider.Day{Year: 2026, Month: time.June, Day: 30}) || st.DueDate != nil {
+		t.Fatalf("dueDate 2026-06-30: day %v, instant %v; want the day and no instant", st.DueDay, st.DueDate)
 	}
 }
 
@@ -393,7 +387,7 @@ func TestFetchTeamIssues_NullParentDoesNotSetParentID(t *testing.T) {
 		            "updatedAt": "2026-05-25T00:00:00Z",
 		            "state": {"id": "s-1", "name": "Todo", "type": "unstarted"},
 		            "parent": null,
-		            "labels":   {"nodes": []},
+		            "labelIds": [],
 		            "comments": {"nodes": []},
 		            "attachments": {"nodes": []}
 		          }

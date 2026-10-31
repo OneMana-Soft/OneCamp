@@ -5,8 +5,29 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	model "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
 )
+
+// A list names its items' statuses from one read of the project's: what a
+// task or a request stores reads as Display reads it, and a custom status
+// deleted since reads as nothing rather than as its id.
+func TestNamesReadStoredValuesAsTheProjectNamesThem(t *testing.T) {
+	signOff := &model.TaskStatus{ID: uuid.New(), Name: "Client sign-off", Category: dgraphStruct.TASK_STATUS_INREVIEW}
+	name := namesOf([]*model.TaskStatus{signOff})
+	for value, want := range map[string]string{
+		dgraphStruct.TASK_STATUS_DONE:     "Done",
+		dgraphStruct.TASK_STATUS_INREVIEW: "In review",
+		signOff.ID.String():               "Client sign-off",
+		uuid.NewString():                  "",
+	} {
+		if got := name(value); got != want {
+			t.Errorf("%s reads %q, want %q", value, got, want)
+		}
+	}
+}
 
 func TestBuiltInNamesAreForgiving(t *testing.T) {
 	for in, want := range map[string]string{

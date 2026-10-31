@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	"github.com/google/uuid"
@@ -35,16 +36,11 @@ func TestNotifyTaskDelegatorTellsWhoHandedItOver(t *testing.T) {
 	t.Cleanup(func() { delegatedTaskName, pushToDelegator, reach = savedName, savedPush, savedReach })
 	sent := make(chan [2]string, 5)
 	delegatedTaskName = func(context.Context, *model.AiAgent, string) string { return "Book the launch retro" }
-	pushToDelegator = func(_ context.Context, user string, data map[string]string) error {
+	pushToDelegator = func(_ context.Context, user, _ string, data map[string]string) {
 		sent <- [2]string{user, data[firebaseInit.FIREBASE_PUSH_DATA_TITLE]}
-		return nil
 	}
 	// u-1 may read the task; u-2 was taken off its project; u-3's can't be read.
-	// Each check is reported, so the test waits for every goroutine to have
-	// made it before the clean-up puts reach back.
-	asked := make(chan string, 5)
 	reach.readsTask = func(_ context.Context, user, task string) (bool, error) {
-		asked <- user
 		if user == "u-3" {
 			return false, errors.New("lookup failed")
 		}
@@ -54,32 +50,16 @@ func TestNotifyTaskDelegatorTellsWhoHandedItOver(t *testing.T) {
 
 	notifyTaskDelegator(agent, "t-9", "", "Done.")
 	notifyTaskDelegator(agent, "t-9", "u-1", "  ")
-	select {
-	case s := <-sent:
-		t.Fatalf("pushed with nobody to tell or nothing to say: %v", s)
-	case <-time.After(150 * time.Millisecond):
-	}
-
 	notifyTaskDelegator(agent, "t-9", "u-1", "Done — booked for Friday.")
 	notifyTaskDelegator(agent, "t-9", "u-2", "Done — booked for Friday.")
 	notifyTaskDelegator(agent, "t-9", "u-3", "Done — booked for Friday.")
-	// Each push goes on a goroutine of its own here. Wait until all three
-	// have asked whether their delegator may read the task, then take u-1's
-	// push, which follows its check, and make sure nothing else comes.
-	for i := 0; i < 3; i++ {
-		select {
-		case <-asked:
-		case <-time.After(10 * time.Second):
-			t.Fatalf("only %d of the 3 delegators were checked", i)
-		}
+	if busy := helpers.SettleBackground(5 * time.Second); len(busy) > 0 {
+		t.Fatalf("still at work: %v", busy)
 	}
+	close(sent)
 	var got [][2]string
-	for _, wait := range []time.Duration{10 * time.Second, 150 * time.Millisecond} {
-		select {
-		case s := <-sent:
-			got = append(got, s)
-		case <-time.After(wait):
-		}
+	for s := range sent {
+		got = append(got, s)
 	}
 	// Nobody to tell, nothing to say, someone who may no longer read the task,
 	// or a check that can't be made, pushes nothing.

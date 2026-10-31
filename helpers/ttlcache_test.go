@@ -1,6 +1,8 @@
 package helpers
 
 import (
+	"math"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -84,5 +86,60 @@ func TestTTLCacheNilSafe(t *testing.T) {
 	c.Purge()
 	if c.Len() != 0 {
 		t.Fatalf("nil cache len must be 0")
+	}
+}
+
+// A Set costs about the same whether the cache holds two thousand entries
+// or sixty-four thousand. Until 23 Oct every Set past 1,024 unexpired
+// entries scanned the whole map for expired ones, under the write lock.
+func TestTTLCacheSetCostDoesNotGrowWithItsSize(t *testing.T) {
+	small, big := setCost(2_000), setCost(64_000)
+	t.Logf("a Set takes %v beside 2,000 entries, %v beside 64,000", small, big)
+	if big > 8*small {
+		t.Fatalf("a Set took %v beside 64,000 entries and %v beside 2,000; want about the same", big, small)
+	}
+}
+
+// setCost is the time per Set of 2,000 new keys into a cache that already
+// holds `live` unexpired entries: the fastest of five rounds, so a round
+// the scheduler or the collector interrupted doesn't count.
+func setCost(live int) time.Duration {
+	c := NewTTLCache[int](time.Hour)
+	for i := range live {
+		c.Set("live-"+strconv.Itoa(i), i)
+	}
+	keys := make([]string, 2_000)
+	for i := range keys {
+		keys[i] = "new-" + strconv.Itoa(i)
+	}
+	best := time.Duration(math.MaxInt64)
+	for range 5 {
+		start := time.Now()
+		for _, k := range keys {
+			c.Set(k, 0)
+		}
+		best = min(best, time.Since(start))
+		for _, k := range keys {
+			c.Delete(k)
+		}
+	}
+	return best / time.Duration(len(keys))
+}
+
+// Expired entries nobody reads again are still swept: by the time the map
+// has doubled, the ones that expired before it began to grow are gone.
+func TestTTLCacheSweepsExpiredEntriesNobodyReads(t *testing.T) {
+	c := NewTTLCache[int](time.Hour)
+	const short = 3_000
+	for i := range short {
+		c.SetWithTTL("short-"+strconv.Itoa(i), i, time.Millisecond)
+	}
+	time.Sleep(2 * time.Millisecond)
+	const long = 2*short + 1
+	for i := range long {
+		c.Set("long-"+strconv.Itoa(i), i)
+	}
+	if got := c.Len(); got != long {
+		t.Fatalf("the cache holds %d entries, want only the %d unexpired ones", got, long)
 	}
 }

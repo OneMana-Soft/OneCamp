@@ -9,7 +9,6 @@ import (
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	memDgraph "github.com/akashc777/OneCamp/models/dgraph/WorkspaceMemory"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
-	"github.com/google/uuid"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
@@ -63,12 +62,4 @@ func dropMemoryProjectionsMany(ctx context.Context, ids []string) error {
 		return errSearch
 	}
 	return errGraph
-}
-
-func uuidStrings(ids []uuid.UUID) []string {
-	out := make([]string, len(ids))
-	for i, id := range ids {
-		out[i] = id.String()
-	}
-	return out
 }

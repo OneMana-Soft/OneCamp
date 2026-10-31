@@ -684,6 +684,20 @@ func HardDeleteUser(query string, userUUID uuid.UUID) (err error) {
 // Unknown and deleted ids are simply absent from the map, so a caller that
 // ranges over its own ids decides what a missing one should read as.
 func DisplayNamesByUUIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	return labelsByUUIDs(ctx, "DisplayNamesByUUIDs", `COALESCE(NULLIF(display_name, ''), email_id)`, ids)
+}
+
+// EmailsByUUIDs is each live user's email, in one query, as DisplayNamesByUUIDs
+// reads its names: for a caller that needs the address itself, whatever name
+// its owner has set since (business/Guest's room addresses, made from it).
+// Unknown and deleted ids are absent.
+func EmailsByUUIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	return labelsByUUIDs(ctx, "EmailsByUUIDs", `email_id`, ids)
+}
+
+// labelsByUUIDs reads one text column (column, an expression over users) for
+// each live user in ids, in one query. caller names the read in its error.
+func labelsByUUIDs(ctx context.Context, caller, column string, ids []uuid.UUID) (map[uuid.UUID]string, error) {
 	out := make(map[uuid.UUID]string, len(ids))
 	if len(ids) == 0 {
 		return out, nil
@@ -706,11 +720,11 @@ func DisplayNamesByUUIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]st
 	}
 
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx,
-		`SELECT id, COALESCE(NULLIF(display_name, ''), email_id)
+		`SELECT id, `+column+`
 		 FROM users WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
 		"{"+strings.Join(args, ",")+"}")
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/DisplayNamesByUUIDs err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "models/%s err: %+v", caller, err)
 		return nil, err
 	}
 	defer rows.Close()

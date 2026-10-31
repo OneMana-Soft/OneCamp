@@ -163,3 +163,43 @@ func TestNewOptions(t *testing.T) {
 		t.Errorf("no more than %d options in all: %+v", MaxOptions, got)
 	}
 }
+
+// A value reads as a person would write it in a cell: an option by its label,
+// a person by their name, money in its units, a ticked box as Yes. A value
+// that isn't its field's shape, or an option taken away, reads as nothing.
+func TestTextReadsEachKind(t *testing.T) {
+	maya := uuid.NewString()
+	person := func(id string) string {
+		if id == maya {
+			return "Maya"
+		}
+		return ""
+	}
+	field := func(typ string) *model.Field {
+		return &model.Field{Name: "F", Type: typ, Options: []model.Option{{ID: "aaaa1111", Label: "One"}, {ID: "bbbb2222", Label: "Two"}}}
+	}
+	for _, c := range []struct {
+		typ, raw, want string
+	}{
+		{TypeText, `"Ship it"`, "Ship it"},
+		{TypeURL, `"https://onemana.dev/a"`, "https://onemana.dev/a"},
+		{TypeNumber, `3.5`, "3.5"},
+		{TypeNumber, `1000000`, "1000000"},
+		{TypeNumber, `-2`, "-2"},
+		{TypeMoney, `123456`, "1234.56"},
+		{TypeDate, `"2026-10-23"`, "2026-10-23"},
+		{TypeSelect, `"bbbb2222"`, "Two"},
+		{TypeSelect, `"gone0000"`, ""},
+		{TypeMultiSelect, `["bbbb2222","gone0000","aaaa1111"]`, "Two, One"},
+		{TypePerson, `"` + maya + `"`, "Maya"},
+		{TypeCheckbox, `true`, "Yes"},
+		{TypeText, `null`, ""},
+		{TypeText, ``, ""},
+		{TypeNumber, `"three"`, ""},
+		{TypeMultiSelect, `"aaaa1111"`, ""},
+	} {
+		if got := Text(field(c.typ), json.RawMessage(c.raw), person); got != c.want {
+			t.Errorf("%s %s: got %q, want %q", c.typ, c.raw, got, c.want)
+		}
+	}
+}

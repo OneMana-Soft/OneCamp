@@ -41,6 +41,7 @@ import (
 
 	bulkPostAndChatbusiness "github.com/akashc777/OneCamp/business/BulkPostAndChat"
 	placesBusiness "github.com/akashc777/OneCamp/business/Places"
+	preferencesBusiness "github.com/akashc777/OneCamp/business/Preferences"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	business "github.com/akashc777/OneCamp/business/User"
 	userChannelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
@@ -72,7 +73,16 @@ func GetLoggedInUserProfile(w http.ResponseWriter, r *http.Request) {
 	profile.Handle = business.HandleOnRead(ctx, &userInfo.UserPostgresInfo, &userInfo.UserDgraphInfo)
 	markDemoVisitor(&profile, userInfo.UserPostgresInfo.EmailID)
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": profile})
+	// Their preferences ride with it (design #37), so the app starts with
+	// them; a read that fails leaves them out, and the app asks on its own.
+	prefs, err := preferencesBusiness.Get(ctx, userInfo.UserPostgresInfo.Id)
+	if err != nil {
+		prefs = nil
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": struct {
+		dgraphStruct.DgraphUser
+		Preferences map[string]json.RawMessage `json:"preferences,omitempty"`
+	}{profile, prefs}})
 }
 
 // markDemoVisitor says on the person's own profile whether they are the public
@@ -908,62 +918,20 @@ func GetIfUserNameIsAvailable(w http.ResponseWriter, r *http.Request) {
 //}
 
 func UploadFile(w http.ResponseWriter, r *http.Request) {
-
-	uploadLimitMB := settingsBusiness.UploadLimitMB()
-	MultipartUploadLimit := 1024 * 1024 * uploadLimitMB
-	// Parse the form data.
 	ctx := r.Context()
-	// Cap the request body BEFORE multipart parsing so a malicious
-	// client can't push gigabytes through ParseMultipartForm and
-	// either exhaust /tmp (multipart spills past MaxMemory) or pin
-	// memory. MaxBytesReader rejects with a clean 413 once the cap is
-	// breached.
-	r.Body = http.MaxBytesReader(w, r.Body, MultipartUploadLimit)
-
-	// Cap the in-memory portion of the parse to a small, fixed value.
-	// Anything bigger spills to /tmp; combined with MaxBytesReader
-	// above, we never accept more than MultipartUploadLimit total.
-	const multipartInMemoryCap = 8 * 1024 * 1024 // 8 MiB
-	err := r.ParseMultipartForm(multipartInMemoryCap)
-	if err != nil {
-		// http.MaxBytesReader surfaces an *http.MaxBytesError when the body
-		// exceeds the cap. Distinguish that (413 + the actual limit so the
-		// client can show a precise message) from a genuinely malformed form
-		// (400). This is what powers the "File exceeds the 10 MB limit"
-		// toast on the FE.
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) || strings.Contains(err.Error(), "request body too large") {
-			helpers.WriteJSON(w, http.StatusRequestEntityTooLarge, helpers.Envolope{
-				"msg":             fmt.Sprintf("File exceeds the %d MB upload limit", uploadLimitMB),
-				"error":           "file_too_large",
-				"upload_limit_mb": uploadLimitMB,
-			})
-			return
-		}
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UploadMedia Failed to ParseMultipartForm err: %+v",
-			err)
-
-		er := errors.New("Failed to ParseMultipartForm file")
-		helpers.ErrorJSON(w, er, http.StatusBadRequest)
+	// The body is capped at the workspace's upload limit before anything is
+	// parsed, so no upload can push gigabytes through the parse or fill the
+	// disk, and a file past it is answered 413 with the limit, which the web
+	// shows as "File exceeds the 10 MB limit" (httpx.ReadUpload).
+	file, fHeader, ok := httpx.ReadUpload(w, r, settingsBusiness.UploadLimitMB())
+	if !ok {
 		return
 	}
-
-	// Get the file handle.
-	file, fHeader, err := r.FormFile("file")
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UploadMedia Failed to get csv file err: %+v",
-			err)
-
-		er := errors.New("Failed to get media file")
-		helpers.ErrorJSON(w, er, http.StatusBadRequest)
-		return
-	}
+	defer file.Close()
 
 	jsonData := r.FormValue("jsonData")
 	var uploadData adapter.AddOrRemoveAttachmentInput
-	err = json.Unmarshal([]byte(jsonData), &uploadData)
+	err := json.Unmarshal([]byte(jsonData), &uploadData)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/UploadMedia Failed to parse json data err: %+v",
@@ -973,19 +941,6 @@ func UploadFile(w http.ResponseWriter, r *http.Request) {
 		helpers.ErrorJSON(w, er, http.StatusBadRequest)
 		return
 	}
-
-	defer func() {
-		err = file.Close()
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"controllers/UploadMedia Failed to temp file err: %+v",
-				err)
-
-			er := errors.New("Failed to temp file")
-			helpers.ErrorJSON(w, er, http.StatusBadRequest)
-			return
-		}
-	}()
 
 	var objUUID uuid.UUID
 
@@ -1563,6 +1518,12 @@ func GetDocAttachment(w http.ResponseWriter, r *http.Request) {
 	serveFileOf(w, r, fileAccessBusiness.Place{Kind: postgressStruct.ATTACHMENT_SRC_DOC, ID: chi.URLParam(r, "doc_uuid")}, true)
 }
 
+// GetTableFile serves a table's file (its files cells') to whoever may read
+// the table's rows.
+func GetTableFile(w http.ResponseWriter, r *http.Request) {
+	serveFileOf(w, r, fileAccessBusiness.Place{Kind: postgressStruct.ATTACHMENT_SRC_TABLE, ID: chi.URLParam(r, "id")}, false)
+}
+
 // GetBoardAttachment serves a picture on a board to whoever may read the
 // board: a redirect to it.
 func GetBoardAttachment(w http.ResponseWriter, r *http.Request) {
@@ -1870,8 +1831,8 @@ func writeRecordingRefusal(w http.ResponseWriter, code int) {
 const recordingUnavailable = "The recording couldn't be opened just now."
 
 // writeRecordingURL answers a recording's playback link, or why there is
-// none to play: still being saved, failed (nothing was written), or a call's
-// transcript with no recording. The link lives for the recording's length and
+// none to play: still being saved, failed, empty (it captured nothing), or a
+// call's transcript with no recording. The link lives for the recording's length and
 // half an hour (business.RecordingURLTTL), and expires_at says when, so the
 // player fetches a new one before or after it runs out, keeping its place.
 func writeRecordingURL(w http.ResponseWriter, r *http.Request, rec *dgraphStruct.DgraphRecording) {
@@ -1882,8 +1843,8 @@ func writeRecordingURL(w http.ResponseWriter, r *http.Request, rec *dgraphStruct
 	case rec.EndedAt == nil || !rec.EndedAt.After(time.Unix(0, 0)):
 		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "recording"})
 		return
-	case recordingBusiness.Failed(rec.Status):
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "failed"})
+	case recordingBusiness.Failed(rec.Status), recordingBusiness.Empty(rec.Status):
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": rec.Status})
 		return
 	}
 
@@ -1936,6 +1897,16 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 	if len(userFwdMsgRawInfo.FwdTo) == 0 {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Fwd list is empty",
+		})
+		return
+	}
+	// A forward writes to every place it names in one request (DG4's probe:
+	// 5.7 s at 1,000), so it names at most sendBusiness.MaxForwardPlaces, and
+	// a longer list is refused in words with the limit, before anything is read.
+	if len(userFwdMsgRawInfo.FwdTo) > sendBusiness.MaxForwardPlaces {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+			"msg":   sendBusiness.TooManyForwardPlaces,
+			"limit": sendBusiness.MaxForwardPlaces,
 		})
 		return
 	}
@@ -2012,6 +1983,28 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 	// used to be written as they came, so a check on one id and a write to
 	// another, or a channel uuid with no uid to check at all, put a forward
 	// into a channel or conversation the sender isn't in.
+	// The groups and people are read at once (chatBusiness.StandingsOf), not
+	// one trip each.
+	var grpIDs, personUUIDs []string
+	for _, t := range userFwdMsgRawInfo.FwdTo {
+		switch {
+		case t.ChannelDgraphUid != "" || t.ChannelUuid != "":
+		case t.GrpId != "":
+			grpIDs = append(grpIDs, t.GrpId)
+		case t.UserUuid != "":
+			personUUIDs = append(personUUIDs, t.UserUuid)
+		}
+	}
+	standings, errStandings := chatBusiness.StandingsOf(ctx, userInfo.UserDgraphInfo.Uid, grpIDs, personUUIDs)
+	if errStandings != nil {
+		helpers.LogErrorWithContext(ctx,
+			"controllers/FwdUserMessage Failed to read the places to forward to err: %+v",
+			errStandings)
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+			"msg": "Couldn't check the places to forward to. Try again.",
+		})
+		return
+	}
 	var channelDgraphUIDs []string
 	for i := range userFwdMsgRawInfo.FwdTo {
 		t := &userFwdMsgRawInfo.FwdTo[i]
@@ -2024,16 +2017,7 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 			t.GrpId, t.UserUuid = "", ""
 			channelDgraphUIDs = append(channelDgraphUIDs, t.ChannelDgraphUid)
 		case t.GrpId != "":
-			grpDmInfo, errGrp := chatBusiness.GetDgraphDmBasicByGrpId(ctx, t.GrpId, userInfo.UserDgraphInfo.Uid)
-			if errGrp != nil {
-				helpers.LogErrorWithContext(ctx,
-					"controllers/FwdUserMessage Failed to verify group chat membership err: %+v",
-					errGrp)
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-					"msg": "Failed to verify group chat membership",
-				})
-				return
-			}
+			grpDmInfo := standings.Groups[t.GrpId]
 			if grpDmInfo == nil || grpDmInfo.ParticipantIsMember == 0 {
 				helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 					"msg": "Not authorised to forward to this group",
@@ -2042,8 +2026,8 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 			}
 			t.GrpDgraphUid, t.UserUuid = grpDmInfo.Uid, ""
 		case t.UserUuid != "":
-			to, errTo := business.GetDgraphUserInfoByUUID(ctx, t.UserUuid)
-			if errTo != nil || to == nil {
+			to := standings.People[t.UserUuid]
+			if to == nil {
 				helpers.WriteBadRequest(w, "There's no such person to forward to")
 				return
 			}
@@ -2130,6 +2114,12 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The server's own messages (a system line, a call's post) aren't forwarded:
+	// a call's card belongs to its conversation (calls CALLS-3b).
+	if userDgraphPost.ServerWritten() || userDgraphChat.ServerWritten() {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "This message can't be forwarded."})
+		return
+	}
 	err = bulkPostAndChatbusiness.BulkPostAndChatForward(ctx, &userInfo.UserDgraphInfo, &userFwdMsgRawInfo, mentionsDgraphUsersList, userDgraphPost, userDgraphChat)
 
 	if err != nil {
@@ -2838,7 +2828,7 @@ func FwdUserAndChannelList(w http.ResponseWriter, r *http.Request) {
 	cleanSearch, sErr := dgraphquery.CleanSearchTerm(searchTextInputRaw.SearchText)
 	if sErr != nil {
 		if errors.Is(sErr, dgraphquery.ErrEmpty) {
-			helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "empty search", "data": nil})
+			helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "empty search", "data": []*adapter.UserAndChannelFwdMessage{}})
 			return
 		}
 		helpers.WriteBadRequest(w, "search text is too long or invalid")
@@ -2861,7 +2851,7 @@ func FwdUserAndChannelList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"data":   resultList,
+		"data":   helpers.NonNil(resultList),
 		"status": "success",
 	})
 

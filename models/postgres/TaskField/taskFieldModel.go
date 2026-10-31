@@ -13,6 +13,8 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -102,7 +104,7 @@ func List(ctx context.Context, projectID uuid.UUID) ([]*Field, error) {
 	c, cancel := withTimeout(ctx)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
-		`SELECT `+columns+` FROM task_fields WHERE project_id = $1 ORDER BY position, created_at`, projectID)
+		`SELECT `+columns+` FROM task_fields WHERE project_id = $1 AND `+softDelete.Live("")+` ORDER BY position, created_at`, projectID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/TaskField List err: %+v", err)
 		return nil, err
@@ -124,7 +126,7 @@ func Get(ctx context.Context, projectID, id uuid.UUID) (*Field, error) {
 	c, cancel := withTimeout(ctx)
 	defer cancel()
 	f, err := scan(postgresInit.DBConn.SqlDB.QueryRowContext(c,
-		`SELECT `+columns+` FROM task_fields WHERE id = $1 AND project_id = $2`, id, projectID))
+		`SELECT `+columns+` FROM task_fields WHERE id = $1 AND project_id = $2 AND `+softDelete.Live(""), id, projectID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -136,7 +138,7 @@ func Count(ctx context.Context, projectID uuid.UUID) (int, error) {
 	c, cancel := withTimeout(ctx)
 	defer cancel()
 	var n int
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `SELECT COUNT(*) FROM task_fields WHERE project_id = $1`, projectID).Scan(&n)
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `SELECT COUNT(*) FROM task_fields WHERE project_id = $1 AND `+softDelete.Live(""), projectID).Scan(&n)
 	return n, err
 }
 
@@ -186,7 +188,7 @@ func Update(ctx context.Context, f *Field, removed []string) (*Field, []string, 
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op after Commit
 	var before []byte
-	err = tx.QueryRowContext(c, `SELECT options FROM task_fields WHERE id = $1 AND project_id = $2 FOR UPDATE`, f.ID, f.ProjectID).Scan(&before)
+	err = tx.QueryRowContext(c, `SELECT options FROM task_fields WHERE id = $1 AND project_id = $2 AND `+softDelete.Live("")+` FOR UPDATE`, f.ID, f.ProjectID).Scan(&before)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}
@@ -257,7 +259,7 @@ func AddOptions(ctx context.Context, projectID, id uuid.UUID, more func(have []O
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op after Commit
 	var raw []byte
-	err = tx.QueryRowContext(c, `SELECT options FROM task_fields WHERE id = $1 AND project_id = $2 FOR UPDATE`, id, projectID).Scan(&raw)
+	err = tx.QueryRowContext(c, `SELECT options FROM task_fields WHERE id = $1 AND project_id = $2 AND `+softDelete.Live("")+` FOR UPDATE`, id, projectID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -297,18 +299,14 @@ func Reorder(ctx context.Context, projectID uuid.UUID, ids []uuid.UUID) error {
 	return err
 }
 
-// Delete removes one of a project's fields, and with it every task's value.
-func Delete(ctx context.Context, projectID, id uuid.UUID) error {
-	c, cancel := withTimeout(ctx)
-	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(c, `DELETE FROM task_fields WHERE id = $1 AND project_id = $2`, id, projectID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
+// Delete deletes one of a project's fields softly (V-78): every task keeps its
+// value, unseen until a restore brings the field back.
+func Delete(ctx context.Context, projectID, id, by uuid.UUID) error {
+	deleted, err := softDelete.Delete(ctx, softDelete.Field, id, by, "project_id = $3", projectID)
+	if err == nil && !deleted {
 		return ErrNotFound
 	}
-	return nil
+	return err
 }
 
 // dropOptionValues takes options a field no longer has off its tasks, in tx: a
@@ -363,7 +361,8 @@ func ValuesFor(ctx context.Context, taskIDs []uuid.UUID) (Values, error) {
 	c, cancel := withTimeout(ctx)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
-		`SELECT task_uuid, field_id, value FROM task_field_values WHERE task_uuid = ANY($1)`, pq.Array(taskIDs))
+		`SELECT v.task_uuid, v.field_id, v.value FROM task_field_values v JOIN task_fields f ON f.id = v.field_id AND `+softDelete.Live("f")+`
+		WHERE v.task_uuid = ANY($1)`, pq.Array(taskIDs))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/TaskField ValuesFor err: %+v", err)
 		return nil, err
@@ -390,7 +389,8 @@ func ValueOf(ctx context.Context, taskID, fieldID uuid.UUID) (json.RawMessage, e
 	defer cancel()
 	var value []byte
 	err := postgresInit.DBConn.SqlDB.QueryRowContext(c,
-		`SELECT value FROM task_field_values WHERE task_uuid = $1 AND field_id = $2`, taskID, fieldID).Scan(&value)
+		`SELECT v.value FROM task_field_values v JOIN task_fields f ON f.id = v.field_id AND `+softDelete.Live("f")+`
+		WHERE v.task_uuid = $1 AND v.field_id = $2`, taskID, fieldID).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -416,6 +416,25 @@ func SetValue(ctx context.Context, taskID, fieldID uuid.UUID, value json.RawMess
 	return err
 }
 
+// SetNew gives a task just made its first values, all in one statement.
+func SetNew(ctx context.Context, taskID uuid.UUID, values map[uuid.UUID]json.RawMessage, by uuid.UUID) error {
+	if len(values) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, 0, len(values))
+	vals := make([]string, 0, len(values))
+	for id, v := range values {
+		ids = append(ids, id)
+		vals = append(vals, string(v))
+	}
+	_, err := pgexec.Exec(ctx, `
+		INSERT INTO task_field_values (task_uuid, field_id, value, updated_by)
+		SELECT $1, t.f, t.v::jsonb, $4 FROM unnest($2::uuid[], $3::text[]) AS t(f, v)
+		ON CONFLICT (task_uuid, field_id) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+		taskID, ids, vals, by)
+	return err
+}
+
 // CopyValues gives to the values from has, for the fields to doesn't have a
 // value of yet: a repeating task's next copy, made in the same project.
 func CopyValues(ctx context.Context, from, to uuid.UUID, by uuid.UUID) error {
@@ -423,7 +442,8 @@ func CopyValues(ctx context.Context, from, to uuid.UUID, by uuid.UUID) error {
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(c, `
 		INSERT INTO task_field_values (task_uuid, field_id, value, updated_by)
-		SELECT $2, field_id, value, $3 FROM task_field_values WHERE task_uuid = $1
+		SELECT $2, v.field_id, v.value, $3 FROM task_field_values v JOIN task_fields f ON f.id = v.field_id AND `+softDelete.Live("f")+`
+		WHERE v.task_uuid = $1
 		ON CONFLICT (task_uuid, field_id) DO NOTHING`, from, to, by)
 	return err
 }
@@ -443,7 +463,8 @@ func TasksMatching(ctx context.Context, fieldID uuid.UUID, m Match) ([]string, e
 	c, cancel := withTimeout(ctx)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
-		SELECT task_uuid FROM task_field_values WHERE field_id = $1 AND (
+		SELECT task_uuid FROM task_field_values WHERE field_id = $1
+		AND EXISTS (SELECT 1 FROM task_fields f WHERE f.id = $1 AND `+softDelete.Live("f")+`) AND (
 			$3
 			OR (jsonb_typeof(value) = 'string' AND value #>> '{}' = ANY($2))
 			OR (jsonb_typeof(value) = 'array' AND value ?| $2)

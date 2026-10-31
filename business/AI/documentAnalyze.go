@@ -24,18 +24,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/akashc777/OneCamp/helpers"
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
+
 	"github.com/akashc777/OneCamp/helpers/zipsafe"
-	"github.com/akashc777/OneCamp/initializers/minioInit"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/ledongthuc/pdf"
-	"github.com/minio/minio-go/v7"
 )
 
 const (
@@ -282,37 +282,19 @@ func looksTextual(data []byte) bool {
 	return float64(ctrl)/float64(total) < 0.02
 }
 
-// fetchDocumentObject downloads an attachment's bytes from MinIO, size-capped.
-// Unlike fetchImageObject it doesn't restrict the content type (format is
-// sniffed from the bytes). The object key comes from the trusted attachment
-// row, never from the client.
+// fetchDocumentObject reads an attachment's bytes (attachmentBusiness.
+// ReadStored), at most docAnalyzeMaxBytes. Unlike fetchImageObject it doesn't
+// restrict the content type (the format is sniffed from the bytes). The
+// object key comes from the trusted attachment row, never from the client.
 func fetchDocumentObject(ctx context.Context, objKey string) ([]byte, error) {
-	bucket := helpers.UserUploadBucket()
-	fullName := "userFileUpload/" + objKey
-
-	info, err := minioInit.MinioClient.StatObject(ctx, bucket, fullName, minio.StatObjectOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("could not read the attachment")
-	}
-	if info.Size > docAnalyzeMaxBytes {
+	data, _, err := attachmentBusiness.ReadStored(ctx, objKey, docAnalyzeMaxBytes, false)
+	switch {
+	case err == nil:
+		return data, nil
+	case errors.Is(err, attachmentBusiness.ErrStoredTooLarge):
 		return nil, fmt.Errorf("that file is too large to read (limit 15 MB)")
-	}
-
-	obj, err := minioInit.MinioClient.GetObject(ctx, bucket, fullName, minio.GetObjectOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("could not read the attachment")
-	}
-	defer obj.Close()
-
-	data, err := io.ReadAll(io.LimitReader(obj, docAnalyzeMaxBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("could not read the attachment")
-	}
-	if len(data) == 0 {
+	case errors.Is(err, attachmentBusiness.ErrStoredEmpty):
 		return nil, errEmptyDoc
 	}
-	if len(data) > docAnalyzeMaxBytes {
-		return nil, fmt.Errorf("that file is too large to read (limit 15 MB)")
-	}
-	return data, nil
+	return nil, fmt.Errorf("could not read the attachment")
 }

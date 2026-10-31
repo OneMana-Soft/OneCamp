@@ -51,6 +51,10 @@ var (
 	ErrTooMany = graph.ErrTooMany
 	// ErrUnknownKind is a kind of tree nobody registered.
 	ErrUnknownKind = errors.New("tree: no such kind of tree")
+	// ErrLeaf is a new parent that holds nothing: a doc tree's file or link
+	// (docs F1, D-30). A move or a new page under one is refused, its preview
+	// too.
+	ErrLeaf = graph.ErrLeaf
 )
 
 // LevelQuery is one page of one level: a parent's children, or with no
@@ -397,6 +401,13 @@ func (hierarchy) Move(ctx context.Context, who accessBusiness.Subject, m Move) (
 	}
 	if m.DryRun {
 		return moved, nil
+	}
+	// The parent it leaves, under the lock, so no other move changes it first.
+	// Unread, the move still stands: its kind just can't follow it out.
+	if chain, _, err := graph.Chain(ctx, s, m.UUID); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Tree Move: the parent %s leaves: %v", m.UUID, err)
+	} else if len(chain) > 1 {
+		moved.From = chain[1].UUID
 	}
 	move := graph.Move{UUID: m.UUID, Parent: m.ParentUUID, Key: placed.Key, Renumber: placed.Renumber}
 	if m.SpaceKind != "" && s.SpaceKind != "" {

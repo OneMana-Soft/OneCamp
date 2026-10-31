@@ -834,12 +834,12 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 	// builder. Until the runner said so, the model did not know, and an agent
 	// asked for a weekly report wrote the numbers out in a sentence.
 	system += chartCapabilityFor(enabledTools, kc)
-	// GitHub grounding: give a tool-enabled agent the workspace's connected
-	// repos (exact owner/name) so it resolves "the onecamp-fe repo" to
+	// GitHub grounding: give a tool-enabled agent the connected repos this run
+	// may read (exact owner/name) so it resolves "the onecamp-fe repo" to
 	// akashc777/onecamp-fe deterministically instead of a global search or a
 	// "which repository?" question.
 	if len(enabledTools) > 0 {
-		if gh := buildGitHubContext(ctx); gh != "" {
+		if gh := buildGitHubContext(ctx, userUUID); gh != "" {
 			system += gh
 		}
 	}

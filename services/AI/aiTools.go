@@ -440,7 +440,7 @@ var ToolRegistry = []ToolDef{
 			{Name: "aggregate", Type: "string", Required: false, Description: "One of count (default), sum, avg, min, max. sum/avg/min/max require value_field."},
 			{Name: "value_field", Type: "string", Required: false, Description: "Number column (name or id) to aggregate for sum/avg/min/max"},
 			{Name: "group_by", Type: "string", Required: false, Description: "Column (name or id) to break the result down by. Omit for a single total. Array columns (multi-select/person) split into one group per value."},
-			{Name: "filters", Type: "string", Required: false, Description: "Optional JSON array of {\"field\":name-or-id,\"op\":one of eq|ne|contains|gt|gte|lt|lte|empty|not_empty,\"value\":string}"},
+			{Name: "filters", Type: "string", Required: false, Description: "Optional JSON array of {\"field\":name-or-id,\"op\":one of eq|ne|contains|gt|gte|lt|lte|empty|not_empty,\"value\":string}, read as the grid's filters: gt..lte compare numbers and dates (a day, a month as 2026-10, or a year); a checkbox is eq true or false; people and links match a name, an id or @me. A filter a column can't take is refused, saying why."},
 			{Name: "limit", Type: "string", Required: false, Description: "Max number of groups to return (default 50, top by value)"},
 			{Name: "order", Type: "string", Required: false, Description: "asc for smallest-first; default is largest-first"},
 		},
@@ -451,7 +451,7 @@ var ToolRegistry = []ToolDef{
 		ReadOnly:    true,
 		Parameters: []ToolParam{
 			{Name: "table_uuid", Type: "string", Required: true, Description: "UUID of the table to query"},
-			{Name: "plan", Type: "string", Required: true, Description: "JSON plan: {\"filters\":[{\"field\":..,\"op\":eq|ne|contains|gt|gte|lt|lte|empty|not_empty,\"value\":..}], \"group_by\":\"Column\", \"metrics\":[{\"aggregate\":count|sum|avg|min|max,\"value_field\":\"Column\",\"label\":\"optional\"}], \"having\":[{\"metric\":\"label\",\"op\":gt|gte|lt|lte|eq|ne,\"value\":10}], \"share_of\":\"metric-label\", \"sort_by\":\"metric-label\", \"ascending\":false, \"limit\":5}. Only metrics[] is required; group_by omitted = one total. count needs no value_field."},
+			{Name: "plan", Type: "string", Required: true, Description: "JSON plan: {\"filters\":[{\"field\":..,\"op\":eq|ne|contains|gt|gte|lt|lte|empty|not_empty,\"value\":..}], \"group_by\":\"Column\", \"metrics\":[{\"aggregate\":count|sum|avg|min|max,\"value_field\":\"Column\",\"label\":\"optional\"}], \"having\":[{\"metric\":\"label\",\"op\":gt|gte|lt|lte|eq|ne,\"value\":10}], \"share_of\":\"metric-label\", \"sort_by\":\"metric-label\", \"ascending\":false, \"limit\":5}. Only metrics[] is required; group_by omitted = one total. count needs no value_field. Filters read as query_table's."},
 		},
 	},
 	// --- External data sources (read-only warehouse/DB connectors). Same
@@ -559,7 +559,7 @@ var ToolRegistry = []ToolDef{
 		Description: "List what one workspace item is connected to: the docs it links or is linked from, its tasks, project, team, board, the messages that share it and their channels, and the people who made, own or are assigned it, each with the path that connects it. Use to answer what something is connected to, what links to a doc, what a task belongs to, or what blocks a task. Name the item by kind and uuid (find a uuid with search_workspace, list_docs or list_tasks first). Read-only.",
 		ReadOnly:    true,
 		Parameters: []ToolParam{
-			{Name: "kind", Type: "string", Required: true, Description: "What the item is: doc, task, project, person, board, channel, message, team"},
+			{Name: "kind", Type: "string", Required: true, Description: "What the item is: doc (a page, folder, file or link), task, project, person, board, channel, message, team"},
 			{Name: "uuid", Type: "string", Required: true, Description: "The item's uuid"},
 			{Name: "depth", Type: "string", Required: false, Description: "1 for what is directly connected (the default), 2 to go one step further"},
 			{Name: "kinds", Type: "string", Required: false, Description: "Only these kinds, comma-separated (for example doc,task); every kind when empty"},
@@ -570,9 +570,9 @@ var ToolRegistry = []ToolDef{
 		Description: "Find the shortest ways two workspace items are connected (at most three paths of up to four steps), for example how a doc relates to a project, or how a message connects to a task. Name each item by kind and uuid. Read-only.",
 		ReadOnly:    true,
 		Parameters: []ToolParam{
-			{Name: "from_kind", Type: "string", Required: true, Description: "What the first item is: doc, task, project, person, board, channel, message, team"},
+			{Name: "from_kind", Type: "string", Required: true, Description: "What the first item is: doc (a page, folder, file or link), task, project, person, board, channel, message, team"},
 			{Name: "from_uuid", Type: "string", Required: true, Description: "The first item's uuid"},
-			{Name: "to_kind", Type: "string", Required: true, Description: "What the second item is: doc, task, project, person, board, channel, message, team"},
+			{Name: "to_kind", Type: "string", Required: true, Description: "What the second item is: doc (a page, folder, file or link), task, project, person, board, channel, message, team"},
 			{Name: "to_uuid", Type: "string", Required: true, Description: "The second item's uuid"},
 		},
 	},

@@ -879,10 +879,15 @@ services:
   # NOT AN AI FEATURE, so it ships in BOTH editions. The v1/v2 split is about models
   # and agents; a meeting is neither.
   #
-  # TURN IS BUILT IN. LiveKit serves TURN itself on 443, which is why there is no
-  # coturn container here — and why onecamp-turn must be a DNS-only record. Media
+  # TURN IS BUILT IN. LiveKit serves TURN itself, which is why there is no coturn
+  # container here — and why onecamp-turn must be a DNS-only record. Media
   # travels over UDP and a proxy cannot pass it; proxying that hostname does not
   # fail loudly, calls simply never connect for anyone behind a restrictive network.
+  # TURN over UDP is 3478, published below. TURN over TLS is what LiveKit tells
+  # callers to use where only 443 gets out (turns:<TURN_DOMAIN>:443): Traefik's
+  # TCP router for that name ends TLS on 443 and passes the stream to LiveKit's
+  # TURN port (livekit.yaml: tls_port 5349, external_tls), as final-compose.yml
+  # always did (helpers/turnRouteGuard_test.go holds the two to it).
   # ---------------------------------------------------------------------------
   livekit:
     logging: *default-logging
@@ -903,8 +908,8 @@ services:
       # deployment's signing key.
       - ./livekit.yaml:/livekit.yaml
     ports:
-      # Published directly, not through Traefik: TURN and the media path are not
-      # HTTP, and a reverse proxy has nothing useful to do with them.
+      # Published directly, not through Traefik: TURN over UDP and the media path
+      # are not HTTP, and a reverse proxy has nothing useful to do with them.
       - "3478:3478/tcp"
       - "3478:3478/udp"
       - "7881:7881/tcp"
@@ -921,6 +926,12 @@ services:
       - traefik.http.routers.livekit-https.tls=true
       - traefik.http.routers.livekit-https.service=livekit
       - traefik.http.routers.livekit-https.tls.certresolver=le
+      - traefik.tcp.routers.livekit-turn.rule=HostSNI(`${TURN_DOMAIN}`)
+      - traefik.tcp.routers.livekit-turn.entrypoints=https
+      - traefik.tcp.routers.livekit-turn.tls=true
+      - traefik.tcp.routers.livekit-turn.tls.certresolver=le
+      - traefik.tcp.routers.livekit-turn.service=livekit-turn
+      - traefik.tcp.services.livekit-turn.loadbalancer.server.port=5349
     networks:
       - onecamp-shared-net
       - traefik-public

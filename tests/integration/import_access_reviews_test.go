@@ -13,9 +13,6 @@ package integration_test
 // Run: go test -tags=integration ./tests/integration/ -run 'TestImportAccessReviews' -v
 
 import (
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -23,22 +20,6 @@ import (
 
 	"github.com/akashc777/OneCamp/tests/integration"
 )
-
-// migrationSQL is the one migration named name (its number aside), up or
-// down.
-func migrationSQL(t *testing.T, name, dir string) string {
-	t.Helper()
-	_, here, _, _ := runtime.Caller(0)
-	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(here), "..", "..", "migrations", "*_"+name+"."+dir+".sql"))
-	if len(matches) != 1 {
-		t.Fatalf("want one %s %s migration, found %v", name, dir, matches)
-	}
-	b, err := os.ReadFile(matches[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
-}
 
 func TestImportAccessReviewsMigrationUpDownUp(t *testing.T) {
 	up, down := migrationSQL(t, "import_access_reviews", "up"), migrationSQL(t, "import_access_reviews", "down")

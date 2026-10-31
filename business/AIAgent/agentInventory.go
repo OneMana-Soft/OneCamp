@@ -181,7 +181,7 @@ func buildInventory(
 			ID:          t.Id,
 			Name:        t.Name,
 			TokenPrefix: t.TokenPrefix,
-			Scopes:      nonNilStrings(parseTokenScopes(t.Scopes)),
+			Scopes:      helpers.NonNil(parseTokenScopes(t.Scopes)),
 			SponsorID:   t.CreatedBy,
 			Sponsor:     names[t.CreatedBy],
 			AgentID:     t.AgentId,
@@ -265,13 +265,6 @@ func brainLabel(a *model.AiAgent) string {
 func parseTokenScopes(raw string) []string {
 	var s []string
 	_ = json.Unmarshal([]byte(raw), &s)
-	return s
-}
-
-func nonNilStrings(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
 	return s
 }
 

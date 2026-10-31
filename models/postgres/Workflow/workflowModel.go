@@ -33,6 +33,19 @@ const (
 	// TriggerTaskFieldChanged fires when a task's priority, due date, tags or
 	// name change (trigger_config "fields" narrows which).
 	TriggerTaskFieldChanged = "task_field_changed"
+	// TriggerSchedule fires on a schedule (trigger_config: the repeat rule,
+	// time and zone), through business/Scheduler.
+	TriggerSchedule = "schedule"
+	// TriggerTaskDueSoon fires once per due date, a number of days before it.
+	TriggerTaskDueSoon = "task_due_soon"
+	// TriggerTaskOverdue fires once per due date, when it has passed.
+	TriggerTaskOverdue = "task_overdue"
+	// TriggerFormSubmitted fires when one of the project's forms is sent
+	// (trigger_config form_id), about the task the form made.
+	TriggerFormSubmitted = "form_submitted"
+	// TriggerApprovalDecided fires when a task's approval request is answered
+	// for good (trigger_config outcome: approved, changes, rejected or any).
+	TriggerApprovalDecided = "approval_decided"
 )
 
 // ValidTriggerType reports whether t is a supported trigger kind (mirrors the
@@ -41,7 +54,8 @@ func ValidTriggerType(t string) bool {
 	switch t {
 	case TriggerMessagePosted, TriggerReactionAdded, TriggerUserJoinedChannel,
 		TriggerTaskCreated, TriggerTaskStatusChanged, TriggerMeetingEnded,
-		TriggerTaskAssigned, TriggerTaskFieldChanged:
+		TriggerTaskAssigned, TriggerTaskFieldChanged,
+		TriggerSchedule, TriggerTaskDueSoon, TriggerTaskOverdue, TriggerFormSubmitted, TriggerApprovalDecided:
 		return true
 	default:
 		return false

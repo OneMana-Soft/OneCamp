@@ -102,7 +102,7 @@ func TestASlackImportsChannelsAreTheTeams(t *testing.T) {
 		{ID: "GLEAD", Name: "leadership", Creator: "UBO", Members: []string{"UADA", "UBO"}},
 		{ID: "GMINE", Name: "admins", Creator: "UADMIN", Members: []string{"UADMIN", "UADA"}},
 	}
-	stats, err := resolveChannels(ctx, job, "Acme", public, private, adminInfo, "")
+	stats, err := resolveChannels(ctx, job, "Acme", public, private, adminInfo, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

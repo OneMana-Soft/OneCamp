@@ -55,19 +55,16 @@ func siteFieldsOf(t *testing.T) siteFields {
 	if err := json.Unmarshal([]byte(siteFieldsJSON), &metas); err != nil {
 		t.Fatal(err)
 	}
-	out := siteFields{}
-	for _, m := range metas {
-		if kindOf(m) != "" {
-			out[m.ID] = m
-		}
-	}
-	return out
+	return fieldsOf(metas)
 }
 
 func TestKindOf(t *testing.T) {
 	fields := siteFieldsOf(t)
-	if len(fields) != 10 || fields["customfield_10020"].ID != "" || fields["summary"].ID != "" {
+	if len(fields.kinds) != 10 || fields.kinds["customfield_10020"].ID != "" || fields.kinds["summary"].ID != "" {
 		t.Fatalf("custom fields of kinds OneCamp has, without sprints, ranks or system fields: %v", fields)
+	}
+	if fields.sprint != "customfield_10020" {
+		t.Fatalf("the Sprint field is known by its schema, for the sprints: %q", fields.sprint)
 	}
 }
 
@@ -154,8 +151,8 @@ func TestCustomFieldsReadOnceAnImport(t *testing.T) {
 	p, job := New(), &importModels.Job{Id: uuid.New()}
 	first, err1 := p.customFields(context.Background(), job, "tok", srv.URL)
 	second, err2 := p.customFields(context.Background(), job, "tok", srv.URL)
-	if err1 != nil || err2 != nil || len(first) != 10 || len(second) != 10 || atomic.LoadInt32(&calls) != 1 {
-		t.Fatalf("%d %d fields, %d calls, %v %v", len(first), len(second), calls, err1, err2)
+	if err1 != nil || err2 != nil || len(first.kinds) != 10 || len(second.kinds) != 10 || atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("%d %d fields, %d calls, %v %v", len(first.kinds), len(second.kinds), calls, err1, err2)
 	}
 	p.CleanupJob(job.Id.String())
 	if _, ok := p.fieldsCache[job.Id]; ok {
@@ -188,7 +185,7 @@ func TestCustomFieldsWhenTheListFails(t *testing.T) {
 		t.Fatal("and isn't cached either")
 	}
 	status = http.StatusForbidden
-	if fields, err := p.customFields(context.Background(), job, "tok", srv.URL); err != nil || len(fields) != 0 {
-		t.Fatalf("a 403 imports without custom fields: %v %v", fields, err)
+	if fields, err := p.customFields(context.Background(), job, "tok", srv.URL); err != nil || len(fields.kinds) != 0 || fields.sprint != "" {
+		t.Fatalf("a 403 imports without custom fields or sprints: %v %v", fields, err)
 	}
 }

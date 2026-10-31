@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	"github.com/akashc777/OneCamp/helpers"
 	tableModel "github.com/akashc777/OneCamp/models/postgres/DataTable"
@@ -124,7 +125,7 @@ func executeReadTable(ctx context.Context, action ai.ProposedAction, userUUID st
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Table %q (id: %s)\n\nColumns (use the field id as the key in row values):\n", bundle.Table.Name, bundle.Table.Id))
 	for _, f := range bundle.Fields {
-		b.WriteString(fmt.Sprintf("- %s [%s] id: %s\n", f.Name, f.Type, f.Id))
+		b.WriteString(fmt.Sprintf("- %s [%s%s] id: %s\n", f.Name, f.Type, columnNote(f), f.Id))
 	}
 
 	b.WriteString(rowSample(bundle))
@@ -138,6 +139,23 @@ func executeReadTable(ctx context.Context, action ai.ProposedAction, userUUID st
 		b.WriteString(defs)
 	}
 	return strings.TrimSpace(b.String()), nil, nil
+}
+
+// columnNote is what a column's kind adds to its line in read_table: an id's
+// prefix, so the model knows "DEAL-12" is the row whose id cell is 12 (a
+// query_table filter takes either), and that what is read from the row
+// itself (its id, when it was made or changed, and by whom) is never written.
+func columnNote(f *tableModel.Field) string {
+	note := ""
+	if f.Type == tableModel.FieldAutonumber {
+		if p := fieldTypes.IDPrefix(f); p != "" {
+			note = fmt.Sprintf(", shown as %s-<number>", p)
+		}
+	}
+	if k, ok := fieldTypes.Kinds.Lookup(f.Type); ok && k.FromRow != nil {
+		note += ", read-only"
+	}
+	return note
 }
 
 // sampleRows is how many rows read_table lists.

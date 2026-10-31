@@ -3,7 +3,8 @@ package business
 // Project guests: the client's view of the work being done for them. A
 // project's admin gives someone outside the workspace a link to one project;
 // they see its tasks by status, open one for its description, and (with the
-// comment capability) read and write its comments.
+// comment capability) read and write its comments and answer what the team
+// asks them to approve.
 //
 // The same construction as channel guests: a grant, never a user. The read is
 // made as the "Guests" principal and filtered to the grant's project, and a
@@ -47,6 +48,20 @@ type GuestTaskCard struct {
 	CommentCount uint32     `json:"comment_count"`
 	// Review is the client's newest verdict, if they gave one.
 	Review *ReviewView `json:"review,omitempty"`
+	// Waiting is what the team asks this link's client to approve on the
+	// task, while it waits for them.
+	Waiting *GuestAsk `json:"waiting,omitempty"`
+}
+
+// GuestAsk is what the team asks a client to approve on a task, as the client
+// reads it: the asker's words, where a held move goes once approved, by when,
+// and who asked.
+type GuestAsk struct {
+	Ask     string     `json:"ask,omitempty"`
+	ToLabel string     `json:"to_label,omitempty"`
+	DueAt   *time.Time `json:"due_at,omitempty"`
+	AskedBy string     `json:"asked_by"`
+	AskedAt time.Time  `json:"asked_at"`
 }
 
 // GuestColumn is one status and its tasks, in board order.
@@ -207,6 +222,7 @@ func GetGuestProject(ctx context.Context, grant *guestModel.GuestGrant) (*GuestP
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Guest/GetGuestProject reviews err: %+v", err)
 	}
+	asks := asksFor(ctx, grant, projectID)
 	for _, s := range guestStatuses {
 		col := GuestColumn{Status: s.status, Label: s.label, Tasks: []GuestTaskCard{}}
 		for _, t := range byStatus[s.status] {
@@ -219,6 +235,7 @@ func GetGuestProject(ctx context.Context, grant *guestModel.GuestGrant) (*GuestP
 					card.Review = reviewView(&r)
 				}
 			}
+			card.Waiting = waitingOf(asks, t.Uuid)
 			col.Tasks = append(col.Tasks, card)
 		}
 		view.TotalTasks += len(col.Tasks)
@@ -285,6 +302,7 @@ func GetGuestTask(ctx context.Context, grant *guestModel.GuestGrant, taskID stri
 			v.Review = reviewView(r)
 		}
 	}
+	v.Waiting = waitingOf(asksFor(ctx, grant, projectID), t.Uuid)
 	if canComment {
 		for _, c := range t.Comments {
 			v.Comments = append(v.Comments, guestMessage(c.Uuid, c.CommentBy, c.Text, c.CreatedAt))
@@ -404,10 +422,59 @@ func ReviewAsGuest(ctx context.Context, grant *guestModel.GuestGrant, taskID, na
 	if err != nil {
 		return nil, err
 	}
+	if ClientVerdict != nil {
+		ClientVerdict(ctx, grant.Id, "task", task.Uuid, task.Name, decision, SanitizeGuestName(name), note)
+	}
 	if err := postGuestComment(ctx, bot, task.Uuid, body); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Guest/ReviewAsGuest comment err: %+v", err)
 	}
 	return reviewView(r), nil
+}
+
+// ClientVerdict, when set (business/Approvals' init), counts a client's
+// verdict on an item as a decision on its open approval request, when the
+// request names this link; the verdict is kept as a review either way. A
+// seam, so this package needs nothing of approvals.
+var ClientVerdict func(ctx context.Context, grant uuid.UUID, kind, id, title, decision, name, note string)
+
+// ClientAsk is an open approval request that waits for a link's client on a
+// task: what is asked, where a held move goes, by when, and who asked (nil
+// when they couldn't be read).
+type ClientAsk struct {
+	Ask     string
+	ToName  string
+	DueAt   *time.Time
+	AskedBy *dgraphStruct.DgraphUser
+	AskedAt time.Time
+}
+
+// ClientAsks, when set (business/Approvals' init), is what a link's client is
+// asked to approve in its project, by task id. A seam, as ClientVerdict is.
+var ClientAsks func(ctx context.Context, grant, projectID uuid.UUID) (map[string]ClientAsk, error)
+
+// asksFor is what grant's client is asked to approve, by task. A link only to
+// view can't answer, so is asked nothing; a failed read is logged and asks
+// nothing, so the client's board still loads.
+func asksFor(ctx context.Context, grant *guestModel.GuestGrant, projectID uuid.UUID) map[string]ClientAsk {
+	if ClientAsks == nil || grant.Capability != guestModel.CapabilityComment {
+		return nil
+	}
+	asks, err := ClientAsks(ctx, grant.Id, projectID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Guest: what link %s is asked: %v", grant.Id, err)
+		return nil
+	}
+	return asks
+}
+
+// waitingOf is a task's ask as its client reads it, or nil when nothing waits
+// for them. Pure.
+func waitingOf(asks map[string]ClientAsk, taskID string) *GuestAsk {
+	a, ok := asks[taskID]
+	if !ok {
+		return nil
+	}
+	return &GuestAsk{Ask: a.Ask, ToLabel: a.ToName, DueAt: a.DueAt, AskedBy: authorName(a.AskedBy), AskedAt: a.AskedAt}
 }
 
 // LatestReview is a task's newest client verdict, for the team's task panel.

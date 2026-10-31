@@ -33,12 +33,18 @@ const (
 // may do in it. It writes the response and returns ok=false when they may not
 // go on.
 func projectAccess(w http.ResponseWriter, r *http.Request, need access) (projectID uuid.UUID, user userModels.UserInfo, ok bool) {
-	user, _ = r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	projectID, err := uuid.Parse(chi.URLParam(r, "project_uuid"))
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That is not a project id."})
 		return uuid.Nil, user, false
 	}
+	return accessTo(w, r, projectID, need)
+}
+
+// accessTo is projectAccess for a project the handler names: a deleted
+// status's, for its restore.
+func accessTo(w http.ResponseWriter, r *http.Request, projectID uuid.UUID, need access) (uuid.UUID, userModels.UserInfo, bool) {
+	user, _ := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	project, err := projectBusiness.GetBasicDgraphProjectInfo(r.Context(), projectID.String(), user.UserDgraphInfo.Uid)
 	if err != nil || project == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Project not found."})
@@ -158,7 +164,7 @@ func Update(w http.ResponseWriter, r *http.Request) {
 // Body: {"move_to": "<status>"}; empty moves its tasks to the built-in status
 // it counted as.
 func Delete(w http.ResponseWriter, r *http.Request) {
-	projectID, _, ok := projectAccess(w, r, admin)
+	projectID, user, ok := projectAccess(w, r, admin)
 	if !ok {
 		return
 	}
@@ -170,7 +176,7 @@ func Delete(w http.ResponseWriter, r *http.Request) {
 		MoveTo string `json:"move_to"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
-	if err := business.Delete(r.Context(), projectID, id, in.MoveTo); err != nil {
+	if err := business.Delete(r.Context(), projectID, id, in.MoveTo, user.UserPostgresInfo.Id); err != nil {
 		fail(w, r, err)
 		return
 	}

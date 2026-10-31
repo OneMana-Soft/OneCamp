@@ -10,7 +10,9 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // MaxRulesPerProject bounds one project's rules: a list a person can read,
@@ -112,6 +114,9 @@ type Run struct {
 	Branch     string     `json:"branch,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	Steps      []Step     `json:"steps"`
+	// Matched is how many tasks a scheduled run found its conditions held
+	// for; nil for every other run.
+	Matched    *int       `json:"matched,omitempty"`
 	StartedAt  time.Time  `json:"started_at"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 	UndoneBy   *uuid.UUID `json:"undone_by,omitempty"`
@@ -133,13 +138,13 @@ func ClaimRun(ctx context.Context, r *Run, eventKey string) (bool, error) {
 	if r.Status == "" {
 		r.Status = RunRunning
 	}
-	steps, _ := json.Marshal(nonNil(r.Steps))
+	steps, _ := json.Marshal(helpers.NonNil(r.Steps))
 	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx,
-		`INSERT INTO workflow_runs (id, workflow_id, event_key, trigger, project_id, subject_id, subject, status, branch, error, steps, started_at, finished_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), NULLIF($10, ''), $11, $12, $13)
+		`INSERT INTO workflow_runs (id, workflow_id, event_key, trigger, project_id, subject_id, subject, status, branch, error, steps, started_at, finished_at, matched)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), NULLIF($10, ''), $11, $12, $13, $14)
 		 ON CONFLICT (workflow_id, event_key) DO NOTHING`,
 		r.ID, r.WorkflowID, clip(eventKey, 200), clip(r.Trigger, 40), r.ProjectID, clip(r.SubjectID, 64), clip(r.Subject, 300),
-		r.Status, r.Branch, r.Error, steps, r.StartedAt, r.FinishedAt)
+		r.Status, r.Branch, r.Error, steps, r.StartedAt, r.FinishedAt, r.Matched)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/ClaimRun err: %+v", err)
 		return false, err
@@ -154,14 +159,41 @@ func FinishRun(ctx context.Context, r *Run) error {
 	defer cancel()
 	now := time.Now()
 	r.FinishedAt = &now
-	steps, _ := json.Marshal(nonNil(r.Steps))
+	steps, _ := json.Marshal(helpers.NonNil(r.Steps))
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx,
-		`UPDATE workflow_runs SET status = $2, branch = NULLIF($3, ''), error = NULLIF($4, ''), steps = $5, finished_at = $6, subject = COALESCE(NULLIF($7, ''), subject)
-		 WHERE id = $1`, r.ID, r.Status, r.Branch, clip(r.Error, 2000), steps, now, clip(r.Subject, 300))
+		`UPDATE workflow_runs SET status = $2, branch = NULLIF($3, ''), error = NULLIF($4, ''), steps = $5, finished_at = $6, subject = COALESCE(NULLIF($7, ''), subject),
+		   matched = COALESCE($8, matched), subject_id = COALESCE(NULLIF($9, ''), subject_id)
+		 WHERE id = $1`, r.ID, r.Status, r.Branch, clip(r.Error, 2000), steps, now, clip(r.Subject, 300), r.Matched, clip(r.SubjectID, 64))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/FinishRun err: %+v", err)
 	}
 	return err
+}
+
+// ClaimedKeys is which of these event keys a rule already has a run for.
+func ClaimedKeys(ctx context.Context, workflowID uuid.UUID, keys []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	clipped := make([]string, len(keys))
+	for i, k := range keys {
+		clipped[i] = clip(k, 200)
+	}
+	found, err := pgexec.Query(ctx, `SELECT event_key FROM workflow_runs WHERE workflow_id = $1 AND event_key = ANY($2)`,
+		func(r pgexec.Row) (string, error) {
+			var k string
+			err := r.Scan(&k)
+			return k, err
+		}, workflowID, pq.Array(clipped))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/ClaimedKeys err: %+v", err)
+		return nil, err
+	}
+	for _, k := range found {
+		out[k] = true
+	}
+	return out, nil
 }
 
 // MarkUndone records that someone undid a run; it answers false when the run
@@ -169,7 +201,7 @@ func FinishRun(ctx context.Context, r *Run) error {
 func MarkUndone(ctx context.Context, id, by uuid.UUID, steps []Step) (bool, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
-	b, _ := json.Marshal(nonNil(steps))
+	b, _ := json.Marshal(helpers.NonNil(steps))
 	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx,
 		`UPDATE workflow_runs SET status = 'undone', undone_by = $2, undone_at = NOW(), steps = $3
 		 WHERE id = $1 AND status IN ('ok', 'failed')`, id, by, b)
@@ -184,16 +216,21 @@ func MarkUndone(ctx context.Context, id, by uuid.UUID, steps []Step) (bool, erro
 var ErrRunNotFound = errors.New("that run isn't there")
 
 const runColumns = `id, workflow_id, trigger, project_id, COALESCE(subject_id, ''), COALESCE(subject, ''), status,
-	COALESCE(branch, ''), COALESCE(error, ''), steps, started_at, finished_at, undone_by, undone_at`
+	COALESCE(branch, ''), COALESCE(error, ''), steps, started_at, finished_at, undone_by, undone_at, matched`
 
 func scanRun(s scanner) (*Run, error) {
 	var r Run
 	var project, undoneBy uuid.NullUUID
 	var finished, undoneAt sql.NullTime
+	var matched sql.NullInt64
 	var steps []byte
 	if err := s.Scan(&r.ID, &r.WorkflowID, &r.Trigger, &project, &r.SubjectID, &r.Subject, &r.Status,
-		&r.Branch, &r.Error, &steps, &r.StartedAt, &finished, &undoneBy, &undoneAt); err != nil {
+		&r.Branch, &r.Error, &steps, &r.StartedAt, &finished, &undoneBy, &undoneAt, &matched); err != nil {
 		return nil, err
+	}
+	if matched.Valid {
+		n := int(matched.Int64)
+		r.Matched = &n
 	}
 	if project.Valid {
 		r.ProjectID = &project.UUID
@@ -208,7 +245,7 @@ func scanRun(s scanner) (*Run, error) {
 		r.UndoneAt = &undoneAt.Time
 	}
 	_ = json.Unmarshal(steps, &r.Steps)
-	r.Steps = nonNil(r.Steps)
+	r.Steps = helpers.NonNil(r.Steps)
 	return &r, nil
 }
 
@@ -292,13 +329,6 @@ func PurgeRuns(ctx context.Context, before time.Time, limit int) (int64, error) 
 		return 0, err
 	}
 	return res.RowsAffected()
-}
-
-func nonNil(s []Step) []Step {
-	if s == nil {
-		return []Step{}
-	}
-	return s
 }
 
 // clip cuts s to at most n bytes on a rune boundary.

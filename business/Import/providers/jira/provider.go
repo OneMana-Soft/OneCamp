@@ -28,7 +28,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,9 +45,10 @@ const providerName = importModels.ProviderJira
 // runaway loop.
 const maxPages = 200
 
-// siteClient is what Jira's calls go through: the site is the one the admin
-// typed, so it is SiteAPIClient.
-var siteClient = importProvider.SiteAPIClient
+// statusRules reads Jira's answers. fields.go goes on without custom fields
+// when a StatusError's code says the token can't list them. The site is the
+// one the admin typed, so its calls go through SiteAPIClient.
+var statusRules = importProvider.StatusRules{Name: "Jira", Wait: 30 * time.Second, Client: importProvider.SiteAPIClient}
 
 // Provider implements the importProvider.Provider interface for Jira.
 type Provider struct {
@@ -58,15 +58,22 @@ type Provider struct {
 	// site URL so each Iter* doesn't re-resolve from token metadata.
 	mu        sync.Mutex
 	siteCache map[uuid.UUID]string
+	// browseCache maps job id → the site's own address, where its issues
+	// are browsed (the API may go through Atlassian's gateway).
+	browseCache map[uuid.UUID]string
 	// fieldsCache maps job id → the site's custom fields (fields.go).
 	fieldsCache map[uuid.UUID]siteFields
+	// sprintsCache maps job id → project key → its cycles (sprints.go).
+	sprintsCache map[uuid.UUID]map[string][]importProvider.SourceCycle
 }
 
 func New() *Provider {
 	return &Provider{
-		rl:          importProvider.NewSleepLimiter(100*time.Millisecond, 10),
-		siteCache:   make(map[uuid.UUID]string, 4),
-		fieldsCache: make(map[uuid.UUID]siteFields, 4),
+		rl:           importProvider.NewSleepLimiter(100*time.Millisecond, 10),
+		siteCache:    make(map[uuid.UUID]string, 4),
+		browseCache:  make(map[uuid.UUID]string, 4),
+		fieldsCache:  make(map[uuid.UUID]siteFields, 4),
+		sprintsCache: make(map[uuid.UUID]map[string][]importProvider.SourceCycle, 4),
 	}
 }
 
@@ -101,6 +108,11 @@ func (p *Provider) DefaultStatusMap() map[string]string {
 		"cancelled":                "canceled",
 		"won't do":                 "canceled",
 		"won't fix":                "canceled",
+
+		// A status category, for a status with a name of the team's own
+		// (Plan.StatusKinds).
+		"new":           "todo",
+		"indeterminate": "inProgress",
 	}
 }
 
@@ -178,7 +190,13 @@ func (p *Provider) Plan(ctx context.Context, j *importModels.Job, opts importPro
 			plan.TaskCount += count
 		}
 		// Status set per project.
-		statuses, _ := p.listProjectStatuses(ctx, tok, site, pr.Key)
+		statuses, kinds, _ := p.listProjectStatuses(ctx, tok, site, pr.Key)
+		for name, kind := range kinds {
+			if plan.StatusKinds == nil {
+				plan.StatusKinds = map[string]string{}
+			}
+			plan.StatusKinds[name] = kind
+		}
 		for _, s := range statuses {
 			n := strings.ToLower(strings.TrimSpace(s))
 			if n != "" {
@@ -233,13 +251,7 @@ func (p *Provider) IterUsers(ctx context.Context, j *importModels.Job, opts impo
 			select {
 			case <-ctx.Done():
 				return
-			case out <- importProvider.SourceUser{
-				SourceID:    u.AccountID,
-				DisplayName: u.DisplayName,
-				Email:       u.EmailAddress,
-				AvatarURL:   helpers.FirstNonEmpty(u.AvatarURLs.URL48x48, u.AvatarURLs.URL32x32),
-				IsBot:       u.AccountType == "app",
-			}:
+			case out <- u.source():
 			}
 		}
 	}()
@@ -314,28 +326,57 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 			errCh <- err
 			return
 		}
+		fields, err := p.customFields(ctx, j, tok, site)
+		if err != nil {
+			errCh <- err
+			return
+		}
 		groupBy, _ := opts["group_by"].(string)
-		for _, pr := range projects {
-			team := ""
-			if groupBy == "project_category" && pr.Category != nil {
-				team = pr.Category.ID
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case out <- importProvider.SourceProject{
-				SourceID:     pr.Key, // we use the human-friendly key; gid lookups still work via /project/{key}
-				Name:         pr.Name,
-				Description:  pr.Description,
-				TeamSourceID: team,
-				CreatedBy:    safeAccountID(pr.Lead),
-				SourceKey:    pr.Key,
-				Metadata:     map[string]any{"jira_key": pr.Key, "jira_url": site + "/browse/" + pr.Key},
-			}:
-			}
+		if err := p.sendProjects(ctx, j, tok, site, projects, groupBy, fields.sprint, out); err != nil {
+			errCh <- err
 		}
 	}()
 	return out, errCh
+}
+
+// sendProjects sends the projects in scope, in order, until one can't be
+// read; the stage is then tried again from the first.
+func (p *Provider) sendProjects(ctx context.Context, j *importModels.Job, tok, site string, projects []jiraProject, groupBy, sprintField string, out chan<- importProvider.SourceProject) error {
+	for _, pr := range projects {
+		team := ""
+		if groupBy == "project_category" && pr.Category != nil {
+			team = pr.Category.ID
+		}
+		sp, err := p.sourceProject(ctx, j, tok, site, pr, team, sprintField)
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case out <- sp:
+		}
+	}
+	return nil
+}
+
+// sourceProject is a Jira project as the import takes it, with the sprints
+// that hold its issues as its cycles (sprints.go).
+func (p *Provider) sourceProject(ctx context.Context, j *importModels.Job, tok, site string, pr jiraProject, team, sprintField string) (importProvider.SourceProject, error) {
+	cycles, err := p.projectSprints(ctx, j, tok, site, pr.Key, sprintField)
+	if err != nil {
+		return importProvider.SourceProject{}, err
+	}
+	return importProvider.SourceProject{
+		SourceID:     pr.Key, // we use the human-friendly key; gid lookups still work via /project/{key}
+		Name:         pr.Name,
+		Description:  pr.Description,
+		TeamSourceID: team,
+		CreatedBy:    safeAccountID(pr.Lead),
+		SourceKey:    pr.Key,
+		Cycles:       cycles,
+		Metadata:     map[string]any{"jira_key": pr.Key, "jira_url": site + "/browse/" + pr.Key},
+	}, nil
 }
 
 // IterTasksOfProject paginates issues via JQL search ordered by created
@@ -374,7 +415,7 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 			select {
 			case <-ctx.Done():
 				return false
-			case out <- buildSourceTask(iss, projectSourceId, site, fields):
+			case out <- buildSourceTask(iss, projectSourceId, p.browseOf(j, site), fields):
 			}
 			// If the issue has subtasks, schedule a subtask chunk (once: the
 			// search meets each issue once).
@@ -477,7 +518,7 @@ func (p *Provider) IterSubtasksOfTask(ctx context.Context, j *importModels.Job, 
 				site+"/rest/api/3/issue/"+url.PathEscape(st.Key)+"?expand=renderedFields", &iss); err != nil {
 				continue // tolerate per-subtask failures
 			}
-			task := buildSourceTask(&iss, projectKeyFromIssue(&iss), site, fields)
+			task := buildSourceTask(&iss, projectKeyFromIssue(&iss), p.browseOf(j, site), fields)
 			task.ParentTaskID = taskSourceId
 			select {
 			case <-ctx.Done():
@@ -571,15 +612,22 @@ func (p *Provider) FetchAttachment(ctx context.Context, j *importModels.Job, opt
 	if err != nil {
 		return "", 0, err
 	}
-	return importProvider.DefaultFetchAttachment(ctx, jiraDownload(att, site, tok), dest)
+	return importProvider.DefaultFetchAttachment(ctx, jiraDownload(att, site, tok, p.browseOf(j, site)), dest)
 }
 
 // jiraDownload is att as it is fetched: its /content URL (derived from the
 // site when the issue gave none), carrying the credential only when that URL
 // is on the site the credential was connected for. It went with every URL an
 // issue named.
-func jiraDownload(att importProvider.SourceAttachment, site, tok string) importProvider.SourceAttachment {
+func jiraDownload(att importProvider.SourceAttachment, site, tok string, browse ...string) importProvider.SourceAttachment {
 	if att.URL == "" {
+		att.URL = site + "/rest/api/3/attachment/content/" + url.PathEscape(att.SourceID)
+	}
+	// A signed-in (3LO) token reaches the API only through Atlassian's
+	// gateway (site), and the site's own address refuses it: a file on the
+	// site is fetched from the gateway. A file on any other host is left as
+	// it is, and gets no credential (below).
+	if len(browse) > 0 && browse[0] != "" && browse[0] != site && att.SourceID != "" && helpers.SameOrigin(att.URL, browse[0]) {
 		att.URL = site + "/rest/api/3/attachment/content/" + url.PathEscape(att.SourceID)
 	}
 	var siteHost []string
@@ -606,6 +654,7 @@ type jiraUser struct {
 	AccountType  string `json:"accountType"`
 	DisplayName  string `json:"displayName"`
 	EmailAddress string `json:"emailAddress"`
+	Active       *bool  `json:"active"`
 	AvatarURLs   struct {
 		URL48x48 string `json:"48x48"`
 		URL32x32 string `json:"32x32"`
@@ -664,7 +713,7 @@ func (i *jiraIssue) UnmarshalJSON(b []byte) error {
 type jiraIssueFields struct {
 	Summary     string           `json:"summary"`
 	Description any              `json:"description"` // ADF JSON object
-	Status      jiraNamed        `json:"status"`
+	Status      jiraStatus       `json:"status"`
 	Priority    *jiraNamed       `json:"priority"`
 	IssueType   jiraIssueType    `json:"issuetype"`
 	Assignee    *jiraUser        `json:"assignee"`
@@ -704,13 +753,29 @@ type jiraRenderedFields struct {
 type jiraNamed struct {
 	Name string `json:"name"`
 }
+
+// jiraStatus is a status with its category: new, indeterminate or done.
+type jiraStatus struct {
+	Name     string `json:"name"`
+	Category struct {
+		Key string `json:"key"`
+	} `json:"statusCategory"`
+}
+
 type jiraIssueType struct {
 	Name    string `json:"name"`
 	Subtask bool   `json:"subtask"`
 }
+
+// jiraIssueRef is another issue an issue names: a sub-task, or its parent,
+// which comes with its summary and type.
 type jiraIssueRef struct {
-	ID  string `json:"id"`
-	Key string `json:"key"`
+	ID     string `json:"id"`
+	Key    string `json:"key"`
+	Fields *struct {
+		Summary   string        `json:"summary"`
+		IssueType jiraIssueType `json:"issuetype"`
+	} `json:"fields"`
 }
 type jiraProjectRef struct {
 	Key  string `json:"key"`
@@ -789,20 +854,6 @@ type jiraCommentsResp struct {
 // ─── HTTP helpers ─────────────────────────────────────────────────
 
 // getJSON does GET <url> with the appropriate auth header. Honours 429.
-// statusError is Jira answering with an error status.
-type statusError struct {
-	Code int
-	Msg  string
-}
-
-func (e *statusError) Error() string { return e.Msg }
-
-// Is makes a refusal of the credentials (401, 403) match
-// importProvider.ErrTokenRejected.
-func (e *statusError) Is(target error) bool {
-	return target == importProvider.ErrTokenRejected && (e.Code == http.StatusUnauthorized || e.Code == http.StatusForbidden)
-}
-
 func (p *Provider) getJSON(ctx context.Context, tok, urlStr string, out any) error {
 	return p.call(ctx, tok, http.MethodGet, urlStr, nil, out)
 }
@@ -833,28 +884,7 @@ func (p *Provider) call(ctx context.Context, tok, method, urlStr string, body, o
 	req.Header.Set("Authorization", authorizationHeader(tok))
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := siteClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	switch {
-	case resp.StatusCode == http.StatusTooManyRequests:
-		retryAfter := 30 * time.Second
-		if v := resp.Header.Get("Retry-After"); v != "" {
-			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-				retryAfter = time.Duration(secs) * time.Second
-			}
-		}
-		return &importProvider.ErrRateLimited{RetryAfter: retryAfter, Reason: "Jira 429"}
-	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return &statusError{Code: resp.StatusCode, Msg: fmt.Sprintf("jira auth failed (HTTP %d); reconnect token", resp.StatusCode)}
-	case resp.StatusCode >= 400:
-		raw, _ := io.ReadAll(resp.Body)
-		return &statusError{Code: resp.StatusCode, Msg: fmt.Sprintf("jira HTTP %d: %s", resp.StatusCode, string(raw))}
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return statusRules.SendJSON(req, out)
 }
 
 func (p *Provider) listUsers(ctx context.Context, tok, site string) ([]jiraUser, error) {
@@ -1009,19 +1039,29 @@ func pickProjects(projects []jiraProject, key string) ([]jiraProject, error) {
 	return nil, fmt.Errorf("the Jira project %s isn't visible to this account any more. Pick another project, or reconnect with an account that can see it", key)
 }
 
-func (p *Provider) listProjectStatuses(ctx context.Context, tok, site, projectKey string) ([]string, error) {
+func (p *Provider) listProjectStatuses(ctx context.Context, tok, site, projectKey string) ([]string, map[string]string, error) {
 	endpoint := fmt.Sprintf("%s/rest/api/3/project/%s/statuses", site, url.PathEscape(projectKey))
-	var resp []struct {
-		Name     string `json:"name"`
-		Statuses []struct {
-			Name string `json:"name"`
-		} `json:"statuses"`
-	}
+	var resp []jiraTypeStatuses
 	if err := p.getJSON(ctx, tok, endpoint, &resp); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	names, kinds := statusesOf(resp)
+	return names, kinds, nil
+}
+
+// jiraTypeStatuses is one issue type's statuses, as GET
+// /rest/api/3/project/{key}/statuses gives them.
+type jiraTypeStatuses struct {
+	Name     string       `json:"name"`
+	Statuses []jiraStatus `json:"statuses"`
+}
+
+// statusesOf is a project's statuses, each once, and each one's category
+// (new, indeterminate or done) by its lower-cased name. Pure.
+func statusesOf(resp []jiraTypeStatuses) ([]string, map[string]string) {
 	out := []string{}
 	seen := map[string]struct{}{}
+	kinds := map[string]string{}
 	for _, t := range resp {
 		for _, s := range t.Statuses {
 			n := strings.TrimSpace(s.Name)
@@ -1033,9 +1073,12 @@ func (p *Provider) listProjectStatuses(ctx context.Context, tok, site, projectKe
 			}
 			seen[strings.ToLower(n)] = struct{}{}
 			out = append(out, n)
+			if k := strings.ToLower(strings.TrimSpace(s.Category.Key)); k != "" {
+				kinds[strings.ToLower(n)] = k
+			}
 		}
 	}
-	return out, nil
+	return out, kinds
 }
 
 func (p *Provider) listPriorities(ctx context.Context, tok, site string) ([]string, error) {
@@ -1139,32 +1182,38 @@ func (p *Provider) resolveSite(ctx context.Context, j *importModels.Job) (string
 	if j.TriggeredBy == nil {
 		return "", errors.New("job has no triggered_by user")
 	}
-	site, err := siteFor(ctx, *j.TriggeredBy)
+	api, browse, err := sitesFor(ctx, *j.TriggeredBy)
 	if err != nil {
 		return "", err
 	}
 	p.mu.Lock()
-	p.siteCache[j.Id] = site
+	p.siteCache[j.Id] = api
+	p.browseCache[j.Id] = browse
 	p.mu.Unlock()
-	return site, nil
+	return api, nil
 }
 
-// siteFor is owner's stored connection's Jira site (metadata.site_url), read
-// from the connection now: where its API is reached and its issues browsed.
-func siteFor(ctx context.Context, owner uuid.UUID) (string, error) {
+// sitesFor is where owner's stored connection reaches Jira's API (api) and
+// where its issues are browsed (browse), read from the connection now.
+func sitesFor(ctx context.Context, owner uuid.UUID) (api, browse string, err error) {
 	t, err := importModels.LoadToken(ctx, providerName, owner)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	var md struct {
-		SiteURL string `json:"site_url"`
-	}
+	var md tokenMeta
 	_ = json.Unmarshal(t.Metadata, &md)
-	site := strings.TrimRight(md.SiteURL, "/")
-	if site == "" {
-		return "", errors.New("jira token missing metadata.site_url; reconnect with the Atlassian site URL")
+	return md.bases()
+}
+
+// browseOf is where a job's issues are browsed: the site, even when the API
+// is reached through Atlassian's gateway (resolveSite runs first).
+func (p *Provider) browseOf(j *importModels.Job, api string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if b, ok := p.browseCache[j.Id]; ok && b != "" {
+		return b
 	}
-	return site, nil
+	return api
 }
 
 // ─── helpers ──────────────────────────────────────────────────────
@@ -1236,12 +1285,9 @@ const issueFields = "summary,description,status,priority,assignee,reporter,creat
 func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields) importProvider.SourceTask {
 	created := parseJiraTime(iss.Fields.Created)
 	updated := parseJiraTime(iss.Fields.Updated)
-	var due *time.Time
-	if iss.Fields.DueDate != "" {
-		if t, err := time.Parse("2006-01-02", iss.Fields.DueDate); err == nil {
-			due = &t
-		}
-	}
+	// duedate is a day with no time, which the import writes where the team
+	// is (provider.Day).
+	due, _ := importProvider.ParseDay(iss.Fields.DueDate)
 
 	priority := ""
 	if iss.Fields.Priority != nil {
@@ -1277,6 +1323,11 @@ func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields)
 		})
 	}
 
+	cycle := ""
+	if s := iss.sprintOf(fields.sprint); s != nil {
+		cycle = s.sourceID()
+	}
+
 	restricted, audience := restrictedBy(iss)
 	return importProvider.SourceTask{
 		SourceID:        iss.Key,
@@ -1291,13 +1342,14 @@ func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields)
 		CreatedBy:       safeAccountID(iss.Fields.Creator),
 		Created:         created,
 		Updated:         updated,
-		DueDate:         due,
-		Completed:       isDoneStatus(iss.Fields.Status.Name),
+		DueDay:          due,
+		Completed:       iss.done(),
 		AttachmentRefs:  atts,
 		CommentCount:    commentTotal(iss),
 		EstimateMinutes: iss.Fields.Estimate / 60,
 		Dependencies:    blockedBy(iss),
-		Fields:          issueFieldValues(iss.Custom, fields),
+		Fields:          append(issueFieldValues(iss.Custom, fields), parentValue(iss)...),
+		CycleSourceID:   cycle,
 		Metadata:        map[string]any{"jira_url": site + "/browse/" + iss.Key, "type": iss.Fields.IssueType.Name},
 		Restricted:      restricted,
 		Audience:        audience,
@@ -1395,7 +1447,7 @@ func walkADF(n any, b *strings.Builder) {
 	}
 }
 
-// CleanupJob evicts the cached site URL for a finished job.
+// CleanupJob evicts what was kept for a finished job.
 // Implements importProvider.JobCleaner.
 func (p *Provider) CleanupJob(jobId string) {
 	id, err := uuid.Parse(jobId)
@@ -1404,6 +1456,21 @@ func (p *Provider) CleanupJob(jobId string) {
 	}
 	p.mu.Lock()
 	delete(p.siteCache, id)
+	delete(p.browseCache, id)
 	delete(p.fieldsCache, id)
+	delete(p.sprintsCache, id)
 	p.mu.Unlock()
+}
+
+// source is the person as the import takes them: an app is a bot, and an
+// account Jira calls inactive has left (never invited).
+func (u jiraUser) source() importProvider.SourceUser {
+	return importProvider.SourceUser{
+		SourceID:    u.AccountID,
+		DisplayName: u.DisplayName,
+		Email:       u.EmailAddress,
+		AvatarURL:   helpers.FirstNonEmpty(u.AvatarURLs.URL48x48, u.AvatarURLs.URL32x32),
+		IsBot:       u.AccountType == "app",
+		Left:        u.Active != nil && !*u.Active,
+	}
 }

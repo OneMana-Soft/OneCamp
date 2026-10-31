@@ -182,7 +182,8 @@ type WebhookCreateInput struct {
 	ScopeEntityId *uuid.UUID `json:"scope_entity_id,omitempty"`
 }
 
-// sanitizeEvents removes empty strings and duplicates from an event slice.
+// sanitizeEvents removes blanks and duplicates from an event slice, each kind
+// trimmed: a blank kind names nothing, and a padded one is the kind it pads.
 func sanitizeEvents(events []string) []string {
 	if len(events) == 0 {
 		return nil
@@ -190,6 +191,7 @@ func sanitizeEvents(events []string) []string {
 	seen := make(map[string]bool, len(events))
 	out := make([]string, 0, len(events))
 	for _, ev := range events {
+		ev = strings.TrimSpace(ev)
 		if ev == "" || seen[ev] {
 			continue
 		}
@@ -200,6 +202,31 @@ func sanitizeEvents(events []string) []string {
 		return nil
 	}
 	return out
+}
+
+// noKinds refuses an outgoing webhook that names no kind of event.
+const noKinds = "Choose at least one event to send: a webhook with none is sent nothing."
+
+// eventsColumn is what a webhook's row keeps as its events: its kinds as a JSON
+// array, or nil for none. An outgoing webhook is sent only the kinds it names
+// (domain GetActiveOutgoingWebhooksByEvent matches events @> kind), so one
+// that names none would look set up and be sent nothing: it is refused, on
+// create and on every change alike. A row kept from before with none stays
+// as it is until an admin ticks a kind: none is switched on unasked. An
+// incoming webhook is sent nothing whatever it names, so it keeps what it is
+// given.
+func eventsColumn(webhookType string, events []string) (*string, error) {
+	events = sanitizeEvents(events)
+	if len(events) == 0 {
+		if webhookType == "outgoing" {
+			return nil, ScopeError{noKinds}
+		}
+		return nil, nil
+	}
+	// A []string always marshals.
+	b, _ := json.Marshal(events)
+	s := string(b)
+	return &s, nil
 }
 
 // WebhookUpdateInput captures update parameters.
@@ -272,6 +299,11 @@ func CreateWebhook(ctx context.Context, input WebhookCreateInput, createdBy uuid
 	// Validate incoming webhook has channel_id or will accept it in payload
 	// (channel_id is optional for incoming — can be specified in payload)
 
+	eventsJson, err := eventsColumn(input.Type, input.Events)
+	if err != nil {
+		return nil, err
+	}
+
 	// What it is sent events from, checked before anything is written.
 	scope, scopeEntity, err := webhookScope(ctx, input.Type, input.ScopeType, input.ScopeEntityId, createdBy, createdBy)
 	if err != nil {
@@ -295,18 +327,6 @@ func CreateWebhook(ctx context.Context, input WebhookCreateInput, createdBy uuid
 			return nil, fmt.Errorf("failed to generate signing secret")
 		}
 		secret = &s
-	}
-
-	// Sanitize and marshal events
-	input.Events = sanitizeEvents(input.Events)
-	var eventsJson *string
-	if len(input.Events) > 0 {
-		evBytes, err := json.Marshal(input.Events)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal events")
-		}
-		evStr := string(evBytes)
-		eventsJson = &evStr
 	}
 
 	id := uuid.New()
@@ -367,6 +387,11 @@ func UpdateWebhook(ctx context.Context, webhookId uuid.UUID, input WebhookUpdate
 		}
 	}
 
+	eventsJson, err := eventsColumn(existing.Type, input.Events)
+	if err != nil {
+		return nil, false, err
+	}
+
 	owner := existing.CreatedBy
 	if existing.Type == "outgoing" && by != owner && (existing.TargetUrl == nil || *input.TargetUrl != *existing.TargetUrl) {
 		owner, tookOver = by, true
@@ -385,17 +410,6 @@ func UpdateWebhook(ctx context.Context, webhookId uuid.UUID, input WebhookUpdate
 	}
 	if err != nil {
 		return nil, false, err
-	}
-
-	input.Events = sanitizeEvents(input.Events)
-	var eventsJson *string
-	if len(input.Events) > 0 {
-		evBytes, err := json.Marshal(input.Events)
-		if err != nil {
-			return nil, false, fmt.Errorf("failed to marshal events")
-		}
-		evStr := string(evBytes)
-		eventsJson = &evStr
 	}
 
 	input.BotName = botNameOf(input.BotName, botNameOf(existing.BotName, defaultBotName))

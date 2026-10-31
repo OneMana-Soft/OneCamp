@@ -653,6 +653,30 @@ func CreateChatCommentWithAttachmentsInOpenSearch(openSearchComment *openSearchS
 		return
 	}
 }
+
+// TaskCommentInSearch is a task comment's search entry, for every path that
+// writes one (a person's comment, an import's): its text as plain text, its
+// task and its task's project. Search shows a task comment to the project's
+// people through the project (domain/GlobalSearch, comment_project_id), and
+// keeps a restricted task's comments from whoever may not read it through the
+// task (models/taskread SearchWithout, comment_task_id), so an entry without
+// them is found by no one. Pure.
+func TaskCommentInSearch(task *dgraphStruct.DgraphTask, commentUUID string, by *dgraphStruct.DgraphUser, html string, at time.Time) *openSearchStruct.OpenSearchComment {
+	entry := &openSearchStruct.OpenSearchComment{
+		Uuid:                  commentUUID,
+		CommentBody:           helpers.HTMLToPlainText(html),
+		CommentTaskUuid:       task.Uuid,
+		CommentByUserUuid:     by.Uuid,
+		CommentByUserFullName: by.DisplayName(),
+		CommentByProfile:      by.ProfileKey,
+		CommentCreatedAt:      at.Unix(),
+	}
+	if task.Project != nil {
+		entry.CommentProjectUuid, entry.CommentProjectName = task.Project.Uuid, task.Project.Name
+	}
+	return entry
+}
+
 func CreateTaskCommentWithAttachmentsInOpenSearch(openSearchComment *openSearchStruct.OpenSearchComment, dgraphAttachment []*dgraphStruct.DgraphAttachment) {
 	ctx := context.Background()
 	var openSearchAttachments []*openSearchStruct.OpenSearchAttachment

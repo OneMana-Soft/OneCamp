@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/akashc777/OneCamp/tests/timing"
@@ -432,5 +433,32 @@ func TestNumbersInListsReadAsNumbers(t *testing.T) {
 	_ = json.Unmarshal([]byte(rows[0].Values), &got)
 	if v := got[fields[0].Id.String()]; v != "1e+308, 1500000, 0.25, Live" {
 		t.Errorf("the list reads as %#v", v)
+	}
+}
+
+// A list cell reaches a formula as its labels joined, as before, and as a
+// list for the ARRAY functions; a formula reads its row's id and when the
+// row was made and changed (tables B2).
+func TestFormulasReadListsAndTheRow(t *testing.T) {
+	tags := &model.Field{Id: uuid.MustParse("00000000-0000-0000-0000-0000000000b1"), Name: "Tags", Type: model.FieldMultiSelect, Config: "{}"}
+	fields := []*model.Field{tags}
+	srcs := []string{`{Tags}`, `ARRAYUNIQUE({Tags})`, `COUNTA({Tags})`, `RECORD_ID()`, `DATETIME_DIFF(LAST_MODIFIED_TIME(), CREATED_TIME(), "minutes")`}
+	for i, src := range srcs {
+		cfg, _ := json.Marshal(map[string]string{"formula": src})
+		fields = append(fields, &model.Field{Id: uuid.MustParse(fmt.Sprintf("00000000-0000-0000-0000-0000000000f%d", i)), Name: fmt.Sprint("F", i), Type: model.FieldFormula, Config: string(cfg)})
+	}
+	rows := rowsOf(1, map[string]interface{}{tags.Id.String(): []interface{}{"Design", "Launch", "design"}})
+	rows[0].CreatedAt = time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	rows[0].UpdatedAt = rows[0].CreatedAt.Add(90 * time.Minute)
+	withComputed(context.Background(), fields, rows)
+	var got map[string]interface{}
+	if err := json.Unmarshal([]byte(rows[0].Values), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []interface{}{"Design, Launch, design", "Design, Launch", float64(3), rows[0].Id.String(), float64(90)}
+	for i, w := range want {
+		if g := got[fields[i+1].Id.String()]; !reflect.DeepEqual(g, w) {
+			t.Errorf("%s = %#v, want %#v", srcs[i], g, w)
+		}
 	}
 }

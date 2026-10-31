@@ -40,7 +40,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
@@ -500,6 +499,9 @@ func (p *Provider) FetchAttachment(ctx context.Context, j *importModels.Job, opt
 // got both.
 const trelloHost = "trello.com"
 
+// statusRules reads Trello's answers; its limit is per 10 seconds.
+var statusRules = importProvider.StatusRules{Name: "Trello", Wait: 5 * time.Second}
+
 // trelloFile is att with the key and token in an OAuth Authorization header
 // when it is a Trello file, and with none when it isn't. Trello stopped taking
 // them in a /download/ URL's query on 25 Jan 2021 (I1).
@@ -762,27 +764,7 @@ func (p *Provider) getJSON(ctx context.Context, urlStr string, out any) error {
 	if err != nil {
 		return err
 	}
-	resp, err := importProvider.SharedAPIClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusTooManyRequests:
-		retryAfter := 5 * time.Second
-		if v := resp.Header.Get("Retry-After"); v != "" {
-			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-				retryAfter = time.Duration(secs) * time.Second
-			}
-		}
-		return &importProvider.ErrRateLimited{RetryAfter: retryAfter, Reason: "Trello 429"}
-	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return &importProvider.TokenRejected{Msg: fmt.Sprintf("trello auth failed (HTTP %d); reconnect token", resp.StatusCode)}
-	case resp.StatusCode >= 400:
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("trello HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return statusRules.SendJSON(req, out)
 }
 
 // ─── Source-mode resolvers ────────────────────────────────────────
@@ -825,19 +807,16 @@ func (p *Provider) resolveBoard(ctx context.Context, j *importModels.Job, opts i
 	return nil, fmt.Errorf("unsupported source %q", j.Source)
 }
 
-// loadStagedBoard reads the staged JSON object from MinIO and decodes it.
-// We use the slack import's MinIO range reader because it's already
-// generic; for Trello board JSON the file is small enough to read in
-// one shot, but the helper handles both cases.
+// loadStagedBoard reads the uploaded board JSON and decodes it.
 func (p *Provider) loadStagedBoard(ctx context.Context, j *importModels.Job) (*trelloBoard, error) {
 	if j.RawObjectKey == nil {
 		return nil, errors.New("job has no raw_object_key")
 	}
-	rdr, cleanup, err := openStagedFile(ctx, *j.RawObjectKey)
+	rdr, err := importProvider.OpenStagedFile(ctx, *j.RawObjectKey)
 	if err != nil {
 		return nil, err
 	}
-	defer cleanup()
+	defer rdr.Close()
 	var b trelloBoard
 	dec := json.NewDecoder(rdr)
 	if err := dec.Decode(&b); err != nil {
@@ -972,45 +951,9 @@ func countCheckItems(cls []trelloChecklist) int {
 	return n
 }
 
-// Per-job board memo. Key never repeats (uuid v4) so we don't need
-// eviction; jobs that finish leave at most one entry behind, and the
-// process restarts on every release. Read/write is mutex-protected
-// because IterUsers / IterProjects / IterTasksOfProject can run in
-// parallel goroutines spawned by the orchestrator.
-var boardCache = newJobCache[*trelloBoard]()
-
-// ─── Tiny generic per-job cache (concurrency-safe) ─────────────────
-
-type jobCache[T any] struct {
-	mu sync.RWMutex
-	m  map[uuid.UUID]T
-}
-
-func newJobCache[T any]() *jobCache[T] {
-	return &jobCache[T]{m: map[uuid.UUID]T{}}
-}
-
-func (c *jobCache[T]) Load(id uuid.UUID) T {
-	c.mu.RLock()
-	v := c.m[id]
-	c.mu.RUnlock()
-	return v
-}
-
-func (c *jobCache[T]) Store(id uuid.UUID, v T) {
-	c.mu.Lock()
-	c.m[id] = v
-	c.mu.Unlock()
-}
-
-// Evict removes a job's cached entry. Called by the orchestrator when
-// a job reaches a terminal state so the in-process map doesn't grow
-// unbounded across long-running deploys.
-func (c *jobCache[T]) Evict(id uuid.UUID) {
-	c.mu.Lock()
-	delete(c.m, id)
-	c.mu.Unlock()
-}
+// Per-job board memo: IterUsers, IterProjects and IterTasksOfProject run in
+// their own goroutines, and each reads the board.
+var boardCache = importProvider.NewJobCache[*trelloBoard]()
 
 // CleanupJob evicts the cached board snapshot for a finished job.
 // Implements importProvider.JobCleaner.

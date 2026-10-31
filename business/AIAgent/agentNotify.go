@@ -17,13 +17,14 @@ package business
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
 	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
-	userFCMTokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -136,7 +137,8 @@ func buildTriggererActivity(agent *model.AiAgent, bot *userBusiness.BotIdentity,
 // notifies nobody, so the first word people heard was "On it" and the moments
 // that mattered, "I need your input" and "done", reached only whoever happened
 // to reopen the task. The person who delegated it is the one waiting, so they
-// get a push at those moments, and the tap opens the task.
+// are told at those moments, by push and on the desktop app, and the tap opens
+// the task.
 
 const taskDelegatorBodyMax = 140
 
@@ -152,12 +154,11 @@ var (
 		}
 		return task.Name
 	}
-	pushToDelegator = func(ctx context.Context, userUUID string, data map[string]string) error {
-		tokens, err := userFCMTokenBusiness.GetFCMTokenByUserId(ctx, userUUID)
-		if err != nil || len(tokens) == 0 {
-			return err
-		}
-		return firebaseInit.FirebaseApp.MultiCastPush(ctx, data, tokens)
+	// Through the one way a push goes out (notificationBusiness.Deliver): their
+	// devices and the desktop app, as their pause, quiet hours and focus time
+	// allow. Each moment is a notice of its own.
+	pushToDelegator = func(ctx context.Context, userUUID, taskID string, data map[string]string) {
+		notificationBusiness.Deliver(ctx, []string{userUUID}, data, fmt.Sprintf("agent_task:%s:%d", taskID, time.Now().UnixMilli()))
 	}
 )
 
@@ -190,12 +191,7 @@ func notifyTaskDelegator(agent *model.AiAgent, taskID, delegatorUUID, text strin
 	if agent == nil || delegatorUUID == "" || taskID == "" || text == "" {
 		return
 	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				helpers.LogErrorWithContext(context.Background(), "agentNotify: notifyTaskDelegator panic: %v", r)
-			}
-		}()
+	helpers.GoSafeNamed("notifyTaskDelegator", func() {
 		ctx := context.Background()
 		reads, err := reach.readsTask(ctx, delegatorUUID, taskID)
 		if err != nil {
@@ -206,8 +202,6 @@ func notifyTaskDelegator(agent *model.AiAgent, taskID, delegatorUUID, text strin
 			return
 		}
 		data := delegatorPushData(agent.Name, taskID, delegatedTaskName(ctx, agent, taskID), text)
-		if err := pushToDelegator(ctx, delegatorUUID, data); err != nil {
-			helpers.LogErrorWithContext(ctx, "agentNotify: push to delegator failed (task=%s): %v", taskID, err)
-		}
-	}()
+		pushToDelegator(ctx, delegatorUUID, taskID, data)
+	})
 }

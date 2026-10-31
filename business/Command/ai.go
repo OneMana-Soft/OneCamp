@@ -7,6 +7,7 @@ import (
 	"time"
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
+	slashModel "github.com/akashc777/OneCamp/models/postgres/SlashCommand"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
 )
@@ -23,8 +24,11 @@ import (
 
 const oneCampAIAppSlug = "onecamp-ai"
 
+// /ask is seeded here, beside its handler, not in seed.go's shared list: the
+// edition without AI has no ai.go, so it seeds no AI command.
 func init() {
 	Register("ask", handleAsk)
+	builtinCatalog = append(builtinCatalog, builtinSpec{"ask", "Ask OneCamp AI a quick question", "<your question>", slashModel.ExecInline, "ephemeral"})
 	RegisterAppTest(oneCampAIAppSlug, testOneCampAI)
 }
 

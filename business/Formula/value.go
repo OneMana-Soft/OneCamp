@@ -61,6 +61,63 @@ type Value struct {
 	Time time.Time
 	// Day marks a date with no time of day: a date field, or TODAY().
 	Day bool
+	// Zoned marks a moment SET_TIMEZONE put on a zone's clock: it's read on
+	// that clock rather than the reader's.
+	Zoned bool
+	// Locale is the language a date is written in by DATETIME_FORMAT, once
+	// SET_LOCALE has given it one ("" is English).
+	Locale string
+	// list is a list's values (a multi-select's options, a link's rows, a
+	// lookup's values). A list is text too, its items joined with ", ", so
+	// every function that reads text reads it as before; the ARRAY functions
+	// and COUNT read the items. A pointer keeps a Value comparable.
+	list *[]Value
+}
+
+// Items is a list's values, nil for a value that isn't a list.
+func (v Value) Items() []Value {
+	if v.list == nil {
+		return nil
+	}
+	return *v.list
+}
+
+// List is a list of values: blank when it has none or only blanks, otherwise
+// text that joins them with ", " and keeps them as Items.
+func List(items []Value) Value {
+	if len(items) == 0 {
+		return Blank()
+	}
+	parts := make([]string, len(items))
+	for i, it := range items {
+		parts[i] = it.Text()
+	}
+	if allBlank(items) {
+		return Blank() // only blanks: a blank, as its text "" always was
+	}
+	return Value{Kind: KindText, Str: strings.Join(parts, ", "), list: &items}
+}
+
+func allBlank(items []Value) bool {
+	for _, it := range items {
+		if it.Kind != KindBlank {
+			return false
+		}
+	}
+	return true
+}
+
+// items is a value as a list: its items, or the value alone (none when it's
+// blank), so a list function reads one value as a list of one.
+func (v Value) items() []Value {
+	switch {
+	case v.list != nil:
+		return *v.list
+	case v.Kind == KindBlank:
+		return nil
+	default:
+		return []Value{v}
+	}
 }
 
 // Blank is no value: an empty cell, or BLANK().

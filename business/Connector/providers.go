@@ -1,5 +1,7 @@
 package business
 
+import "github.com/akashc777/OneCamp/initializers/oauth"
+
 // providers.go — the connector catalog. Each provider reuses an admin-managed
 // OAuth client ("google" or "github") and declares the least-privilege scope
 // set it needs, with human-readable permission descriptions for the consent
@@ -14,8 +16,8 @@ func init() {
 		Description: "Let the AI search and summarise your email, and draft replies for your approval.",
 		IconKey:     "gmail",
 		reuseClient: "google",
-		AuthURL:     "https://accounts.google.com/o/oauth2/v2/auth",
-		TokenURL:    "https://oauth2.googleapis.com/token",
+		AuthURL:     oauth.GoogleEndpoint.AuthURL,
+		TokenURL:    oauth.GoogleEndpoint.TokenURL,
 		RevokeURL:   "https://oauth2.googleapis.com/revoke",
 		Scopes: []string{
 			"https://www.googleapis.com/auth/gmail.readonly",
@@ -34,8 +36,8 @@ func init() {
 		Description: "Let the AI see your schedule, find free time, and create events for your approval.",
 		IconKey:     "calendar",
 		reuseClient: "google",
-		AuthURL:     "https://accounts.google.com/o/oauth2/v2/auth",
-		TokenURL:    "https://oauth2.googleapis.com/token",
+		AuthURL:     oauth.GoogleEndpoint.AuthURL,
+		TokenURL:    oauth.GoogleEndpoint.TokenURL,
 		RevokeURL:   "https://oauth2.googleapis.com/revoke",
 		Scopes: []string{
 			"https://www.googleapis.com/auth/calendar.events",

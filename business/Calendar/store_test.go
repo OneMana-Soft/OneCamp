@@ -27,15 +27,57 @@ type memStore struct {
 	calendars map[uuid.UUID]uuid.UUID
 	hints     map[uuid.UUID]models.ZoneHints
 	noAccount map[uuid.UUID]bool
+	// notMembers keep their accounts but are no members now: deactivated,
+	// or an outside guest's or a bot's account.
+	notMembers map[uuid.UUID]bool
 	// addresses are the accounts' addresses, in lower case.
 	addresses map[string]uuid.UUID
 	writes    int
+	// imported are the calendars imports made, by owner and name;
+	// containers the containers' calendars, by kind and id.
+	imported   map[string]uuid.UUID
+	containers map[string]uuid.UUID
+	shares     []models.CalendarShare
+	// calendarEdits are calendars' names and colours as changed, by id.
+	calendarEdits map[uuid.UUID][2]string
+	// ooo is each out-of-office event's decline rule (head 5b).
+	ooo map[uuid.UUID]models.OOORule
+	// feeds are secret feeds, in the order made; revoked ones stay, marked.
+	feeds []memFeed
+	// subscribed are calendars read from addresses, by id.
+	subscribed map[uuid.UUID]models.Calendar
+	// reads counts the reads a test pins, by the store's method.
+	readMu sync.Mutex
+	reads  map[string]int
+}
+
+// countRead counts one call of a store read.
+func (m *memStore) countRead(name string) {
+	m.readMu.Lock()
+	defer m.readMu.Unlock()
+	if m.reads == nil {
+		m.reads = map[string]int{}
+	}
+	m.reads[name]++
+}
+
+// readsOf is how many times a read was called since the last resetReads.
+func (m *memStore) readsOf(name string) int {
+	m.readMu.Lock()
+	defer m.readMu.Unlock()
+	return m.reads[name]
+}
+
+func (m *memStore) resetReads() {
+	m.readMu.Lock()
+	defer m.readMu.Unlock()
+	m.reads = nil
 }
 
 func newMemStore() *memStore {
 	return &memStore{events: map[uuid.UUID]*models.Event{}, guests: map[uuid.UUID][]models.Attendee{},
 		calendars: map[uuid.UUID]uuid.UUID{}, hints: map[uuid.UUID]models.ZoneHints{}, noAccount: map[uuid.UUID]bool{},
-		addresses: map[string]uuid.UUID{}}
+		notMembers: map[uuid.UUID]bool{}, addresses: map[string]uuid.UUID{}}
 }
 
 func copyEvent(e *models.Event) *models.Event {
@@ -57,20 +99,367 @@ func (m *memStore) personalCalendar(_ context.Context, owner uuid.UUID, _ string
 	return c, nil
 }
 
-func (m *memStore) get(_ context.Context, id uuid.UUID) (*models.Event, error) {
+func (m *memStore) containerCalendar(_ context.Context, kind, id, _ string) (uuid.UUID, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if e := m.events[id]; e != nil {
-		return copyEvent(e), nil
+	if m.containers == nil {
+		m.containers = map[string]uuid.UUID{}
+	}
+	k := kind + "/" + id
+	if c, ok := m.containers[k]; ok {
+		return c, nil
+	}
+	c := uuid.New()
+	m.containers[k] = c
+	return c, nil
+}
+
+func (m *memStore) calendarsByID(_ context.Context, ids []uuid.UUID) ([]models.Calendar, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []models.Calendar
+	defer func() {
+		for i := range out {
+			if e, ok := m.calendarEdits[out[i].ID]; ok {
+				out[i].Name, out[i].Hue = e[0], e[1]
+			}
+		}
+	}()
+	for _, id := range ids {
+		for owner, c := range m.calendars {
+			if c == id {
+				o := owner
+				out = append(out, models.Calendar{ID: id, Kind: "personal", OwnerID: &o})
+			}
+		}
+		for k, c := range m.containers {
+			if c == id {
+				kind, cid, _ := strings.Cut(k, "/")
+				out = append(out, models.Calendar{ID: id, Kind: kind, ContainerKind: kind, ContainerID: cid})
+			}
+		}
+		for k, c := range m.imported {
+			if c == id {
+				who, name, _ := strings.Cut(k, "/")
+				o := uuid.MustParse(who)
+				out = append(out, models.Calendar{ID: id, Kind: "external", OwnerID: &o, Name: name})
+			}
+		}
+		if c, ok := m.subscribed[id]; ok {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) nextOf(_ context.Context, calendars []uuid.UUID, now time.Time, limit int) ([]*models.Event, error) {
+	m.countRead("nextOf")
+	var out []*models.Event
+	for _, calendar := range calendars {
+		out = append(out, m.sorted(func(e *models.Event) bool {
+			if e.CalendarID != calendar || e.DeletedAt != nil || e.SeriesID != nil {
+				return false
+			}
+			_, end := spanOf(e)
+			return e.RRule != "" || !end.Before(now)
+		}, limit)...)
+	}
+	return out, nil
+}
+
+func (m *memStore) sharesFor(_ context.Context, person uuid.UUID, calendars []uuid.UUID) (map[uuid.UUID]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[uuid.UUID]string{}
+	for _, sh := range m.shares {
+		if sh.PersonID == person && slices.Contains(calendars, sh.CalendarID) {
+			out[sh.CalendarID] = sh.Level
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) sharesOf(_ context.Context, calendar uuid.UUID) ([]models.CalendarShare, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []models.CalendarShare
+	for _, sh := range m.shares {
+		if sh.CalendarID == calendar {
+			out = append(out, sh)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) setShare(_ context.Context, calendar, person, _ uuid.UUID, level string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.shares = slices.DeleteFunc(m.shares, func(sh models.CalendarShare) bool { return sh.CalendarID == calendar && sh.PersonID == person })
+	if level != "" {
+		m.shares = append(m.shares, models.CalendarShare{CalendarID: calendar, PersonID: person, Level: level})
+	}
+	return nil
+}
+
+type memFeed struct {
+	models.Feed
+	revoked bool
+}
+
+func (m *memStore) liveFeed(_ context.Context, calendar, person uuid.UUID) (*models.Feed, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, f := range m.feeds {
+		if !f.revoked && f.CalendarID == calendar && f.PersonID == person {
+			c := f.Feed
+			return &c, nil
+		}
 	}
 	return nil, nil
 }
 
-func (m *memStore) getMany(ctx context.Context, ids []uuid.UUID) ([]*models.Event, error) {
+func (m *memStore) feedByHash(_ context.Context, hash []byte) (*models.Feed, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, f := range m.feeds {
+		if !f.revoked && bytes.Equal(f.TokenHash, hash) {
+			c := f.Feed
+			return &c, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *memStore) makeFeed(_ context.Context, f models.Feed) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.feeds {
+		if m.feeds[i].CalendarID == f.CalendarID && m.feeds[i].PersonID == f.PersonID {
+			m.feeds[i].revoked = true
+		}
+	}
+	m.feeds = append(m.feeds, memFeed{Feed: f})
+	return nil
+}
+
+func (m *memStore) revokeFeed(_ context.Context, calendar, person uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.feeds {
+		if m.feeds[i].CalendarID == calendar && m.feeds[i].PersonID == person {
+			m.feeds[i].revoked = true
+		}
+	}
+	return nil
+}
+
+func (m *memStore) updateCalendar(_ context.Context, id uuid.UUID, name, hue *string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.calendarEdits == nil {
+		m.calendarEdits = map[uuid.UUID][2]string{}
+	}
+	cur := m.calendarEdits[id]
+	if name != nil {
+		cur[0] = *name
+	}
+	if hue != nil {
+		cur[1] = *hue
+	}
+	m.calendarEdits[id] = cur
+	return nil
+}
+
+func (m *memStore) sharedWith(ctx context.Context, person uuid.UUID) ([]models.Calendar, error) {
+	m.mu.Lock()
+	var ids []uuid.UUID
+	for _, sh := range m.shares {
+		if sh.PersonID == person {
+			ids = append(ids, sh.CalendarID)
+		}
+	}
+	m.mu.Unlock()
+	return m.calendarsByID(ctx, ids)
+}
+
+func (m *memStore) personalCalendarsOf(_ context.Context, owners []uuid.UUID) ([]models.Calendar, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []models.Calendar
+	for _, o := range owners {
+		if c, ok := m.calendars[o]; ok {
+			owner := o
+			out = append(out, models.Calendar{ID: c, Kind: "personal", OwnerID: &owner})
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) ownCalendars(_ context.Context, owner uuid.UUID) ([]models.Calendar, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []models.Calendar
+	if c, ok := m.calendars[owner]; ok {
+		o := owner
+		out = append(out, models.Calendar{ID: c, Kind: "personal", OwnerID: &o})
+	}
+	for k, c := range m.imported {
+		who, name, _ := strings.Cut(k, "/")
+		if who == owner.String() {
+			o := owner
+			out = append(out, models.Calendar{ID: c, Kind: "external", OwnerID: &o, Name: name})
+		}
+	}
+	for _, c := range m.subscribed {
+		if *c.OwnerID == owner {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) subscribedCalendar(_ context.Context, id, owner uuid.UUID, name, hue, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.subscribed == nil {
+		m.subscribed = map[uuid.UUID]models.Calendar{}
+	}
+	o := owner
+	m.subscribed[id] = models.Calendar{ID: id, Kind: kindSubscribed, OwnerID: &o, Name: name, Hue: hue}
+	return nil
+}
+
+// deleteSubscribedCalendar deletes it and, as Postgres cascades, every event on it.
+func (m *memStore) deleteSubscribedCalendar(_ context.Context, id, owner uuid.UUID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.subscribed[id]
+	if !ok || *c.OwnerID != owner {
+		return false, nil
+	}
+	delete(m.subscribed, id)
+	for eid, e := range m.events {
+		if e.CalendarID == id {
+			delete(m.events, eid)
+		}
+	}
+	return true, nil
+}
+
+// deleteSubscribedEvents deletes the address's events of these ids on the
+// calendar, and (as Postgres cascades) their changed instances.
+func (m *memStore) deleteSubscribedEvents(_ context.Context, calendar uuid.UUID, ids []uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range ids {
+		e := m.events[id]
+		if e == nil || e.CalendarID != calendar || e.Source != sourceSubscribed {
+			continue
+		}
+		delete(m.events, id)
+		for oid, o := range m.events {
+			if o.SeriesID != nil && *o.SeriesID == id {
+				delete(m.events, oid)
+			}
+		}
+	}
+	return nil
+}
+
+func (m *memStore) containerCalendars(_ context.Context, kind string, limit int) ([]models.Calendar, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []models.Calendar
+	for k, c := range m.containers {
+		ck, cid, _ := strings.Cut(k, "/")
+		if ck == kind && len(out) < limit {
+			out = append(out, models.Calendar{ID: c, Kind: ck, ContainerKind: ck, ContainerID: cid})
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) rangeOnCalendars(_ context.Context, calendars []uuid.UUID, w models.Window, limit int) ([]*models.Event, error) {
+	return m.sorted(func(e *models.Event) bool {
+		return e.DeletedAt == nil && e.SeriesID == nil && slices.Contains(calendars, e.CalendarID) && (inWindow(e, w) || e.RRule != "")
+	}, limit), nil
+}
+
+func (m *memStore) importedCalendar(_ context.Context, owner uuid.UUID, name, _ string) (uuid.UUID, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.imported == nil {
+		m.imported = map[string]uuid.UUID{}
+	}
+	k := owner.String() + "/" + name
+	if c, ok := m.imported[k]; ok {
+		return c, nil
+	}
+	c := uuid.New()
+	m.imported[k] = c
+	return c, nil
+}
+
+func (m *memStore) get(_ context.Context, id uuid.UUID) (*models.Event, error) {
+	m.countRead("get")
+	return m.event(id), nil
+}
+
+// event is a copy of one event, or nil, read without counting.
+func (m *memStore) event(id uuid.UUID) *models.Event {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.events[id]; e != nil {
+		return copyEvent(e)
+	}
+	return nil
+}
+
+func (m *memStore) getMany(_ context.Context, ids []uuid.UUID) ([]*models.Event, error) {
+	m.countRead("getMany")
 	var out []*models.Event
 	for _, id := range ids {
-		if e, _ := m.get(ctx, id); e != nil {
+		if e := m.event(id); e != nil {
 			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) memberGuests(_ context.Context, events []uuid.UUID, perEvent int) (map[uuid.UUID][]uuid.UUID, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[uuid.UUID][]uuid.UUID{}
+	for _, id := range events {
+		for _, g := range m.guests[id] {
+			if g.UserID != nil && g.Response != string(Declined) && len(out[id]) < perEvent {
+				out[id] = append(out[id], *g.UserID)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) seriesAfter(_ context.Context, after uuid.UUID, skip []string, subscribed bool, limit int) ([]uuid.UUID, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []uuid.UUID
+	for id, e := range m.events {
+		if e.SeriesID == nil && (subscribed || e.Source != sourceSubscribed) && !slices.Contains(skip, e.Kind) && strings.Compare(id.String(), after.String()) > 0 {
+			out = append(out, id)
+		}
+	}
+	slices.SortFunc(out, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	return out[:min(limit, len(out))], nil
+}
+
+func (m *memStore) byICalUIDs(_ context.Context, uids []string) ([]*models.Event, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*models.Event
+	for _, e := range m.events {
+		if e.SeriesID == nil && slices.Contains(uids, e.ICalUID) {
+			out = append(out, copyEvent(e))
 		}
 	}
 	return out, nil
@@ -193,11 +582,46 @@ func (m *memStore) trashOf(_ context.Context, person uuid.UUID, before *time.Tim
 	return out, nil
 }
 
+func (m *memStore) oooRules(_ context.Context, events []uuid.UUID) (map[uuid.UUID]models.OOORule, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[uuid.UUID]models.OOORule{}
+	for _, id := range events {
+		if r, ok := m.ooo[id]; ok {
+			out[id] = r
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) setOOORule(_ context.Context, event uuid.UUID, r models.OOORule) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.ooo == nil {
+		m.ooo = map[uuid.UUID]models.OOORule{}
+	}
+	if r.Decline == models.OOODeclineNone {
+		delete(m.ooo, event)
+	} else {
+		m.ooo[event] = r
+	}
+	return nil
+}
+
 func (m *memStore) awayOf(_ context.Context, people []uuid.UUID, w models.Window, limit int) ([]*models.Event, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.sorted(func(e *models.Event) bool {
 		return slices.Contains(people, e.CreatedBy) && e.Kind == string(EventAway) && e.DeletedAt == nil &&
+			e.Status != statusCancelled && e.SeriesID == nil && reaches(e, w)
+	}, limit), nil
+}
+
+func (m *memStore) placesOf(_ context.Context, people []uuid.UUID, w models.Window, limit int) ([]*models.Event, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sorted(func(e *models.Event) bool {
+		return slices.Contains(people, e.CreatedBy) && e.Kind == string(EventWorkingLocation) && e.DeletedAt == nil &&
 			e.Status != statusCancelled && e.SeriesID == nil && reaches(e, w)
 	}, limit), nil
 }
@@ -219,6 +643,20 @@ func (m *memStore) known(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]bool
 	out := map[uuid.UUID]bool{}
 	for _, id := range ids {
 		if !m.noAccount[id] {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+
+// membersNow is everyone with an account but those the test marks as no
+// members now.
+func (m *memStore) membersNow(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[uuid.UUID]bool{}
+	for _, id := range ids {
+		if !m.noAccount[id] && !m.notMembers[id] {
 			out[id] = true
 		}
 	}
@@ -441,6 +879,22 @@ func (m *memStore) apply(_ context.Context, b batch) error {
 	return nil
 }
 
+func (m *memStore) setCallRoom(_ context.Context, id uuid.UUID, room, was string, now time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.events[id]
+	if e == nil || e.DeletedAt != nil || e.CallRoom != was {
+		return false, nil
+	}
+	e.CallRoom, e.UpdatedAt, e.Sequence = room, now, e.Sequence+1
+	for _, o := range m.events {
+		if o.SeriesID != nil && *o.SeriesID == id {
+			o.CallRoom = room
+		}
+	}
+	return true, nil
+}
+
 func (m *memStore) setGoogleID(_ context.Context, id uuid.UUID, googleID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -450,7 +904,7 @@ func (m *memStore) setGoogleID(_ context.Context, id uuid.UUID, googleID string)
 	return nil
 }
 
-func (m *memStore) answer(_ context.Context, event uuid.UUID, rid *time.Time, k models.GuestKey, response, note string, at time.Time) (bool, error) {
+func (m *memStore) answer(_ context.Context, event uuid.UUID, rid *time.Time, k models.GuestKey, response, note string, at time.Time, p *models.Proposal) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	i := slices.IndexFunc(m.guests[event], func(a models.Attendee) bool { return k.Is(a) })
@@ -463,14 +917,36 @@ func (m *memStore) answer(_ context.Context, event uuid.UUID, rid *time.Time, k 
 	}
 	if rid == nil {
 		g := &m.guests[event][i]
-		g.Response, g.Note, g.RespondedAt = response, note, &at
+		g.Response, g.Note, g.RespondedAt, g.Proposal = response, note, &at, p
 		m.answered = slices.DeleteFunc(m.answered, mine)
 		return true, nil
 	}
 	m.answered = slices.DeleteFunc(m.answered, func(a models.InstanceAnswer) bool { return mine(a) && a.RecurrenceID.Equal(*rid) })
 	m.answered = append(m.answered, models.InstanceAnswer{EventID: event, RecurrenceID: *rid, UserID: k.UserID, Email: k.Email,
-		Response: response, Note: note, RespondedAt: at})
+		Response: response, Note: note, RespondedAt: at, Proposal: p})
 	return true, nil
+}
+
+func (m *memStore) clearProposal(_ context.Context, event uuid.UUID, rid *time.Time, k models.GuestKey) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rid == nil {
+		for i := range m.guests[event] {
+			if g := &m.guests[event][i]; k.Is(*g) && g.Proposal != nil {
+				g.Proposal = nil
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	for i := range m.answered {
+		a := &m.answered[i]
+		if a.EventID == event && a.RecurrenceID.Equal(*rid) && a.Key().String() == k.String() && a.Proposal != nil {
+			a.Proposal = nil
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *memStore) instanceAnswers(_ context.Context, series []uuid.UUID, rids []time.Time) ([]models.InstanceAnswer, error) {

@@ -14,7 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,6 +23,7 @@ import (
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	model "github.com/akashc777/OneCamp/models/postgres/TaskField"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -270,8 +271,7 @@ func Normalize(f *model.Field, raw json.RawMessage) (json.RawMessage, error) {
 			return nil, invalid("Keep %s under %d characters.", f.Name, MaxTextLength)
 		}
 		if f.Type == TypeURL {
-			u, err := url.Parse(s)
-			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			if _, ok := helpers.WebLink(s); !ok {
 				return nil, invalid("%s takes a link starting with https://.", f.Name)
 			}
 		}
@@ -348,6 +348,70 @@ func Normalize(f *model.Field, raw json.RawMessage) (json.RawMessage, error) {
 	return nil, invalid("Choose what kind of field it is.")
 }
 
+// Text is a value as a person writes it in a cell, for each shape Normalize
+// stores: an option by its label, several joined by ", ", a person by the
+// name person gives for their id, money in its units, a ticked box as Yes.
+// A value that isn't its field's shape, or an option taken away since, is
+// nothing. Pure.
+func Text(f *model.Field, raw json.RawMessage, person func(id string) string) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	label := func(id string) string {
+		for _, o := range f.Options {
+			if o.ID == id {
+				return o.Label
+			}
+		}
+		return ""
+	}
+	switch f.Type {
+	case TypeText, TypeURL, TypeDate, TypeSelect, TypePerson:
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return ""
+		}
+		switch f.Type {
+		case TypeSelect:
+			return label(s)
+		case TypePerson:
+			return person(s)
+		}
+		return s
+	case TypeNumber:
+		var v float64
+		if json.Unmarshal(raw, &v) != nil {
+			return ""
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case TypeMoney:
+		var cents int64
+		if json.Unmarshal(raw, &cents) != nil {
+			return ""
+		}
+		return helpers.Money(cents)
+	case TypeMultiSelect:
+		var ids []string
+		if json.Unmarshal(raw, &ids) != nil {
+			return ""
+		}
+		labels := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if l := label(id); l != "" {
+				labels = append(labels, l)
+			}
+		}
+		return strings.Join(labels, ", ")
+	case TypeCheckbox:
+		var b bool
+		if json.Unmarshal(raw, &b) != nil || !b {
+			return ""
+		}
+		return "Yes"
+	}
+	return ""
+}
+
 // InputOf is a field as the app sends one: a template keeps a project's
 // fields this way, options and their ids included.
 func InputOf(f *model.Field) Input {
@@ -413,9 +477,17 @@ func Update(ctx context.Context, project, id uuid.UUID, in Input) (field *model.
 	return field, changed, err
 }
 
-// Delete removes a field and every task's value of it.
-func Delete(ctx context.Context, project, id uuid.UUID) error {
-	return model.Delete(ctx, project, id)
+// Delete deletes a field softly, by whom: every task's value of it stays, for
+// its restore (POST /restore/field/{id}).
+func Delete(ctx context.Context, project, id, by uuid.UUID) error {
+	return model.Delete(ctx, project, id, by)
+}
+
+// Restore brings a deleted field back with every task's value of it (POST
+// /restore/field/{id}). ErrNameTaken: a live field of its project has its
+// name now.
+func Restore(ctx context.Context, id uuid.UUID) error {
+	return softDelete.RestoreAs(ctx, softDelete.Field, id, ErrNameTaken)
 }
 
 // Reorder puts a project's fields in the order given.

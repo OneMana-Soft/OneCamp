@@ -17,6 +17,7 @@ import (
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	taskWriter "github.com/akashc777/OneCamp/business/TaskWriter"
@@ -64,13 +65,15 @@ const (
 // maxPool bounds the people an assign or notify names.
 const maxPool = 50
 
-var taskActions = []string{ActionSetStatus, ActionSetPriority, ActionAssign, ActionSetDue, ActionComment, ActionAddSubtask, ActionNotify}
+var taskActions = []string{ActionSetStatus, ActionSetPriority, ActionAssign, ActionSetDue, ActionComment, ActionAddSubtask, ActionNotify, ActionAskAgent}
 
 func isTaskAction(t string) bool { return slices.Contains(taskActions, t) }
 
 // taskTriggers are the triggers about one task.
 var taskTriggers = []string{workflowModel.TriggerTaskCreated, workflowModel.TriggerTaskStatusChanged,
-	workflowModel.TriggerTaskAssigned, workflowModel.TriggerTaskFieldChanged}
+	workflowModel.TriggerTaskAssigned, workflowModel.TriggerTaskFieldChanged,
+	workflowModel.TriggerTaskDueSoon, workflowModel.TriggerTaskOverdue, workflowModel.TriggerFormSubmitted,
+	workflowModel.TriggerApprovalDecided}
 
 func isTaskTrigger(t string) bool { return slices.Contains(taskTriggers, t) }
 
@@ -116,10 +119,27 @@ func validateTaskAction(act *WorkflowAction) error {
 		}
 	case ActionAddSubtask:
 		if act.TaskName == "" {
-			return fmt.Errorf("name the sub-task")
+			return fmt.Errorf("name the subtask")
 		}
 		if len(act.TaskName) > 200 {
-			return fmt.Errorf("a sub-task's name is at most 200 characters")
+			return fmt.Errorf("a subtask's name is at most 200 characters")
+		}
+	case ActionAskAgent:
+		if act.Text == "" {
+			return fmt.Errorf("write what to ask the agent")
+		}
+		if len(act.Text) > maxAgentPrompt {
+			return fmt.Errorf("a question is at most %d characters", maxAgentPrompt)
+		}
+		if asker() == nil {
+			return ErrNeedsAI
+		}
+		if act.AgentID = strings.TrimSpace(act.AgentID); act.AgentID != "" {
+			u, err := uuid.Parse(act.AgentID)
+			if err != nil {
+				return fmt.Errorf("pick the agent to ask")
+			}
+			act.AgentID = u.String()
 		}
 	case ActionNotify:
 		if act.Text == "" {
@@ -168,6 +188,10 @@ func checkTaskActionsIn(ctx context.Context, projectID string, branches ...[]Wor
 					return err
 				}
 				act.Status = r.Value()
+			}
+			// The agent asked is an AI teammate, never a person's id sent as one.
+			if act.Type == ActionAskAgent && act.AgentID != "" && !isAgent(ctx, act.AgentID) {
+				return fmt.Errorf("pick an AI teammate to ask")
 			}
 			for _, id := range act.UserIDs {
 				ok, err := memberOf(ctx, id, projectID)
@@ -223,6 +247,17 @@ type runCtx struct {
 	owner *userModels.UserInfo
 	task  *dgraphStruct.DgraphTask
 	runID uuid.UUID
+	// shared is what one run over many tasks reads once (eachTask.go); nil
+	// for a run about one task, which reads afresh.
+	shared *runShared
+}
+
+// runShared is the project as one run over many tasks reads it once: its
+// members, and each one's open tasks, counted on as the run assigns.
+type runShared struct {
+	members map[string]bool
+	counts  map[string]int
+	agents  map[string]bool
 }
 
 func (rc *runCtx) taskID() uuid.UUID {
@@ -295,12 +330,21 @@ func (cw *compiledWorkflow) runTaskAction(ctx context.Context, act WorkflowActio
 			return fail(err)
 		}
 		step.Field, step.Before, step.After = "assignee", raw(before), raw(to)
+		if rc.shared != nil && rc.shared.counts != nil {
+			rc.shared.counts[to]++
+			if before != "" {
+				rc.shared.counts[before]--
+			}
+		}
 		if to == "" {
 			rc.task.Assignee = nil
 			step.Detail = "unassigned"
 		} else {
 			rc.task.Assignee = &dgraphStruct.DgraphUser{Uuid: to}
 			step.Detail = "assigned"
+			if cw.handOffIfAgent(ctx, rc, to) {
+				step.Detail = "assigned to an AI teammate, who has started"
+			}
 		}
 	case ActionSetDue:
 		var due *time.Time
@@ -342,7 +386,20 @@ func (cw *compiledWorkflow) runTaskAction(ctx context.Context, act WorkflowActio
 		if sub != nil {
 			step.Made = sub.Uuid
 		}
-		step.Detail = "added a sub-task"
+		step.Detail = "added a subtask"
+	case ActionAskAgent:
+		id, said, err := cw.askAgent(ctx, act, ev, rc)
+		if err != nil {
+			return fail(err)
+		}
+		if id == "" {
+			if said == "" {
+				said = "the agent had no answer"
+			}
+			step.Status, step.Detail = "skipped", said
+			return step
+		}
+		step.Made, step.Detail = id, said
 	case ActionNotify:
 		people, err := readersAmong(ctx, rc.task.Uuid, cw.whomToTell(act, ev, rc))
 		if err != nil {
@@ -357,9 +414,9 @@ func (cw *compiledWorkflow) runTaskAction(ctx context.Context, act WorkflowActio
 			recipients = append(recipients, notificationBusiness.NoticeRecipient{UserUUID: p, Reason: "rule"})
 		}
 		told := tell(ctx, notificationBusiness.Notice{
-			Kind: "work.rule", ResourceKind: "task", ResourceUUID: rc.task.Uuid, ResourceTitle: rc.task.Name,
+			Kind: "work.rule", ResourceKind: "task", ResourceUUID: rc.task.Uuid, ResourceTitle: taskKeys.NamedTask(ctx, rc.task.Uuid, rc.task.Name),
 			Data:     map[string]string{"rule_id": cw.id.String(), "run_id": rc.runID.String()},
-			DedupKey: fmt.Sprintf("rule|%s|%d", rc.runID, idx),
+			DedupKey: fmt.Sprintf("rule|%s|%s|%d", rc.runID, rc.task.Uuid, idx),
 			Title:    applyVars(act.Text, ev.vars), Body: cw.name,
 			Path: "/app/task/" + rc.task.Uuid,
 			Push: &notificationBusiness.Push{Type: firebaseInit.FIREBASE_PUSH_DATA_TYPE_TASK, ID: rc.task.Uuid},
@@ -396,14 +453,23 @@ func (cw *compiledWorkflow) pickAssignee(ctx context.Context, act WorkflowAction
 	}
 	if act.Assign == AssignLeastLoaded {
 		// Counted as the rule's owner sees the project: a restricted task
-		// they may not see isn't counted (models/taskread).
-		readCtx := taskread.AsNobody(ctx)
-		if rc.owner != nil {
-			readCtx = taskread.ActingFor(ctx, rc.owner.UserPostgresInfo.Id.String())
-		}
-		counts, err := openCounts(readCtx, rc.projectID())
-		if err != nil {
-			return "", err
+		// they may not see isn't counted (models/taskread). One count serves
+		// every task of a run that acts for each task (rc.shared).
+		var counts map[string]int
+		if rc.shared != nil && rc.shared.counts != nil {
+			counts = rc.shared.counts
+		} else {
+			readCtx := taskread.AsNobody(ctx)
+			if rc.owner != nil {
+				readCtx = taskread.ActingAs(ctx, *rc.owner)
+			}
+			var err error
+			if counts, err = openCounts(readCtx, rc.projectID()); err != nil {
+				return "", err
+			}
+			if rc.shared != nil {
+				rc.shared.counts = counts
+			}
 		}
 		best := pool[0]
 		for _, p := range pool[1:] {
@@ -423,9 +489,17 @@ func (cw *compiledWorkflow) pickAssignee(ctx context.Context, act WorkflowAction
 // pool is the people an assign chooses among: those it names who are still
 // in the project, or everyone in it; in a fixed order, so turns go round.
 func (cw *compiledWorkflow) pool(ctx context.Context, act WorkflowAction, rc *runCtx) ([]string, error) {
-	members, err := membersOf(ctx, rc.projectID(), rc.owner)
-	if err != nil {
-		return nil, err
+	var members map[string]bool
+	if rc.shared != nil && rc.shared.members != nil {
+		members = rc.shared.members
+	} else {
+		var err error
+		if members, err = membersOf(ctx, rc.projectID(), rc.owner); err != nil {
+			return nil, err
+		}
+		if rc.shared != nil {
+			rc.shared.members = members
+		}
 	}
 	var out []string
 	if len(act.UserIDs) > 0 {
