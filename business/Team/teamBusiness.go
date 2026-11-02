@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	domain "github.com/akashc777/OneCamp/domain/Team"
@@ -275,12 +276,15 @@ func RemoveMemberFromTeam(ctx context.Context, teamDgraph *dgraphStruct.DgraphTe
 	// Their roles in the team's projects go with them. The graph edges just
 	// removed are what let anyone in, so a row left behind gives nothing, and
 	// the hourly parity sweep (projects.roles.parity) takes one this misses.
-	if derr := projectRoleModel.DeleteIn(ctx, parseOr(memberUUID), teamProjectIDs(teamDgraph)); derr != nil {
+	// The rows are kept, marked by whoever took them off (V-184).
+	by, _, _ := auditBusiness.ActorFromContext(ctx)
+	if derr := projectRoleModel.DeleteIn(ctx, parseOr(memberUUID), teamProjectIDs(teamDgraph), by); derr != nil {
 		helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromTeam couldn't remove their project roles err: %+v", derr)
 	}
 	// And their grants on those projects' restricted tasks (WA2); one left
-	// behind lets no one in, since reading a task needs its project.
-	if gerr := restrictionModel.DropGrantsIn(ctx, teamProjectIDs(teamDgraph), parseOr(memberUUID)); gerr != nil {
+	// behind lets no one in, since reading a task needs its project. The
+	// grants are marked, by the same person (V-179).
+	if gerr := restrictionModel.DropGrantsIn(ctx, teamProjectIDs(teamDgraph), parseOr(memberUUID), by); gerr != nil {
 		helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromTeam couldn't remove their grants err: %+v", gerr)
 	}
 	// Their cached profile still lists the team and its projects, and search

@@ -1843,67 +1843,6 @@ func sendChatCallNotification(title string, body string, userId string, grpId st
 
 }
 
-func StartRecordingChatCall(ctx context.Context, userDgraphInfo *dgraphStruct.DgraphUser, actualGrpId string) (err error) {
-	egresssInfo, filePath, err := LiveKitBusiness.StartRecording(ctx, actualGrpId, userDgraphInfo)
-
-	zeroEpochTime := time.Time{}
-
-	currentTime := time.Now()
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/StartRecordingChatCall Failed to start call recording err: %+v",
-			err)
-
-		return
-	}
-
-	dgraphDmInfo := &dgraphStruct.DgraphDm{
-		Uid: "uid(dm)",
-		Recordings: []*dgraphStruct.DgraphRecording{
-
-			{
-
-				EgressId:  egresssInfo.EgressId,
-				EndedAt:   &zeroEpochTime,
-				StartedAt: &currentTime,
-				ObjectKey: filePath,
-				Dm: &dgraphStruct.DgraphDm{
-					Uid: "uid(dm)",
-				},
-				RecordingStartedBy: &dgraphStruct.DgraphUser{
-					Uid: userDgraphInfo.Uid,
-				},
-			},
-		},
-	}
-
-	_, _, err = domain.CreateDM(ctx, dgraphDmInfo, actualGrpId)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/StartRecordingChatCall Failed to update chat DM err: %+v",
-			err)
-
-		return
-	}
-	return
-}
-
-func StopRecordingChatCall(ctx context.Context, grpId string) (err error) {
-	err = LiveKitBusiness.StopRecording(ctx, grpId)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/StopRecordingChatCall Failed to start call recording err: %+v",
-			err)
-
-		return
-	}
-
-	return
-}
-
 // StandingsOf reads where a forward's groups and people stand, in one trip
 // (domain StandingsOf): each group by its grouping id with whether the sender
 // is in it, each person by their uuid.

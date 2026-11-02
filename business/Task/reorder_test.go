@@ -2,6 +2,7 @@ package business
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -47,7 +48,7 @@ func TestReorderPlacesTasksInOneOrder(t *testing.T) {
 	if reads != 1 || writes != 1 || len(wrote) != 2 || *wrote[0].Rank >= *wrote[1].Rank || *wrote[0].Rank <= 0 || *wrote[1].Rank >= 1024 {
 		t.Fatalf("%d reads, %d writes: %+v", reads, writes, wrote)
 	}
-	if told == nil || *told != (mqttStruct.MqttTaskChanged{TaskUuid: "m1", ProjectUuid: "p"}) {
+	if told == nil || !reflect.DeepEqual(*told, mqttStruct.MqttTaskChanged{TaskUuid: "m1", ProjectUuid: "p"}) {
 		t.Fatalf("told %+v", told)
 	}
 

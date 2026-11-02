@@ -125,7 +125,7 @@ func TestRestoringAHandedOnDocTellsItsOwnerNotItsMaker(t *testing.T) {
 
 	s := &stubDocRestore{docs: docs, links: map[string]int64{doc.String(): 1}}
 	s.install(t)
-	if _, err := restoreDocs(asAdmin("bea", "Bea Ortiz"), []uuid.UUID{doc}, false); err != nil {
+	if _, err := restoreDocs(asAdmin("bea", "Bea Ortiz"), []string{doc.String()}, false); err != nil {
 		t.Fatal(err)
 	}
 	if len(s.told) != 0 {
@@ -134,7 +134,7 @@ func TestRestoringAHandedOnDocTellsItsOwnerNotItsMaker(t *testing.T) {
 
 	s = &stubDocRestore{docs: docs, links: map[string]int64{doc.String(): 1}}
 	s.install(t)
-	if _, err := restoreDocs(asAdmin("sam", "Sam Rivera"), []uuid.UUID{doc}, false); err != nil {
+	if _, err := restoreDocs(asAdmin("sam", "Sam Rivera"), []string{doc.String()}, false); err != nil {
 		t.Fatal(err)
 	}
 	if len(s.told) != 1 || !strings.HasPrefix(s.told[0], "bea: ") {
@@ -161,7 +161,7 @@ func TestRestoringADocItsOwnerDeletedTurnsOffItsGuestLinks(t *testing.T) {
 
 	s := &stubDocRestore{docs: docs, links: map[string]int64{deleted.String(): 2}}
 	s.install(t)
-	n, err := restoreDocs(asAdmin("sam", "Sam Rivera"), []uuid.UUID{deleted, archived, noLinks}, false)
+	n, err := restoreDocs(asAdmin("sam", "Sam Rivera"), []string{deleted.String(), archived.String(), noLinks.String()}, false)
 	if err != nil || n != 3 {
 		t.Fatalf("restoring from the list: %d, %v", n, err)
 	}
@@ -175,7 +175,7 @@ func TestRestoringADocItsOwnerDeletedTurnsOffItsGuestLinks(t *testing.T) {
 	// Undoing a run brings back only archived docs, and their links with them.
 	s = &stubDocRestore{docs: docs}
 	s.install(t)
-	if _, err := restoreDocs(asAdmin("sam", "Sam Rivera"), []uuid.UUID{archived}, true); err != nil {
+	if _, err := restoreDocs(asAdmin("sam", "Sam Rivera"), []string{archived.String()}, true); err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"restore"}; !slices.Equal(s.steps, want) || len(s.told) != 0 {
@@ -185,7 +185,7 @@ func TestRestoringADocItsOwnerDeletedTurnsOffItsGuestLinks(t *testing.T) {
 	// An owner restoring their own doc is told nothing; its links still go.
 	s = &stubDocRestore{docs: docs[:1], links: map[string]int64{deleted.String(): 1}}
 	s.install(t)
-	if _, err := restoreDocs(asAdmin("dana", "Dana Whitfield"), []uuid.UUID{deleted}, false); err != nil {
+	if _, err := restoreDocs(asAdmin("dana", "Dana Whitfield"), []string{deleted.String()}, false); err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"read", "links off " + deleted.String(), "restore"}; !slices.Equal(s.steps, want) || len(s.told) != 0 {
@@ -207,7 +207,7 @@ func TestADocWhoseLinksStayOnStaysDeleted(t *testing.T) {
 	}
 	s := &stubDocRestore{docs: docs, linksErr: map[string]error{stuck.String(): errors.New("postgres is down")}}
 	s.install(t)
-	n, err := restoreDocs(asAdmin("sam", "Sam Rivera"), []uuid.UUID{stuck, archived}, false)
+	n, err := restoreDocs(asAdmin("sam", "Sam Rivera"), []string{stuck.String(), archived.String()}, false)
 	if err == nil || n != 1 {
 		t.Errorf("restoring with one doc's links stuck on: %d, %v; want the other doc restored and an error", n, err)
 	}
@@ -217,7 +217,7 @@ func TestADocWhoseLinksStayOnStaysDeleted(t *testing.T) {
 
 	s = &stubDocRestore{docs: docs, readErr: errors.New("the graph did not answer")}
 	s.install(t)
-	if n, err := restoreDocs(asAdmin("sam", "Sam Rivera"), []uuid.UUID{stuck, archived}, false); err == nil || n != 0 || len(s.restoreAsks) != 0 {
+	if n, err := restoreDocs(asAdmin("sam", "Sam Rivera"), []string{stuck.String(), archived.String()}, false); err == nil || n != 0 || len(s.restoreAsks) != 0 {
 		t.Errorf("restoring docs that can't be read: %d, %v, restore asked %v; want nothing restored and an error", n, err, s.restoreAsks)
 	}
 }

@@ -30,7 +30,8 @@ func TestRecordingListBlocksAreNamedForTheParser(t *testing.T) {
 	// body. Var blocks ("x as var(func:") and count blocks have no body the
 	// parser reads and are not matched.
 	lists := regexp.MustCompile(`(?m)^\s*(\w+)\(func:[^\n]*\{\s*$`).FindAllStringSubmatch(string(src), -1)
-	if len(lists) < 3 {
+	// Two since V-140, whose delete and restore reads are one builder.
+	if len(lists) < 2 {
 		t.Fatalf("found %d list blocks; the regexp no longer matches the file", len(lists))
 	}
 	for _, b := range lists {

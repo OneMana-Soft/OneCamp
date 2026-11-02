@@ -182,11 +182,24 @@ func TestABatchsKind(t *testing.T) {
 }
 
 // The purges keep everything until the owner decides how long (O3): at 0
-// days they do nothing, not even ask the database.
+// days nothing past its retention goes, and neither purge asks the database
+// for it (no database is connected here, so any such read fails the test).
+// The trash's sweep only finishes a delete for good a stopped server left
+// part way (V-121): it asks for that one once, and here there's none.
 func TestThePurgesKeepEverythingAtZero(t *testing.T) {
 	ctx := context.Background()
+	asked := 0
+	was := claimStalePurge
+	claimStalePurge = func(context.Context, time.Time, time.Time) (model.Claim, bool, error) {
+		asked++
+		return model.Claim{}, false, nil
+	}
+	t.Cleanup(func() { claimStalePurge = was })
 	if err := trashPurge(ctx, 0, time.Now()); err != nil {
 		t.Errorf("the trash purge at 0: %v", err)
+	}
+	if asked != 1 {
+		t.Errorf("the trash purge at 0 asked for a delete for good left part way %d times, want once", asked)
 	}
 	if err := historyPurge(ctx, 0, time.Now()); err != nil {
 		t.Errorf("the history purge at 0: %v", err)

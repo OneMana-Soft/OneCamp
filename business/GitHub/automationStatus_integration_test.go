@@ -127,7 +127,7 @@ func TestAutomationRulesFollowCustomStatuses(t *testing.T) {
 		if err := UpdateAutomationRulesAndInvalidate(ctx, link.Id, `{"approved":"inReview","review_requested":"done","pr_merged":"inReview"}`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := taskStatusBusiness.Restore(ctx, review.ID); err != nil {
+		if _, err := taskStatusBusiness.Restore(ctx, project, review.ID); err != nil {
 			t.Fatal(err)
 		}
 		if got := rulesOf(); got["approved"] != review.ID.String() || got["review_requested"] != "done" || got["pr_merged"] != "inReview" {

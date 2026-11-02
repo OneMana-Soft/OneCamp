@@ -862,6 +862,12 @@ var contextOverflowMarkers = []string{
 	"reduce the length of the messages",
 	"exceeds the maximum number of tokens",
 	"requested too many tokens",
+	// A request above a provider's per-request cap, which can sit far below the window: Groq's on_demand tier
+	// answers 413 "Request too large for model ... Limit 8000, Requested 10306, please reduce your message size".
+	"request too large",
+	"reduce your message size",
+	"request entity too large",
+	"payload too large",
 }
 
 // IsContextOverflow reports whether err is a provider rejection caused by the
@@ -870,6 +876,9 @@ var contextOverflowMarkers = []string{
 func IsContextOverflow(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, ErrPromptTooLarge) || errors.Is(err, errProviderTooLarge) {
+		return true
 	}
 	text := strings.ToLower(err.Error())
 	for _, m := range contextOverflowMarkers {

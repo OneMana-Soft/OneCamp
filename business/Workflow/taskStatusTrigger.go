@@ -140,6 +140,11 @@ func (cw *compiledWorkflow) wants(trigger string, data map[string]interface{}, m
 		return cw.outcome == "" || o == cw.outcome
 	case workflowModel.TriggerTaskStatusChanged:
 		return cw.taskMove.Matches(move)
+	case workflowModel.TriggerTaskCreated:
+		// A sub-task's making (its task.created names a parent) starts no
+		// rule, as it never has: a template's sub-tasks would start one each.
+		p, _ := data["parent_task_id"].(string)
+		return p == ""
 	case workflowModel.TriggerTaskFieldChanged:
 		if len(cw.fields) == 0 {
 			return true

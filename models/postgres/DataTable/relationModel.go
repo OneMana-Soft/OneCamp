@@ -20,6 +20,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -437,14 +438,13 @@ func TuplesChanged(ctx context.Context, table string) (int64, error) {
 }
 
 // Vacuum vacuums one of InsertMostly, so counts and reads of it take the
-// index alone, unless another vacuum of it is running.
+// index alone, unless another vacuum of it is running. A VACUUM can't run in
+// a transaction, so it runs alone (pgexec.ExecAlone), within vacuumTimeout.
 func Vacuum(ctx context.Context, table string) error {
 	if !insertMostly(table) {
 		return fmt.Errorf("models: %s isn't vacuumed here", table)
 	}
-	dbctx, cancel := context.WithTimeout(ctx, vacuumTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, `VACUUM (ANALYZE, SKIP_LOCKED) `+table)
+	_, err := pgexec.ExecAlone(ctx, vacuumTimeout, `VACUUM (ANALYZE, SKIP_LOCKED) `+table)
 	return err
 }
 
@@ -461,16 +461,26 @@ func RowHasLinks(ctx context.Context, rowId uuid.UUID) (bool, error) {
 	return has, err
 }
 
-// TablesLinkedWith is the other tables whose relation fields link to a
-// table's rows, or whose rows its relation fields link to: those whose
-// readers see its rows' names, or add them up.
-func TablesLinkedWith(ctx context.Context, tableId uuid.UUID) ([]uuid.UUID, error) {
+// TablesLinkedWith is the other tables whose relation fields link to these
+// tables' rows, or whose rows their relation fields link to: those whose
+// readers see their rows' names, or add them up.
+func TablesLinkedWith(ctx context.Context, tableIds ...uuid.UUID) ([]uuid.UUID, error) {
+	if len(tableIds) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(tableIds))
+	asked := make(map[uuid.UUID]bool, len(tableIds))
+	for i, id := range tableIds {
+		ids[i], asked[id] = id.String(), true
+	}
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
-	rs, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, `SELECT DISTINCT CASE WHEN f.table_id = $1 THEN f.config->>'table_id' ELSE f.table_id::text END
+	// The ids twice: as uuids for the column (its index serves them), and as
+	// text for the relation's config. One parameter can't be both types.
+	rs, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, `SELECT DISTINCT CASE WHEN f.table_id = ANY($1::uuid[]) THEN f.config->>'table_id' ELSE f.table_id::text END
 		FROM data_table_fields f JOIN data_tables t ON t.id = f.table_id AND t.deleted_at IS NULL
 		WHERE f.deleted_at IS NULL AND f.type = 'relation' AND f.config->>'relation_target' = 'table'
-			AND (f.table_id = $1 OR f.config->>'table_id' = $1::text)`, tableId)
+			AND (f.table_id = ANY($1::uuid[]) OR f.config->>'table_id' = ANY($2::text[]))`, pq.Array(ids), pq.Array(ids))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/TablesLinkedWith err: %+v", err)
 		return nil, err
@@ -482,7 +492,7 @@ func TablesLinkedWith(ctx context.Context, tableId uuid.UUID) ([]uuid.UUID, erro
 		if err := rs.Scan(&s); err != nil {
 			return nil, err
 		}
-		if id, err := uuid.Parse(s.String); err == nil && id != tableId {
+		if id, err := uuid.Parse(s.String); err == nil && !asked[id] {
 			out = append(out, id)
 		}
 	}

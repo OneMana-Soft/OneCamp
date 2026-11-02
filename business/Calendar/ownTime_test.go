@@ -3,6 +3,7 @@ package Calendar
 import (
 	"context"
 	"errors"
+	"maps"
 	"testing"
 	"time"
 
@@ -98,5 +99,63 @@ func TestOwnTimeTakesNoGuestsThroughAnyWriter(t *testing.T) {
 	if err := h.s.legacyUpdateAt(ctx, old.ID, adapter.CreateOrUpdateEventInput{Title: "Offsite", StartTime: from, EndTime: to, IsAway: &yes,
 		Participants: []string{lee.UserDgraphInfo.Uuid}}, maya); err != nil {
 		t.Errorf("an older out of office with a guest, changed through /event/updateEvent naming that guest: %v", err)
+	}
+}
+
+// CR-113 S1: Focus time, Away and Working location could be switched on while
+// editing a meeting with guests, and the save was refused. The event's read
+// says, to whoever may change it, the own time a save that keeps its guests is
+// refused, in the very words the save is refused with, so the form offers only
+// what the server takes. It is keepOwnTime's own answer, never a second copy:
+// a meeting with a guest can't become any own time; as its guest reads it, or
+// with no guests, nothing is said, and focus time is taken.
+func TestAnEventSaysWhichOwnTimeItCantBecome(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	maya, lee := withGraphUID(h.member("Maya"), "0xmaya"), h.member("Lee")
+	start, end := timed(h.clock.Add(2*time.Hour), 60, "UTC")
+	sync, err := h.s.Create(ctx, maya, EventInput{Title: "Sync", Start: start, End: end, Attendees: []GuestInput{{UUID: lee.UserDgraphInfo.Uuid}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := h.s.Get(ctx, maya, sync.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[EventKind]string{}
+	for _, k := range ownTimeKinds {
+		want[EventKind(k)] = ownTimeWords[EventKind(k)]
+	}
+	if !maps.Equal(read.OwnTimeRefused, want) {
+		t.Errorf("a meeting with a guest, as its organiser reads it: own_time_refused %v, want %v", read.OwnTimeRefused, want)
+	}
+	for _, k := range []EventKind{EventFocus, EventAway, EventWorkingLocation} {
+		kind := k
+		_, err := h.s.Update(ctx, maya, sync.ID, EventPatch{Sequence: seq(read.Sequence), Kind: &kind})
+		var in *EventInputError
+		if !errors.As(err, &in) || in.Error() != want[k] {
+			t.Errorf("%s: the read says %q, the save answers %v", k, want[k], err)
+		}
+	}
+	if asGuest, err := h.s.Get(ctx, lee, sync.ID); err != nil {
+		t.Errorf("as its guest reads it: %v", err)
+	} else if asGuest.OwnTimeRefused != nil {
+		t.Errorf("as its guest reads it: %v; want nothing said", asGuest.OwnTimeRefused)
+	}
+
+	solo, err := h.s.Create(ctx, maya, EventInput{Title: "Solo", Start: start, End: end})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alone, err := h.s.Get(ctx, maya, solo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alone.OwnTimeRefused != nil {
+		t.Errorf("a meeting with no guests: %v; want nothing said", alone.OwnTimeRefused)
+	}
+	focus := EventFocus
+	if _, err := h.s.Update(ctx, maya, solo.ID, EventPatch{Sequence: seq(alone.Sequence), Kind: &focus}); err != nil {
+		t.Errorf("a meeting with no guests made focus time: %v", err)
 	}
 }

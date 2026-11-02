@@ -225,13 +225,13 @@ func TestCustomFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a new field takes the deleted one's name: %v", err)
 	}
-	if err := Restore(ctx, budget.ID); !errors.Is(err, ErrNameTaken) {
+	if err := Restore(ctx, project, budget.ID); !errors.Is(err, ErrNameTaken) {
 		t.Fatalf("restoring Budget while budget lives: %v", err)
 	}
 	if err := Delete(ctx, project, again.ID, admin); err != nil {
 		t.Fatal(err)
 	}
-	if err := Restore(ctx, budget.ID); err != nil {
+	if err := Restore(ctx, project, budget.ID); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := model.ValueOf(ctx, uuid.MustParse(t1.Uuid), budget.ID); v == nil {

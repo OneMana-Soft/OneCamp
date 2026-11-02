@@ -11,6 +11,7 @@ import (
 
 	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // Who waits in a meeting's lobby.
@@ -40,6 +41,9 @@ type Meeting struct {
 	Lobby      string
 	CreatedAt  time.Time
 	ArchivedAt *time.Time
+	// Event is the calendar event whose call the meeting is (KindEvent), and
+	// uuid.Nil for every other meeting.
+	Event uuid.UUID
 }
 
 // Knock is one call_knocks row.
@@ -63,19 +67,24 @@ func SaveMeeting(ctx context.Context, m Meeting) error {
 	if m.Kind == "" {
 		m.Kind = "instant"
 	}
-	_, err := pgexec.Exec(ctx, `INSERT INTO call_meetings (id, kind, owner, title, lobby, created_at) VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6) ON CONFLICT (id) DO NOTHING`,
-		m.ID, m.Kind, m.Owner, m.Title, m.Lobby, m.CreatedAt)
+	_, err := pgexec.Exec(ctx, `INSERT INTO call_meetings (id, kind, owner, title, lobby, created_at, event_id) VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7) ON CONFLICT (id) DO NOTHING`,
+		m.ID, m.Kind, m.Owner, m.Title, m.Lobby, m.CreatedAt, uuid.NullUUID{UUID: m.Event, Valid: m.Event != uuid.Nil})
 	return err
+}
+
+const meetingColumns = `id, kind, owner, COALESCE(title, ''), lobby, created_at, archived_at, event_id`
+
+func scanMeeting(r pgexec.Row) (Meeting, error) {
+	var m Meeting
+	var event uuid.NullUUID
+	err := r.Scan(&m.ID, &m.Kind, &m.Owner, &m.Title, &m.Lobby, &m.CreatedAt, &m.ArchivedAt, &event)
+	m.Event = event.UUID
+	return m, err
 }
 
 // MeetingOf answers a meeting's home, or nil.
 func MeetingOf(ctx context.Context, id string) (*Meeting, error) {
-	m, ok, err := pgexec.QueryOne(ctx, `SELECT id, kind, owner, COALESCE(title, ''), lobby, created_at, archived_at FROM call_meetings WHERE id = $1`,
-		func(r pgexec.Row) (Meeting, error) {
-			var m Meeting
-			err := r.Scan(&m.ID, &m.Kind, &m.Owner, &m.Title, &m.Lobby, &m.CreatedAt, &m.ArchivedAt)
-			return m, err
-		}, id)
+	m, ok, err := pgexec.QueryOne(ctx, `SELECT `+meetingColumns+` FROM call_meetings WHERE id = $1`, scanMeeting, id)
 	if err != nil || !ok {
 		return nil, err
 	}
@@ -90,13 +99,8 @@ const KindEvent = "event"
 
 // PersonalMeetingOf answers a member's open personal room, or nil.
 func PersonalMeetingOf(ctx context.Context, owner uuid.UUID) (*Meeting, error) {
-	m, ok, err := pgexec.QueryOne(ctx, `SELECT id, kind, owner, COALESCE(title, ''), lobby, created_at, archived_at FROM call_meetings
-		WHERE owner = $1 AND kind = 'personal' AND archived_at IS NULL`,
-		func(r pgexec.Row) (Meeting, error) {
-			var m Meeting
-			err := r.Scan(&m.ID, &m.Kind, &m.Owner, &m.Title, &m.Lobby, &m.CreatedAt, &m.ArchivedAt)
-			return m, err
-		}, owner)
+	m, ok, err := pgexec.QueryOne(ctx, `SELECT `+meetingColumns+` FROM call_meetings
+		WHERE owner = $1 AND kind = 'personal' AND archived_at IS NULL`, scanMeeting, owner)
 	if err != nil || !ok {
 		return nil, err
 	}
@@ -113,6 +117,25 @@ func ArchiveMeeting(ctx context.Context, id string, at time.Time) (bool, error) 
 func SetLobby(ctx context.Context, id, lobby string) (bool, error) {
 	n, err := pgexec.Exec(ctx, `UPDATE call_meetings SET lobby = $2 WHERE id = $1`, id, lobby)
 	return n > 0, err
+}
+
+// LobbiesOf is each meeting's lobby by its id, for those there, in one read.
+func LobbiesOf(ctx context.Context, ids []string) (map[string]string, error) {
+	type lobbyOf struct{ id, lobby string }
+	rows, err := pgexec.Query(ctx, `SELECT id, lobby FROM call_meetings WHERE id = ANY($1)`,
+		func(r pgexec.Row) (lobbyOf, error) {
+			var l lobbyOf
+			err := r.Scan(&l.id, &l.lobby)
+			return l, err
+		}, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(rows))
+	for _, l := range rows {
+		out[l.id] = l.lobby
+	}
+	return out, nil
 }
 
 const knockColumns = `id, room, grant_id, name, COALESCE(identity, ''), knocked_at, decided_at, COALESCE(decision, ''), COALESCE(decided_by, '')`

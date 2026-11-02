@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -77,6 +78,17 @@ type deletedPart struct {
 	// keeps a reference to it fails once), makes the next restore stop there
 	// and answers the words of its retry-later.
 	stops func() (words string)
+	// full, where its create holds a most (a project's fields, statuses and
+	// forms, a table's forms, the milestones each project that shows one
+	// shows), fills where it counts up to that most and answers the words its
+	// create then refuses with, which its restore says too, and how to make
+	// room (V-184 head 2).
+	full func(t *testing.T) (words string, makeRoom func())
+	// loses, where its create needs a standing whoever restores it can lose
+	// since (a time entry needs its person to log time on its task), takes it
+	// away and answers the words its create then refuses with, and how to
+	// give it back.
+	loses func(t *testing.T) (words string, regain func())
 }
 
 func TestEveryDeletedProjectPartComesBackWhole(t *testing.T) {
@@ -179,6 +191,12 @@ func TestEveryDeletedProjectPartComesBackWhole(t *testing.T) {
 	if _, err := milestoneModel.SetTasks(ctx, tasks, &ms.Id); err != nil {
 		t.Fatal(err)
 	}
+	// Beta shows in Billing too, so its restore is held to Billing's most as
+	// well as to its own project's.
+	billing := uuid.MustParse(w.billing)
+	if err := milestoneModel.Share(ctx, ms.Id, billing, milestoneBusiness.MostProjects, milestoneBusiness.MostPerProject); err != nil {
+		t.Fatal(err)
+	}
 	var form, token string
 	if err := env.PG.QueryRow(`INSERT INTO project_forms (project_uuid, token, title, fields, created_by) VALUES ($1, $2, 'Bugs', '[]', $3) RETURNING id`,
 		project, "tok-"+uuid.NewString(), w.people["ana"]).Scan(&form); err != nil {
@@ -210,6 +228,17 @@ func TestEveryDeletedProjectPartComesBackWhole(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// exec is a write for the subtest t, which an error fails (w.exec fails
+	// the parent test). The fills below put live rows by SQL where a part's
+	// most counts, as many as that most leaves room for.
+	exec := func(t *testing.T, q string, args ...any) {
+		t.Helper()
+		if _, err := env.PG.Exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	const mostForms = 20 // business/Form's maxForms: a project's forms, or a table's own
+
 	parts := []deletedPart{
 		{kind: "field", table: "task_fields", id: field.ID.String(), by: ana, refused: []*userModels.UserInfo{ben, cy},
 			del: func(who *userModels.UserInfo) *httptest.ResponseRecorder {
@@ -237,6 +266,15 @@ func TestEveryDeletedProjectPartComesBackWhole(t *testing.T) {
 						t.Fatalf("renaming that one: %v", err)
 					}
 				}
+			},
+			full: func(t *testing.T) (string, func()) {
+				exec(t, `INSERT INTO task_fields (id, project_id, name, type, created_by)
+					SELECT uuid_generate_v4(), $1, 'Filler ' || g, 'number', $3 FROM generate_series(1, $2::int -
+						(SELECT COUNT(*)::int FROM task_fields WHERE project_id = $1 AND deleted_at IS NULL)) g`,
+					project, taskFieldBusiness.MaxPerProject, w.people["ana"])
+				return fmt.Sprintf("A project can have up to %d fields.", taskFieldBusiness.MaxPerProject), func() {
+					exec(t, `DELETE FROM task_fields WHERE project_id = $1 AND name LIKE 'Filler %'`, project)
+				}
 			}},
 		{kind: "status", table: "task_statuses", id: status.ID.String(), by: ana, refused: []*userModels.UserInfo{ben, cy},
 			del: func(who *userModels.UserInfo) *httptest.ResponseRecorder {
@@ -263,6 +301,15 @@ func TestEveryDeletedProjectPartComesBackWhole(t *testing.T) {
 			stops: func() string {
 				stop = true
 				return "The status is back, but its restore didn't finish. Try again in a moment."
+			},
+			full: func(t *testing.T) (string, func()) {
+				exec(t, `INSERT INTO task_statuses (id, project_id, name, category, created_by)
+					SELECT uuid_generate_v4(), $1, 'Filler ' || g, 'inReview', $3 FROM generate_series(1, $2::int -
+						(SELECT COUNT(*)::int FROM task_statuses WHERE project_id = $1 AND deleted_at IS NULL)) g`,
+					project, taskStatusBusiness.MaxPerProject, w.people["ana"])
+				return taskStatusBusiness.ErrTooMany.Error(), func() {
+					exec(t, `DELETE FROM task_statuses WHERE project_id = $1 AND name LIKE 'Filler %'`, project)
+				}
 			}},
 		{kind: "cycle", table: "project_cycles", id: cycle.Id.String(), by: ana, refused: []*userModels.UserInfo{ben, cy},
 			del: func(who *userModels.UserInfo) *httptest.ResponseRecorder {
@@ -288,6 +335,19 @@ func TestEveryDeletedProjectPartComesBackWhole(t *testing.T) {
 			shown: func() bool { in, _ := milestoneModel.In(ctx, []uuid.UUID{project}); return len(in[project]) == 1 },
 			kept: func() int {
 				return count(`SELECT (SELECT COUNT(*) FROM task_milestones WHERE milestone_id = $1) + (SELECT COUNT(*) FROM milestone_projects WHERE milestone_id = $1)`, ms.Id)
+			},
+			// Billing, where it is shared, is the project that is full: its own
+			// project has room, and the restore is still refused.
+			full: func(t *testing.T) (string, func()) {
+				exec(t, `WITH m AS (INSERT INTO milestones (project_uuid, name, created_by)
+						SELECT $1, 'Filler ' || g, $3 FROM generate_series(1, $2::int - (SELECT COUNT(*)::int FROM milestone_projects mp
+							JOIN milestones x ON x.id = mp.milestone_id AND x.deleted_at IS NULL WHERE mp.project_uuid = $1)) g RETURNING id)
+					INSERT INTO milestone_projects (project_uuid, milestone_id) SELECT $1, id FROM m`,
+					billing, milestoneBusiness.MostPerProject, w.people["ana"])
+				return fmt.Sprintf("A project shows at most %d milestones, and a milestone shows in at most %d projects.",
+						milestoneBusiness.MostPerProject, milestoneBusiness.MostProjects), func() {
+						exec(t, `DELETE FROM milestones WHERE project_uuid = $1 AND name LIKE 'Filler %'`, billing)
+					}
 			}},
 		{kind: "form", table: "project_forms", id: form, by: ana, refused: []*userModels.UserInfo{ben, cy},
 			del: func(who *userModels.UserInfo) *httptest.ResponseRecorder {
@@ -298,13 +358,31 @@ func TestEveryDeletedProjectPartComesBackWhole(t *testing.T) {
 				_, linkErr := formModel.ByToken(ctx, token)
 				return len(listed) == 1 && linkErr == nil
 			},
-			kept: func() int { return count(`SELECT COUNT(*) FROM form_submissions WHERE form_id = $1`, form) }},
+			kept: func() int { return count(`SELECT COUNT(*) FROM form_submissions WHERE form_id = $1`, form) },
+			full: func(t *testing.T) (string, func()) {
+				exec(t, `INSERT INTO project_forms (project_uuid, token, title, fields, created_by)
+					SELECT $1, 'tok-' || uuid_generate_v4(), 'Filler ' || g, '[]', $3 FROM generate_series(1, $2::int -
+						(SELECT COUNT(*)::int FROM project_forms WHERE project_uuid = $1 AND deleted_at IS NULL)) g`,
+					project, mostForms, w.people["ana"])
+				return fmt.Sprintf("This project has %d forms. Delete one to make another.", mostForms), func() {
+					exec(t, `DELETE FROM project_forms WHERE project_uuid = $1 AND title LIKE 'Filler %'`, project)
+				}
+			}},
 		{kind: "form", table: "project_forms", id: tableForm, by: ana, refused: []*userModels.UserInfo{ben},
 			del: func(who *userModels.UserInfo) *httptest.ResponseRecorder {
 				return call(t, formController.DeleteTableForm, http.MethodPost, "/", who, "", map[string]string{"id": table.Id.String(), "form_id": tableForm})
 			},
 			shown: func() bool { listed, _ := formModel.ListOfTable(ctx, table.Id); return len(listed) == 1 },
-			kept:  func() int { return count(`SELECT COUNT(*) FROM form_submissions WHERE form_id = $1`, tableForm) }},
+			kept:  func() int { return count(`SELECT COUNT(*) FROM form_submissions WHERE form_id = $1`, tableForm) },
+			full: func(t *testing.T) (string, func()) {
+				exec(t, `INSERT INTO project_forms (target_table, token, title, fields, created_by)
+					SELECT $1, 'tok-' || uuid_generate_v4(), 'Filler ' || g, '[]', $3 FROM generate_series(1, $2::int -
+						(SELECT COUNT(*)::int FROM project_forms WHERE target_table = $1 AND project_uuid IS NULL AND deleted_at IS NULL)) g`,
+					table.Id, mostForms, w.people["ana"])
+				return fmt.Sprintf("This table has %d forms. Delete one to make another.", mostForms), func() {
+					exec(t, `DELETE FROM project_forms WHERE target_table = $1 AND title LIKE 'Filler %'`, table.Id)
+				}
+			}},
 		{kind: "time_entry", table: "task_time_entries", id: entry.Id.String(), by: ben, refused: []*userModels.UserInfo{ana},
 			del: func(who *userModels.UserInfo) *httptest.ResponseRecorder {
 				return post(timeEntryController.DeleteTime, who, "", "entry_id", entry.Id.String())
@@ -320,7 +398,15 @@ func TestEveryDeletedProjectPartComesBackWhole(t *testing.T) {
 				}
 				return len(onTask) == 1 && len(billed) == 1 && reported > 0
 			},
-			kept: func() int { return 0 }},
+			kept: func() int { return 0 },
+			// Made a viewer since, ben logs no time on the project's tasks, so
+			// his deleted time can't come back into it either.
+			loses: func(t *testing.T) (string, func()) {
+				exec(t, `INSERT INTO project_roles (project_id, user_id, role) VALUES ($1, $2, 'viewer')`, project, w.people["ben"])
+				return "Only the people who work in this project log time on its tasks.", func() {
+					exec(t, `DELETE FROM project_roles WHERE project_id = $1 AND user_id = $2`, project, w.people["ben"])
+				}
+			}},
 		{kind: "invoice", table: "invoices", id: invoice.String(), by: ana, refused: []*userModels.UserInfo{ben, cy},
 			del: func(who *userModels.UserInfo) *httptest.ResponseRecorder {
 				return post(invoiceController.DeleteInvoice, who, "", "invoice_id", invoice.String())
@@ -378,6 +464,31 @@ func TestEveryDeletedProjectPartComesBackWhole(t *testing.T) {
 					t.Fatal("restored with its place taken")
 				}
 				makeWay()
+			}
+			// Where its create holds a most, a restore is held to it too: past
+			// it the restore is refused in the create's words and the part stays
+			// deleted until there is room.
+			if p.full != nil {
+				words, makeRoom := p.full(t)
+				if rec := restore(p.by); rec.Code == http.StatusOK || msgOf(rec) != words {
+					t.Errorf("a restore past its most: %d %q, want %q", rec.Code, msgOf(rec), words)
+				}
+				if n := count(`SELECT COUNT(*) FROM `+p.table+` WHERE id = $1 AND deleted_at IS NOT NULL`, p.id); n != 1 {
+					t.Fatal("restored past its most")
+				}
+				makeRoom()
+			}
+			// Whoever lost what its create needs since is refused its restore
+			// in the create's words, until they have it again.
+			if p.loses != nil {
+				words, regain := p.loses(t)
+				if rec := restore(p.by); rec.Code == http.StatusOK || msgOf(rec) != words {
+					t.Errorf("a restore by someone who lost what its create needs: %d %q, want %q", rec.Code, msgOf(rec), words)
+				}
+				if n := count(`SELECT COUNT(*) FROM `+p.table+` WHERE id = $1 AND deleted_at IS NOT NULL`, p.id); n != 1 {
+					t.Fatal("restored by someone who lost what its create needs")
+				}
+				regain()
 			}
 			// A restore that stops partway answers retry-later and leaves the
 			// rest to do. Those refused may not finish it; the next restore by

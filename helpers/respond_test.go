@@ -70,3 +70,29 @@ func TestRouteOfNamesTheRouteNotThePath(t *testing.T) {
 		t.Errorf("a request no router saw is %q, want (no route)", got)
 	}
 }
+
+// ⌘K sends its words through encodeURIComponent, and chi hands a parameter
+// back escaped whenever the request's escaping differs from Go's own.
+func TestPathTextIsTheWordsAsTyped(t *testing.T) {
+	r := chi.NewRouter()
+	var got string
+	r.Route("/search", func(r chi.Router) {
+		r.Get("/unifiedSearch/{search_text}", func(w http.ResponseWriter, r *http.Request) { got = PathText(r, "search_text") })
+	})
+	for sent, want := range map[string]string{
+		"type%3Atask%20launch": "type:task launch", // ":" as %3A: chi reads the raw path
+		"Q%26A":                "Q&A",
+		"C%2B%2B":              "C++",
+		"from%3A%40alice":      "from:@alice",
+		"launch%20plan":        "launch plan", // Go's own escaping: chi reads the decoded path
+		"50%25%20off":          "50% off",
+		"%2526":                "%26", // a typed "%26": decoded once, never twice
+		"a%3A%2526":            "a:%26",
+	} {
+		got = ""
+		r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/search/unifiedSearch/"+sent, nil))
+		if got != want {
+			t.Errorf("%s reads %q; want %q", sent, got, want)
+		}
+	}
+}

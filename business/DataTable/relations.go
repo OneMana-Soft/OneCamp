@@ -564,9 +564,9 @@ func tellLinkedTables(ctx context.Context, table, row uuid.UUID, wasLinked bool)
 // tellTablesLinkedWith has the readers of the tables linking with a table
 // look again: one of its fields changed, which their cells or rollups may
 // read, or which shows their links.
-func tellTablesLinkedWith(ctx context.Context, table uuid.UUID) {
-	if tables, err := model.TablesLinkedWith(ctx, table); err == nil {
-		tellTables(ctx, tables...)
+func tellTablesLinkedWith(ctx context.Context, tables ...uuid.UUID) {
+	if linked, err := model.TablesLinkedWith(ctx, tables...); err == nil {
+		tellTables(ctx, linked...)
 	}
 }
 

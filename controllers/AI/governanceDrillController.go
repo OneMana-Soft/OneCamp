@@ -13,6 +13,7 @@ import (
 	drillBusiness "github.com/akashc777/OneCamp/business/AIDrill"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	ai "github.com/akashc777/OneCamp/services/AI"
 )
 
 // How often one person may run the drill.
@@ -51,7 +52,7 @@ func SetupGovernanceDrill(w http.ResponseWriter, r *http.Request) {
 		// returned rather than replaced with a generic message: a half-built
 		// fixture is the one state that would make the drill lie.
 		helpers.LogErrorWithContext(ctx, "controllers/SetupGovernanceDrill failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{
@@ -74,7 +75,7 @@ func RunGovernanceDrill(w http.ResponseWriter, r *http.Request) {
 	res, err := drillBusiness.Run(ctx, userInfo)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/RunGovernanceDrill could not run err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": res})
@@ -110,7 +111,7 @@ func RunMyGovernanceDrill(w http.ResponseWriter, r *http.Request) {
 	res, err := drillBusiness.Run(ctx, userInfo)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/RunMyGovernanceDrill could not run err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": res})

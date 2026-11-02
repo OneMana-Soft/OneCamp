@@ -36,6 +36,13 @@ const (
 	LevelFull    = level.Full
 )
 
+// RestoreNeeds and PurgeNeeds are what a restore and a delete for good take
+// of the level someone had before the delete (business/Access/level).
+const (
+	RestoreNeeds = level.RestoreNeeds
+	PurgeNeeds   = level.PurgeNeeds
+)
+
 // KindDoc is a doc.
 const KindDoc = "doc"
 

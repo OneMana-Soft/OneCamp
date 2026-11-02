@@ -208,7 +208,9 @@ func runSelfTestScenario(ctx context.Context, llm ai.LLMProvider, systemPrompt s
 	// to discover, and report a pass for a configuration that fails in normal use.
 	resp, err := llm.Chat(cctx, msgs, opts)
 	if err != nil {
-		return false, fmt.Sprintf("model call failed: %v", err)
+		// The kind of failure in our words; the provider's own text goes to the log only (V-157).
+		helpers.LogErrorWithContext(ctx, "business/AI self-test %q: model call failed: %+v", sc.name, err)
+		return false, "model call failed: " + ai.ClientWords(ctx, err)
 	}
 	cleanText, actions := ai.ParseToolCalls(resp)
 	got := selfTestToolNames(actions)
@@ -242,7 +244,8 @@ func runSelfTestScenario(ctx context.Context, llm ai.LLMProvider, systemPrompt s
 	// output of this diagnostic, not an obstacle to work around.
 	resp2, err := llm.Chat(cctx, msgs, opts)
 	if err != nil {
-		return false, fmt.Sprintf("follow-up model call failed: %v", err)
+		helpers.LogErrorWithContext(ctx, "business/AI self-test %q: follow-up model call failed: %+v", sc.name, err)
+		return false, "follow-up model call failed: " + ai.ClientWords(ctx, err)
 	}
 	_, actions2 := ai.ParseToolCalls(resp2)
 	got2 := selfTestToolNames(actions2)

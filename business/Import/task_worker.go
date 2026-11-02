@@ -66,10 +66,12 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 	taskCh, errCh := prov.IterTasksOfProject(ctx, job, opts, projectSrcId)
 
 	committed := 0
+	made := newMadeTasks(importingUser.UserDgraphInfo.Uuid) // the work log's batch: logged with every flush
 	pendingChunks := make([]*importModels.Chunk, 0, 64)
 	var notes []importModels.ImportError // the tasks' report lines, written with their chunks
 
 	flush := func() {
+		made.log(ctx)
 		if len(pendingChunks) == 0 && len(notes) == 0 {
 			return
 		}
@@ -112,7 +114,7 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 			if st.ParentTaskID == "" {
 				if err := importOneTask(ctx, job, &st, projectUUID, projectInfo,
 					statusMap, priorityMap, defaultStatus, defaultPriority,
-					importingUser, fields, &pendingChunks, &notes, who, days); err != nil {
+					importingUser, fields, &pendingChunks, &notes, who, days, made); err != nil {
 					importModels.LogImportError(ctx, job.Id, &chunk.Id,
 						importModels.EntityTask, st.SourceID,
 						importModels.SeverityError, "TASK_IMPORT_FAILED",
@@ -150,7 +152,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	projectUUID uuid.UUID, projectInfo *dgraphStruct.DgraphProject,
 	statusMap, priorityMap, defaultStatus, defaultPriority map[string]string,
 	importingUser *userModels.UserInfo, fields *projectFields, pendingChunks *[]*importModels.Chunk,
-	notes *[]importModels.ImportError, who *people, days *time.Location,
+	notes *[]importModels.ImportError, who *people, days *time.Location, made *madeTasks,
 ) error {
 	if existing, _ := importModels.LookupIdMapping(ctx, job.Id,
 		importModels.EntityTask, st.SourceID); existing != uuid.Nil {
@@ -186,7 +188,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	start, due := taskDates(st, days)
 
 	why := restrictedWhy(job, st)
-	taskUUID, left, err := writeTask(ctx, job, importTaskInput{
+	taskUUID, left, err := writeTask(ctx, job, made, importTaskInput{
 		ProjectUUID:     projectUUID,
 		Project:         projectInfo,
 		Creator:         creator,
@@ -401,6 +403,8 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 	days := dayZone(ctx, job, opts)
 	subCh, errCh := prov.IterSubtasksOfTask(ctx, job, opts, parentSrc)
 	committed := 0
+	made := newMadeTasks(importingUser.UserDgraphInfo.Uuid) // the work log's batch: what the chunk wrote, when it ends
+	defer made.log(ctx)
 	var pending []*importModels.Chunk
 	var notes []importModels.ImportError // the sub-tasks' report lines, written at once whatever ends the chunk
 	defer func() {
@@ -457,7 +461,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 			if why == "" {
 				why = parentWhy
 			}
-			subUUID, left, err := writeTask(ctx, job, importTaskInput{
+			subUUID, left, err := writeTask(ctx, job, made, importTaskInput{
 				ProjectUUID:     projectUUID,
 				Project:         projectInfo,
 				ParentTask:      parentDgraphTask,
@@ -640,9 +644,10 @@ type importTaskInput struct {
 //   - Same Dgraph node shape (domain.CreateOrUpdateDgraphTask)
 //   - Same OpenSearch doc shape (CreateTaskWithAttachmentsInOpensearch)
 //
-// Returns the new task UUID, and who of a restricted task's people in its
-// source isn't let in.
-func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (uuid.UUID, []leftOut, error) {
+// The task joins made, its chunk's batch for the Work Change Log, once it is
+// in the graph. Returns the new task UUID, and who of a restricted task's
+// people in its source isn't let in.
+func writeTask(ctx context.Context, job *importModels.Job, made *madeTasks, in importTaskInput) (uuid.UUID, []leftOut, error) {
 	taskUUID := uuid.New()
 	zeroUnixTime := time.Time{}
 
@@ -756,6 +761,7 @@ func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (
 	}
 	// A OneCamp link in an imported description shows on what it links (DG15a).
 	refsBusiness.Saved(ctx, refsBusiness.Task, taskUUID.String(), in.Description, true)
+	made.add(in, dgraphTask)
 
 	// 3. OpenSearch (async, best-effort).
 	emptyString := ""

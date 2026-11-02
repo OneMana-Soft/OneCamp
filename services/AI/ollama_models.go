@@ -99,7 +99,7 @@ func (o *OllamaProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama: tags returned %d: %s", resp.StatusCode, string(body))
+		return nil, FromProvider(fmt.Errorf("ollama: tags returned %d: %s", resp.StatusCode, string(body)))
 	}
 
 	var tags ollamaTagsResponse
@@ -151,9 +151,9 @@ func (o *OllamaProvider) PullModel(ctx context.Context, model string) (<-chan Pu
 		resp.Body.Close()
 		msg := string(b)
 		if isUpdateRequiredError(msg) {
-			return nil, fmt.Errorf("%w: %s", ErrOllamaUpdateRequired, msg)
+			return nil, FromProvider(fmt.Errorf("%w: %s", ErrOllamaUpdateRequired, msg))
 		}
-		return nil, fmt.Errorf("ollama: pull returned %d: %s", resp.StatusCode, msg)
+		return nil, FromProvider(fmt.Errorf("ollama: pull returned %d: %s", resp.StatusCode, msg))
 	}
 
 	ch := make(chan PullProgress, 64)
@@ -233,7 +233,7 @@ func (o *OllamaProvider) DeleteModel(ctx context.Context, model string) error {
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("ollama: delete returned %d: %s", resp.StatusCode, string(b))
+		return FromProvider(fmt.Errorf("ollama: delete returned %d: %s", resp.StatusCode, string(b)))
 	}
 	return nil
 }

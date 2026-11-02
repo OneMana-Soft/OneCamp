@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	workflowModel "github.com/akashc777/OneCamp/models/postgres/Workflow"
 	"github.com/google/uuid"
 )
@@ -51,5 +52,24 @@ func TestTaskStatusVarsReachTheMessage(t *testing.T) {
 	})
 	if got != "Maya moved Set up SSO to QA (In Progress before) in Q4 launch" {
 		t.Fatal(got)
+	}
+}
+
+// linear-39 round 2: a sub-task's making reaches webhooks as task.created,
+// naming its parent (business/Task taskWebhooks.go). A "task is created" rule
+// still runs on a top-level task's making only, as it always has: a
+// template's sub-tasks would otherwise start it once each.
+func TestATaskCreatedRuleRunsOnATopLevelTaskOnly(t *testing.T) {
+	cw, err := compile(&workflowModel.Workflow{Id: uuid.New(), Name: "Triage", CreatedBy: uuid.New(), IsActive: true,
+		TriggerType: workflowModel.TriggerTaskCreated, TriggerConfig: `{}`, MatchType: "any",
+		Actions: `[{"type":"add_comment","text":"x"}]`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cw.wants(workflowModel.TriggerTaskCreated, map[string]interface{}{"task_id": "t1", "project_id": "p1"}, taskStatusBusiness.Move{}) {
+		t.Error("a top-level task's making didn't start its rule")
+	}
+	if cw.wants(workflowModel.TriggerTaskCreated, map[string]interface{}{"task_id": "t2", "project_id": "p1", "parent_task_id": "t1"}, taskStatusBusiness.Move{}) {
+		t.Error("a sub-task's making started a rule")
 	}
 }

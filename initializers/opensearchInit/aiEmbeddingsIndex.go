@@ -55,6 +55,7 @@ func aiEmbeddingsIndexBody(dimension int) string {
 				"doc_reading_users": { "type": "keyword", "index": true },
 				"doc_editing_users": { "type": "keyword", "index": true },
 				"doc_commenting_users": { "type": "keyword", "index": true },
+`+aiBoardAccessProperties+`,
 
 				"project_uuid": { "type": "keyword", "index": true },
 				"task_assignee_user_id": { "type": "keyword", "index": true },
@@ -124,6 +125,9 @@ func EnsureAIEmbeddingsIndexDimension(ctx context.Context, wantDim int) error {
 		// Missing → create at the wanted dimension.
 		return RecreateAIEmbeddingsIndex(ctx, wantDim)
 	}
+
+	// An index made before the board access fields takes them now.
+	ensureMapping(ctx, AIEmbeddingsIndexName, aiBoardAccessProperties)
 
 	curDim, derr := aiEmbeddingsIndexDimension(ctx)
 	if derr != nil {

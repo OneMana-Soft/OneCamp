@@ -2,14 +2,12 @@ package business
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
 	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
-	"github.com/google/uuid"
-	"github.com/livekit/protocol/livekit"
 
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 
@@ -225,40 +223,6 @@ func callName(roomName string, user *dgraphStruct.DgraphUser) string {
 	return "Someone"
 }
 
-func StartRecording(ctx context.Context, roomName string, userDgraphInfo *dgraphStruct.DgraphUser) (egresssInfo *livekit.EgressInfo, filePath string, err error) {
-	egresssInfo, filePath, err = livekitInit.LiveKitService.StartRecording(ctx, roomName, callName(roomName, userDgraphInfo))
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/StartRecording Failed to start recording err: %+v",
-			err,
-		)
-		return
-	}
-
-	// While it runs, the call's transcript lines are filed under it, and the
-	// call's record lists it.
-	NoteRecording(ctx, roomName, egresssInfo.EgressId)
-	var by *uuid.UUID
-	if userDgraphInfo != nil {
-		if id, perr := uuid.Parse(userDgraphInfo.Uuid); perr == nil {
-			by = &id
-		}
-	}
-	if _, ferr := callStateModel.RecordingStarted(ctx, roomName, egresssInfo.EgressId, by, time.Now()); ferr != nil {
-		helpers.LogErrorWithContext(ctx, "business/StartRecording could not file the recording under its call: %+v", ferr)
-	}
-	// They keep the call recorded: a recording ends with its room, and the
-	// call records again as them when its room is made again after its
-	// breakout rooms (business/CallControl).
-	if by != nil {
-		if kerr := callStateModel.KeepRecording(ctx, roomName, by); kerr != nil {
-			helpers.LogErrorWithContext(ctx, "business/StartRecording could not note who keeps the call in %s recorded: %+v", roomName, kerr)
-		}
-	}
-	callChanged(ctx, roomName)
-	return
-}
-
 func StopRecording(ctx context.Context, roomName string) (err error) {
 	// A person's Stop is final: nothing records the call again by itself,
 	// even when its recording already ended with its room.
@@ -268,10 +232,14 @@ func StopRecording(ctx context.Context, roomName string) (err error) {
 	_, err = livekitInit.LiveKitService.StopRecording(ctx, roomName)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/StopRecording Failed to stop recording err: %+v",
-			err,
-		)
+		// Nothing recording is the asker's view being behind (ErrNothingRecording),
+		// answered as such on every route: not an error of the server's to log.
+		if !errors.Is(err, ErrNothingRecording) {
+			helpers.LogErrorWithContext(ctx,
+				"business/StopRecording Failed to stop recording err: %+v",
+				err,
+			)
+		}
 		return
 	}
 

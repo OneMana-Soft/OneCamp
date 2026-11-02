@@ -445,6 +445,12 @@ PATCH	/calendar/events/{eventId}	session	none	member	object:event	TestSomeoneEls
 POST	/calendar/events/{eventId}/answer	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	a guest on it
 DELETE	/calendar/events/{eventId}/call	session	none	member	object:event	TestAnEventsOwnCallIsItsOrganisersToGiveAndItsGuestsToJoin	whoever may change it
 POST	/calendar/events/{eventId}/call	session	none	member	object:event	TestAnEventsOwnCallIsItsOrganisersToGiveAndItsGuestsToJoin	whoever may change it
+GET	/calendar/events/{eventId}/call/artefacts	session	none	member	object:event	TestAnEventsCallKeepsItsTranscriptOnTheEvent	whoever may read it
+DELETE	/calendar/events/{eventId}/call/artefacts/{key}	session	none	member	object:event	TestOnlyWhoMayChangeAnEventDeletesItsCallsRecordings	whoever may change it (soft: Undo restores it); a recording filed under another event is not found
+GET	/calendar/events/{eventId}/call/artefacts/{key}/recording	session	none	member	object:event	TestOnlyWhoMayReadAnEventPlaysItsCallsRecordings	whoever may read it; a recording filed under another event is not found
+POST	/calendar/events/{eventId}/call/artefacts/{key}/restore	session	none	member	object:event	TestOnlyWhoMayChangeAnEventDeletesItsCallsRecordings	whoever may change it, as its delete
+GET	/calendar/events/{eventId}/call/artefacts/{key}/transcript	session	none	member	object:event	TestOnlyWhoMayReadAnEventReadsItsCallsTranscript	whoever may read it; a transcript filed under another event is not found
+POST	/calendar/events/{eventId}/call/lobby	session	none	member	object:event	TestOnlyWhoMayChangeAnEventMakesItsInviteesKnock	whoever may change it
 POST	/calendar/events/{eventId}/guest-link	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its organiser
 POST	/calendar/events/{eventId}/nudge	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its organiser
 POST	/calendar/events/{eventId}/proposal/dismiss	session	none	member	object:event	TestOnlyWhoMayChangeAnEventDismissesAProposal	whoever may change the event (mayChange: its organiser, or a guest it lets change it); an instance's id dismisses that instance's
@@ -466,6 +472,7 @@ GET	/calls/current	session	none	member	TODO(calls)	-
 POST	/calls/door	session	none	member	TODO(calls)	-	
 POST	/calls/invite	session	none	member	TODO(calls)	-	
 POST	/calls/meetings/{meeting_id}/lobby	session	none	member	TODO(calls)	-	
+POST	/calls/meetings/{meeting_id}/recording	session	none	member	object:call	TestOnlyWhoRunsAMeetingRecordsIt	whoever runs the meeting by rule (its owner; an event's organiser), as its lobby is changed; never through a token
 GET	/calls/quality/days	session	none	member	admin	TestTheInstallsCallDaysAreAnAdminsAlone	an admin acting themselves, never through a token
 DELETE	/calls/room	session	none	member	TODO(calls)	-	
 GET	/calls/room	session	none	member	TODO(calls)	-	
@@ -497,7 +504,7 @@ POST	/ch/checkins/{checkin_id}/delete	session	none	member	TODO(ch)	-
 POST	/ch/checkins/{checkin_id}/edit	session	none	member	TODO(ch)	-	
 POST	/ch/checkins/{checkin_id}/pause	session	none	member	TODO(ch)	-	
 POST	/ch/create	session	none	member	TODO(ch)	-	
-POST	/ch/deleteRecording/{egressId}	session	none	member	TODO(ch)	-	
+POST	/ch/deleteRecording/{egressId}	session	none	member	object:channel	TestOnlyAChannelsModeratorsDeleteItsRecordingsAndBringThemBack	its moderators and workspace admins (soft: its Undo is restoreRecording; purged only by the retention setting)
 GET	/ch/discover	session	none	member	TODO(ch)	-	
 POST	/ch/getCallToken	session	none	member	TODO(ch)	-	
 GET	/ch/getFile/{channel_uuid}/{obj_uuid}	session	none	member	TODO(ch)	-	
@@ -511,6 +518,7 @@ POST	/ch/publishChannelTyping	session	none	member	TODO(ch)	-
 POST	/ch/removeMember	session	none	member	TODO(ch)	-	
 POST	/ch/removeModerator	session	none	member	TODO(ch)	-	
 POST	/ch/restore	session	none	member	TODO(ch)	-	
+POST	/ch/restoreRecording/{egressId}	session	none	member	object:channel	TestOnlyAChannelsModeratorsDeleteItsRecordingsAndBringThemBack	its moderators and workspace admins, as its delete
 POST	/ch/startCallRecording	session	none	member	TODO(ch)	-	
 POST	/ch/stopCallRecording	session	none	member	TODO(ch)	-	
 GET	/ch/suggested	session	none	member	TODO(ch)	-	
@@ -580,7 +588,7 @@ GET	/dm/chatWithAllComments/{chat_uuid}	session	none	member	TODO(dm)	-
 POST	/dm/createChat	session	none	member	TODO(dm)	-	
 POST	/dm/createComment	session	none	member	TODO(dm)	-	
 POST	/dm/deleteChat	session	none	member	TODO(dm)	-	
-POST	/dm/deleteRecording/{egressId}	session	none	member	TODO(dm)	-	
+POST	/dm/deleteRecording/{egressId}	session	none	member	object:chat	TestOnlyPeopleInAConversationDeleteItsRecordingsAndBringThemBack	its two people (soft: its Undo is restoreRecording; purged only by the retention setting)
 POST	/dm/getCallToken	session	none	member	TODO(dm)	-	
 GET	/dm/getChatOnlyText/{chat_uuid}	session	none	member	TODO(dm)	-	
 GET	/dm/getFile/{chat_uuid}/{obj_uuid}	session	none	member	TODO(dm)	-	
@@ -596,6 +604,7 @@ POST	/dm/publishChatTyping	session	none	member	TODO(dm)	-
 POST	/dm/removeComment	session	none	member	TODO(dm)	-	
 POST	/dm/removeReaction	session	none	member	TODO(dm)	-	
 POST	/dm/removeReactionOnComment	session	none	member	TODO(dm)	-	
+POST	/dm/restoreRecording/{egressId}	session	none	member	object:chat	TestOnlyPeopleInAConversationDeleteItsRecordingsAndBringThemBack	its two people, as its delete
 POST	/dm/searchChatWithUser	session	none	member	TODO(dm)	-	
 GET	/dm/seen/{user_uuid}	session	none	member	TODO(dm)	-	
 POST	/dm/seen/{user_uuid}	session	none	member	TODO(dm)	-	
@@ -732,7 +741,7 @@ GET	/graph/connected	session	none	member	TODO(graph)	-
 GET	/graph/path	session	none	member	TODO(graph)	-	
 POST	/groupChat/addParticipant	session	none	member	TODO(groupchat)	-	
 POST	/groupChat/createChat	session	none	member	TODO(groupchat)	-	
-POST	/groupChat/deleteRecording/{egressId}	session	none	member	TODO(groupchat)	-	
+POST	/groupChat/deleteRecording/{egressId}	session	none	member	object:chat	TestOnlyPeopleInAConversationDeleteItsRecordingsAndBringThemBack	its members (soft: its Undo is restoreRecording; purged only by the retention setting)
 POST	/groupChat/getCallToken	session	none	member	TODO(groupchat)	-	
 GET	/groupChat/getChatOnlyText/{chat_uuid}	session	none	member	TODO(groupchat)	-	
 GET	/groupChat/getDmParticipants/{grp_id}	session	none	member	TODO(groupchat)	-	
@@ -744,6 +753,7 @@ GET	/groupChat/latestChat/{grp_id}	session	none	member	TODO(groupchat)	-
 GET	/groupChat/newChats/{grp_id}/{time_stamp}	session	none	member	TODO(groupchat)	-	
 GET	/groupChat/newChatsIncludingCurrentChat/{grp_id}/{chat_uuid}	session	none	member	TODO(groupchat)	-	
 GET	/groupChat/oldChats/{grp_id}/{time_stamp}	session	none	member	TODO(groupchat)	-	
+POST	/groupChat/restoreRecording/{egressId}	session	none	member	object:chat	TestOnlyPeopleInAConversationDeleteItsRecordingsAndBringThemBack	its members, as its delete
 GET	/groupChat/seen/{grp_id}	session	none	member	TODO(groupchat)	-	
 POST	/groupChat/seen/{grp_id}	session	none	member	TODO(groupchat)	-	
 POST	/groupChat/startCallRecording	session	none	member	TODO(groupchat)	-	
@@ -895,6 +905,13 @@ GET	/project/memberWithAdminFlag/{project_uuid}	session	none	member	object:proje
 GET	/project/membersInfo/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"
 GET	/project/milestones	session	none	member	self	TestLinear16ASharedMilestoneCountsWhatEachReaderMayOpen	the milestones of each project the caller is in (their projects read from them; OfMany: NeedView, archived left out); progress and span over the tasks they may open (taskread), other projects only counted
 GET	/project/overview	session	none	member	self	gate	the caller's own projects; restricted tasks count for nothing (taskread)
+POST	/project/plan/labels	session	none	member	admin	TestLinear15StatusesAndLabelsAreTheWorkspaceAdminsToChange	linear-15: a workspace admin adds a project label from the settings (RequireAdmin: a member 403); a live label's name, whatever its case, 400; under the workspace's most (300, pgexec.Capped)
+POST	/project/plan/labels/{id}/delete	session	none	member	admin	TestLinear15StatusesAndLabelsAreTheWorkspaceAdminsToChange	a workspace admin (RequireAdmin); a soft delete (V-78, /restore/project_label): the label leaves every project until its restore
+POST	/project/plan/labels/{id}/edit	session	none	member	admin	TestLinear15StatusesAndLabelsAreTheWorkspaceAdminsToChange	a workspace admin renames or recolours a label (RequireAdmin)
+GET	/project/plan/registry	session	none	member	member	gate	linear-15: the five status categories, the workspace's project statuses and labels, and the colours; any signed-in member reads them (the plan's pickers)
+POST	/project/plan/statuses	session	none	member	admin	TestLinear15StatusesAndLabelsAreTheWorkspaceAdminsToChange	linear-15: a workspace admin adds a project status in one of the five categories (RequireAdmin: a member 403); a built-in's or a live one's name 400; at most 50
+POST	/project/plan/statuses/{id}/delete	session	none	member	admin	TestLinear15StatusesAndLabelsAreTheWorkspaceAdminsToChange	a workspace admin (RequireAdmin); a soft delete (V-78, /restore/project_status): its projects read as the category's built-in until its restore
+POST	/project/plan/statuses/{id}/edit	session	none	member	admin	TestLinear15StatusesAndLabelsAreTheWorkspaceAdminsToChange	a workspace admin renames, recolours or moves a status (RequireAdmin); its category stays
 GET	/project/projectListByAdminUID	session	none	member	self	gate	the projects the caller is an admin of
 POST	/project/removeAdminRole	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins and its team's admins (NeedManagePeople, memberChangeRefusal): a member is refused (403), someone outside finds nothing (404); the creator stays an admin
 POST	/project/removeAttachment	session	none	member	object:project	TestAProjectsFilesAreAddedListedAndRemovedThroughTheHandlers	the project's admins (NeedManage): a member is refused (403)
@@ -947,6 +964,11 @@ POST	/project/{project_uuid}/invoices/{invoice_id}/delete	session	none	member	ob
 POST	/project/{project_uuid}/invoices/{invoice_id}/status	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
 GET	/project/{project_uuid}/key	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
 PUT	/project/{project_uuid}/key	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/links	session	none	member	object:project	TestBasecamp16LinksAreTheProjectsAdminsToChange	basecamp-16: anyone who may see the project (NeedView): outsider 404; can_manage for its admins while it isn't archived
+POST	/project/{project_uuid}/links	session	none	member	object:project	TestBasecamp16LinksAreTheProjectsAdminsToChange	the project's admins (NeedManage): member and viewer 403, outsider 404, archived 403; the server reads the page through safefetch (budget per person)
+POST	/project/{project_uuid}/links/{link_id}/delete	session	none	member	object:project	TestBasecamp16LinksAreTheProjectsAdminsToChange	the project's admins (NeedManage), a soft delete (V-78, /restore/link); another project's link 404
+POST	/project/{project_uuid}/links/{link_id}/edit	session	none	member	object:project	TestBasecamp16LinksAreTheProjectsAdminsToChange	the project's admins (NeedManage): its title; another project's link 404
+GET	/project/{project_uuid}/links/{link_id}/{kind:icon|image}	session	none	member	object:project	TestBasecamp16ALinksPicturesAreServedOnlyByItsLink	anyone who may see the project (NeedView): a 302 to the link's stored icon or picture (src_key projectLink, served by no file route); 404 when it has none
 POST	/project/{project_uuid}/members/{user_uuid}/role	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins and its team's admins (NeedManagePeople, memberChangeRefusal): a member is refused (403), someone outside finds nothing (404)
 GET	/project/{project_uuid}/milestones	session	none	member	object:project	TestLinear16MilestonesAreTheProjectsAdminsToMake	anyone who may see the project (NeedView): outsider 404; progress and span over the tasks the caller may open, in projects they may open (others counted, never named)
 POST	/project/{project_uuid}/milestones	session	none	member	object:project	TestLinear16MilestonesAreTheProjectsAdminsToMake	the project's admins (NeedManage): member and viewer 403, outsider 404
@@ -955,6 +977,8 @@ POST	/project/{project_uuid}/milestones/{milestone_id}/delete	session	none	membe
 POST	/project/{project_uuid}/milestones/{milestone_id}/edit	session	none	member	object:project	TestLinear16MilestonesAreTheProjectsAdminsToMake	the admins of the milestone's home project (NeedManage, home): from a project it is shared with 403; one the project doesn't show 404
 POST	/project/{project_uuid}/milestones/{milestone_id}/share	session	none	member	object:project	TestLinear16ASharedMilestoneCountsWhatEachReaderMayOpen	the home project's admins who also run the other project (NeedManage on both; the other read by RequireID: 404 unseen, 403 not its admin)
 POST	/project/{project_uuid}/milestones/{milestone_id}/unshare	session	none	member	object:project	TestLinear16ASharedMilestoneCountsWhatEachReaderMayOpen	a project's admins from their own list, or the home's admins from a project they shared it with (NeedManage); never off its home
+GET	/project/{project_uuid}/plan	session	none	member	object:project	TestLinear15APlansPostersChangeItAndItsAdminsChooseTheLead	linear-15: anyone who may see the project (NeedView): outsider 404; can_edit for its admins and members, can_lead for its admins, while it isn't archived
+POST	/project/{project_uuid}/plan	session	none	member	object:project	TestLinear15APlansPostersChangeItAndItsAdminsChooseTheLead	status, priority, dates and labels: NeedPostUpdate (admins and members; viewer and commenter 403, outsider 404); the lead: NeedManage (admins; a member 403), and the lead is an admin or member (400); archived 403
 GET	/project/{project_uuid}/policies	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
 PUT	/project/{project_uuid}/policies/{key}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
 GET	/project/{project_uuid}/rates	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
@@ -1065,6 +1089,7 @@ POST	/tables/{id}/forms/{form_id}/delete	session	none	member	object:table	TestAT
 GET	/tables/{id}/forms/{form_id}/submissions	session	none	member	object:table	TestATablesFormsAreItsManagersAlone	the latest answers to one of the table's own forms, by a manager of the table
 POST	/tables/{id}/formula/preview	session	none	member	TODO(tables)	-	
 POST	/tables/{id}/presence	session	none	member	object:table	TestPresenceOnATable	whoever may open the table
+POST	/tables/{id}/purge	session	none	member	object:table	TestOnlyFullAccessDeletesATableForGoodAndOnlyFromTheTrash	a table in the trash, deleted for good: its owner, full access or an admin, as docs decide (accessBusiness.OpenDeleted, PurgeNeeds); one never theirs to see is not found, a live one a conflict
 POST	/tables/{id}/query	session	none	member	object:table	TestRowQuerySummarisesEveryRowItKeeps	whoever may open the table; its rows as they may see them
 POST	/tables/{id}/query-plan	session	none	member	TODO(tables)	-	
 POST	/tables/{id}/redo	session	none	member	TODO(tables)	-	
@@ -1074,6 +1099,7 @@ POST	/tables/{id}/rows	session	none	member	TODO(tables)	-
 POST	/tables/{id}/rows/batch	session	none	member	TODO(tables)	-	
 POST	/tables/{id}/rows/move	session	none	member	TODO(tables)	-	
 GET	/tables/{id}/rows/pick	session	none	member	TODO(tables)	-	
+POST	/tables/{id}/rows/transform	session	none	member	object:table	TestATransformOfATableTheReaderCantOpenIsNotFound	a table the reader can open (loadViewable; else not found): a find and a dry run read its rows as the reader reads them; a write is a paste's (Batch as the caller, every cell checked)
 POST	/tables/{id}/rows/{rowId}/delete	session	none	member	TODO(tables)	-	
 GET	/tables/{id}/rows/{rowId}/history	session	none	member	TODO(tables)	-	
 POST	/tables/{id}/rows/{rowId}/links	session	none	member	TODO(tables)	-	
@@ -1250,6 +1276,7 @@ POST	/v1/tasks/{id}/status	token	as-member	n/a	object:task	TestATokenActsAsAMemb
 GET	/v1/unread	token	as-member	n/a	self	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/webhook/incoming/{token}	public	none	public	link:webhook	-	the 32-byte path token IS the credential — It only posts messages: its own slash commands (and their relay to a caller's response_url) were removed in P-API part 3; a payload naming a command is answered with where they went (business/Webhook SlashCommandsMoved).
 POST	/webhooks/resend	public	none	public	signed:resend	-	Svix signature verified in the handler, refused without the secret; rate limited per address
+GET	/work/changes	session	none	member	self	TestWorkChangesShowEachReaderOnlyWhatTheyMaySee	WCL-1: what changed in the caller's work since their place in the log; a project they can't view and a task kept from them never show; a place the log no longer has is 410
 GET	/workflows	session	none	member	capability:workflow.manage	gate	
 POST	/workflows	session	none	member	capability:workflow.manage	gate	
 POST	/workflows/draft	session	none	member	capability:workflow.manage	gate	

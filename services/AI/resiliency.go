@@ -3,6 +3,9 @@ package ai
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -135,6 +138,9 @@ func (cb *CircuitBreaker) RecordResult(err error) {
 		cb.RecordSuccess()
 	case errors.Is(err, context.Canceled):
 		// The caller went away; the provider may be fine. Neither outcome.
+	case IsContextOverflow(err):
+		// Refused for its size: the provider is up, and a smaller request goes through. Counted, ten board
+		// questions on the demo would open the breaker and refuse every ask (V-157).
 	case errors.Is(err, ErrProviderRateLimited):
 		// Healthy provider, just throttling. Don't penalize the breaker.
 	case errors.Is(err, ErrWorkspaceTokenBudgetExceeded), errors.Is(err, ErrUserTokenBudgetExceeded), errors.Is(err, ErrAgentTokenBudgetExceeded), errors.Is(err, ErrChannelTokenBudgetExceeded):
@@ -238,6 +244,17 @@ func FriendlyProviderError(err error) string {
 	msg := strings.ToLower(err.Error())
 
 	switch {
+	// A refusal for size first, however it is known (by type, or by the words providers use): its numbers can hold
+	// "429" ("Requested 10429"), which the substring cases below would read as a rate limit, and an identical retry
+	// overflows identically, so "try again" is the one advice that is wrong for it (V-157). ClientError answers it 422.
+	case IsContextOverflow(err):
+		return overflowUserMessage
+	case errors.Is(err, ErrOllamaUpdateRequired):
+		return "This model needs a newer Ollama. Update Ollama on the AI server, then pull the model again."
+	case errors.Is(err, errServiceDisabled) || strings.Contains(msg, "ai service is not enabled"):
+		return "AI is turned off for this workspace. An admin can turn it on under Admin > AI Models."
+	case errors.Is(err, ErrCircuitOpen):
+		return "The AI provider isn't answering right now. Please try again in a minute."
 	case errors.Is(err, ErrUserTokenBudgetExceeded):
 		return "You've reached your daily AI usage limit. It resets tomorrow, or an admin can raise your limit under Admin > AI Models."
 	case errors.Is(err, ErrAgentTokenBudgetExceeded):
@@ -250,6 +267,9 @@ func FriendlyProviderError(err error) string {
 		return "The AI model took too long to respond. If it's a local model it may still be loading - try again in a moment, or pick a faster model in the assistant's model menu."
 	case errors.Is(err, context.Canceled) || strings.Contains(msg, "context canceled"):
 		return "The request was cancelled."
+	// The workspace's own per-person limit, before the provider's: no provider refused anything.
+	case errors.Is(err, ErrRateLimited):
+		return "You're asking the AI faster than this workspace allows. Please wait a minute and try again."
 	case errors.Is(err, ErrProviderRateLimited) || strings.Contains(msg, "rate limit") || strings.Contains(msg, "429") || strings.Contains(msg, "too many requests"):
 		return "The AI provider is rate-limiting requests right now. Please wait a few seconds and try again."
 	case strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host") || strings.Contains(msg, "dial ") || strings.Contains(msg, "connect: ") || strings.Contains(msg, "eof"):
@@ -258,13 +278,72 @@ func FriendlyProviderError(err error) string {
 		return "The AI provider rejected the request (authentication). An admin may need to update the API key under Admin > AI Models."
 	case strings.Contains(msg, "status 404") || strings.Contains(msg, "model not found") || strings.Contains(msg, "not found"):
 		return "The selected AI model isn't available. An admin may need to pull or re-select it under Admin > AI Models."
-	// Context overflow is checked LAST among the specific cases but before the
-	// default, because it is the one failure where the default advice is actively
-	// wrong: an identical retry overflows identically. Providers phrase it a dozen
-	// ways with no portable status code, so IsContextOverflow owns the matching.
-	case describeOverflow(err) != "":
-		return describeOverflow(err)
 	default:
 		return "The AI model couldn't complete that request. Please try again."
 	}
+}
+
+// ClientError is the status and the words a person is answered with when an AI call fails (V-157). A request too
+// large is a 422 the person can act on, never a 500.
+//   - A failure of the AI itself (too large, rate or budget, breaker open, AI off, too slow) gets
+//     FriendlyProviderError's words.
+//   - So does any error that holds text written outside the workspace (foreignText): a provider's reply, a remote
+//     agent's message, a failed connection. That text can name the provider's account (Groq's 413 carried the
+//     organization id), its hosts and its limits, so it belongs in the server's log only.
+//   - Any other error is one the workspace wrote for people ("that image is too large to analyze (limit 8 MB)"), and
+//     keeps its words.
+//
+// The text it withholds goes to the server's log with ctx's trace, so no caller can drop it.
+func ClientError(ctx context.Context, err error) (int, string) {
+	if err == nil {
+		return http.StatusInternalServerError, FriendlyProviderError(err)
+	}
+	foreign := foreignText(err)
+	if foreign {
+		helpers.LogWarnWithContext(ctx, "ai: a person was answered in our words; the provider's or connection's text withheld: %+v", err)
+	}
+	status := http.StatusInternalServerError
+	switch {
+	case IsContextOverflow(err):
+		status = http.StatusUnprocessableEntity
+	case errors.Is(err, ErrRateLimited), errors.Is(err, ErrProviderRateLimited), errors.Is(err, ErrUserTokenBudgetExceeded),
+		errors.Is(err, ErrAgentTokenBudgetExceeded), errors.Is(err, ErrChannelTokenBudgetExceeded), errors.Is(err, ErrWorkspaceTokenBudgetExceeded):
+		status = http.StatusTooManyRequests
+	case errors.Is(err, ErrCircuitOpen), errors.Is(err, errServiceDisabled), strings.Contains(strings.ToLower(err.Error()), "ai service is not enabled"):
+		status = http.StatusServiceUnavailable
+	case errors.Is(err, context.DeadlineExceeded):
+		status = http.StatusGatewayTimeout
+	case errors.Is(err, context.Canceled), foreign:
+	default:
+		return status, err.Error()
+	}
+	return status, FriendlyProviderError(err)
+}
+
+// foreignText reports whether err holds text written outside the workspace: a provider's or a remote agent's reply
+// (ProviderError), or a failed connection, whose text names hosts and addresses. A *url.Error from url.Parse is a
+// setting's own check and made no connection.
+func foreignText(err error) bool {
+	var pe *ProviderError
+	if errors.As(err, &pe) {
+		return true
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.Op != "parse" {
+		return true
+	}
+	var oe *net.OpError
+	var de *net.DNSError
+	if errors.As(err, &oe) || errors.As(err, &de) {
+		return true
+	}
+	// A connection's text keeps its mark when a %v on the way dropped its type.
+	msg := err.Error()
+	return strings.Contains(msg, "dial tcp") || strings.Contains(msg, "dial udp")
+}
+
+// ClientWords is ClientError's words, for a caller that keeps its own status.
+func ClientWords(ctx context.Context, err error) string {
+	_, words := ClientError(ctx, err)
+	return words
 }

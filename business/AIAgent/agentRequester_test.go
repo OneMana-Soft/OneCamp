@@ -228,7 +228,7 @@ func TestARoutineIsRecordedAsTheAskersAndRunsForThem(t *testing.T) {
 	if by, err := routineCreator(ctx, agent); err != nil || by != asker {
 		t.Errorf("a routine someone else asks for is theirs: got %s, %v", by, err)
 	}
-	if _, err := routineCreator(ai.WithRunRequester(context.Background(), "", sponsor.String()), agent); err == nil {
+	if _, err := routineCreator(ai.WithRunRequester(context.Background(), "", sponsor.String()), agent); !errors.Is(err, errUnknownAsker) {
 		t.Error("a routine for an unidentified asker must not be set up at all")
 	}
 

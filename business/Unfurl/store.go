@@ -125,7 +125,39 @@ func StoreRemote(ctx context.Context, who accessBusiness.Subject, docUUID, rawUR
 			return Stored{}, err
 		}
 	}
+	pic, err := FetchPicture(ctx, u.String(), kind)
+	if err != nil {
+		return Stored{}, err
+	}
+	obj, err := uploadToDoc(ctx, pic.Body, pic.Name, docUUID)
+	if err != nil {
+		return Stored{}, err
+	}
+	return Stored{ObjectUUID: obj.String(), FileName: pic.Name, ContentType: pic.ContentType, Size: len(pic.Body)}, nil
+}
 
+// Picture is a picture read from a link and not yet kept: its bytes, the type
+// they say, and the name it is kept under.
+type Picture struct {
+	Body        []byte
+	ContentType string
+	Name        string
+}
+
+// FetchPicture reads the picture of kind at rawURL through safefetch, bounded
+// for its kind (an icon a few KB, an image the workspace's upload limit), and
+// checks by its bytes that it is one a page may show. It keeps nothing and asks
+// no one's access or budget: its caller has. StoreRemote keeps it with a doc,
+// a project's link (business/ProjectLink) with its project. A
+// NotStoredError says why it wasn't read.
+func FetchPicture(ctx context.Context, rawURL, kind string) (Picture, error) {
+	if kind != KindImage && kind != KindIcon {
+		return Picture{}, ErrBadKind
+	}
+	u, err := Canonical(rawURL)
+	if err != nil {
+		return Picture{}, err
+	}
 	max := int64(iconMaxBytes)
 	if kind == KindImage {
 		max = imageMaxBytes
@@ -135,25 +167,20 @@ func StoreRemote(ctx context.Context, who accessBusiness.Subject, docUUID, rawUR
 	}
 	res, err := fetch(ctx, u.String(), safefetch.Options{MaxBytes: max, Timeout: imageTimeout, Accept: "image/avif,image/webp,image/png,image/*;q=0.8"})
 	if err != nil {
-		return Stored{}, &NotStoredError{Reason: reasonFor(ctx, err)}
+		return Picture{}, &NotStoredError{Reason: reasonFor(ctx, err)}
 	}
 	if res.Status != http.StatusOK {
-		return Stored{}, &NotStoredError{Reason: ReasonBadStatus}
+		return Picture{}, &NotStoredError{Reason: ReasonBadStatus}
 	}
 	if res.Truncated {
-		return Stored{}, &NotStoredError{Reason: ReasonTooLarge}
+		return Picture{}, &NotStoredError{Reason: ReasonTooLarge}
 	}
 	typ := sniffImage(res.Body)
 	ext, ok := storableTypes[typ]
 	if !ok {
-		return Stored{}, &NotStoredError{Reason: ReasonNotImage}
+		return Picture{}, &NotStoredError{Reason: ReasonNotImage}
 	}
-	name := fileNameFor(res.URL.Path, kind, ext)
-	obj, err := uploadToDoc(ctx, res.Body, name, docUUID)
-	if err != nil {
-		return Stored{}, err
-	}
-	return Stored{ObjectUUID: obj.String(), FileName: name, ContentType: typ, Size: len(res.Body)}, nil
+	return Picture{Body: res.Body, ContentType: typ, Name: fileNameFor(res.URL.Path, kind, ext)}, nil
 }
 
 // sniffImage is the picture's type as its bytes say. Pure.

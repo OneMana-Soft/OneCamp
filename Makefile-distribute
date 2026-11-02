@@ -629,6 +629,23 @@ endif
 	  echo "      make restart-api"; \
 	fi
 
+# restore-admin gives the member who holds EMAIL the workspace admin role back,
+# for a workspace whose every admin role is gone. First-admin setup is one-time:
+# the first admin role a workspace is given shuts it for good (system_configs
+# first_admin_setup), so the setup page never reopens, and this is the way back.
+# It revives a role taken away, or gives one, to a member who has signed in
+# (never a bot or a guest), and refuses an address no member holds. The address
+# reaches psql as a variable, which psql quotes. The role reaches the member's
+# next request within an hour, when the API's cached copy of the account expires.
+restore-admin:
+ifndef EMAIL
+	$(error EMAIL is required, e.g. make restore-admin EMAIL=you@example.com)
+endif
+	@got=$$(printf '%s\n' "INSERT INTO admin_users (email_id) SELECT email_id FROM users WHERE LOWER(email_id) = LOWER(:'email') AND NOT is_bot AND NOT is_external ORDER BY created_at LIMIT 1 ON CONFLICT (email_id) DO UPDATE SET deleted_at = NULL, deleted_by = NULL RETURNING email_id;" \
+	  | $(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d "$(DB_NAME)" -v ON_ERROR_STOP=1 -qtA -v email="$(EMAIL)") || exit 1; \
+	if [ -z "$$got" ]; then echo "ERROR: no member holds $(EMAIL). Use the address of someone who has signed in."; exit 1; fi; \
+	echo "  $$got is a workspace admin. It shows within an hour, when the API's cached copy of the account expires."
+
 # Recreates the API container and nothing else, which is what it takes for a
 # changed .env to be read. Not a rebuild: the image is unchanged, and it is back
 # in a few seconds.

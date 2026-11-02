@@ -19,11 +19,13 @@ import (
 
 	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
 	_ "github.com/akashc777/OneCamp/business/CallRoom" // hands the calendar its event calls
+	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
 	guestController "github.com/akashc777/OneCamp/controllers/Guest"
 	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
 	"github.com/akashc777/OneCamp/tests/integration"
+	"github.com/google/uuid"
 )
 
 func TestAnEventsOwnCallOverHTTP(t *testing.T) {
@@ -95,25 +97,33 @@ func TestAnEventsOwnCallOverHTTP(t *testing.T) {
 	}
 
 	// Its address answers as a room named for the event; its meeting is Sam's,
-	// an event's, whose guests wait unless they are its invitees (meet-02).
+	// an event's, whose guests wait unless they are its invitees (meet-02),
+	// and knows its event, where what the call makes lands (meet-02 (2)).
 	if code, m := page(c.Slug); code != http.StatusOK || m["state"] != "live" || m["title"] != "Design review" {
 		t.Fatalf("its address: %d %v", code, m)
 	}
 	var meetings []callStateModel.Meeting
-	rows, err := env.PG.QueryContext(ctx, `SELECT id, kind, owner, lobby FROM call_meetings WHERE kind = 'event' AND archived_at IS NULL`)
+	rows, err := env.PG.QueryContext(ctx, `SELECT id, kind, owner, lobby, event_id FROM call_meetings WHERE kind = 'event' AND archived_at IS NULL`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for rows.Next() {
 		var m callStateModel.Meeting
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Owner, &m.Lobby); err != nil {
+		var event uuid.NullUUID
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Owner, &m.Lobby, &event); err != nil {
 			t.Fatal(err)
 		}
+		m.Event = event.UUID
 		meetings = append(meetings, m)
 	}
 	_ = rows.Close()
-	if len(meetings) != 1 || meetings[0].Owner.String() != sam.UserDgraphInfo.Uuid || meetings[0].Lobby != callStateModel.LobbyInvitees {
-		t.Fatalf("its meeting: %+v", meetings)
+	if len(meetings) != 1 || meetings[0].Owner.String() != sam.UserDgraphInfo.Uuid || meetings[0].Lobby != callStateModel.LobbyInvitees ||
+		meetings[0].Event.String() != e.ID {
+		t.Fatalf("its meeting: %+v, want event %s's", meetings, e.ID)
+	}
+	if home, err := callStateBusiness.HomeOf(ctx, "meet-"+meetings[0].ID); err != nil || home.Event.String() != e.ID ||
+		home.Ref.Kind != callStateBusiness.KindMeeting || home.Ref.ID != meetings[0].ID {
+		t.Fatalf("its call's home: %+v, %v; want the event %s", home, err, e.ID)
 	}
 
 	// Maya can't take it off; Sam can, and its address stops answering.
@@ -145,5 +155,12 @@ func TestAnEventsOwnCallOverHTTP(t *testing.T) {
 	}
 	if code, m := page(next.Slug); code == http.StatusOK && m["state"] == "live" {
 		t.Fatalf("the deleted event's call still answers: %v", m)
+	}
+
+	// Both of its calls, the one taken off and the one that ended with it,
+	// still know the event their recordings and notes belong to.
+	var calls int
+	if err := env.PG.QueryRowContext(ctx, `SELECT count(*) FROM call_meetings WHERE event_id = $1`, e.ID).Scan(&calls); err != nil || calls != 2 {
+		t.Fatalf("the event's calls: %d, %v; want 2", calls, err)
 	}
 }

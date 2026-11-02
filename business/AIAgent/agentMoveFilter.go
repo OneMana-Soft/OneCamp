@@ -46,11 +46,16 @@ func normalizeAgentMoveFilter(ctx context.Context, in *AgentInput) error {
 }
 
 // eventWanted reports whether an event agent wants this occurrence of its
-// event. Only a status change can be narrowed today; every other event is
-// wanted as before.
+// event. Only a status change can be narrowed today. A sub-task's making (its
+// task.created names a parent) starts no agent, as it never has: a template's
+// sub-tasks would start one each. Every other event is wanted as before.
 func eventWanted(a *model.AiAgent, eventType string, data map[string]interface{}) bool {
-	if eventType != eventTaskStatusChanged {
-		return true
+	switch eventType {
+	case eventTaskStatusChanged:
+		return parseTriggerConfig(a).MoveFilter.Matches(taskStatusBusiness.MoveFromEvent(data))
+	case "task.created":
+		p, _ := data["parent_task_id"].(string)
+		return p == ""
 	}
-	return parseTriggerConfig(a).MoveFilter.Matches(taskStatusBusiness.MoveFromEvent(data))
+	return true
 }

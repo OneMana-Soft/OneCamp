@@ -188,11 +188,8 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := svc.Resiliency.PreCheck(ctx, userInfo.UserDgraphInfo.Uuid); err != nil {
-		code := http.StatusTooManyRequests
-		if err == ai.ErrCircuitOpen {
-			code = http.StatusServiceUnavailable
-		}
-		helpers.WriteJSON(w, code, helpers.Envolope{"msg": err.Error()})
+		code, words := ai.ClientError(ctx, err)
+		helpers.WriteJSON(w, code, helpers.Envolope{"msg": words})
 		return
 	}
 
@@ -236,7 +233,7 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 	stream, err := svc.StreamChat(ctx, messages, ai.ChatOptions{Temperature: 0.3, MaxTokens: 600})
 	if err != nil {
 		svc.Resiliency.CB.RecordResult(err)
-		writeSSEError(w, flusher, err.Error())
+		writeSSEError(w, flusher, ai.ClientWords(ctx, err))
 		broadcastInCallAnswer(ctx, req, asker, "", "The answer couldn't be generated.")
 		return
 	}
@@ -245,7 +242,7 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 	for chunk := range stream {
 		if chunk.Error != nil {
 			svc.Resiliency.CB.RecordResult(chunk.Error)
-			writeSSEError(w, flusher, chunk.Error.Error())
+			writeSSEError(w, flusher, ai.ClientWords(ctx, chunk.Error))
 			broadcastInCallAnswer(ctx, req, asker, "", "The answer couldn't be generated.")
 			return
 		}

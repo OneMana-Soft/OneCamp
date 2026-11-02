@@ -130,7 +130,7 @@ func DeleteMyBookingPage(w http.ResponseWriter, r *http.Request) {
 // GET /public/book/{slug}?from=
 func GetPublicBookingPage(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
-	page, err := business.GetPublicPage(r.Context(), chi.URLParam(r, "slug"), timeParam(r, "from", now), now)
+	page, err := business.GetPublicPage(r.Context(), helpers.PathText(r, "slug"), timeParam(r, "from", now), now)
 	if err != nil {
 		writeAvailabilityError(w, r, "GetPublicBookingPage", err)
 		return
@@ -156,7 +156,7 @@ func BookPublicSlot(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't book that time."})
 		return
 	}
-	booked, err := business.Book(r.Context(), chi.URLParam(r, "slug"), in.BookInput, time.Now())
+	booked, err := business.Book(r.Context(), helpers.PathText(r, "slug"), in.BookInput, time.Now())
 	if err != nil {
 		writeAvailabilityError(w, r, "BookPublicSlot", err)
 		return

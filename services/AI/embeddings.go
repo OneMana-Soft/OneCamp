@@ -149,14 +149,7 @@ func storeEmbeddingDirect(ctx context.Context, doc EmbeddingDoc) error {
 	//
 	// Same rule as every other OpenSearch write path, deliberately reusing the one
 	// implementation rather than repeating it here.
-	text := openSearchStruct.SanitizeIndexedText(doc.ContentText)
-
-	// Truncate very long texts (embedding models have token limits)
-	// Use rune-based slicing to avoid splitting UTF-8 characters
-	textRunes := []rune(text)
-	if len(textRunes) > 8000 {
-		text = string(textRunes[:8000])
-	}
+	text := entryText(doc.ContentText)
 
 	// Generate embedding through the metered chokepoint. Indexing is metered but
 	// never refused on budget: skipping it would leave this content permanently
@@ -211,6 +204,17 @@ func storeEmbeddingDirect(ctx context.Context, doc EmbeddingDoc) error {
 	}
 
 	return nil
+}
+
+// entryText is the text an entry is embedded from and keeps: without embedded
+// media (the rule every OpenSearch write follows), cut to the first 8000
+// runes, as embedding models take only so many tokens.
+func entryText(raw string) string {
+	text := openSearchStruct.SanitizeIndexedText(raw)
+	if r := []rune(text); len(r) > 8000 {
+		text = string(r[:8000])
+	}
+	return text
 }
 
 // entryJSON is an entry as it is written to the index. An entry that exists is
@@ -445,15 +449,9 @@ func buildPermissionFilter(userUUID string, channelUUIDs []string, projectUUIDs 
 		// private channel/DM comments. Requiring doc_uuid to exist scopes this
 		// grant to doc comments only (post/chat/task comments never set it).
 		`{"bool": {"must": [{"exists": {"field": "doc_uuid"}}, {"term": {"doc_private": false}}]}}`,
-		// Board comments inherit board permissions: owner, an explicit
-		// read/edit/comment role, or a public board. board_public is set only
-		// on public-board comments, so it never matches a non-board comment.
-		fmt.Sprintf(`{"term": {"board_created_by_user_id": %s}}`, string(userUUIDJSON)),
-		fmt.Sprintf(`{"term": {"board_reading_users": %s}}`, string(userUUIDJSON)),
-		fmt.Sprintf(`{"term": {"board_editing_users": %s}}`, string(userUUIDJSON)),
-		fmt.Sprintf(`{"term": {"board_commenting_users": %s}}`, string(userUUIDJSON)),
-		`{"term": {"board_public": true}}`,
 	}
+	// Board comments inherit the board's access (boardGrant).
+	commentShouldClauses = append(commentShouldClauses, boardGrant(userUUID)...)
 	if len(channelUUIDs) > 0 {
 		commentShouldClauses = append([]string{fmt.Sprintf(`{"terms": {"channel_uuid": %s}}`, string(channelJSON))}, commentShouldClauses...)
 	}
@@ -516,6 +514,7 @@ func buildPermissionFilter(userUUID string, channelUUIDs []string, projectUUIDs 
 	if commentClause != "" {
 		shouldClauses = append(shouldClauses, commentClause)
 	}
+	shouldClauses = append(shouldClauses, boardClause(userUUID))
 	if memoryClause != "" {
 		shouldClauses = append(shouldClauses, memoryClause)
 	}
@@ -963,27 +962,19 @@ func EmbedChatCommentContent(commentText string, commentUUID string, authorUUID 
 	})
 }
 
-// EmbedBoardCommentContent embeds a comment on a board, inheriting board
-// permissions (owner, read/edit/comment roles, or a public board). boardPrivate
-// is translated into BoardPublic so the permission filter can grant public
-// boards without a blanket term that would leak other comment types.
-func EmbedBoardCommentContent(commentText string, commentUUID string, authorUUID string, authorName string,
-	boardUUID string, boardPrivate bool, boardCreatedByUserID string,
-	boardReadingUsers []string, boardEditingUsers []string, boardCommentingUsers []string) {
-	StoreEmbeddingAsync(EmbeddingDoc{
-		ContentText:          commentText,
-		ContentType:          "comment",
-		ContentUUID:          commentUUID,
-		BoardUUID:            boardUUID,
-		BoardPublic:          !boardPrivate,
-		BoardCreatedByUserID: boardCreatedByUserID,
-		BoardReadingUsers:    boardReadingUsers,
-		BoardEditingUsers:    boardEditingUsers,
-		BoardCommentingUsers: boardCommentingUsers,
-		AuthorUUID:           authorUUID,
-		AuthorName:           authorName,
-		CreatedDate:          time.Now().Unix(),
-	})
+// EmbedBoardCommentContent embeds a comment on a board with the board's
+// access (BoardAccess), so the permission filter grants it as the board does.
+func EmbedBoardCommentContent(commentText, commentUUID, authorUUID, authorName, boardUUID string, access BoardAccess) {
+	doc := EmbeddingDoc{
+		ContentText: commentText,
+		ContentType: "comment",
+		ContentUUID: commentUUID,
+		AuthorUUID:  authorUUID,
+		AuthorName:  authorName,
+		CreatedDate: time.Now().Unix(),
+	}
+	access.on(&doc, boardUUID)
+	StoreEmbeddingAsync(doc)
 }
 
 // EmbedMemoryContent embeds a workspace-memory item so semantic search

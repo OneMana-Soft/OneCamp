@@ -80,13 +80,9 @@ func CatchUp(w http.ResponseWriter, r *http.Request) {
 	resp, err := business.GetCatchUp(ctx, &userInfo, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/CatchUp Failed err: %+v", err)
-		statusCode := http.StatusInternalServerError
-		if err == ai.ErrRateLimited {
-			statusCode = http.StatusTooManyRequests
-		} else if err == ai.ErrCircuitOpen {
-			statusCode = http.StatusServiceUnavailable
-		}
-		helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": "Failed to build catch-up", "err": err.Error()})
+		// Our words: a provider's text, logged above, names its account and hosts (V-157).
+		statusCode, words := ai.ClientError(ctx, err)
+		helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": "Failed to build catch-up", "err": words})
 		return
 	}
 
@@ -144,16 +140,12 @@ func SummarizeChannel(w http.ResponseWriter, r *http.Request) {
 			"controllers/SummarizeChannel Failed to summarize channel err: %+v",
 			err)
 
-		statusCode := http.StatusInternalServerError
-		if err == ai.ErrRateLimited {
-			statusCode = http.StatusTooManyRequests
-		} else if err == ai.ErrCircuitOpen {
-			statusCode = http.StatusServiceUnavailable
-		}
+		// Our words: a provider's text, logged above, names its account and hosts (V-157).
+		statusCode, words := ai.ClientError(ctx, err)
 
 		helpers.WriteJSON(w, statusCode, helpers.Envolope{
 			"msg": "Failed to summarize channel",
-			"err": err.Error(),
+			"err": words,
 		})
 		return
 	}
@@ -203,7 +195,8 @@ func SummarizeDM(w http.ResponseWriter, r *http.Request) {
 	summary, err := business.SummarizeDM(ctx, &userInfo, req.ToUserUUID, req.MessageCount, localization)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/SummarizeDM Failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to summarize DM", "err": err.Error()})
+		statusCode, words := ai.ClientError(ctx, err)
+		helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": "Failed to summarize DM", "err": words})
 		return
 	}
 
@@ -252,7 +245,8 @@ func SummarizeGroup(w http.ResponseWriter, r *http.Request) {
 	summary, err := business.SummarizeGroupChat(ctx, &userInfo, req.ChatGrpID, req.MessageCount, localization)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/SummarizeGroup Failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to summarize group chat", "err": err.Error()})
+		statusCode, words := ai.ClientError(ctx, err)
+		helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": "Failed to summarize group chat", "err": words})
 		return
 	}
 
@@ -306,16 +300,12 @@ func AskAI(w http.ResponseWriter, r *http.Request) {
 			"controllers/AskAI Failed to get AI answer err: %+v",
 			err)
 
-		statusCode := http.StatusInternalServerError
-		if err == ai.ErrRateLimited {
-			statusCode = http.StatusTooManyRequests
-		} else if err == ai.ErrCircuitOpen {
-			statusCode = http.StatusServiceUnavailable
-		}
-
+		// Our words only: the provider's text, logged above, names its account and limits (V-157). A request
+		// too large for the model is a 422 the person can act on, never a 500.
+		statusCode, words := ai.ClientError(ctx, err)
 		helpers.WriteJSON(w, statusCode, helpers.Envolope{
-			"msg": "Failed to get AI answer",
-			"err": err.Error(),
+			"msg": words,
+			"err": words,
 		})
 		return
 	}
@@ -372,16 +362,12 @@ func ExecuteAction(w http.ResponseWriter, r *http.Request) {
 			"controllers/ExecuteAction Failed to execute action err: %+v",
 			err)
 
-		statusCode := http.StatusInternalServerError
-		if err == ai.ErrRateLimited {
-			statusCode = http.StatusTooManyRequests
-		} else if err == ai.ErrCircuitOpen {
-			statusCode = http.StatusServiceUnavailable
-		}
+		// Our words: a provider's text, logged above, names its account and hosts (V-157).
+		statusCode, words := ai.ClientError(ctx, err)
 
 		helpers.WriteJSON(w, statusCode, helpers.Envolope{
 			"msg": "Failed to execute action",
-			"err": err.Error(),
+			"err": words,
 		})
 		return
 	}
@@ -412,7 +398,8 @@ func AnalyzeImage(w http.ResponseWriter, r *http.Request) {
 
 	description, err := business.AnalyzeAttachmentImage(ctx, &userInfo, req.SrcKey, req.SrcRef, req.ObjUuid, req.Prompt)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.LogErrorWithContext(ctx, "controllers/AnalyzeAttachmentImage failed: %+v", err)
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
@@ -443,7 +430,8 @@ func AnalyzeDocument(w http.ResponseWriter, r *http.Request) {
 
 	answer, err := business.AnalyzeAttachmentDocument(ctx, &userInfo, req.SrcKey, req.SrcRef, req.ObjUuid, req.Prompt)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.LogErrorWithContext(ctx, "controllers/AnalyzeAttachmentDocument failed: %+v", err)
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
@@ -472,7 +460,8 @@ func Translate(w http.ResponseWriter, r *http.Request) {
 
 	translated, err := business.TranslateText(ctx, &userInfo, req.Text, req.TargetLanguage)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.LogErrorWithContext(ctx, "controllers/TranslateText failed: %+v", err)
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
@@ -513,7 +502,7 @@ func Transcribe(w http.ResponseWriter, r *http.Request) {
 	// call). Best-effort: skip when the AI service isn't initialized.
 	if svc := ai.GetService(); svc != nil && svc.Resiliency != nil {
 		if err := svc.Resiliency.CheckRateLimit(ctx, userInfo.UserDgraphInfo.Uuid); err != nil {
-			helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": err.Error()})
+			helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 			return
 		}
 	}
@@ -553,7 +542,8 @@ func Transcribe(w http.ResponseWriter, r *http.Request) {
 
 	text, terr := transcriptionBusiness.TranscribeAudio(ctx, audio, filename, contentType)
 	if terr != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": terr.Error()})
+		helpers.LogErrorWithContext(ctx, "controllers/TranscribeAudio failed: %+v", terr)
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, terr)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
@@ -620,11 +610,11 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 	// have mattered to this question and left out when it would not.
 	ai.NoteQuestion(ctx, req.Question)
 	if err := cb.Allow(); err != nil {
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 	if err := svc.Resiliency.CheckRateLimit(ctx, userInfo.UserDgraphInfo.Uuid); err != nil {
-		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
@@ -662,9 +652,6 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 			contextText = ""
 			contextSources = nil
 		}
-		// Hard token ceiling on the assembled context so the total prompt
-		// stays within the model's window (mirrors the non-streaming AskAI).
-		contextText = limits.TruncateForPrompt(ctx, contextText, limits.ContextBudget())
 	}
 
 	// The conversation this exchange belongs to.
@@ -696,13 +683,12 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 		if len(history) == 0 {
 			history = durableHistory(ctx, sessionID, userInfo.UserPostgresInfo.Id)
 		}
-		// Bound history by a token budget so it can't push the prompt past
-		// the context window (mirrors the non-streaming AskAI path).
-		history = limits.TrimHistoryForPrompt(ctx, history, limits.HistoryBudget())
 	}
 
 	// Select appropriate strategy: factual RAG vs. creative conversation
-	var systemPrompt string
+	// The instructions, with a tool section of at most toolTokens: PromptParts.Fit sizes it, the history and the
+	// context to what the model takes, and ChatStreamFitted refits once to a provider's stated limit (V-157).
+	var system func(toolTokens int) string
 	opts := ai.ChatOptions{
 		MaxTokens:  1024,
 		Seed:       int(time.Now().UnixNano() % 1000000), // Inject variety for identical prompts
@@ -715,7 +701,8 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 
 	if isConversational {
 		// Creative/Casual: higher temperature for variety
-		systemPrompt = business.AskAIConversationalPromptWithConnectors(false, connected)
+		conversational := business.AskAIConversationalPromptWithConnectors(false, connected)
+		system = func(int) string { return conversational }
 		opts.Temperature = 0.8
 		opts.TopP = 0.9
 	} else {
@@ -724,25 +711,13 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 		// tokens — UNLESS a write verb co-occurs ("summarize X and DM Y"), in
 		// which case the agent loop needs the tools to perform the write step.
 		includeTools := ai.ShouldIncludeTools(req.Question)
-		systemPrompt = business.AskAISystemPromptWithConnectorsForQuery(includeTools, connected, req.Question)
+		system = func(toolTokens int) string {
+			return business.AskAISystemPromptWithConnectorsForQuery(includeTools, connected, req.Question, limits, toolTokens)
+		}
 		opts.Temperature = 0.3
 	}
 
-	messages := []ai.ChatMessage{
-		{Role: "system", Content: systemPrompt},
-	}
-
-	// Inject conversation history
-	if len(history) > 0 {
-		messages = append(messages, history...)
-	}
-
-	// Build user message with context
-	userContent := req.Question
-	if contextText != "" {
-		userContent = fmt.Sprintf("Context from workspace:\n%s\n\nQuestion: %s", contextText, req.Question)
-	}
-	messages = append(messages, ai.ChatMessage{Role: "user", Content: userContent})
+	parts := ai.PromptParts{System: system, History: history, Context: contextText, Question: req.Question}
 
 	// Sent first, before any content. The client adopts it so the NEXT question
 	// continues this conversation, and so a reader can find it in the history
@@ -767,10 +742,11 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	stream, err := ai.ChatStreamWithRescue(lt.Gen, llm, messages, opts)
+	// messages are the ones sent, refitted or not: the read loop below goes on from them.
+	stream, messages, err := ai.ChatStreamFitted(lt.Gen, llm, opts, parts)
 	if err != nil {
 		cb.RecordResult(err)
-		send(sseFrame(map[string]string{"error": ai.FriendlyProviderError(err)}))
+		send(sseFrame(map[string]string{"error": ai.ClientWords(ctx, err)}))
 		return
 	}
 
@@ -790,7 +766,7 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			cb.RecordResult(chunk.Error)
-			send(sseFrame(map[string]string{"error": ai.FriendlyProviderError(chunk.Error)}))
+			send(sseFrame(map[string]string{"error": ai.ClientWords(ctx, chunk.Error)}))
 			return
 		}
 		if chunk.Content != "" {
@@ -1155,7 +1131,8 @@ func ListMyModels(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := business.ListUsableModelsForUser(ctx, userInfo.UserDgraphInfo.Uuid)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.LogErrorWithContext(ctx, "controllers/ListUsableModels failed: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -1184,7 +1161,7 @@ func SetMyModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := business.SetUserModelPreference(ctx, userInfo.UserDgraphInfo.Uuid, modelID); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "model preference updated"})
@@ -1198,7 +1175,8 @@ func GetMyAIInstructions(w http.ResponseWriter, r *http.Request) {
 
 	instructions, err := business.GetUserCustomInstructions(ctx, userInfo.UserDgraphInfo.Uuid)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.LogErrorWithContext(ctx, "controllers/GetCustomInstructions failed: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": helpers.Envolope{"instructions": instructions}})
@@ -1219,7 +1197,7 @@ func SetMyAIInstructions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetUserCustomInstructions(ctx, userInfo.UserDgraphInfo.Uuid, req.Instructions); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "AI instructions updated"})
@@ -1251,7 +1229,7 @@ func AnalyzeCodeIssue(w http.ResponseWriter, r *http.Request) {
 	// Before the AI is asked, or the asker's rate spent: a repository they may
 	// not read is refused whatever else holds.
 	if err := business.CodeRepoAllowed(ctx, userInfo.UserDgraphInfo.Uuid, req.Owner, req.Repo); err != nil {
-		helpers.WriteJSON(w, codeReadStatus(err), helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, codeReadStatus(err), helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
@@ -1262,14 +1240,15 @@ func AnalyzeCodeIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	// Rate-limit per user (the analysis itself gates on the provider breaker).
 	if err := svc.Resiliency.CheckRateLimit(ctx, userInfo.UserDgraphInfo.Uuid); err != nil {
-		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
 	analysis, err := codeagent.AnalyzeIssue(ctx, req.Owner, req.Repo, req.Title, req.Body, req.Ref, req.Deep)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/AnalyzeCodeIssue failed: %v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		statusCode, words := ai.ClientError(ctx, err)
+		helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": words})
 		return
 	}
 
@@ -1314,7 +1293,7 @@ func DraftReleaseNotes(w http.ResponseWriter, r *http.Request) {
 	res, err := business.DraftReleaseNotes(ctx, userInfo.UserDgraphInfo.Uuid, req.Owner, req.Repo, req.Days)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/DraftReleaseNotes failed: %v", err)
-		helpers.WriteJSON(w, codeReadStatus(err), helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, codeReadStatus(err), helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
@@ -1347,7 +1326,8 @@ func DraftSocialPosts(w http.ResponseWriter, r *http.Request) {
 	posts, err := business.DraftSocialPosts(ctx, userInfo.UserDgraphInfo.Uuid, req.Topic, req.Platforms)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/DraftSocialPosts failed: %v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		statusCode, words := ai.ClientError(ctx, err)
+		helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": words})
 		return
 	}
 

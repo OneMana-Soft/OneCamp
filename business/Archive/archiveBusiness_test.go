@@ -67,6 +67,11 @@ func TestEntityRegistryCoversAllValidTypes(t *testing.T) {
 		if ops.ArchiveFn == nil {
 			t.Errorf("entityRegistry[%q].ArchiveFn is nil", et)
 		}
+		// A restore reads each id as its kind's and looks it up before it
+		// changes anything (V-141).
+		if ops.ParseID == nil || ops.Lookup == nil {
+			t.Errorf("entityRegistry[%q] has no ParseID or Lookup: its restore can't check the ids it is given", et)
+		}
 		// Dgraph sync functions are required for postgres-backed entities
 		// (docs live in the graph: their ArchiveFn writes it).
 		if archiveModels.Archivable(et) {

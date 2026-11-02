@@ -121,6 +121,17 @@ func notifyEventListeners(ctx context.Context, eventType string, data map[string
 	}
 }
 
+// withTheEventID is data, copied, with id as its event_id: a durable
+// source's event says the same id on every run (DispatchDurable).
+func withTheEventID(data map[string]interface{}, id uuid.UUID) map[string]interface{} {
+	out := make(map[string]interface{}, len(data)+1)
+	for k, v := range data {
+		out[k] = v
+	}
+	out["event_id"] = id.String()
+	return out
+}
+
 // withEventID is the event with an "event_id", a copy when it had none (the
 // caller's map is left as it was: outgoing webhooks read it too).
 func withEventID(data map[string]interface{}) map[string]interface{} {

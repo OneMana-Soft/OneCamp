@@ -29,8 +29,8 @@ func TestTheRestoreListLeavesOutLiveRows(t *testing.T) {
 	docsCouldRead = func(context.Context, []string, string) (map[string]bool, error) { return map[string]bool{}, nil }
 	recentlyArchivedRecordings = func(context.Context, string, int, int) ([]*dgraphStruct.DgraphRecording, int64, error) {
 		return []*dgraphStruct.DgraphRecording{
-			{EgressId: "EG_gone_123", DeletedAt: &gone},
-			{EgressId: "EG_live_456", DeletedAt: &live},
+			{EgressId: "EG_gone1234abcd", DeletedAt: &gone},
+			{EgressId: "EG_live4567abcd", DeletedAt: &live},
 		}, 2, nil
 	}
 	docs, _, err := getRecentlyArchivedDocs(context.Background(), 10, 0, "Document")
@@ -44,7 +44,7 @@ func TestTheRestoreListLeavesOutLiveRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recs) != 1 || recs[0].Id != "EG_gone_123" {
+	if len(recs) != 1 || recs[0].Id != "EG_gone1234abcd" {
 		t.Errorf("recordings listed: %+v; want only the deleted one", recs)
 	}
 }

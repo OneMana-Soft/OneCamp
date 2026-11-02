@@ -195,7 +195,7 @@ func TestDocNoticesReachOnlyItsReaders(t *testing.T) {
 			t.Fatalf("bea deletes the doc: %v", err)
 		}
 		asSam := context.WithValue(ctx, helpers.UserInfoContextKey, people["sam"])
-		if n, err := archiveBusiness.RestoreItems(asSam, "docs", []uuid.UUID{uuid.MustParse(doc)}); err != nil || n != 1 {
+		if n, err := archiveBusiness.RestoreItems(asSam, "docs", []string{doc}); err != nil || n != 1 {
 			t.Fatalf("sam restores it: %d, %v", n, err)
 		}
 		if got := broker.noticedFrom("doc_restored:"+doc+":", people); !slices.Equal(got, []string{"bea"}) {

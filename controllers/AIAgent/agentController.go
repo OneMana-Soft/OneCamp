@@ -17,6 +17,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	aiModels "github.com/akashc777/OneCamp/models/postgres/AI"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -217,7 +218,7 @@ func CreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	a, err := business.CreateAgent(ctx, in, userInfo.UserPostgresInfo.Id)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 	auditBusiness.Record(r, "agent.create", auditBusiness.CategorySettings,
@@ -455,7 +456,7 @@ func DraftAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	draft, err := business.DraftAgent(ctx, actorFrom(r), body.Prompt)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": draft})

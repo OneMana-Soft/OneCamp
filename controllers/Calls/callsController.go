@@ -209,6 +209,7 @@ var actSummaries = map[string]string{
 	callControlBusiness.ActBoardDraw:          "Changed who draws on the board on a call's stage",
 	callControlBusiness.ActBoardGuests:        "Changed whether a call's guests draw on the board on its stage",
 	callControlBusiness.ActUndoGuests:         "Took back a call's guests' drawing on the board on its stage",
+	callControlBusiness.ActBoardSlide:         "Changed which slide of the board on a call's stage everyone is shown",
 	callControlBusiness.ActBreakoutsSet:       "Set up a call's breakout rooms",
 	callControlBusiness.ActBreakoutsAssign:    "Moved someone between a call's breakout rooms",
 	callControlBusiness.ActBreakoutsSpread:    "Spread everyone in a call across its breakout rooms",
@@ -275,6 +276,9 @@ func actMeta(sessionID string, a callControlBusiness.Action, result callControlB
 		meta["draw"] = a.Draw
 	}
 	switch a.Action {
+	case callControlBusiness.ActBoardSlide:
+		// The frame's element id; "" is the whole board again.
+		meta["slide"] = a.Slide
 	case callControlBusiness.ActMuteOnEntry, callControlBusiness.ActHold, callControlBusiness.ActAllow, callControlBusiness.ActBoardGuests:
 		meta["on"] = a.On
 	case callControlBusiness.ActBreakoutsSet:

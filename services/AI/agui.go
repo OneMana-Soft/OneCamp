@@ -446,6 +446,7 @@ func (p *AGUIProvider) run(ctx context.Context, messages []ChatMessage, tools []
 		if resp.StatusCode == http.StatusTooManyRequests {
 			err = fmt.Errorf("%w: %v", ErrProviderRateLimited, err)
 		}
+		err = FromProvider(err)
 		p.breaker.RecordResult(err)
 		return "", nil, err
 	}
@@ -607,7 +608,7 @@ func readAGUIStream(r io.Reader, state json.RawMessage, onText func(string)) (ag
 			if ev.Code != "" {
 				msg += " (" + ev.Code + ")"
 			}
-			return fmt.Errorf("agui: %s", msg)
+			return FromProvider(fmt.Errorf("agui: %s", msg))
 		case "RUN_FINISHED":
 			finished = true
 			finishedResult = ev.Result

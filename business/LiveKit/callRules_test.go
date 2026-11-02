@@ -18,18 +18,29 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// A call keeps a transcript only where it has a conversation to keep it in.
-// An instant meeting has none, so its lines went to a node linked to nothing
-// (CALL-BUG-3); it is transcribed for captions only.
-func TestOnlyACallWithAConversationKeepsATranscript(t *testing.T) {
+// A call keeps a transcript only where it has a home to keep it in: a
+// conversation, or the calendar event whose call it is (meet-02; Call State
+// says which event, OnCallEvent). An instant meeting has neither, so its lines
+// went to a node linked to nothing (CALL-BUG-3); it is transcribed for
+// captions only.
+func TestOnlyACallWithAHomeKeepsATranscript(t *testing.T) {
+	eventsCall := "meet-6f1c0e2a-1111-4222-8333-944455556666"
+	defer func(was func(context.Context, string) (string, error)) { callEvent = was }(callEvent)
+	callEvent = func(_ context.Context, room string) (string, error) {
+		if room == eventsCall {
+			return "9c4f3b5d-4444-4555-8666-c77788889999", nil
+		}
+		return "", nil
+	}
 	for room, want := range map[string]bool{
-		"4f0c2a1e-3b7d-4c55-9a51-0d8b1f6a2c33":                                      true, // a channel
-		"4f0c2a1e-3b7d-4c55-9a51-0d8b1f6a2c33 5a1d3b2f-4c8e-4d66-8b62-1e9c2a7b3d44": true, // a DM
-		"0123456789abcdef0123456789abcdef":                                          true, // a group
-		"meet-6f1c0e2a-1111-4222-8333-944455556666":                                 false,
+		"4f0c2a1e-3b7d-4c55-9a51-0d8b1f6a2c33":                                      true,  // a channel
+		"4f0c2a1e-3b7d-4c55-9a51-0d8b1f6a2c33 5a1d3b2f-4c8e-4d66-8b62-1e9c2a7b3d44": true,  // a DM
+		"0123456789abcdef0123456789abcdef":                                          true,  // a group
+		eventsCall:                                                                  true,  // an event's call
+		"meet-7a2d1f3b-2222-4333-8444-a55566667777":                                 false, // an instant meeting
 		"": false,
 	} {
-		if got := keepsTranscript(room); got != want {
+		if got := keepsTranscript(context.Background(), room); got != want {
 			t.Errorf("keepsTranscript(%q) = %v, want %v", room, got, want)
 		}
 	}

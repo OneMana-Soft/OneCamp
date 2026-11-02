@@ -93,7 +93,7 @@ func TestAFillReadsAsMuchForEachRowAtAnySize(t *testing.T) {
 	integration.SetupDgraph(t)
 	// The planner knows of the cell index what the server counted after each
 	// fill, whenever the autovacuum looks.
-	noAutovacuumOnTheCellIndex(ctx, t)
+	noAutovacuumOn(ctx, t, "data_table_cell_index")
 	me := uuid.New()
 	if _, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `INSERT INTO users (id, email_id, username, display_name, created_at, updated_at)
 		VALUES ($1, 'fills@example.test', 'fills', 'Fills', NOW(), NOW())`, me); err != nil {

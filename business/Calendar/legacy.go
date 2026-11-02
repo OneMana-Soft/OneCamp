@@ -355,6 +355,14 @@ func legacyOfInstance(inst instance, occ map[string][]models.Attendee, names map
 	return ev
 }
 
+// markAway marks, in the /event routes' JSON, the guests awayDecliners named
+// for this occurrence.
+func markAway(ev *dgraphStruct.DgraphEvent, away map[string]bool) {
+	for i := range ev.Guests {
+		ev.Guests[i].OutOfOffice = away[ev.Guests[i].UserUUID]
+	}
+}
+
 // legacyRange is the events GetEventsList answers from the store, before it
 // adds the reader's Google events and their bookings.
 func (s *service) legacyRange(ctx context.Context, who *model.UserInfo, from, to time.Time) ([]*dgraphStruct.DgraphEvent, error) {
@@ -367,9 +375,12 @@ func (s *service) legacyRange(ctx context.Context, who *model.UserInfo, from, to
 	}
 	names := s.namesOf(ctx, rows, guests)
 	occ := s.withAnswers(ctx, rows, guests)
+	away := s.awayDecliners(ctx, personOf(who), rows, occ)
 	out := make([]*dgraphStruct.DgraphEvent, 0, len(rows))
 	for _, inst := range rows {
-		out = append(out, legacyOfInstance(inst, occ, names, personOf(who), webDates))
+		ev := legacyOfInstance(inst, occ, names, personOf(who), webDates)
+		markAway(ev, away[inst.ref])
+		out = append(out, ev)
 	}
 	s.withReminders(ctx, rows, occ, out, personOf(who))
 	s.withTasks(ctx, who, rows, out)
@@ -389,22 +400,13 @@ func (s *service) legacyGet(ctx context.Context, who *model.UserInfo, id string)
 	}
 	all := map[uuid.UUID][]models.Attendee{inst.owner().ID: guests}
 	occ := s.withAnswers(ctx, []instance{inst}, all)
-	out := []*dgraphStruct.DgraphEvent{legacyOfInstance(inst, occ, s.namesOf(ctx, []instance{inst}, all), personOf(who), webDates)}
+	ev := legacyOfInstance(inst, occ, s.namesOf(ctx, []instance{inst}, all), personOf(who), webDates)
+	markAway(ev, s.awayDecliners(ctx, personOf(who), []instance{inst}, occ)[inst.ref])
+	out := []*dgraphStruct.DgraphEvent{ev}
 	s.withReminders(ctx, []instance{inst}, occ, out, personOf(who))
 	s.withTasks(ctx, who, []instance{inst}, out)
 	s.withCalls(ctx, out)
-	// A decline made by an out of office says so (head 5c).
-	var declined []string
-	for _, g := range out[0].Guests {
-		if g.Response == responseDeclined {
-			declined = append(declined, g.UserUUID)
-		}
-	}
-	away := s.awayDecliners(ctx, inst, declined)
-	for i := range out[0].Guests {
-		out[0].Guests[i].OutOfOffice = out[0].Guests[i].Response == responseDeclined && away[out[0].Guests[i].UserUUID]
-	}
-	return out[0], nil
+	return ev, nil
 }
 
 // busyEvents is what makes someone busy between from and to, in the graph's

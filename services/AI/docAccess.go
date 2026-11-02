@@ -16,9 +16,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
+	globalSearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
 )
 
 // DocAccess is a doc's privacy and sharing, as its entries carry them. The
@@ -143,27 +142,21 @@ func SetDocAccess(ctx context.Context, docs []DocAccess) (corrected int, err err
 	if err != nil || body == nil {
 		return 0, err
 	}
-	if opensearchInit.OpenSearchClient == nil {
-		return 0, fmt.Errorf("OpenSearch client not initialized")
-	}
-	refresh := true
-	resp, err := opensearchInit.OpenSearchClient.UpdateByQuery(ctx, opensearchapi.UpdateByQueryReq{
-		Indices: []string{AI_EMBEDDINGS_INDEX},
-		Body:    strings.NewReader(string(body)),
-		Params: opensearchapi.UpdateByQueryParams{
-			Refresh:           &refresh,
-			WaitForCompletion: &refresh,
-			Conflicts:         "proceed",
-		},
-	})
+	return updateEntries(ctx, body, "docs' access")
+}
+
+// updateEntries runs an update-by-query on the AI index as every search
+// update-by-query runs (globalSearchModels.UpdateByQuerySettled): refreshed
+// first, so an entry embedded a moment ago is matched, and run again while an
+// entry it matched was being written by something else. One run with
+// conflicts "proceed" skipped such an entry and answered done: a board made
+// public just after its words were embedded kept "private" for everyone
+// else's AI until its words changed. It answers how many entries it changed;
+// what names the write in its errors.
+func updateEntries(ctx context.Context, body []byte, what string) (int, error) {
+	n, err := globalSearchModels.UpdateByQuerySettled(ctx, []string{AI_EMBEDDINGS_INDEX}, string(body))
 	if err != nil {
-		return 0, fmt.Errorf("writing docs' access to the AI index: %w", err)
+		return n, fmt.Errorf("writing %s to the AI index: %w", what, err)
 	}
-	if resp == nil {
-		return 0, nil
-	}
-	if len(resp.Failures) > 0 {
-		return resp.Updated, fmt.Errorf("writing docs' access to the AI index: %d entries failed", len(resp.Failures))
-	}
-	return resp.Updated, nil
+	return n, nil
 }

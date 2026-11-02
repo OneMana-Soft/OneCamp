@@ -41,7 +41,10 @@ func TestSignedIntentsVerifyAndTamperingIsCaught(t *testing.T) {
 
 func TestAgentKeysAreStableAndDistinct(t *testing.T) {
 	a, b := uuid.New(), uuid.New()
-	if string(AgentPublicKey(a)) != string(AgentPublicKey(a)) {
+	// Taken twice, into two values: one call compared with itself proves
+	// nothing (V-208, staticcheck SA4000).
+	first, again := AgentPublicKey(a), AgentPublicKey(a)
+	if string(first) != string(again) {
 		t.Fatal("an agent's key is derived, so it is the same every time")
 	}
 	if string(AgentPublicKey(a)) == string(AgentPublicKey(b)) {

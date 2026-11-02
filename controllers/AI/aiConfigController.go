@@ -64,7 +64,7 @@ func GetAIConfig(w http.ResponseWriter, r *http.Request) {
 	cfg, err := business.GetAIConfig(ctx)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetAIConfig failed: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "failed to load AI configuration", "err": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "failed to load AI configuration", "err": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": cfg})
@@ -104,14 +104,14 @@ func ListProviderModels(w http.ResponseWriter, r *http.Request) {
 			helpers.LogInfoWithContext(ctx,
 				"controllers/ListProviderModels refused: %v (answered 409; admin must re-enter the key)", err)
 			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
-				"msg":  err.Error(),
+				"msg":  ai.ClientWords(r.Context(), err),
 				"code": "provider_key_unreadable",
 			})
 			return
 		}
 		// Everything else is a genuine upstream or server failure and keeps ERROR.
 		helpers.LogErrorWithContext(ctx, "controllers/ListProviderModels failed: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "failed to list models", "err": err.Error()})
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "failed to list models", "err": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": map[string]any{"models": models}})
@@ -144,7 +144,7 @@ func GetOllamaCatalog(w http.ResponseWriter, r *http.Request) {
 		resp, err = business.GetOllamaCatalog(ctx, id)
 	}
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -161,7 +161,7 @@ func TestConnection(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := business.TestConnection(ctx, req)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -177,7 +177,7 @@ func CreateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	v, err := business.CreateCustomProvider(ctx, req)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s created custom provider id=%s label=%q base_url=%q",
@@ -215,7 +215,7 @@ func DeleteProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.DeleteCustomProvider(ctx, id); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s deleted provider id=%s", aiAdminUserUUID(r), id)
@@ -231,7 +231,7 @@ func SetChatModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetChatModel(ctx, req); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set chat model provider=%s model=%q",
@@ -249,7 +249,7 @@ func SetVisionModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetVisionModel(ctx, req); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set vision model provider=%s model=%q",
@@ -272,7 +272,7 @@ func SetEmbeddingModel(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(err.Error(), "requires reindexing") {
 			status = http.StatusConflict
 		}
-		helpers.WriteJSON(w, status, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set embedding model provider=%s model=%q dim=%d reindex=%v",
@@ -289,7 +289,7 @@ func SetEnabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetEnabled(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set ai enabled=%v", aiAdminUserUUID(r), req.Enabled)
@@ -305,7 +305,7 @@ func SetMeetingRecap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetMeetingRecapEnabled(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set meeting_recap enabled=%v", aiAdminUserUUID(r), req.Enabled)
@@ -321,7 +321,7 @@ func SetMeetingNotesDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetMeetingNotesDocEnabled(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set meeting_notes_doc enabled=%v", aiAdminUserUUID(r), req.Enabled)
@@ -337,7 +337,7 @@ func SetMeetingRecapInstructions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetMeetingRecapInstructions(ctx, req.Instructions); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set meeting_recap instructions (len=%d)", aiAdminUserUUID(r), len(strings.TrimSpace(req.Instructions)))
@@ -353,7 +353,7 @@ func SetCoworker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetCoworkerEnabled(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set coworker enabled=%v", aiAdminUserUUID(r), req.Enabled)
@@ -369,7 +369,7 @@ func SetRateLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetRateLimit(ctx, req.RateLimitPerMin); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "rate limit updated"})
@@ -385,7 +385,7 @@ func SetContextWindow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetContextWindow(ctx, req.ContextWindowTokens); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "context window updated"})
@@ -401,7 +401,7 @@ func SetWorkspaceTokenBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetWorkspaceDailyTokenBudget(ctx, req.Tokens); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "workspace token budget updated"})
@@ -417,7 +417,7 @@ func SetUserTokenBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetUserDailyTokenBudget(ctx, req.Tokens); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "user token budget updated"})
@@ -433,7 +433,7 @@ func SetReasoning(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetReasoning(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set reasoning enabled=%v", aiAdminUserUUID(r), req.Enabled)
@@ -451,7 +451,7 @@ func SetLocalOnly(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetLocalOnly(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set local-only enabled=%v", aiAdminUserUUID(r), req.Enabled)
@@ -468,7 +468,7 @@ func SetPIIRedaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetPIIRedaction(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set pii-redaction enabled=%v", aiAdminUserUUID(r), req.Enabled)
@@ -485,7 +485,7 @@ func SetPIIPatterns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetPIICustomPatterns(ctx, req.Patterns); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s updated pii custom patterns", aiAdminUserUUID(r))
@@ -510,7 +510,7 @@ func DeleteModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.DeleteModel(ctx, id, req.Model); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s deleted model provider=%s model=%q",
@@ -556,7 +556,7 @@ func PullModelStream(w http.ResponseWriter, r *http.Request) {
 	}
 	model, err := business.ValidatePullModelName(req.Model)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	req.Model = model
@@ -568,7 +568,7 @@ func PullModelStream(w http.ResponseWriter, r *http.Request) {
 
 	manager, _, err := business.GetManagerForPull(ctx, id)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 
@@ -587,7 +587,7 @@ func PullModelStream(w http.ResponseWriter, r *http.Request) {
 	progress, err := manager.PullModel(ctx, req.Model)
 	if err != nil {
 		// Distinguish the actionable "update Ollama" case.
-		payload := map[string]any{"error": err.Error(), "done": true}
+		payload := map[string]any{"error": ai.ClientWords(r.Context(), err), "done": true}
 		if isUpdateRequired(err) {
 			payload["update_required"] = true
 		}
@@ -624,7 +624,7 @@ func isUpdateRequired(err error) bool {
 func ListAuthorizedModels(w http.ResponseWriter, r *http.Request) {
 	models, err := business.ListAuthorizedModels(r.Context())
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": models})
@@ -649,7 +649,7 @@ func AuthorizeModel(w http.ResponseWriter, r *http.Request) {
 	}
 	m, err := business.AuthorizeModel(ctx, providerID, strings.TrimSpace(req.Model), strings.TrimSpace(req.Label))
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s authorized model %s/%s", aiAdminUserUUID(r), req.ProviderID, req.Model)
@@ -670,7 +670,7 @@ func SetAuthorizedModelEnabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetAuthorizedModelEnabled(ctx, id, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set authorized model %s enabled=%v", aiAdminUserUUID(r), id, req.Enabled)
@@ -698,7 +698,7 @@ func DiscoverAuthorizedModelLimits(w http.ResponseWriter, r *http.Request) {
 	}
 	found, err := business.DiscoverAuthorizedModelLimits(ctx, id)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "discovery complete", "data": found})
@@ -730,7 +730,7 @@ func SetAuthorizedModelLimits(w http.ResponseWriter, r *http.Request) {
 	// silently zeroed — a PATCH-shaped body must not clear what it does not mention.
 	current, err := business.GetAuthorizedModelForAdmin(ctx, id)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	window, output := current.ContextWindowTokens, current.MaxOutputTokens
@@ -742,7 +742,7 @@ func SetAuthorizedModelLimits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := business.SetAuthorizedModelLimits(ctx, id, window, output); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set authorized model %s limits window=%d output=%d",
@@ -759,7 +759,7 @@ func RevokeAuthorizedModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.RevokeAuthorizedModel(ctx, id); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s revoked authorized model %s", aiAdminUserUUID(r), id)
@@ -823,7 +823,7 @@ func SetCodeAnalysisMaxFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetCodeAnalysisMaxFiles(ctx, req.MaxFiles); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set code_analysis_max_files=%d", aiAdminUserUUID(r), req.MaxFiles)
@@ -839,7 +839,7 @@ func SetIssueTriage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetIssueTriageEnabled(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set issue_triage enabled=%v", aiAdminUserUUID(r), req.Enabled)
@@ -890,7 +890,7 @@ func SetSandboxEnabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetSandboxEnabled(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set sandbox enabled=%v (kill switch)", aiAdminUserUUID(r), req.Enabled)
@@ -925,7 +925,7 @@ func SetCodePREnabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetCodePREnabled(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set code-pr enabled=%v (kill switch)", aiAdminUserUUID(r), req.Enabled)
@@ -943,7 +943,7 @@ func SetCodePRModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetCodePRModel(ctx, req); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set code-pr model provider=%s model=%q",
@@ -964,7 +964,7 @@ func GetCodePRScorecard(w http.ResponseWriter, r *http.Request) {
 	}
 	view, err := business.CodePRScorecard(ctx, days)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": view})
@@ -1000,7 +1000,7 @@ func CodePRLLMProxy(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimSpace(r.Header.Get("X-Runner-Token"))
 	answer, err := business.CodePRLLMProxy(ctx, token, msgs, req.MaxTokens, req.Temperature)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"error": err.Error()})
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"error": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"content": answer})
@@ -1023,7 +1023,7 @@ func ListCodePRRuns(w http.ResponseWriter, r *http.Request) {
 	limit := helpers.LimitParam(r.URL.Query(), 50, 200)
 	runs, err := business.RecentCodePRRuns(ctx, limit)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": runs})
@@ -1060,7 +1060,7 @@ func SetAgentDelegation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetAgentDelegation(ctx, req.Enabled, req.MaxHops, req.Surfaces); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set agent delegation enabled=%v max_hops=%d surfaces=%q",
@@ -1092,7 +1092,7 @@ func SetModelRouting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetModelRouting(ctx, req.Routes); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set model routing %v", aiAdminUserUUID(r), req.Routes)
@@ -1135,7 +1135,7 @@ func SetMCPServer(w http.ResponseWriter, r *http.Request) {
 	if err := mcpServerBusiness.SetAdmission(ctx, req.Enabled, req.ToolGroups); err != nil {
 		// The business error names the valid groups, so it is forwarded rather than
 		// replaced: an admin who mistyped a group needs the list, not "bad request".
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set MCP server enabled=%v tool_groups=%q",

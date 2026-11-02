@@ -89,7 +89,11 @@ func limitsForEndpoint(ep Endpoint, cfg *AIConfig) ModelLimits {
 
 // WorkspaceLimits returns the limits of the workspace DEFAULT model — today's
 // behaviour for every caller that has no particular model in hand.
-func WorkspaceLimits() ModelLimits {
+func WorkspaceLimits() ModelLimits { return workspaceLimits().withinStatedLimit() }
+
+// workspaceLimits is WorkspaceLimits before any limit a provider stated: what a model with no window of its own
+// inherits, so one model's stated limit never reaches another.
+func workspaceLimits() ModelLimits {
 	lim := ModelLimits{ContextWindow: contextWindowTokens(), Source: limitSourceWorkspace}
 	if cfg := GetConfig(); cfg != nil {
 		lim.Provider = string(cfg.Provider())
@@ -124,7 +128,7 @@ func LimitsForModel(provider, model string, rowWindow, rowOutput int) ModelLimit
 	if rowWindow > 0 {
 		lim.ContextWindow, lim.Source = rowWindow, limitSourceModel
 	} else {
-		ws := WorkspaceLimits()
+		ws := workspaceLimits()
 		lim.ContextWindow, lim.Source = ws.ContextWindow, ws.Source
 	}
 	if lim.ContextWindow < minContextWindow {
@@ -133,7 +137,7 @@ func LimitsForModel(provider, model string, rowWindow, rowOutput int) ModelLimit
 	if lim.MaxOutput < 0 {
 		lim.MaxOutput = 0
 	}
-	return lim
+	return lim.withinStatedLimit()
 }
 
 // --- tokenizer ratio (per model) ---------------------------------------------
@@ -296,7 +300,8 @@ func WithModelLimits(ctx context.Context, lim ModelLimits) context.Context {
 func LimitsFrom(ctx context.Context) ModelLimits {
 	if ctx != nil {
 		if lim, ok := ctx.Value(modelLimitsKey{}).(ModelLimits); ok && lim.ContextWindow > 0 {
-			return lim
+			// Attached before the provider stated a limit, it still answers to one.
+			return lim.withinStatedLimit()
 		}
 	}
 	return WorkspaceLimits()

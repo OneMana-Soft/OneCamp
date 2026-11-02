@@ -31,6 +31,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	milestoneModel "github.com/akashc777/OneCamp/models/postgres/Milestone"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 )
 
@@ -396,6 +397,18 @@ func worded(err error) error {
 }
 
 const gone = "That milestone isn't there any more."
+
+// Restore brings a deleted milestone back (POST /restore/milestone/{id}) to
+// every project that showed it, with its tasks, unless one of them shows
+// MostPerProject milestones since: then it stays deleted, refused in the
+// words a create or a share gets (milestoneModel.Bounds).
+func Restore(ctx context.Context, id uuid.UUID) error {
+	bounds, err := milestoneModel.Bounds(ctx, id, MostPerProject)
+	if err != nil {
+		return err
+	}
+	return worded(softDelete.RestoreAs(ctx, softDelete.Milestone, id, nil, bounds...))
+}
 
 // Create makes a milestone in project, last in its order.
 func Create(ctx context.Context, project uuid.UUID, in Input, by uuid.UUID) (*milestoneModel.Milestone, error) {

@@ -39,7 +39,7 @@ func TestARunUnderWayHoldsOffItsOwnTypeOnly(t *testing.T) {
 	if _, err := RunArchiveJob(ctx, "posts", nil); !errors.As(err, &held) || held.EntityType != "posts" {
 		t.Errorf("a second posts run while one is under way: %v; want ArchiveAlreadyRunningError for posts", err)
 	}
-	if _, err := RestoreItems(ctx, "posts", []uuid.UUID{uuid.New()}); !errors.As(err, &held) || held.EntityType != "posts" {
+	if _, err := RestoreItems(ctx, "posts", []string{uuid.New().String()}); !errors.As(err, &held) || held.EntityType != "posts" {
 		t.Errorf("a posts restore while a posts run is under way: %v; want ArchiveAlreadyRunningError for posts", err)
 	}
 	if err := checkRunningArchiveJob(ctx, "tasks"); err != nil {

@@ -6,7 +6,6 @@ import (
 
 	"github.com/livekit/protocol/livekit"
 
-	archiveBusiness "github.com/akashc777/OneCamp/business/Archive"
 	domain "github.com/akashc777/OneCamp/domain/Recording"
 	"github.com/akashc777/OneCamp/helpers"
 )
@@ -107,32 +106,31 @@ func UpdateStopRecordingTime(ctx context.Context, egressId string, duration floa
 	return
 }
 
-// DeleteRecording removes a recording someone deleted, for good: its file in
-// storage, then the recording and its transcript, as the purge of archived
-// recordings does (archiveBusiness.PurgeRecording).
+// DeleteRecording deletes a recording from its channel or conversation. The
+// delete is soft, as every delete is: it stamps the recording's deletion with
+// the archive's own write (domain.BulkArchiveRecordings), so its list and its
+// player stop showing it at once, RestoreRecording brings it back (the web's
+// Undo, or an admin in Settings > Archive), and the workspace's purge setting
+// removes it for good, file first, as it does any archived recording
+// (business/Archive purge.go). Until then its file stays in storage.
 //
-// It was a soft delete that never reached the recording: its mutation named no
-// node, so it made a new one (see domain.setRecordingsDeletedAt), and the
-// recording stayed listed and playable. Had it worked, the file would still
-// have stayed in storage unless the workspace had set a purge.
+// It purged at once until 31 Oct 2026 (V-140): the file, then the recording
+// and its transcript, with no Undo and nothing in Archive.
 //
 // The caller checks who may delete it: a channel's moderators or a workspace
 // admin, or anyone in the conversation.
 func DeleteRecording(ctx context.Context, egressId string) error {
-	recs, err := recordingsToPurge(ctx, egressId)
-	if err != nil {
-		return err
-	}
-	for _, r := range recs {
-		if _, err := purgeRecording(ctx, r); err != nil {
-			return err
-		}
-	}
-	return nil
+	return archiveRecordings(ctx, []string{egressId})
 }
 
-// The seams DeleteRecording's tests replace.
+// RestoreRecording brings back a recording DeleteRecording deleted. The
+// caller checks who may: whoever may delete it.
+func RestoreRecording(ctx context.Context, egressId string) error {
+	return restoreRecordings(ctx, []string{egressId})
+}
+
+// The seams DeleteRecording's and RestoreRecording's tests replace.
 var (
-	recordingsToPurge = domain.RecordingsToPurge
-	purgeRecording    = archiveBusiness.PurgeRecording
+	archiveRecordings = domain.BulkArchiveRecordings
+	restoreRecordings = domain.BulkRestoreRecordings
 )

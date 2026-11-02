@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
+	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -427,8 +428,14 @@ func List(ctx context.Context, project uuid.UUID) ([]*model.Field, error) {
 	return model.List(ctx, project)
 }
 
-// Create adds a field to a project. A money field with no currency takes the
-// project's billing currency, or USD.
+// bound is a project's MaxPerProject fields, which its creates and its
+// fields' restores are held to alike, in the same words.
+func bound(project uuid.UUID) softDelete.Bound {
+	return model.Bound(project, MaxPerProject, invalid("A project can have up to %d fields.", MaxPerProject))
+}
+
+// Create adds a field to a project, under its most (bound). A money field
+// with no currency takes the project's billing currency, or USD.
 func Create(ctx context.Context, project uuid.UUID, in Input, by uuid.UUID, billingCurrency string) (*model.Field, error) {
 	if in.Type == TypeMoney && strings.TrimSpace(in.Currency) == "" {
 		in.Currency = billingCurrency
@@ -440,15 +447,14 @@ func Create(ctx context.Context, project uuid.UUID, in Input, by uuid.UUID, bill
 	if err != nil {
 		return nil, err
 	}
-	n, err := model.Count(ctx, project)
-	if err != nil {
-		return nil, err
-	}
-	if n >= MaxPerProject {
-		return nil, invalid("A project can have up to %d fields.", MaxPerProject)
-	}
 	f.ProjectID = project
-	return model.Create(ctx, f, by)
+	var made *model.Field
+	err = bound(project).Add(ctx, func(ctx context.Context) error {
+		var err error
+		made, err = model.Create(ctx, f, by)
+		return err
+	})
+	return made, err
 }
 
 // Update changes a field's name, options, currency or place on cards; its
@@ -483,11 +489,11 @@ func Delete(ctx context.Context, project, id, by uuid.UUID) error {
 	return model.Delete(ctx, project, id, by)
 }
 
-// Restore brings a deleted field back with every task's value of it (POST
-// /restore/field/{id}). ErrNameTaken: a live field of its project has its
-// name now.
-func Restore(ctx context.Context, id uuid.UUID) error {
-	return softDelete.RestoreAs(ctx, softDelete.Field, id, ErrNameTaken)
+// Restore brings a deleted field of project back with every task's value of
+// it (POST /restore/field/{id}), under the project's most as a create is
+// (bound). ErrNameTaken: a live field of its project has its name now.
+func Restore(ctx context.Context, project, id uuid.UUID) error {
+	return softDelete.RestoreAs(ctx, softDelete.Field, id, ErrNameTaken, bound(project))
 }
 
 // Reorder puts a project's fields in the order given.
@@ -556,6 +562,11 @@ func SetValue(ctx context.Context, task *dgraphStruct.DgraphTask, f *model.Field
 	// that exists: an upsert would make one for an unknown id.
 	if err := taskDomain.UpdateDgraphTaskClearing(ctx, history, nil); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/TaskField SetValue history err: %+v", err)
+	}
+	// The Work Change Log, as the set's own answer names a value.
+	if task.Project != nil {
+		diff, _ := json.Marshal(map[string]any{"field_id": f.ID.String(), "value": value})
+		workFeed.RecordTasks(ctx, user.Uuid, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: task.Project.Uuid, Task: task, Diff: diff})
 	}
 	return value, nil
 }

@@ -17,6 +17,7 @@ import (
 	integrationBusiness "github.com/akashc777/OneCamp/business/Integration"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 	domain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/topo"
@@ -352,6 +353,7 @@ var moveChanged = dispatchTaskChanged
 // request.
 func afterMove(ctx context.Context, moves []movedTask, user *dgraphStruct.DgraphUser) {
 	byProject := map[string][]mqttStruct.MqttTaskDate{}
+	var moved []workFeed.TaskChange
 	var order []string
 	for _, mv := range moves {
 		t := mv.before
@@ -379,7 +381,10 @@ func afterMove(ctx context.Context, moves []movedTask, user *dgraphStruct.Dgraph
 			order = append(order, p)
 		}
 		byProject[p] = append(byProject[p], mqttStruct.MqttTaskDate{TaskUuid: t.Uuid, StartDate: wireDate(start), DueDate: wireDate(due)})
+		moved = append(moved, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: p,
+			Task: &dgraphStruct.DgraphTask{Uuid: t.Uuid, StartDate: start, DueDate: due}, Fields: []string{"task_start_date", "task_due_date"}})
 	}
+	logChange(ctx, user, moved...)
 	for _, p := range order {
 		project, tasks := p, byProject[p]
 		helpers.GoSafeNamed("Task.afterMove.dates", func() {

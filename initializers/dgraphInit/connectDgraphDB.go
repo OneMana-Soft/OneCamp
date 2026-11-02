@@ -263,6 +263,9 @@ func createSchema() (err error) {
 		recording_deleted_at: dateTime .
 		recording_transcript_only: bool .
 		recording_status: string .
+		recording_event: string @index(exact) .
+		recording_notes_doc: string .
+		recording_recap_chat: string .
 
 		reaction_added_at: dateTime .
 		reaction_emoji_id: string .
@@ -514,6 +517,9 @@ func createSchema() (err error) {
 			recording_deleted_at
 			recording_transcript_only
 			recording_status
+			recording_event
+			recording_notes_doc
+			recording_recap_chat
 		}
 
 		type Doc {

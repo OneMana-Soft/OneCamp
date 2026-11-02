@@ -40,6 +40,17 @@ type DgraphRecording struct {
 	Channel            *DgraphChannel      `json:"recording_channel,omitempty"`
 	Dm                 *DgraphDm           `json:"recording_dm,omitempty"`
 	DeletedAt          *time.Time          `json:"recording_deleted_at,omitempty"`
+	// Event is the calendar event whose call this was (its uuid), for a call
+	// that belongs to an event rather than a conversation (meet-02): the
+	// event's readers find it there, by the calendar's own read rule. Not an
+	// edge: an event lives in the calendar's store, and its work-graph node is
+	// a projection that many events never get.
+	Event string `json:"recording_event,omitempty"`
+	// NotesDoc is the notes document written for the call (its uuid), and
+	// RecapChat the conversation its recap was posted in (a DM's or a group's
+	// grouping id), so the event can link to both.
+	NotesDoc  string `json:"recording_notes_doc,omitempty"`
+	RecapChat string `json:"recording_recap_chat,omitempty"`
 
 	// TranscriptOnly marks a node that exists ONLY to hold the transcript of a
 	// call nobody recorded. It has no media, no duration and nothing to play.
@@ -721,6 +732,9 @@ type EventCall struct {
 	Room    string `json:"-"`
 	Slug    string `json:"slug"`
 	Address string `json:"address"`
+	// InviteesWait is whether its invitees knock like anyone from outside, its
+	// host having turned their way in by invitation off (meet-02).
+	InviteesWait bool `json:"invitees_wait"`
 }
 
 // EventTask is the task a task block is time for: its uuid always, and its

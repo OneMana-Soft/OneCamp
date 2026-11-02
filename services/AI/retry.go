@@ -16,6 +16,7 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -101,16 +102,42 @@ func backoffWait(ctx context.Context, attempt int, cfg retryConfig, suggested ti
 	}
 }
 
+// errProviderTooLarge marks a 413: the provider refused the request for its size, which a smaller request fixes
+// and waiting does not (V-157).
+var errProviderTooLarge = errors.New("ai: the provider refused the request as too large")
+
+// ProviderError is an error built from text a provider or a remote agent wrote: a reply's status and body, an error
+// it reported inside a 200 reply or a stream, or a reply that broke off or couldn't be read. That text can name the
+// provider's account, hosts and limits (Groq's 413 carried the organization id), and a reply that couldn't be read is
+// no more the workspace's words, so it belongs in the server's log, and ClientError answers a person with our words
+// instead (V-157). Its text is the wrapped error's, and errors.Is still reaches the sentinels beneath it.
+type ProviderError struct{ err error }
+
+func (e *ProviderError) Error() string { return e.err.Error() }
+func (e *ProviderError) Unwrap() error { return e.err }
+
+// FromProvider marks err as built from a provider's or a remote agent's own text. nil stays nil.
+func FromProvider(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ProviderError{err: err}
+}
+
 // providerStatusError builds the error for a non-2xx provider response. A
 // surviving 429 (rate limit that outlasted retry/backoff) is wrapped with
 // ErrProviderRateLimited so callers can treat it as a neutral, non-outage
-// event for the circuit breaker (see CircuitBreaker.RecordResult). label is
-// the provider/endpoint prefix, e.g. "openai: API returned".
+// event for the circuit breaker (see CircuitBreaker.RecordResult), and a 413
+// with errProviderTooLarge. label is the provider/endpoint prefix, e.g.
+// "openai: API returned".
 func providerStatusError(label string, code int, body []byte) error {
 	if code == http.StatusTooManyRequests {
-		return fmt.Errorf("%s status %d: %s: %w", label, code, string(body), ErrProviderRateLimited)
+		return FromProvider(fmt.Errorf("%s status %d: %s: %w", label, code, string(body), ErrProviderRateLimited))
 	}
-	return fmt.Errorf("%s status %d: %s", label, code, string(body))
+	if code == http.StatusRequestEntityTooLarge {
+		return FromProvider(fmt.Errorf("%s status %d: %s: %w", label, code, string(body), errProviderTooLarge))
+	}
+	return FromProvider(fmt.Errorf("%s status %d: %s", label, code, string(body)))
 }
 
 // doHTTPWithRetry sends a request built fresh on each attempt (newReq must

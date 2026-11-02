@@ -234,13 +234,16 @@ func TestKeepReadableBoardComments(t *testing.T) {
 		{ContentType: "comment", ContentUUID: "c-binned", BoardUUID: "binned"},
 		{ContentType: "comment", ContentUUID: "c-gone", BoardUUID: "gone"},
 		{ContentType: "comment", ContentUUID: "c-broken", BoardUUID: "broken"},
+		// A board's own entry (what it says) is the board's to grant.
+		{ContentType: ai.BoardContentType, ContentUUID: "private", BoardUUID: "private"},
+		{ContentType: ai.BoardContentType, ContentUUID: "shared", BoardUUID: "shared"},
 		{ContentType: "post", ContentUUID: "p1", ChannelUUID: "ch"},
 	}
 	var kept []string
 	for _, h := range keepReadableDocs(context.Background(), me, hits) {
 		kept = append(kept, h.ContentUUID)
 	}
-	if got, want := strings.Join(kept, ","), "c-open,c-shared,p1"; got != want {
+	if got, want := strings.Join(kept, ","), "c-open,c-shared,shared,p1"; got != want {
 		t.Errorf("kept %s, want %s", got, want)
 	}
 	if reads["private"] != 1 {

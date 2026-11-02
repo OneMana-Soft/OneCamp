@@ -72,18 +72,6 @@ func TestRandomTokenUniqueAndUrlSafe(t *testing.T) {
 	}
 }
 
-func TestIsMeetingRoom(t *testing.T) {
-	if !IsMeetingRoom(MeetingRoomPrefix + "abc") {
-		t.Fatal("expected meet- room to be recognized")
-	}
-	if IsMeetingRoom("550e8400-e29b-41d4-a716-446655440000") {
-		t.Fatal("a channel UUID room must not be treated as a meeting room")
-	}
-	if IsMeetingRoom("uuid1 uuid2") {
-		t.Fatal("a DM room must not be treated as a meeting room")
-	}
-}
-
 func TestAnAnswerAboutTheLinkIsNotAFault(t *testing.T) {
 	for _, err := range []error{ErrGuestDisabled, ErrInvalidGrant, ErrNotFound, ErrForbidden, fmt.Errorf("reading: %w", ErrNotFound)} {
 		if !IsUnavailable(err) {

@@ -2,6 +2,7 @@ package business
 
 import (
 	"context"
+	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	"strings"
 	"testing"
 	"time"
@@ -109,7 +110,8 @@ func TestNotesAudienceLeavesOutWhoCanNoLongerOpenTheConversation(t *testing.T) {
 	}
 
 	call := liveKitBusiness.FinishedCall{Room: "4f0c2a1e-3b7d-4c55-9a51-0d8b1f6a2c33", SessionKey: "call-RM_abc"}
-	got := notesAudience(context.Background(), call, []string{"0x1", "0x2", "0x3"})
+	home := recapHome{home: callStateBusiness.Home{Ref: callStateBusiness.Ref{Kind: "channel", ID: call.Room}}}
+	got := notesAudience(context.Background(), call, home, []string{"0x1", "0x2", "0x3"})
 	if want := "0x1,0x3"; strings.Join(got, ",") != want {
 		t.Errorf("audience = %v, want %s", got, want)
 	}

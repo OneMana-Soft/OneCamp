@@ -119,6 +119,13 @@ func Canonical(rawURL string) (*url.URL, error) {
 	return u, nil
 }
 
+// SiteHost is u's host as people say it: lower case, without "www." or a
+// trailing dot (figma.com for https://www.figma.com./file). A page with no
+// name of its own, or one this server couldn't read, is called by it. Pure.
+func SiteHost(u *url.URL) string {
+	return strings.TrimPrefix(strings.TrimSuffix(strings.ToLower(u.Hostname()), "."), "www.")
+}
+
 // cacheKey is the cache's key for a canonical link: its SHA-256, without the
 // fragment (the page is the same page). Pure.
 func cacheKey(u *url.URL) string {

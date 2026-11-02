@@ -66,6 +66,26 @@ func UUIDParam(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, 
 	return id, true
 }
 
+// PathText is the route's parameter name as the person typed it, for a path
+// that carries words: ⌘K's GET /search/unifiedSearch/{search_text}, an email,
+// a slug, a task's key (TestWordsInAPathAreReadThroughPathText keeps every
+// such read on it). chi matches on r.URL.RawPath whenever the request's escaping differs from Go's
+// own (":" sent as %3A, "&" as %26, as encodeURIComponent sends them), and
+// then hands the parameter back still escaped; otherwise it matches on the
+// decoded path and hands it back decoded. So it decodes exactly when chi read
+// the raw path, and never twice: a typed "%26" stays "%26". A parameter that
+// won't decode is returned as chi gave it.
+func PathText(r *http.Request, name string) string {
+	text := chi.URLParam(r, name)
+	if r.URL.RawPath == "" {
+		return text
+	}
+	if decoded, err := url.PathUnescape(text); err == nil {
+		return decoded
+	}
+	return text
+}
+
 // RouteOf names r for a log line by the route it matched
 // ("/task/info/{task_uuid}"), never by its path, which carries ids and, on the
 // guest and public routes, a link's token. A request that has matched no

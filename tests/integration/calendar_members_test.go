@@ -21,6 +21,7 @@ import (
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/google/uuid"
 )
 
 func TestACalendarGoesOnlyToMembers(t *testing.T) {
@@ -87,8 +88,14 @@ func TestACalendarGoesOnlyToMembers(t *testing.T) {
 			t.Errorf("Sam took back his share with Dex: %v", err)
 		}
 		var n int
-		if err := env.PG.QueryRow(`SELECT count(*) FROM calendar_shares WHERE calendar_id = $1`, samCal).Scan(&n); err != nil || n != 0 {
-			t.Errorf("Sam's calendar has %d shares (%v), want none", n, err)
+		if err := env.PG.QueryRow(`SELECT count(*) FROM calendar_shares WHERE calendar_id = $1 AND deleted_at IS NULL`, samCal).Scan(&n); err != nil || n != 0 {
+			t.Errorf("Sam's calendar has %d live shares (%v), want none", n, err)
+		}
+		// Taken back, the share stays on record, marked as stopped by Sam.
+		var by uuid.NullUUID
+		if err := env.PG.QueryRow(`SELECT deleted_by FROM calendar_shares WHERE calendar_id = $1 AND person_id = $2 AND deleted_at IS NOT NULL`,
+			samCal, dex.UserPostgresInfo.Id).Scan(&by); err != nil || by.UUID != sam.UserPostgresInfo.Id {
+			t.Errorf("Sam's share with Dex, taken back: stopped by %s (%v); want it kept, stopped by Sam %s", by.UUID, err, sam.UserPostgresInfo.Id)
 		}
 	})
 	t.Run("nobody lays over theirs the calendar of someone who isn't a member", func(t *testing.T) {

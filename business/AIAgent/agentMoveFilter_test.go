@@ -29,6 +29,20 @@ func TestEventAgentsNarrowToTheMoveTheyName(t *testing.T) {
 	}
 }
 
+// linear-39 round 2: a sub-task's making reaches webhooks as task.created,
+// naming its parent (business/Task taskWebhooks.go). An agent bound to a
+// task's making still runs on a top-level task's only, as it always has: a
+// template's sub-tasks would otherwise start it once each.
+func TestAnAgentOnATasksMakingRunsOnATopLevelTaskOnly(t *testing.T) {
+	agent := &model.AiAgent{TriggerConfig: `{"event":"task.created"}`}
+	if !eventWanted(agent, "task.created", map[string]interface{}{"task_id": "t1", "project_id": "p1"}) {
+		t.Error("a top-level task's making didn't start it")
+	}
+	if eventWanted(agent, "task.created", map[string]interface{}{"task_id": "t2", "project_id": "p1", "parent_task_id": "t1"}) {
+		t.Error("a sub-task's making started it")
+	}
+}
+
 func TestNormalizeAgentMoveFilter(t *testing.T) {
 	ctx := context.Background()
 	in := AgentInput{TriggerType: model.TriggerEvent, TriggerConfig: map[string]interface{}{"event": "task.status_changed", "to_status": "Done"}}

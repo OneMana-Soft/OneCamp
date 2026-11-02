@@ -30,6 +30,24 @@ var ownTimeWords = map[EventKind]string{
 // isOwnTime reports whether kind is someone's own time. Pure.
 func isOwnTime(kind string) bool { return slices.Contains(ownTimeKinds, kind) }
 
+// ownTimeRefused is, for each kind of own time a save that keeps an event's
+// guests can't make it, the words that save is refused with: keepOwnTime's
+// own answer for a write naming no guests, so the read that says it and the
+// write it foretells can't disagree (CR-113 S1). was is the event's kind now,
+// creator who made it, and kept its guests. nil when every kind is taken. Pure.
+func ownTimeRefused(was string, creator uuid.UUID, kept []models.Attendee) map[EventKind]string {
+	var out map[EventKind]string
+	for _, k := range ownTimeKinds {
+		if err := keepOwnTime(&models.Event{Kind: k}, was, creator, kept, nil); err != nil {
+			if out == nil {
+				out = map[EventKind]string{}
+			}
+			out[EventKind(k)] = err.Error()
+		}
+	}
+	return out
+}
+
 // guestKeyOf is the guest an entry of a write's list names: none for an entry
 // that names no one, or for creator, who is never their own guest. Pure.
 func guestKeyOf(w GuestInput, creator uuid.UUID) (models.GuestKey, bool) {

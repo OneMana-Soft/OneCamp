@@ -37,6 +37,7 @@ import (
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	channelController "github.com/akashc777/OneCamp/controllers/Channel"
 	livekitController "github.com/akashc777/OneCamp/controllers/LiveKit"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -359,6 +360,17 @@ func TestCallRecordingGoesOnAfterItsBreakoutRooms(t *testing.T) {
 			t.Fatalf("Kai stopping the recording from Design: %d", code)
 		}
 		endRecording(t, lk, egress, egress.Started(c.room)[0].EgressId)
+		// Stopped and ended, nothing records the call: Kai's second stop is
+		// answered as every route answers it, a meeting's too (head D).
+		again := call(t, channelController.StopVideoChannelCallRecording, http.MethodPost, "/ch/stopCallRecording",
+			&userModels.UserInfo{UserDgraphInfo: *c.people["kai"]}, `{"channel_uuid":"`+c.room+`"}`, nil)
+		var said struct {
+			Msg string `json:"msg"`
+		}
+		_ = json.Unmarshal(again.Body.Bytes(), &said)
+		if again.Code != http.StatusBadRequest || said.Msg != httpx.NothingRecording {
+			t.Errorf("Kai stopping it again with nothing recording: %d %q, want 400 %q", again.Code, said.Msg, httpx.NothingRecording)
+		}
 		c.closeOwnRoom(t, ctx, lk)
 		c.comeBack(t, ctx, lk)
 		settle(t)

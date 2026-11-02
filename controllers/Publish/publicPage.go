@@ -177,7 +177,7 @@ func answer(w http.ResponseWriter, r *http.Request, d business.Document) {
 
 // bySlug and byToken are how a request names its page: a published address,
 // or a link's token.
-func bySlug(r *http.Request) business.Ref  { return business.Ref{Slug: chi.URLParam(r, "slug")} }
+func bySlug(r *http.Request) business.Ref  { return business.Ref{Slug: helpers.PathText(r, "slug")} }
 func byToken(r *http.Request) business.Ref { return business.Ref{Token: chi.URLParam(r, "token")} }
 
 // PublishedPage GET /public/p/{slug}: a published page, for anyone with its

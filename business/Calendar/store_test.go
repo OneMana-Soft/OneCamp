@@ -609,6 +609,7 @@ func (m *memStore) setOOORule(_ context.Context, event uuid.UUID, r models.OOORu
 }
 
 func (m *memStore) awayOf(_ context.Context, people []uuid.UUID, w models.Window, limit int) ([]*models.Event, error) {
+	m.countRead("awayOf")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.sorted(func(e *models.Event) bool {

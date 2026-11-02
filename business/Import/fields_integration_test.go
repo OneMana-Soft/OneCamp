@@ -251,7 +251,7 @@ func TestImportedFields(t *testing.T) {
 	}
 	exec(`UPDATE tasks SET deleted_at = NULL WHERE id IN ($1, $2)`, t1, t2)
 	for _, id := range gone {
-		if err := taskField.Restore(ctx, id); err != nil {
+		if err := taskField.Restore(ctx, project, id); err != nil {
 			t.Fatal(err)
 		}
 	}

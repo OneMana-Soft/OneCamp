@@ -321,21 +321,11 @@ func logRescueExhausted(ctx context.Context, lim ModelLimits, attempt []ChatMess
 		trimForLog(err.Error()))
 }
 
-// overflowUserMessage is what a person sees when even the shrunk prompt did not fit.
-// Says what to do about it, because "try again" is false here: the same request will
-// fail the same way every time.
+// overflowUserMessage is what a person sees when even the shrunk prompt did not fit
+// (FriendlyProviderError gives it for every overflow). Says what to do about it, because
+// "try again" is false here: the same request will fail the same way every time.
 const overflowUserMessage = "That request was too long for the selected AI model's context window, even after trimming. " +
 	"Try asking about a smaller selection or a shorter thread, or pick a model with a larger context window in the assistant's model menu."
-
-// describeOverflow returns the user-facing text for a context-overflow error, or ""
-// when err is not one. Kept next to the rescue so the message and the mechanism that
-// tries to avoid needing it stay in the same file.
-func describeOverflow(err error) string {
-	if IsContextOverflow(err) {
-		return overflowUserMessage
-	}
-	return ""
-}
 
 // trimForLog bounds an error string used in a log line.
 func trimForLog(s string) string {

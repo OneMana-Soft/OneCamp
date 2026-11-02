@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
@@ -116,5 +117,52 @@ func TestPgexecRunsStatementsAndTransactions(t *testing.T) {
 	}
 	if c, _ := pgexec.Scalar[int](ctx, `SELECT count(*) FROM pgexec_t`); c != 4 {
 		t.Fatalf("the cancelled delete ran: %d rows left", c)
+	}
+
+	// Upkeep no transaction may hold runs alone, even from a ctx inside one;
+	// Exec runs it in that transaction, where Postgres refuses it.
+	var inTx error
+	err = pgexec.InTx(ctx, func(ctx context.Context) error {
+		if _, err := pgexec.ExecAlone(ctx, time.Minute, `VACUUM (ANALYZE) pgexec_t`); err != nil {
+			return err
+		}
+		_, inTx = pgexec.Exec(ctx, `VACUUM (ANALYZE) pgexec_t`)
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("a VACUUM alone from a ctx in a transaction: %v", err)
+	}
+	if inTx == nil {
+		t.Fatal("a VACUUM ran in the transaction: the ctx carried none, so nothing here was alone")
+	}
+
+	// A VACUUM right after commits that don't wait for the disk (this
+	// server's synchronous_commit is off, as a self-hosted one's may be)
+	// marks every page they wrote whole once FlushCommits ran. Without it the
+	// newest 32 transactions' rows have no hint bit yet, and their pages stay
+	// unmarked (V-150).
+	if s, err := pgexec.Scalar[string](ctx, `SHOW synchronous_commit`); err != nil || s != "off" {
+		t.Fatalf("this server's synchronous_commit is %q (%v): the flush below proves nothing unless commits don't wait for the disk", s, err)
+	}
+	if _, err := pgexec.Exec(ctx, `CREATE TABLE pgexec_w (n int, pad text) WITH (autovacuum_enabled = false)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := pgexec.Exec(ctx, `INSERT INTO pgexec_w SELECT g, repeat('w', 200) FROM generate_series(1, 500) g`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pgexec.FlushCommits(ctx, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pgexec.ExecAlone(ctx, time.Minute, `VACUUM pgexec_w`); err != nil {
+		t.Fatal(err)
+	}
+	var whole, pages int
+	if err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `SELECT relallvisible, relpages FROM pg_class WHERE oid = 'pgexec_w'::regclass`).Scan(&whole, &pages); err != nil {
+		t.Fatal(err)
+	}
+	if pages == 0 || whole != pages {
+		t.Fatalf("a VACUUM after FlushCommits marked %d of the fill's %d pages whole: a commit not yet on disk kept its rows unhinted", whole, pages)
 	}
 }

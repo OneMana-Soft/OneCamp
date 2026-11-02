@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	authController "github.com/akashc777/OneCamp/controllers/Auth"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	ldapService "github.com/akashc777/OneCamp/services/LDAP"
@@ -52,17 +53,29 @@ func TestDirectoryAdminFollowsItsGroups(t *testing.T) {
 	t.Cleanup(authController.UseDirectoryForTest(func(_ *ldapService.LDAPClient, who, password string) (*ldapService.LDAPUser, error) {
 		return &ldapService.LDAPUser{DN: "uid=" + who + ",dc=example,dc=test", Email: who + "@example.test", Username: who, Groups: groups}, nil
 	}))
+	frank := uuid.New()
 	if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, signup_method, is_sso_managed, created_at, updated_at)
-		VALUES ($1, 'frank@example.test', 'frank', 'ldap', true, NOW(), NOW())`, uuid.New()); err != nil {
+		VALUES ($1, 'frank@example.test', 'frank', 'ldap', true, NOW(), NOW())`, frank); err != nil {
 		t.Fatal(err)
 	}
+	// Whether frank is an admin, as the sign-in itself reads it.
 	isAdmin := func() bool {
 		t.Helper()
-		var yes bool
-		if err := env.PG.QueryRow(`SELECT EXISTS (SELECT 1 FROM admin_users WHERE email_id = 'frank@example.test')`).Scan(&yes); err != nil {
+		yes, _, err := userDomain.GetUserSignInFlags(ctx, frank)
+		if err != nil {
 			t.Fatal(err)
 		}
 		return yes
+	}
+	// frank's admin rows: all of them, and those taken away by nobody (the
+	// directory, not a person, takes a role at sign-in).
+	adminRows := func(where string) int {
+		t.Helper()
+		var n int
+		if err := env.PG.QueryRow(`SELECT count(*) FROM admin_users WHERE email_id = 'frank@example.test'` + where).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
 	}
 	signIn := func() {
 		t.Helper()
@@ -90,4 +103,28 @@ func TestDirectoryAdminFollowsItsGroups(t *testing.T) {
 		t.Fatal("taken out of the directory's admin group, and still an admin")
 	}
 	audited(t, env.PG, "admin.revoked", 1)
+	// The role is kept, taken by nobody, with when (V-184). The workspace has
+	// had an admin, so its first-admin setup stays closed: it is one-time
+	// (docs/customer-onboarding.md), not open to anyone once the last admin
+	// role goes.
+	if n := adminRows(""); n != 1 {
+		t.Fatalf("the admin role the directory took from frank is gone (%d rows), and with it who had it", n)
+	}
+	if n := adminRows(" AND deleted_at IS NOT NULL AND deleted_by IS NULL"); n != 1 {
+		t.Error("the directory's take-away is not marked, or is marked by someone")
+	}
+	if exists, err := userDomain.AdminSetupDone(ctx); err != nil || !exists {
+		t.Errorf("after the directory took the only admin role: the workspace has had an admin = %v (%v), want true", exists, err)
+	}
+
+	// Back in the group: the same row comes back, live.
+	groups = []string{adminGroup}
+	signIn()
+	if !isAdmin() {
+		t.Fatal("back in the directory's admin group: an admin again")
+	}
+	if n := adminRows(" AND deleted_at IS NULL AND deleted_by IS NULL"); n != 1 || adminRows("") != 1 {
+		t.Errorf("back in the group: %d live rows of %d, want its one row back, live", n, adminRows(""))
+	}
+	audited(t, env.PG, "admin.granted", 2)
 }

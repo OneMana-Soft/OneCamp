@@ -20,12 +20,11 @@ type CounterKey struct {
 	Args []string
 }
 
-// GetInt64Many is GetInt64 for several counters in one MGET: each value,
-// and whether it was there. All misses when Redis is unavailable.
-func GetInt64Many(ctx context.Context, keys []CounterKey) ([]int64, []bool, error) {
-	vals, found := make([]int64, len(keys)), make([]bool, len(keys))
+// mget reads several keys in one MGET: nil when Redis is unavailable, or
+// there are no keys.
+func mget(ctx context.Context, op string, keys []CounterKey) ([]interface{}, error) {
 	if !IsAvailable() || len(keys) == 0 {
-		return vals, found, nil
+		return nil, nil
 	}
 	built := make([]string, len(keys))
 	for i, k := range keys {
@@ -33,13 +32,21 @@ func GetInt64Many(ctx context.Context, keys []CounterKey) ([]int64, []bool, erro
 	}
 	res, err := redisInit.RedisClient.MGet(ctx, built...).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
-		helpers.LogErrorWithContext(ctx, "redis store: GetInt64Many failed err=%+v", err)
+		helpers.LogErrorWithContext(ctx, "redis store: %s failed err=%+v", op, err)
+		return nil, err
+	}
+	return res, nil
+}
+
+// GetInt64Many is GetInt64 for several counters in one MGET: each value,
+// and whether it was there. All misses when Redis is unavailable.
+func GetInt64Many(ctx context.Context, keys []CounterKey) ([]int64, []bool, error) {
+	vals, found := make([]int64, len(keys)), make([]bool, len(keys))
+	res, err := mget(ctx, "GetInt64Many", keys)
+	if err != nil {
 		return vals, found, err
 	}
 	for i, r := range res {
-		if r == nil {
-			continue
-		}
 		s, ok := r.(string)
 		if !ok {
 			continue
@@ -47,6 +54,22 @@ func GetInt64Many(ctx context.Context, keys []CounterKey) ([]int64, []bool, erro
 		var n int64
 		if err := redis.NewStringResult(s, nil).Scan(&n); err == nil {
 			vals[i], found[i] = n, true
+		}
+	}
+	return vals, found, nil
+}
+
+// GetStringMany is GetString for several keys in one MGET: each value, and
+// whether it was there. All misses when Redis is unavailable.
+func GetStringMany(ctx context.Context, keys []CounterKey) ([]string, []bool, error) {
+	vals, found := make([]string, len(keys)), make([]bool, len(keys))
+	res, err := mget(ctx, "GetStringMany", keys)
+	if err != nil {
+		return vals, found, err
+	}
+	for i, r := range res {
+		if s, ok := r.(string); ok {
+			vals[i], found[i] = s, true
 		}
 	}
 	return vals, found, nil

@@ -199,6 +199,14 @@ type entityOps struct {
 	// items must follow this entity's archive/restore (empty = no memory
 	// link, e.g. attachments/recordings). Posts->"post", chats->"chat".
 	MemorySourceType string
+	// ParseID reads one id of this kind as its archive list gives it,
+	// strictly, and answers it written the one way the kind's stores write
+	// it; false for anything else, which a restore refuses. Lookup is which
+	// of these ids, so read, name an item of this kind here, archived or
+	// live (its own store: a row of its table, a doc, a recording filed
+	// under its home): a restore naming anything else is refused whole.
+	ParseID func(id string) (string, bool)
+	Lookup  func(ctx context.Context, ids []string) ([]string, error)
 }
 
 // makeOpenSearchArchive builds the closure that fans an archive event
@@ -296,6 +304,8 @@ var entityRegistry = map[string]entityOps{
 		OpenSearchArchiveFn: makeOpenSearchArchive([]string{"post_id", "comment_post_id", "attachment_post_id", "content_uuid", "post_uuid"}, []string{"posts", "comments", "attachments", "ai_embeddings"}),
 		OpenSearchRestoreFn: makeOpenSearchRestore([]string{"post_id", "comment_post_id", "attachment_post_id", "content_uuid", "post_uuid"}, []string{"posts", "comments", "attachments", "ai_embeddings"}),
 		MemorySourceType:    "post",
+		ParseID:             parseUUID,
+		Lookup:              knownRowsOf("posts"),
 	},
 	"chats": {
 		Label: "Chat",
@@ -307,6 +317,8 @@ var entityRegistry = map[string]entityOps{
 		OpenSearchArchiveFn: makeOpenSearchArchive([]string{"chat_id", "comment_chat_id", "attachment_chat_id", "content_uuid", "chat_uuid"}, []string{"chats", "comments", "attachments", "ai_embeddings"}),
 		OpenSearchRestoreFn: makeOpenSearchRestore([]string{"chat_id", "comment_chat_id", "attachment_chat_id", "content_uuid", "chat_uuid"}, []string{"chats", "comments", "attachments", "ai_embeddings"}),
 		MemorySourceType:    "chat",
+		ParseID:             parseUUID,
+		Lookup:              knownRowsOf("chats"),
 	},
 	"tasks": {
 		Label: "Task",
@@ -317,6 +329,8 @@ var entityRegistry = map[string]entityOps{
 		ArchiveDgraphFn:     taskDomain.BulkArchiveTasksInDgraph,
 		OpenSearchArchiveFn: makeOpenSearchArchive([]string{"task_id", "comment_task_id", "attachment_task_id", "content_uuid", "task_uuid"}, []string{"tasks", "comments", "attachments", "ai_embeddings"}),
 		OpenSearchRestoreFn: makeOpenSearchRestore([]string{"task_id", "comment_task_id", "attachment_task_id"}, []string{"tasks", "comments", "attachments"}),
+		ParseID:             parseUUID,
+		Lookup:              knownRowsOf("tasks"),
 	},
 	"attachments": {
 		Label: "Attachment",
@@ -327,6 +341,8 @@ var entityRegistry = map[string]entityOps{
 		ArchiveDgraphFn:     attachmentDomain.BulkArchiveAttachmentsInDgraph,
 		OpenSearchArchiveFn: makeOpenSearchArchiveSingle("attachment_id", []string{"attachments"}),
 		OpenSearchRestoreFn: makeOpenSearchRestoreSingle("attachment_id", []string{"attachments"}),
+		ParseID:             parseUUID,
+		Lookup:              knownRowsOf("attachments"),
 	},
 	"recordings": {
 		Label: "Recording",
@@ -335,6 +351,12 @@ var entityRegistry = map[string]entityOps{
 			return n, n, nil, err
 		},
 		OpenSearchRestoreFn: makeOpenSearchRestoreSingle("recording_egress_id", []string{"recordings"}),
+		// A recording's id is its key, an egress id or, for a call's
+		// transcript, its session key; it has no uuid.
+		ParseID: parseRecordingKey,
+		Lookup: func(ctx context.Context, keys []string) ([]string, error) {
+			return recordingKeysHere(ctx, keys)
+		},
 	},
 	// Docs live in the graph, so archiveDocs writes them there itself and
 	// answers which it archived (there are no Postgres rows to sync). Search
@@ -347,7 +369,48 @@ var entityRegistry = map[string]entityOps{
 		},
 		OpenSearchArchiveFn: docSearchFollows(makeOpenSearchArchive(docCascadeFields, docCascadeIndexes)),
 		OpenSearchRestoreFn: docSearchFollows(makeOpenSearchRestore(docCascadeFields, docCascadeIndexes)),
+		ParseID:             parseUUID,
+		Lookup:              docsHere,
 	},
+}
+
+// parseUUID is ParseID for a kind whose ids are uuids: a uuid, written as
+// uuids are (lower case, with its dashes).
+func parseUUID(id string) (string, bool) {
+	u, err := uuid.Parse(id)
+	if err != nil {
+		return "", false
+	}
+	return u.String(), true
+}
+
+// parseRecordingKey is ParseID for recordings: a recording's key exactly as
+// the list gives it (helpers.IsRecordingKey).
+func parseRecordingKey(key string) (string, bool) {
+	return key, helpers.IsRecordingKey(key)
+}
+
+// knownRowsOf is Lookup for a kind kept as rows of table.
+func knownRowsOf(table string) func(context.Context, []string) ([]string, error) {
+	return func(ctx context.Context, ids []string) ([]string, error) {
+		return knownRows(ctx, table, ids)
+	}
+}
+
+// docsHere is Lookup for docs: which of these uuids name a doc, deleted or
+// live.
+func docsHere(ctx context.Context, ids []string) ([]string, error) {
+	docs, err := docsDeletion(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	here := make([]string, 0, len(docs))
+	for _, d := range docs {
+		if d != nil && d.Uuid != "" {
+			here = append(here, strings.ToLower(d.Uuid))
+		}
+	}
+	return here, nil
 }
 
 // docCascadeFields are the fields a doc's comments, files and AI entries name
@@ -623,9 +686,21 @@ func GetArchiveStats(ctx context.Context) (*ArchiveStats, error) {
 	return stats, nil
 }
 
+// The archive list's and the restore's reads and writes of rows, runs and
+// recordings: production wiring, which tests replace.
+var (
+	runningArchiveJob     = archiveModels.RunningJobExists
+	archivedRows          = archiveModels.RecentlyArchived
+	restoreRows           = archiveModels.Restore
+	liveRows              = archiveModels.Live
+	knownRows             = archiveModels.Known
+	recordingKeysHere     = recordingDomain.RecordingKeysHere
+	restoreRecordingNodes = recordingDomain.BulkRestoreRecordings
+)
+
 // checkRunningArchiveJob returns an error if an archive job is already running for the given entity type.
 func checkRunningArchiveJob(ctx context.Context, entityType string) error {
-	running, err := archiveModels.RunningJobExists(ctx, entityType)
+	running, err := runningArchiveJob(ctx, entityType)
 	if err != nil {
 		return fmt.Errorf("failed to check running jobs: %w", err)
 	}
@@ -659,17 +734,31 @@ func ArchiveInGraphAndSearch(ctx context.Context, entityType string, ids []strin
 	return nil
 }
 
-// RestoreItems restores archived items by clearing their deleted_at timestamp.
-// Dgraph sync is performed synchronously to match the archive path; OpenSearch
-// cascades are async fire-and-forget.
-//
-// The implementation routes through entityRegistry so adding a new
-// entity type is one registry entry instead of touching this function.
-// Recordings and Docs use dedicated paths because their data lives in
-// Dgraph rather than Postgres.
-func RestoreItems(ctx context.Context, entityType string, entityIds []uuid.UUID) (int, error) {
-	if len(entityIds) == 0 {
-		return 0, nil
+// A restore that can't be done whole changes nothing: ErrUnknownArchiveKind
+// for a kind the archive doesn't keep, ErrBadArchiveID for an id not of its
+// kind's shape (entityOps.ParseID), and ErrNotInArchive for one of that shape
+// that names nothing here (entityOps.Lookup): another workspace's recording,
+// or an item purged since the list was read.
+var (
+	ErrUnknownArchiveKind = errors.New("the archive keeps no such kind of item")
+	ErrBadArchiveID       = errors.New("not an id of that kind")
+	ErrNotInArchive       = errors.New("not in the archive")
+)
+
+// RestoreItems brings items of a kind back from the archive, by the ids its
+// list gave (Settings > Archive), and answers how many came back. Never the
+// client's word for it: each id is read strictly as its kind's (ParseID) and
+// looked up in the kind's own store (Lookup), and nothing is restored unless
+// every one names an item here. A restore while an archive run of the kind is
+// under way is held off (ArchiveAlreadyRunningError).
+func RestoreItems(ctx context.Context, entityType string, entityIds []string) (int, error) {
+	ops, ok := entityRegistry[entityType]
+	if !ok {
+		return 0, fmt.Errorf("%w: %q", ErrUnknownArchiveKind, entityType)
+	}
+	ids, err := archiveIDs(entityType, ops, entityIds)
+	if err != nil || len(ids) == 0 {
+		return 0, err
 	}
 
 	// Guard: prevent restore while an archive job is running for the same entity type.
@@ -677,32 +766,79 @@ func RestoreItems(ctx context.Context, entityType string, entityIds []uuid.UUID)
 		return 0, err
 	}
 
+	known, err := ops.Lookup(ctx, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/RestoreItems could not look up the %s asked for: %+v", entityType, err)
+		return 0, err
+	}
+	if missing := firstNotIn(ids, known); missing != "" {
+		return 0, fmt.Errorf("%s %s is %w, so nothing was restored", ops.Label, missing, ErrNotInArchive)
+	}
+	return restoreKind(ctx, entityType, ids)
+}
+
+// archiveIDs reads a restore's ids as kind reads them (ops.ParseID), each
+// once, in the order given: ErrBadArchiveID names the first that is not of
+// the kind's shape. Pure.
+func archiveIDs(kind string, ops entityOps, given []string) ([]string, error) {
+	ids := make([]string, 0, len(given))
+	seen := make(map[string]bool, len(given))
+	for i, raw := range given {
+		id, ok := ops.ParseID(raw)
+		if !ok {
+			return nil, fmt.Errorf("entity_ids[%d] is %w (%s)", i, ErrBadArchiveID, kind)
+		}
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// firstNotIn is the first of ids that known doesn't hold, "" when it holds
+// them all. Pure.
+func firstNotIn(ids, known []string) string {
+	held := make(map[string]bool, len(known))
+	for _, id := range known {
+		held[id] = true
+	}
+	for _, id := range ids {
+		if !held[id] {
+			return id
+		}
+	}
+	return ""
+}
+
+// restoreKind brings back these ids of a kind: read and looked up already
+// (RestoreItems), or an archive run's own (UndoArchiveJob, which an item gone
+// since must not hold up). Docs and recordings come back in the graph by
+// their own paths, the rest by their rows and then in the graph, search and
+// memory. An id that names nothing is passed over.
+//
+// The implementation routes through entityRegistry so adding a new
+// entity type is one registry entry instead of touching this function.
+// Dgraph sync is performed synchronously to match the archive path; OpenSearch
+// cascades are async fire-and-forget.
+func restoreKind(ctx context.Context, entityType string, ids []string) (int, error) {
 	// Recordings and docs aren't backed by Postgres soft-delete; they
 	// have their own restore paths.
 	switch entityType {
 	case "docs":
 		// Any deleted doc, archived or deleted by its owner: there is no
 		// Trash in the app yet, so this list is how a deleted doc comes back.
-		return restoreDocs(ctx, entityIds, false)
+		return restoreDocs(ctx, ids, false)
 	case "recordings":
-		return restoreRecordings(ctx, entityIds)
+		return restoreRecordings(ctx, ids)
 	}
 
 	ops, registered := entityRegistry[entityType]
-	if !registered {
-		return 0, fmt.Errorf("unsupported entity type for restore: %s", entityType)
+	if !registered || !archiveModels.Archivable(entityType) {
+		return 0, fmt.Errorf("%w: %q", ErrUnknownArchiveKind, entityType)
 	}
 
-	if !archiveModels.Archivable(entityType) {
-		return 0, fmt.Errorf("unsupported entity type for restore: %s", entityType)
-	}
-
-	ids := make([]string, len(entityIds))
-	for i, id := range entityIds {
-		ids[i] = id.String()
-	}
-
-	if _, err := archiveModels.Restore(ctx, entityType, ids); err != nil {
+	if _, err := restoreRows(ctx, entityType, ids); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/RestoreItems Failed to bulk restore %s err: %+v", entityType, err)
 		return 0, err
 	}
@@ -710,7 +846,7 @@ func RestoreItems(ctx context.Context, entityType string, entityIds []uuid.UUID)
 	// earlier one that stopped part way, comes back in the graph, search and
 	// memory too, so a retry heals what an ended request left: rows live in
 	// Postgres that the app, reading the graph, still shows as deleted.
-	live, err := archiveModels.Live(ctx, entityType, ids)
+	live, err := liveRows(ctx, entityType, ids)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/RestoreItems Failed to read the restored %s err: %+v", entityType, err)
 		return 0, err
@@ -786,9 +922,11 @@ func UndoArchiveJob(ctx context.Context, jobId uuid.UUID) (int, error) {
 	if len(idStrs) == 0 {
 		return 0, fmt.Errorf("no archived item ids found for job (was this job archived before exact-id tracking was enabled?)")
 	}
-	ids := make([]uuid.UUID, 0, len(idStrs))
+	// The run's own ids, as its kind reads them: one that doesn't read (a
+	// hand-edited row) is passed over rather than holding up the rest.
+	ids := make([]string, 0, len(idStrs))
 	for _, idStr := range idStrs {
-		if id, parseErr := uuid.Parse(idStr); parseErr == nil {
+		if id, ok := entityRegistry[entityType].ParseID(idStr); ok {
 			ids = append(ids, id)
 		}
 	}
@@ -825,7 +963,9 @@ func UndoArchiveJob(ctx context.Context, jobId uuid.UUID) (int, error) {
 		// owner deleted since stays deleted.
 		count, err = restoreDocs(work, ids, true)
 	} else {
-		count, err = RestoreItems(work, entityType, ids)
+		// Not RestoreItems: an item of the run purged since is passed over,
+		// never a reason to leave the rest of the run archived.
+		count, err = restoreKind(work, entityType, ids)
 	}
 	finishUndo(work, jobId, entityType, count, err)
 	return count, err
@@ -885,7 +1025,7 @@ func GetRecentlyArchivedItems(ctx context.Context, entityType string, limit int,
 	}
 
 	cutoff := time.Now().AddDate(0, 0, -30)
-	rows, total, err := archiveModels.RecentlyArchived(ctx, entityType, cutoff, limit, offset)
+	rows, total, err := archivedRows(ctx, entityType, cutoff, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1002,39 +1142,41 @@ func getRecentlyArchivedRecordings(ctx context.Context, limit, offset int, label
 	}
 	items := make([]*ArchivedItem, 0, len(recs))
 	for _, r := range recs {
-		if r.EgressId == "" || !helpers.IsSoftDeleted(r.DeletedAt) {
+		// Only what a restore takes back: a key of a recording's shape.
+		if !helpers.IsRecordingKey(r.EgressId) || !helpers.IsSoftDeleted(r.DeletedAt) {
 			continue
 		}
 		items = append(items, &ArchivedItem{
 			Id:         r.EgressId,
-			Name:       fmt.Sprintf("%s · %s (%s)", label, r.DeletedAt.Format("Jan 02, 3:04 PM"), r.EgressId[:8]),
+			Name:       recordingRestoreName(label, r.EgressId, *r.DeletedAt),
 			ArchivedAt: *r.DeletedAt,
 		})
 	}
 	return items, total, nil
 }
 
-func restoreRecordings(ctx context.Context, entityIds []uuid.UUID) (int, error) {
-	egressIds := make([]string, len(entityIds))
-	for i, id := range entityIds {
-		egressIds[i] = id.String()
+// recordingRestoreName is how a recording reads in the restore list: a call's
+// transcript-only node says it is the call's transcript, by its session, not
+// "Recording · ... (call-RM_)"; a recording, by its egress id. Pure.
+func recordingRestoreName(label, key string, at time.Time) string {
+	short := key
+	if helpers.IsCallSessionKey(key) {
+		label, short = "Call transcript", helpers.CallSessionID(key)
 	}
+	return fmt.Sprintf("%s · %s (%s)", label, at.Format("Jan 02, 3:04 PM"), short[:min(8, len(short))])
+}
+
+// restoreRecordings brings these recordings back by their keys, in the graph
+// and then in search, and answers how many.
+func restoreRecordings(ctx context.Context, keys []string) (int, error) {
 	// Synchronous data-path restore.
-	if err := recordingDomain.BulkRestoreRecordings(ctx, egressIds); err != nil {
+	if err := restoreRecordingNodes(ctx, keys); err != nil {
 		return 0, err
 	}
-	// OpenSearch cascade async.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				helpers.MessageLogs.ErrorLog.Printf("panic in restoreRecordings OpenSearch cascade: %v", r)
-			}
-		}()
-		globalSearchDomain.SyncCascadingUnarchiveInOpenSearchMulti(
-			"recording_egress_id", egressIds, []string{"recordings"}, "cascade",
-		)
-	}()
-	return len(entityIds), nil
+	// Search follows in the background, by the registry's own restore (it
+	// spelled the same cascade out here).
+	entityRegistry["recordings"].OpenSearchRestoreFn(keys)
+	return len(keys), nil
 }
 
 // The doc restore's reads and writes: production wiring, which tests replace.
@@ -1060,11 +1202,7 @@ var (
 // stays deleted (and the error is answered), and the owner is told. A doc the
 // retention archived keeps its links, whether a run is undone (archivedOnly)
 // or an admin restores it from the list.
-func restoreDocs(ctx context.Context, entityIds []uuid.UUID, archivedOnly bool) (int, error) {
-	docUuids := make([]string, len(entityIds))
-	for i, id := range entityIds {
-		docUuids[i] = id.String()
-	}
+func restoreDocs(ctx context.Context, docUuids []string, archivedOnly bool) (int, error) {
 	ownerDeleted := map[string]*dgraphStruct.DgraphDoc{}
 	linksOff := map[string]int64{}
 	var linksErr error

@@ -87,7 +87,7 @@ func TestGraphContextAnswers(t *testing.T) {
 		body, _ := json.Marshal(map[string]any{
 			"model": model,
 			"messages": []map[string]string{
-				{"role": "system", "content": AskAISystemPromptWithConnectorsForQuery(!ai.IsSummaryOrReadIntent(q), nil, q)},
+				{"role": "system", "content": AskAISystemPromptWithConnectorsForQuery(!ai.IsSummaryOrReadIntent(q), nil, q, ai.ModelLimits{ContextWindow: 32768}, 3000)},
 				{"role": "user", "content": fmt.Sprintf("Context from workspace:\n%s\n\nQuestion: %s", contextText, q)},
 			},
 			"stream":     false,

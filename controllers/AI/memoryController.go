@@ -18,6 +18,7 @@ import (
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -40,7 +41,7 @@ func ListMemory(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/ListMemory failed: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-			"msg": "failed to load workspace memory", "err": err.Error(),
+			"msg": "failed to load workspace memory", "err": ai.ClientWords(r.Context(), err),
 		})
 		return
 	}
@@ -63,13 +64,7 @@ func UpdateMemoryStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.UpdateWorkspaceMemoryStatus(ctx, &userInfo, id, strings.TrimSpace(req.Status)); err != nil {
-		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "not authorized") {
-			status = http.StatusForbidden
-		} else if strings.Contains(err.Error(), "not found") {
-			status = http.StatusNotFound
-		}
-		helpers.WriteJSON(w, status, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "memory updated"})
@@ -92,13 +87,7 @@ func UpdateMemoryDue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.UpdateWorkspaceMemoryDue(ctx, &userInfo, id, req.Due); err != nil {
-		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "not authorized") {
-			status = http.StatusForbidden
-		} else if strings.Contains(err.Error(), "not found") {
-			status = http.StatusNotFound
-		}
-		helpers.WriteJSON(w, status, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "due date updated"})
@@ -115,13 +104,7 @@ func DeleteMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.DeleteWorkspaceMemory(ctx, &userInfo, id); err != nil {
-		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "not authorized") {
-			status = http.StatusForbidden
-		} else if strings.Contains(err.Error(), "not found") {
-			status = http.StatusNotFound
-		}
-		helpers.WriteJSON(w, status, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "memory deleted"})
@@ -146,7 +129,7 @@ func CaptureMemory(w http.ResponseWriter, r *http.Request) {
 		} else if strings.Contains(err.Error(), "not enabled") {
 			status = http.StatusConflict
 		}
-		helpers.WriteJSON(w, status, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": view})
@@ -190,7 +173,7 @@ func CreateTaskFromMemory(w http.ResponseWriter, r *http.Request) {
 		Priority:     strings.TrimSpace(req.Priority),
 	})
 	if err != nil {
-		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -217,7 +200,7 @@ func RemindAboutMemory(w http.ResponseWriter, r *http.Request) {
 		StartTime: strings.TrimSpace(req.StartTime),
 	})
 	if err != nil {
-		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -268,7 +251,7 @@ func ProposeSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := business.ProposeSchedule(ctx, &userInfo, req)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -287,7 +270,7 @@ func ConfirmSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := business.ConfirmSchedule(ctx, &userInfo, req)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -306,7 +289,7 @@ func RescheduleOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := business.RescheduleOptions(ctx, &userInfo, req)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -325,7 +308,7 @@ func ConfirmReschedule(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := business.ConfirmReschedule(ctx, &userInfo, req)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -345,7 +328,7 @@ func MeetingPrep(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := business.MeetingPrepBrief(ctx, &userInfo, req)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -360,7 +343,7 @@ func GetChannelMemoryExclusion(w http.ResponseWriter, r *http.Request) {
 	}
 	excluded, err := business.GetChannelMemoryExcluded(ctx, &userInfo, channelUUID)
 	if err != nil {
-		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": map[string]bool{"excluded": excluded}})
@@ -385,7 +368,7 @@ func SetChannelMemoryExclusion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetChannelMemoryExcluded(ctx, &userInfo, strings.TrimSpace(req.ChannelUUID), req.Excluded); err != nil {
-		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: user=%s set channel %s memory excluded=%v",
@@ -402,7 +385,7 @@ func SetMemoryLayer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetMemoryLayerEnabled(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set memory_layer enabled=%v", aiAdminUserUUID(r), req.Enabled)
@@ -418,7 +401,7 @@ func SetTeamReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetTeamReportEnabled(ctx, req.Enabled); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set team_report enabled=%v", aiAdminUserUUID(r), req.Enabled)
@@ -466,7 +449,7 @@ func RunTeamReportNow(w http.ResponseWriter, r *http.Request) {
 	}
 	posted, processed, err := business.RunTeamReportNowForVerify(ctx)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s ran team report now (posted=%d processed=%d)", aiAdminUserUUID(r), posted, processed)
@@ -501,7 +484,7 @@ func SendTestDigest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SendTestMemoryDigest(ctx, uid); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s sent test memory digest", uid)
@@ -545,7 +528,7 @@ func UnifiedSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := business.UnifiedSearch(ctx, &userInfo, req.Query)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -567,7 +550,7 @@ func UnifiedSearchAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := business.AnswerFromSearch(ctx, &userInfo, req.Query)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -591,7 +574,7 @@ func ExtractTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := business.ExtractActionItems(ctx, &userInfo, req.SourceType, req.SourceID, req.Text)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": resp})
@@ -613,7 +596,7 @@ func CreateTasksFromExtraction(w http.ResponseWriter, r *http.Request) {
 	}
 	created, failed, err := business.CreateTasksFromProposals(ctx, &userInfo, req.ProjectUUID, req.Tasks)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": map[string]int{"created": created, "failed": failed}})
@@ -637,7 +620,7 @@ func AIActivityProof(w http.ResponseWriter, r *http.Request) {
 		proofLimitFrom(r),
 	)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 
@@ -666,7 +649,7 @@ func AIActivity(w http.ResponseWriter, r *http.Request) {
 	ownerID := userInfo.UserPostgresInfo.Id
 	items, err := business.AIActivity(ctx, userInfo.UserPostgresInfo.IsAdmin, &ownerID, limit)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": items})

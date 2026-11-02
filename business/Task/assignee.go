@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
+	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 	domain "github.com/akashc777/OneCamp/domain/Task"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
@@ -62,5 +63,9 @@ func AssignInTrash(ctx context.Context, task *dgraphStruct.DgraphTask, to, by *d
 		return err
 	}
 	domain.UpdateTaskInOpenSearch(search)
+	if userUUIDOf(task.Assignee) != userUUIDOf(to) {
+		logChange(ctx, by, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectOf(task),
+			Task: &dgraphStruct.DgraphTask{Uuid: task.Uuid, Assignee: to}, Fields: []string{"task_assignee"}})
+	}
 	return nil
 }

@@ -126,7 +126,7 @@ func TestRoomNamesAreCheckedBeforeAnythingIsStored(t *testing.T) {
 // room, where its record is.
 func TestARoomRunsOnlyWhatIsItsOwn(t *testing.T) {
 	for _, a := range []string{ActMute, ActMuteAll, ActAskUnmute, ActAskAllUnmute, ActSpotlight, ActEndSpotlight,
-		ActLowerHand, ActLowerAll, ActPresentBoard, ActStopBoard, ActBoardDraw, ActBoardGuests, ActUndoGuests} {
+		ActLowerHand, ActLowerAll, ActPresentBoard, ActStopBoard, ActBoardDraw, ActBoardGuests, ActUndoGuests, ActBoardSlide} {
 		if !roomAct(a) {
 			t.Errorf("%s is refused in a room", a)
 		}

@@ -35,6 +35,7 @@ import (
 	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
 	botpost "github.com/akashc777/OneCamp/business/BotPost"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
+	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	postBusiness "github.com/akashc777/OneCamp/business/Post"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
@@ -42,6 +43,7 @@ import (
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	aiModels "github.com/akashc777/OneCamp/models/postgres/AI"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
@@ -143,6 +145,17 @@ func runMeetingRecap(ctx context.Context, call liveKitBusiness.FinishedCall) err
 		return nil
 	}
 
+	// Where the recap goes: the call's conversation, or for an event's call
+	// the conversation of the event's people. An instant meeting keeps none,
+	// so it never takes the lock.
+	home, keeps, err := recapHomeOf(ctx, roomName)
+	if err != nil {
+		return fmt.Errorf("the call's home: %w", err)
+	}
+	if !keeps {
+		return nil
+	}
+
 	// 2. Idempotency lock: one recap per CALL. Keyed by the room it locked
 	//    every later call in the same channel out for 30 minutes.
 	if !acquireRecapLock(ctx, call.SessionKey) {
@@ -232,7 +245,7 @@ func runMeetingRecap(ctx context.Context, call liveKitBusiness.FinishedCall) err
 
 	notesDocUUID := ""
 	if settings.MeetingNotesDocEnabled {
-		docUUID, derr := createMeetingNotesDoc(ctx, meetingSurfaceName(ctx, roomName, helpers.FirstNonBlank(speakerUIDs...)), call, speakerUIDs, recap, gapNote, lines, nameByUID)
+		docUUID, derr := createMeetingNotesDoc(ctx, home.surfaceName(ctx, roomName, helpers.FirstNonBlank(speakerUIDs...)), call, home, speakerUIDs, recap, gapNote, lines, nameByUID)
 		if derr != nil {
 			helpers.LogErrorWithContext(ctx, "AI meeting recap: notes document for room %q failed: %+v", roomName, derr)
 		} else if docUUID != "" {
@@ -241,8 +254,17 @@ func runMeetingRecap(ctx context.Context, call liveKitBusiness.FinishedCall) err
 		}
 	}
 
-	authorUUID, err := deliverRecapWithFallback(ctx, roomName, speakerUIDs, recap, egressID, notesDocUUID, gapNote)
-	if err != nil {
+	// 9. Deliver it, then note on the call's transcript what it made: the
+	//    notes, and for an event's call the conversation it went to, which the
+	//    event links to. An event with no conversation keeps its notes alone.
+	authorUUID := ""
+	if home.conv.Kind != "" {
+		authorUUID, err = deliverRecapWithFallback(ctx, home, speakerUIDs, recap, egressID, notesDocUUID, gapNote)
+	}
+	if rerr := recordCallArtefacts(ctx, call.SessionKey, notesDocUUID, home.recapChat(authorUUID != "")); rerr != nil {
+		helpers.LogErrorWithContext(ctx, "AI meeting recap: could not note the call's artefacts for room %q: %+v", roomName, rerr)
+	}
+	if err != nil || authorUUID == "" {
 		return err
 	}
 
@@ -252,7 +274,7 @@ func runMeetingRecap(ctx context.Context, call liveKitBusiness.FinishedCall) err
 	//    is off or fails. Uses the recap text (already concise + factual)
 	//    rather than the raw transcript to keep the extraction prompt small
 	//    and high-signal.
-	extractMemoryFromRecap(ctx, roomName, authorUUID, recap)
+	extractMemoryFromRecap(ctx, home.conv, roomName, authorUUID, recap)
 	return nil
 }
 
@@ -262,31 +284,50 @@ func runMeetingRecap(ctx context.Context, call liveKitBusiness.FinishedCall) err
 // any speaker will do: the title falls back cleanly when the lookup fails, so
 // this never needs to be the "right" one.
 
-// extractMemoryFromRecap feeds the recap into the memory extractor with
-// scope derived from the room name. Best-effort; logs and returns.
-func extractMemoryFromRecap(ctx context.Context, roomName, authorDgraphUID, recap string) {
-	scope := MemoryScope{
+// rememberRecap is the memory extractor a recap goes through, and
+// recapAuthorOf how the recap's author is read for it (seams for tests).
+var (
+	rememberRecap = MaybeExtractMemory
+	recapAuthorOf = getUserInfoByDgraphUID
+)
+
+// recapMemoryScope is where a recap's memory is kept: the conversation the
+// call's recap went to (conv), so only its people recall it. ok is false when
+// no conversation holds it (an event's call whose organiser is alone with
+// guests by email, or one inviting more people than a conversation holds): a
+// memory with no channel or chat is stored unscoped, and no scope would keep
+// it from everyone else in the workspace. Pure.
+func recapMemoryScope(conv conversationBusiness.Ref, roomName string) (scope MemoryScope, ok bool) {
+	scope = MemoryScope{
 		SourceType: "recap",
 		SourceUUID: memoryRoomSourceID(roomName),
 	}
+	switch conv.Kind {
+	case conversationBusiness.KindDM, conversationBusiness.KindGroup:
+		// A chat's grouping id, as chats are scoped everywhere else.
+		scope.ChatGrpID = conv.ID
+	case conversationBusiness.KindChannel:
+		scope.ChannelUUID = conv.ID
+	default:
+		return MemoryScope{}, false
+	}
+	return scope, true
+}
+
+// extractMemoryFromRecap feeds the recap into the memory extractor, scoped to
+// the conversation its recap went to (recapMemoryScope); nobody remembers a
+// recap that no conversation holds. Best-effort; logs and returns.
+func extractMemoryFromRecap(ctx context.Context, conv conversationBusiness.Ref, roomName, authorDgraphUID, recap string) {
+	scope, ok := recapMemoryScope(conv, roomName)
+	if !ok {
+		return
+	}
 	// Resolve the author's app UUID for created_by / owner-visibility.
-	if u, err := getUserInfoByDgraphUID(ctx, authorDgraphUID); err == nil && u != nil {
+	if u, err := recapAuthorOf(ctx, authorDgraphUID); err == nil && u != nil {
 		scope.CreatedByUUID = u.UserDgraphInfo.Uuid
 	}
 
-	switch {
-	case strings.Contains(roomName, " "):
-		// DM room name IS the canonical grouping id (space-joined sorted
-		// user UUIDs — see helpers.GetGroupingId). Use it verbatim so the
-		// scope key matches how DMs are scoped everywhere else.
-		scope.ChatGrpID = strings.TrimSpace(roomName)
-	case !strings.Contains(roomName, "-") && len(roomName) == 32:
-		scope.ChatGrpID = roomName
-	default:
-		scope.ChannelUUID = roomName
-	}
-
-	if _, err := MaybeExtractMemory(ctx, recap, scope); err != nil {
+	if _, err := rememberRecap(ctx, recap, scope); err != nil {
 		helpers.LogErrorWithContext(ctx, "AI memory extraction for room %q: %v", roomName, err)
 	}
 }
@@ -377,7 +418,8 @@ func isLikelyUserUID(identity string) bool {
 // resilient to a lead speaker who left the workspace / lost channel access
 // after the call, without ever posting on behalf of someone without access
 // (each delivery path re-checks the author's access).
-func deliverRecapWithFallback(ctx context.Context, roomName string, speakerUIDs []string, recap, egressID, notesDocUUID, gapNote string) (string, error) {
+func deliverRecapWithFallback(ctx context.Context, home recapHome, speakerUIDs []string, recap, egressID, notesDocUUID, gapNote string) (string, error) {
+	conv := home.conv
 	var lastErr error
 	tried := 0
 	for _, uid := range speakerUIDs {
@@ -387,9 +429,9 @@ func deliverRecapWithFallback(ctx context.Context, roomName string, speakerUIDs 
 			break
 		}
 		tried++
-		if err := deliverRecap(ctx, roomName, uid, recap, egressID, notesDocUUID, gapNote); err != nil {
+		if err := deliverRecap(ctx, home, uid, recap, egressID, notesDocUUID, gapNote); err != nil {
 			lastErr = err
-			helpers.LogInfoWithContext(ctx, "AI recap: author %s could not deliver to %q (%v); trying next", uid, roomName, err)
+			helpers.LogInfoWithContext(ctx, "AI recap: author %s could not deliver to %s %q (%v); trying next", uid, conv.Kind, conv.ID, err)
 			continue
 		}
 		return uid, nil
@@ -400,27 +442,27 @@ func deliverRecapWithFallback(ctx context.Context, roomName string, speakerUIDs 
 	return "", lastErr
 }
 
-// deliverRecap posts the recap to the correct surface. Room-name shape
-// (mirrors controllers/LiveKit.broadcastCallStop):
-//   - contains a space   → DM (space-separated sorted user UUIDs)
-//   - 32-char hex hash    → group chat (grouping id)
-//   - UUID (hyphens)      → channel
-func deliverRecap(ctx context.Context, roomName, authorUID, recap, egressID, notesDocUUID, gapNote string) error {
+// deliverRecap posts the recap where the call keeps it (home.conv, from
+// business/CallState HomeOf): a DM, a group or a channel; for an event's call,
+// its people's DM or group.
+func deliverRecap(ctx context.Context, home recapHome, authorUID, recap, egressID, notesDocUUID, gapNote string) error {
+	conv := home.conv
 	authorInfo, err := getUserInfoByDgraphUID(ctx, authorUID)
 	if err != nil {
 		return fmt.Errorf("resolve author: %w", err)
 	}
 
-	htmlText := recapToHTML(recap, recordingPlayAttrs(roomName, egressID), notesDocUUID, gapNote)
+	htmlText := recapToHTML(recap, recordingPlayAttrs(conv, egressID), notesDocUUID, gapNote)
 
-	switch {
-	case strings.Contains(roomName, " "):
-		return deliverRecapToDM(ctx, roomName, authorInfo, htmlText)
-	case !strings.Contains(roomName, "-") && len(roomName) == 32:
-		return deliverRecapToGroup(ctx, roomName, authorInfo, htmlText)
-	default:
-		return deliverRecapToChannel(ctx, roomName, authorInfo, htmlText)
+	switch conv.Kind {
+	case conversationBusiness.KindDM:
+		return deliverRecapToDM(ctx, conv, authorInfo, htmlText)
+	case conversationBusiness.KindGroup:
+		return deliverRecapToGroup(ctx, conv.ID, authorInfo, htmlText, home.members)
+	case conversationBusiness.KindChannel:
+		return deliverRecapToChannel(ctx, conv.ID, authorInfo, htmlText)
 	}
+	return fmt.Errorf("no conversation holds the call (%s %q)", conv.Kind, conv.ID)
 }
 
 // getUserInfoByDgraphUID builds a full UserInfo (postgres + dgraph) from a
@@ -495,9 +537,13 @@ func deliverRecapToChannel(ctx context.Context, channelUUID string, authorInfo *
 // consistent AI identity as channel recaps. CreateChatForGroup records the
 // author into the existing grouping and notifies the resolved participants, so
 // the bot need not be a group member. Falls back to the participant as author
-// if the bot is unavailable.
-func deliverRecapToGroup(ctx context.Context, grpID string, authorInfo *userModels.UserInfo, htmlText string) error {
+// if the bot is unavailable. An event's people (members) with no group yet
+// have it made by this recap, their first artefact (makeEventGroup).
+func deliverRecapToGroup(ctx context.Context, grpID string, authorInfo *userModels.UserInfo, htmlText string, members []*dgraphStruct.DgraphUser) error {
 	dgraphDm, err := chatBusiness.GetDgraphDmBasicInfoFromDgraph(ctx, authorInfo.UserDgraphInfo.Uid, grpID)
+	if err == nil && dgraphDm == nil && len(members) > 0 {
+		return makeEventGroup(ctx, grpID, authorInfo, htmlText, members)
+	}
 	if err != nil || dgraphDm == nil {
 		return fmt.Errorf("recap author lacks access to group %q", grpID)
 	}
@@ -520,23 +566,12 @@ func deliverRecapToGroup(ctx context.Context, grpID string, authorInfo *userMode
 	return nil
 }
 
-// deliverRecapToDM posts the recap into a 1:1 DM. The room name is the
-// space-joined sorted pair of user UUIDs; the recipient is the OTHER
-// participant relative to the author.
-func deliverRecapToDM(ctx context.Context, roomName string, authorInfo *userModels.UserInfo, htmlText string) error {
-	parts := strings.Fields(roomName)
-	if len(parts) != 2 {
-		return fmt.Errorf("unexpected DM room name %q", roomName)
-	}
-	authorPgID := authorInfo.UserPostgresInfo.Id.String()
-	toUUID := ""
-	for _, p := range parts {
-		if p != authorInfo.UserDgraphInfo.Uuid && p != authorPgID {
-			toUUID = p
-		}
-	}
+// deliverRecapToDM posts the recap into a 1:1 DM, to the person beside the
+// author in it.
+func deliverRecapToDM(ctx context.Context, dm conversationBusiness.Ref, authorInfo *userModels.UserInfo, htmlText string) error {
+	toUUID := dm.Other(authorInfo.UserDgraphInfo.Uuid)
 	if toUUID == "" {
-		return fmt.Errorf("could not determine DM recipient from room %q", roomName)
+		return fmt.Errorf("the recap's author isn't one of DM %q's two people", dm.ID)
 	}
 	parsedTo, err := uuid.Parse(toUUID)
 	if err != nil {
@@ -550,39 +585,37 @@ func deliverRecapToDM(ctx context.Context, roomName string, authorInfo *userMode
 	if _, err := chatBusiness.CreateChat(ctx, chatInput, authorInfo, sendTo, parsedTo, nil); err != nil {
 		return fmt.Errorf("post recap to DM: %w", err)
 	}
-	helpers.LogInfoWithContext(ctx, "AI meeting recap posted to DM %q", roomName)
+	helpers.LogInfoWithContext(ctx, "AI meeting recap posted to DM %q", dm.ID)
 	return nil
 }
 
-// recordingPlayLink builds the in-app data attributes for the recap's "Play
+// recordingPlayAttrs builds the in-app data attributes for the recap's "Play
 // recording" block (a recordingEmbed Tiptap node). The FE renders it as a
 // button that opens the recording player in place (no navigation). Returns ""
-// when there's no egress id.
+// when there's no egress id, or no conversation to play it from.
 //
-// Surface attrs mirror the room-name shape:
+// The recording is addressed by the conversation the call belongs to (conv):
 //   - channel → kind=channel & sid=<channelUUID>
 //   - group   → kind=group   & sid=<groupId>
 //   - DM      → kind=dm & u1=<uuidA> & u2=<uuidB> (the FE picks the peer ≠ self,
 //     since a DM recording media URL is addressed by the OTHER participant)
-func recordingPlayAttrs(roomName, egressID string) string {
+func recordingPlayAttrs(conv conversationBusiness.Ref, egressID string) string {
 	id := strings.TrimSpace(egressID)
 	if id == "" {
 		return ""
 	}
 	attrs := fmt.Sprintf(` data-egress="%s"`, htmlAttrEscape(id))
-	switch {
-	case strings.Contains(roomName, " "):
-		parts := strings.Fields(roomName)
-		if len(parts) == 2 {
-			attrs += fmt.Sprintf(` data-kind="dm" data-u1="%s" data-u2="%s"`,
-				htmlAttrEscape(parts[0]), htmlAttrEscape(parts[1]))
+	switch conv.Kind {
+	case conversationBusiness.KindDM:
+		parts := strings.Fields(conv.ID)
+		if len(parts) != 2 {
+			return ""
 		}
-	case !strings.Contains(roomName, "-") && len(roomName) == 32:
-		attrs += fmt.Sprintf(` data-kind="group" data-sid="%s"`, htmlAttrEscape(roomName))
-	default:
-		attrs += fmt.Sprintf(` data-kind="channel" data-sid="%s"`, htmlAttrEscape(roomName))
+		return attrs + fmt.Sprintf(` data-kind="dm" data-u1="%s" data-u2="%s"`, htmlAttrEscape(parts[0]), htmlAttrEscape(parts[1]))
+	case conversationBusiness.KindGroup, conversationBusiness.KindChannel:
+		return attrs + fmt.Sprintf(` data-kind="%s" data-sid="%s"`, conv.Kind, htmlAttrEscape(conv.ID))
 	}
-	return attrs
+	return ""
 }
 
 // transcriptGapNote describes, in one sentence, the part of the conversation

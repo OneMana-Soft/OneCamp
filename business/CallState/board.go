@@ -32,6 +32,9 @@ type Board struct {
 	Draw string `json:"draw"`
 	// Guests is whether the call's guests draw too ("Guests can draw").
 	Guests bool `json:"guests"`
+	// Slide is the frame on the board everyone is shown (Slides control): its
+	// element id, "" for the whole board.
+	Slide string `json:"slide,omitempty"`
 }
 
 // Draws is whether someone in the call draws on the board: the presenter
@@ -49,7 +52,12 @@ func boardOf(s *model.Session) *Board {
 	if s.BoardUUID == nil {
 		return nil
 	}
-	return &Board{UUID: s.BoardUUID.String(), By: s.BoardBy, Draw: s.BoardDraw, Guests: s.BoardGuestsDraw}
+	return &Board{UUID: s.BoardUUID.String(), By: s.BoardBy, Draw: s.BoardDraw, Guests: s.BoardGuestsDraw, Slide: s.BoardSlide}
+}
+
+// boardFrom is the board a write on its row answered. Pure.
+func boardFrom(b model.BoardState) *Board {
+	return &Board{UUID: b.UUID.String(), By: b.By, Draw: b.Draw, Guests: b.GuestsDraw, Slide: b.Slide}
 }
 
 // Grant is what a call gives someone in it now on the board on its stage.
@@ -181,7 +189,27 @@ func SetBoardDraw(ctx context.Context, s *Session, draw *string, guests *bool) (
 	if err != nil || !on {
 		return nil, err
 	}
-	return &Board{UUID: b.UUID.String(), By: b.By, Draw: b.Draw, Guests: b.GuestsDraw}, nil
+	return boardFrom(b), nil
+}
+
+// SetBoardSlide shows everyone in the call slide, a frame on board ("" for the
+// whole board), while board is on the call's stage and, unless by is "", by
+// put it there. Answers the board as it is now, nil when the move landed on
+// nothing. ErrCallOver once it ended.
+func SetBoardSlide(ctx context.Context, s *Session, board, by, slide string) (*Board, error) {
+	id, err := uuid.Parse(board)
+	if err != nil {
+		return nil, nil
+	}
+	row, err := rowOf(ctx, s)
+	if err != nil {
+		return nil, err
+	}
+	b, on, err := model.SetBoardSlide(ctx, row.ID, id, by, slide)
+	if err != nil || !on {
+		return nil, err
+	}
+	return boardFrom(b), nil
 }
 
 // GuestsKept is whether the board on the call's stage had its version from

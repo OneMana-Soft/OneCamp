@@ -24,7 +24,7 @@ func TestAskAISystemPromptIncludesChartsOnlyWithTools(t *testing.T) {
 		if strings.Contains(AskAISystemPrompt(true), "```chart") {
 			t.Fatal("no executors registered: chart block should be absent")
 		}
-		if strings.Contains(AskAISystemPromptForQuery(true, "chart tasks"), "```chart") {
+		if strings.Contains(AskAISystemPromptForQuery(true, "chart tasks", ai.ModelLimits{ContextWindow: 32768}, 3000), "```chart") {
 			t.Fatal("no executors registered: chart block should be absent (routed)")
 		}
 	}
@@ -32,7 +32,7 @@ func TestAskAISystemPromptIncludesChartsOnlyWithTools(t *testing.T) {
 	if strings.Contains(AskAISystemPrompt(false), "```chart") {
 		t.Error("withTools=false must not include the chart block")
 	}
-	if strings.Contains(AskAISystemPromptForQuery(false, "chart tasks"), "```chart") {
+	if strings.Contains(AskAISystemPromptForQuery(false, "chart tasks", ai.ModelLimits{ContextWindow: 32768}, 3000), "```chart") {
 		t.Error("withTools=false (routed) must not include the chart block")
 	}
 }

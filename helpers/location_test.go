@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -27,6 +28,51 @@ func TestFirstLocation(t *testing.T) {
 	}
 	if _, ok := FirstLocation(); ok {
 		t.Error("no names is a zone")
+	}
+}
+
+// SameZone is one zone by any of its names, never by spelling (V-135).
+func TestSameZone(t *testing.T) {
+	for _, p := range [][2]string{
+		{"Asia/Kolkata", "Asia/Calcutta"}, {"Europe/Kyiv", "Europe/Kiev"}, {"UTC", "Etc/UTC"}, {"Etc/UTC", "Zulu"},
+		{"America/New_York", "US/Eastern"}, {"America/Indiana/Indianapolis", "America/Indianapolis"},
+		{" Asia/Kolkata ", "Asia/Calcutta"},
+		// Equal names are one zone, whatever they name: nothing changed.
+		{"Asia/Kolkata", "Asia/Kolkata"}, {"", ""}, {"Mars/Olympus", "Mars/Olympus"},
+	} {
+		if !SameZone(p[0], p[1]) || !SameZone(p[1], p[0]) {
+			t.Errorf("%q and %q are one zone", p[0], p[1])
+		}
+	}
+	// Other zones, and zones whose clocks agree under names of their own:
+	// Dublin's summer is Irish Standard Time, London's British Summer Time;
+	// Abidjan keeps GMT, and Etc/GMT is a zone apart from UTC.
+	for _, p := range [][2]string{
+		{"Asia/Kolkata", "Asia/Colombo"}, {"Europe/Berlin", "Europe/Paris"}, {"America/New_York", "America/Toronto"},
+		{"Europe/London", "Europe/Dublin"}, {"UTC", "Africa/Abidjan"}, {"UTC", "Etc/GMT"},
+		// A blank name, the server's own zone or one Go doesn't know is none.
+		{"", "UTC"}, {"Local", "UTC"}, {"Mars/Olympus", "UTC"}, {"Mars/Olympus", "Mars/Base"}, {"../../etc/passwd", "UTC"},
+	} {
+		if SameZone(p[0], p[1]) || SameZone(p[1], p[0]) {
+			t.Errorf("%q and %q are two zones", p[0], p[1])
+		}
+	}
+}
+
+// SameZone keeps a record for each name Go knows and for no other, so names
+// that requests make up can't grow what it keeps.
+func TestSameZoneKeepsOnlyZones(t *testing.T) {
+	kept := func() (n int) {
+		zoneRecords.Range(func(any, any) bool { n++; return true })
+		return n
+	}
+	SameZone("Asia/Kolkata", "Asia/Calcutta")
+	was := kept()
+	for i := range 200 {
+		SameZone(fmt.Sprintf("Nowhere/%d", i), "Asia/Kolkata")
+	}
+	if now := kept(); now != was {
+		t.Errorf("kept %d records, then %d after 200 unknown names", was, now)
 	}
 }
 

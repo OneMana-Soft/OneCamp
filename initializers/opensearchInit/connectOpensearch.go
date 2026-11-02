@@ -256,7 +256,7 @@ func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
 			"mappings": {
 				"properties": {
 					"board_title": { "type": "text", "index": true },
-					"board_snippet": { "type": "text", "index": true },
+					"board_snippet": { "type": "text", "index": true },` + boardTextProperties + `,
 					"board_uuid": { "type": "keyword", "index": true },
 					"board_created_by_user_id": { "type": "keyword", "index": true },
 					"board_created_by_user_full_name": { "type": "text", "index": true },
@@ -397,6 +397,7 @@ func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
 	}
 
 	ensureDocAccessMapping(ctx)
+	ensureMapping(ctx, "boards", boardTextProperties)
 	ensureQueryCopies(ctx)
 
 	helpers.GoSafeNamed("ensureAuditLogRetention", func() { ensureAuditLogRetention(context.Background()) })

@@ -10,7 +10,11 @@
 //   - a guest who may only look publishes nothing;
 //   - a call's guest who draws shows their pointer, nothing else (no presenter
 //     to follow);
-//   - a member who may only read keeps their presence (a doc's "viewing" list);
+//   - a member who may only read keeps their presence (a doc's "viewing" list),
+//     but only an editor presents, holds everyone or brings everyone: a
+//     reader's presenting and bring reach nobody;
+//   - each member's user says whether they may edit (edit), as the server
+//     knows it, never as their tab claims; a guest's says nothing;
 //   - a tab speaks only for its own presence;
 //   - a client's broadcast reaches no other tab, and its socket stays open.
 import { test } from 'node:test'
@@ -63,7 +67,7 @@ test("nobody wears another's name: a member is named by the API, a drawing guest
     const kai = await open(CALL_GUEST, 'edit')
     assert.equal(kai.scope, 'read-write')
     maya.presence({ user: { id: 'u-sam', name: 'Sam Rivera', color: '#000000', hue: 'red', profileKey: 'k-maya' }, pointer: { x: 3, y: 4 }, button: 'up', mode: 'editing' })
-    kai.presence({ user: { id: 'u-sam', name: 'Sam Rivera', profileKey: 'k-sam' }, pointer: { x: 5, y: 6 }, button: 'down', mode: 'editing' })
+    kai.presence({ user: { id: 'u-sam', name: 'Sam Rivera', profileKey: 'k-sam', edit: true }, pointer: { x: 5, y: 6 }, button: 'down', mode: 'editing', bring: { id: 'b-kai', view: VIEW } })
     await until(() => sam.others.get(maya.doc.clientID)?.user && sam.others.get(kai.doc.clientID)?.user, 3000, 'Sam hears both')
 
     const m = sam.others.get(maya.doc.clientID)
@@ -109,8 +113,39 @@ test('a member who may only read keeps their presence, under their own name, on 
         maya.presence({ user: { id: 'u-sam', name: 'Sam Rivera' }, pointer: { x: 9, y: 9 }, mode: 'viewing' })
         await until(() => sam.others.get(maya.doc.clientID)?.user, 3000, `Sam hears Maya on ${name}`)
         const m = sam.others.get(maya.doc.clientID)
-        assert.deepEqual({ id: m.user.id, name: m.user.name, mode: m.mode, pointer: m.pointer }, { id: 'u-maya', name: 'Maya Chen', mode: 'viewing', pointer: { x: 9, y: 9 } }, name)
+        assert.deepEqual({ id: m.user.id, name: m.user.name, mode: m.mode, pointer: m.pointer, edit: m.user.edit }, { id: 'u-maya', name: 'Maya Chen', mode: 'viewing', pointer: { x: 9, y: 9 }, edit: false }, name)
     }
+})
+
+test("only an editor presents, holds or brings everyone: a reader's reach nobody, and each member's edit is the server's, whatever their tab claims", async () => {
+    const { open } = await room()
+    const sam = await open(SAM)
+    const maya = await open(MAYA, 'view')
+    assert.equal(maya.scope, 'readonly')
+    // Maya may only read; her tab claims an editor's user, presenting, hold and bring.
+    maya.presence({ user: { id: 'u-maya', name: 'Maya Chen', edit: true }, pointer: { x: 1, y: 2 }, presenting: { userId: 'u-maya', name: 'Maya Chen', view: VIEW, hold: true }, bring: { id: 'b-maya', view: VIEW } })
+    // Sam may edit; his tab says he may not.
+    sam.presence({ user: { id: 'u-sam', name: 'Sam Rivera', edit: false }, presenting: { userId: 'u-sam', name: 'Sam Rivera', view: VIEW, hold: true }, bring: { id: 'b-sam', view: VIEW } })
+    await until(() => sam.others.get(maya.doc.clientID)?.user && maya.others.get(sam.doc.clientID)?.user, 3000, 'each hears the other')
+
+    // A reader keeps her pointer, but nobody is held by, follows or is brought to her view.
+    const m = sam.others.get(maya.doc.clientID)
+    assert.deepEqual({ edit: m.user.edit, presenting: m.presenting, bring: m.bring, pointer: m.pointer }, { edit: false, presenting: undefined, bring: undefined, pointer: { x: 1, y: 2 } })
+    // An editor's presenting, hold and bring reach the others, and his user says he may edit.
+    const s = maya.others.get(sam.doc.clientID)
+    assert.deepEqual({ edit: s.user.edit, presenting: s.presenting, bring: s.bring }, { edit: true, presenting: { userId: 'u-sam', name: 'Sam Rivera', view: VIEW, hold: true }, bring: { id: 'b-sam', view: VIEW } })
+})
+
+test("a board member whose sign-in answer leaves canEdit out may only read: no writes, no presenting or bring, edit false (V-230)", async () => {
+    const { open } = await room()
+    const sam = await open(SAM)
+    const maya = await open(MAYA, 'unsaid')
+    // Fail closed: only canEdit: true lets a member write; Hocuspocus refuses a read-only connection's writes.
+    assert.equal(maya.scope, 'readonly')
+    maya.presence({ user: { id: 'u-maya', name: 'Maya Chen', edit: true }, presenting: { userId: 'u-maya', name: 'Maya Chen', view: VIEW, hold: true }, bring: { id: 'b-maya', view: VIEW } })
+    await until(() => sam.others.get(maya.doc.clientID)?.user, 3000, 'Sam hears Maya')
+    const m = sam.others.get(maya.doc.clientID)
+    assert.deepEqual({ edit: m.user.edit, presenting: m.presenting, bring: m.bring }, { edit: false, presenting: undefined, bring: undefined })
 })
 
 test("a tab speaks only for its own presence: nobody moves or removes another's cursor", async () => {

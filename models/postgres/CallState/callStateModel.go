@@ -112,6 +112,9 @@ type Session struct {
 	BoardBy         string
 	BoardDraw       string
 	BoardGuestsDraw bool
+	// BoardSlide is the board's frame everyone is shown (Slides control), ""
+	// for the whole board.
+	BoardSlide string
 	// A breakout room's call is its parent's (calls package C,
 	// breakoutModel.go); a parent's rooms are open since BreakoutsOpenAt,
 	// people choose their own while BreakoutsChoose, they close by themselves
@@ -187,7 +190,7 @@ func db() (*sql.DB, error) {
 const sessionColumns = `id, room, COALESCE(room_sid, ''), kind, resource_kind, resource_id, post_uuid,
 	COALESCE(topic, ''), started_by, started_at, ended_at, COALESCE(ended_reason, ''), locked_at,
 	COALESCE(locked_by, ''), COALESCE(spotlight, ''), mute_on_entry, held, qa_open, qa_shown, qa_anonymous,
-	board_uuid, COALESCE(board_by, ''), board_draw, board_guests_draw,
+	board_uuid, COALESCE(board_by, ''), board_draw, board_guests_draw, COALESCE(board_slide, ''),
 	parent_session_id, breakouts_open_at, breakouts_choose, breakouts_ends_at, breakouts_closing_at`
 
 type scanner interface{ Scan(dest ...any) error }
@@ -197,7 +200,7 @@ func scanSession(row scanner) (*Session, error) {
 	err := row.Scan(&s.ID, &s.Room, &s.RoomSID, &s.Kind, &s.ResourceKind, &s.ResourceID, &s.PostUUID,
 		&s.Topic, &s.StartedBy, &s.StartedAt, &s.EndedAt, &s.EndedReason, &s.LockedAt,
 		&s.LockedBy, &s.Spotlight, &s.MuteOnEntry, pq.Array(&s.Held), &s.QAOpen, &s.QAShown, &s.QAAnonymous,
-		&s.BoardUUID, &s.BoardBy, &s.BoardDraw, &s.BoardGuestsDraw,
+		&s.BoardUUID, &s.BoardBy, &s.BoardDraw, &s.BoardGuestsDraw, &s.BoardSlide,
 		&s.ParentSessionID, &s.BreakoutsOpenAt, &s.BreakoutsChoose, &s.BreakoutsEndsAt, &s.BreakoutsClosingAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

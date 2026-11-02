@@ -8,6 +8,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -399,7 +400,10 @@ const (
 	ShareManage  = "manage"
 )
 
-// CalendarShare is a calendar shared with someone at a level.
+// CalendarShare is a calendar shared with someone at a level. A share
+// stopped is kept (V-184 head 3b, migration 550): the row is marked deleted_at
+// and deleted_by (who stopped it), every read says softDelete.Live, and
+// sharing again brings the same row back, live.
 type CalendarShare struct {
 	CalendarID uuid.UUID
 	PersonID   uuid.UUID
@@ -411,7 +415,7 @@ func SharesFor(ctx context.Context, person uuid.UUID, calendars []uuid.UUID) (ma
 	if len(calendars) == 0 {
 		return map[uuid.UUID]string{}, nil
 	}
-	out, err := pgexec.Pairs[uuid.UUID, string](ctx, `SELECT calendar_id, level FROM calendar_shares WHERE person_id = $1 AND calendar_id = ANY($2::uuid[])`, person, uuidArray(calendars))
+	out, err := pgexec.Pairs[uuid.UUID, string](ctx, `SELECT calendar_id, level FROM calendar_shares WHERE person_id = $1 AND calendar_id = ANY($2::uuid[]) AND `+softDelete.Live(""), person, uuidArray(calendars))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.SharesFor err: %+v", err)
 		return nil, err
@@ -421,7 +425,7 @@ func SharesFor(ctx context.Context, person uuid.UUID, calendars []uuid.UUID) (ma
 
 // SharesOf are who a calendar is shared with.
 func SharesOf(ctx context.Context, calendar uuid.UUID) ([]CalendarShare, error) {
-	out, err := pgexec.Query(ctx, `SELECT calendar_id, person_id, level FROM calendar_shares WHERE calendar_id = $1 ORDER BY created_at, person_id`,
+	out, err := pgexec.Query(ctx, `SELECT calendar_id, person_id, level FROM calendar_shares WHERE calendar_id = $1 AND `+softDelete.Live("")+` ORDER BY created_at, person_id`,
 		func(r pgexec.Row) (CalendarShare, error) {
 			var s CalendarShare
 			err := r.Scan(&s.CalendarID, &s.PersonID, &s.Level)
@@ -433,14 +437,18 @@ func SharesOf(ctx context.Context, calendar uuid.UUID) ([]CalendarShare, error) 
 	return out, err
 }
 
-// SetShare shares a calendar with someone at a level, or ("" level) stops.
+// SetShare shares a calendar with someone at a level, by whom, or ("" level)
+// stops: the row stays, marked by whom (uuid.Nil for nobody), at the level it
+// had. Sharing again brings a stopped share's row back, live.
 func SetShare(ctx context.Context, calendar, person, by uuid.UUID, level string) error {
 	var err error
 	if level == "" {
-		_, err = pgexec.Exec(ctx, `DELETE FROM calendar_shares WHERE calendar_id = $1 AND person_id = $2`, calendar, person)
+		_, err = pgexec.Exec(ctx, `UPDATE calendar_shares SET deleted_at = NOW(), deleted_by = $3, updated_at = NOW()
+			WHERE calendar_id = $1 AND person_id = $2 AND `+softDelete.Live(""), calendar, person, softDelete.By(by))
 	} else {
 		_, err = pgexec.Exec(ctx, `INSERT INTO calendar_shares (calendar_id, person_id, level, granted_by) VALUES ($1, $2, $3, $4)
-			ON CONFLICT (calendar_id, person_id) DO UPDATE SET level = EXCLUDED.level, granted_by = EXCLUDED.granted_by, updated_at = NOW()`, calendar, person, level, by)
+			ON CONFLICT (calendar_id, person_id) DO UPDATE SET level = EXCLUDED.level, granted_by = EXCLUDED.granted_by, updated_at = NOW(),
+			 deleted_at = NULL, deleted_by = NULL`, calendar, person, level, by)
 	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.SetShare err: %+v", err)
@@ -460,7 +468,7 @@ func PersonalCalendarsOf(ctx context.Context, owners []uuid.UUID) ([]Calendar, e
 // SharedWith are the calendars shared with person, not in the trash.
 func SharedWith(ctx context.Context, person uuid.UUID) ([]Calendar, error) {
 	return queryCalendars(ctx, `SELECT c.id, c.kind, c.owner_id, c.name, c.hue, c.tz, c.container_kind, c.container_id, c.deleted_at IS NOT NULL
-		FROM calendars c JOIN calendar_shares s ON s.calendar_id = c.id WHERE s.person_id = $1 AND c.deleted_at IS NULL ORDER BY s.created_at, c.id`, person)
+		FROM calendars c JOIN calendar_shares s ON s.calendar_id = c.id WHERE s.person_id = $1 AND `+softDelete.Live("s")+` AND c.deleted_at IS NULL ORDER BY s.created_at, c.id`, person)
 }
 
 // UpdateCalendar changes a calendar's name and colour (nil leaves one).

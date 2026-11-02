@@ -57,6 +57,8 @@ import (
 	postController "github.com/akashc777/OneCamp/controllers/Post"
 	preferencesController "github.com/akashc777/OneCamp/controllers/Preferences"
 	projectController "github.com/akashc777/OneCamp/controllers/Project"
+	projectLinkController "github.com/akashc777/OneCamp/controllers/ProjectLink"
+	projectPlanController "github.com/akashc777/OneCamp/controllers/ProjectPlan"
 	projectTemplateController "github.com/akashc777/OneCamp/controllers/ProjectTemplate"
 	projectUpdateController "github.com/akashc777/OneCamp/controllers/ProjectUpdate"
 	publicController "github.com/akashc777/OneCamp/controllers/Public"
@@ -1445,6 +1447,28 @@ func routes() *chi.Mux {
 		r.Post("/{project_uuid}/milestones/{milestone_id}/delete", milestoneController.DeleteMilestone)
 		r.Post("/{project_uuid}/milestones/{milestone_id}/share", milestoneController.ShareMilestone)
 		r.Post("/{project_uuid}/milestones/{milestone_id}/unshare", milestoneController.UnshareMilestone)
+		// A project's links to the tools its people use elsewhere, as cards
+		// this server read from their pages (basecamp-16): whoever may see
+		// the project reads them and their pictures; its admins add, rename
+		// and delete them. See business/ProjectLink.
+		r.Get("/{project_uuid}/links", projectLinkController.ListLinks)
+		r.Post("/{project_uuid}/links", projectLinkController.AddLink)
+		r.Post("/{project_uuid}/links/{link_id}/edit", projectLinkController.EditLink)
+		r.Post("/{project_uuid}/links/{link_id}/delete", projectLinkController.DeleteLink)
+		r.Get("/{project_uuid}/links/{link_id}/{kind:icon|image}", projectLinkController.GetLinkPicture)
+		// A project's plan (linear-15): whoever may see the project reads it;
+		// its admins and the members who post its updates change it, and its
+		// admins choose its lead. The workspace's statuses and labels are read
+		// by anyone and changed by workspace admins. See business/ProjectPlan.
+		r.Get("/plan/registry", projectPlanController.Registry)
+		r.Post("/plan/statuses", projectPlanController.AddStatus)
+		r.Post("/plan/statuses/{id}/edit", projectPlanController.EditStatus)
+		r.Post("/plan/statuses/{id}/delete", projectPlanController.DeleteStatus)
+		r.Post("/plan/labels", projectPlanController.AddLabel)
+		r.Post("/plan/labels/{id}/edit", projectPlanController.EditLabel)
+		r.Post("/plan/labels/{id}/delete", projectPlanController.DeleteLabel)
+		r.Get("/{project_uuid}/plan", projectPlanController.GetPlan)
+		r.Post("/{project_uuid}/plan", projectPlanController.SetPlan)
 		r.Get("/{project_uuid}/updates", projectUpdateController.ListUpdates)
 		r.Get("/{project_uuid}/updates/draft", projectUpdateController.DraftUpdate)
 		r.Post("/{project_uuid}/updates", projectUpdateController.PostUpdate)
@@ -1540,6 +1564,7 @@ func routes() *chi.Mux {
 		r.Get("/getRecordingURL/{channel_uuid}/{egress_id}", userController.GetChannelRecordingURL)
 		r.Get("/getRecordingTranscript/{channel_uuid}/{egress_id}", channelController.GetChannelRecordingTranscript)
 		r.Post("/deleteRecording/{egressId}", recordingController.HandleDeleteChannelRecording)
+		r.Post("/restoreRecording/{egressId}", recordingController.HandleRestoreChannelRecording)
 
 	})
 
@@ -1650,6 +1675,7 @@ func routes() *chi.Mux {
 		r.Get("/getRecordingURL/{grp_id}/{egress_id}", userController.GetGrpChatRecordingURL)
 		r.Get("/getRecordingTranscript/{grp_id}/{egress_id}", chatController.GetGrpChatRecordingTranscript)
 		r.Post("/deleteRecording/{egressId}", recordingController.HandleDeleteChatRecording)
+		r.Post("/restoreRecording/{egressId}", recordingController.HandleRestoreChatRecording)
 
 	})
 
@@ -1684,6 +1710,7 @@ func routes() *chi.Mux {
 		r.Get("/getRecordingURL/{chat_uuid}/{egress_id}", userController.GetChatRecordingURL)
 		r.Get("/getRecordingTranscript/{chat_uuid}/{egress_id}", chatController.GetChatRecordingTranscript)
 		r.Post("/deleteRecording/{egressId}", recordingController.HandleDeleteChatRecording)
+		r.Post("/restoreRecording/{egressId}", recordingController.HandleRestoreChatRecording)
 	})
 
 	docRouter.Group(func(r chi.Router) {

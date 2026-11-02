@@ -54,6 +54,7 @@
 # 25 Oct 2026, CHAT-LEAD-27: the DM list's one-off backfill (DG4) stamps older DMs a batch of 500 at a time, at most 200 batches a run; each batch is one upsert.
 # 25 Oct 2026, CALLS-LEAD-10 (calls package A): the sweep writes each ended call's report of its polls and questions under that call's own claim, at most 50 calls a pass: one claim and one reply a call, by nature.
 # 29 Oct 2026, TABLES-LEAD-69 (TABLES-LEAD-70: none a field at a time): the Computed Store's fill and sweep (airtable-03) run a batch of rows or a table at a time, as IndexTable does: a fill's batches of rows (fillKept, IndexTable's .fill) and the sweep's tables (at most 20 to fill and 10 with rows waiting a round, each with its own fields and marks). A fill marks all of its table's fields in one statement, and what each reaches comes from the one plan of their table.
+# 31 Oct 2026, TABLES-LEAD-110 (G2a): a step over a view's rows (find and replace, trim, dedupe, split; POST /tables/{id}/rows/transform) writes a chunk of up to 1,000 rows at a time, as an import's makeRows does: each chunk is read by ids (rowsNamed, 500 to a read) and written in one Batch (one transaction, one change set, one operation for the step). A chunk refused for a row written meanwhile is read once more, then that row is left, and refused cells are left out once, so a chunk's retries are bounded by its rows.
 business/AI/aiBusiness.go :: RunAgentReadLoop :: ai.ChatWithRescue
 business/AI/aiConfigBusiness.go :: SetModelRouting :: aiModels.GetAuthorizedModelByProviderModel
 business/AI/briefing.go :: GetBriefing :: userBusiness.GetAutomationBot
@@ -436,6 +437,11 @@ business/DataTable/sheetImport.go :: targets :: model.ListFields
 business/DataTable/tableAIColumn.go :: fillCells :: .mayGoOn
 business/DataTable/tableAIColumn.go :: fillCells :: fillOneCell
 business/DataTable/tableDraft.go :: GenerateTable :: CreateRow
+business/DataTable/transformRows.go :: deletes :: transformBatch
+business/DataTable/transformRows.go :: patches :: .worked
+business/DataTable/transformRows.go :: patches :: transformBatch
+business/DataTable/transformRows.go :: write :: .deletes
+business/DataTable/transformRows.go :: write :: .patches
 business/DemoSeed/demoSeed.go :: Run :: channelBusiness.CheckIfChannelExist
 business/DemoSeed/demoSeed.go :: Run :: channelBusiness.CreateChannel
 business/DemoSeed/demoSeed.go :: Run :: writeConversation
@@ -727,7 +733,6 @@ business/PublicAPI/v1api.go :: Mount :: chain
 business/Publish/service.go :: Duplicate :: addFile
 business/Publish/service.go :: Duplicate :: fileOfDoc
 business/Publish/service.go :: changed :: dropPage
-business/Recording/recordingBusiness.go :: DeleteRecording :: purgeRecording
 business/Refs/reconcile.go :: fixPage :: writeFixes
 business/Refs/reconcile.go :: mirrorDocTasks :: docsWithTasks
 business/Refs/reconcile.go :: mirrorDocTasks :: fixPage
@@ -834,7 +839,6 @@ business/TableComments/notify.go :: readers :: notifyAccount
 business/TableComments/notify.go :: readers :: notifyDecide
 business/TableComments/notify.go :: tellComment :: tell
 business/Task/createMany.go :: CreateTasks :: ai.EmbedTaskContent
-business/Task/createMany.go :: CreateTasks :: webhookBusiness.DispatchEvent
 business/Task/createMany.go :: createOneByOne :: CreateTask
 business/Task/createMany.go :: newTaskNodes :: taskStatusBusiness.Resolve
 business/Task/statusSince.go :: StartStatusSinceBackfill :: domain.GetDgraphTasksWithoutStatusSince
@@ -1089,6 +1093,16 @@ business/LiveKit/callView.go :: ReadCallView :: livekitInit.IsPerson
 business/AssigneeRepair/repair.go :: page :: .takeOff
 business/AssigneeRepair/repair.go :: repairAssignees :: .page
 business/AssigneeRepair/repair.go :: tellAdmins :: tell
+# 31 Oct 2026, PROJ-LEAD-120 (WCL-1, the Work Change Log): Publish tells each change on its project's topic, one
+# MQTT send per change by nature (the message open views read one by one), and a burst over 25 as one Reread per
+# project. It reads nothing per entry: each entry's restriction came with its batch's one read (RecordTasks), and its
+# open tasks are marked with helpers.WithOpenTasks. The 30-day prune deletes 5000 a statement (each call one bounded
+# batch, so no statement holds its locks long), at most 200 a pass. TaskWriter's Apply runs the ops of one call, each
+# its own write, like its ten ops above; its rank op now logs its change (business/Task's Reorder), so the walk sees it.
+business/TaskWriter/contract.go :: Apply :: reorder
+business/WorkFeed/feed.go :: Publish :: publishOne
+business/WorkFeed/feed.go :: Publish :: publishReread
+business/WorkFeed/prune.go :: prune :: deleteBefore
 # RELEASE-LINE ONLY (main and without-ai, from v2.75.0; again for v2.76.0): the release lines carry
 # the old demo seeder (business/DemoSeed as the line has it), never beta's; its loops are recorded as they are.
 business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.GetBasicDgraphChannelInfoByUUID

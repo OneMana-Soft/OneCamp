@@ -377,23 +377,28 @@ func IndexTable(ctx context.Context, table uuid.UUID) error {
 	return CountAfterFill(ctx, indexed)
 }
 
-// CountAfterFill has the planner count the rows and the cell index again
-// (model.AnalyzeRows) once rows were written or indexed at once, at least
-// analyzeAfter of them: a walk's, or an import's into a table whose index
-// kept up with it, which no walk follows (V-48). Many rows the planner hasn't
-// counted until the autovacuum's next look made it plan badly: taking the
-// table for one row, it joined a filter's entries by a loop over them all,
-// and a window of 10,000 rows ran past the database's timeout; a first
-// window's summaries and groups ran past their budget and were left out.
+// CountAfterFill vacuums the rows and the cell index and has the planner
+// count them again (model.VacuumRows) once rows were written or indexed at
+// once, at least analyzeAfter of them: a walk's, or an import's into a table
+// whose index kept up with it, which no walk follows (V-48). Many rows the
+// planner hasn't counted until the autovacuum's next look made it plan badly:
+// taking the table for one row, it joined a filter's entries by a loop over
+// them all, and a window of 10,000 rows ran past the database's timeout; a
+// first window's summaries and groups ran past their budget and were left
+// out. Pages no vacuum has seen did too: Postgres 12 never vacuums a table
+// for rows added, so the planner took none of a fill's pages for whole, and
+// a window filtered and sorted by stored numbers over 100,000 rows was
+// planned at times as a read of every row (V-150).
 //
-// A count that fails (a concurrent ANALYZE or the autovacuum's can hold it
-// past its timeout) leaves the planner to the autovacuum's next look, and
-// never fails the fill that asked: its entries are whole. AnalyzeRows logs
-// it. Only a fill that was stopped hears the error (V-107).
+// A count that fails is tried once more (counts). One that fails again (an
+// autovacuum for wraparound, which Postgres never stops, can hold the tables
+// past vacuumTimeout) leaves the planner to the next fill's count or the
+// autovacuum's next look, and never fails the fill that asked: its entries
+// are whole. Only a fill that was stopped hears the error (V-107).
 //
 // The counts run one at a time (counts): fills that ask together, as fields
 // made at once do, share the next count after their entries, and never each
-// start their own to queue on ANALYZE's lock (V-108).
+// start their own to queue on the tables' lock (V-108).
 func CountAfterFill(ctx context.Context, rows int) error {
 	if rows < analyzeAfter {
 		return nil
@@ -404,13 +409,28 @@ func CountAfterFill(ctx context.Context, rows int) error {
 	return nil
 }
 
-// counts is the planner's counts, one at a time (CountAfterFill).
+// counts is the planner's counts, one at a time (CountAfterFill). A count
+// that fails is tried again at once, in the same run (V-147), so the fills
+// waiting on it have the second try's count and no run queues behind it: a
+// dropped connection, or a lock held past its time on a loaded machine, has
+// most often passed by then. A second failure is logged as an error, and
+// those lines are the count of the counts that failed.
 var counts = helpers.NewCoalesced("RowQuery.CountAfterFill", func(ctx context.Context) error {
-	return analyzeRows(ctx)
+	first := vacuumRows(ctx)
+	if first == nil {
+		return nil
+	}
+	err := vacuumRows(ctx)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/RowQuery CountAfterFill: the planner's count of the rows and the cell index failed twice, so it waits for the next fill's or the autovacuum's (%v, then %v)", first, err)
+	} else {
+		helpers.LogInfoWithContext(ctx, "business/RowQuery CountAfterFill: the planner's count failed once and passed when tried again: %v", first)
+	}
+	return err
 })
 
-// analyzeRows is model.AnalyzeRows (a test fails it: CountAfterFill).
-var analyzeRows = model.AnalyzeRows
+// vacuumRows is model.VacuumRows (a test fails it: CountAfterFill).
+var vacuumRows = model.VacuumRows
 
 // analyzeAfter is how many rows written or indexed at once have the planner
 // count the tables again (CountAfterFill).

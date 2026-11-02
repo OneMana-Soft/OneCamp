@@ -12,7 +12,8 @@
 //
 //   - the caller's ctx is used, so a request that ends ends its query;
 //   - outside a transaction a statement gets postgresInit's DBTimeout; inside
-//     one it gets the transaction's (InTx);
+//     one it gets the transaction's (InTx); upkeep no transaction may hold
+//     gets the bound its caller gives (ExecAlone);
 //   - rows are always closed and rows.Err() always read, so a list cut short
 //     by a dropped connection is an error, never a short list;
 //   - a statement inside InTx runs in that transaction without being handed
@@ -24,6 +25,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -102,6 +106,87 @@ func Exec(ctx context.Context, q string, args ...any) (int64, error) {
 	}
 	return res.RowsAffected()
 }
+
+// ExecAlone runs a statement that returns no rows on the pool, never in a
+// transaction ctx carries, within d rather than the pool's DBTimeout, and
+// says how many rows it touched. It is for upkeep Postgres refuses inside a
+// transaction block and that outlasts a request's statement on a large
+// table: VACUUM, CREATE INDEX CONCURRENTLY. Exec would run one in ctx's
+// transaction, where it fails, or cut it off at DBTimeout, so the table
+// models ran their vacuums by hand on the pool (V-150). ctx still ends it:
+// a caller that is stopped stops it. d bounds it as context.WithTimeout does.
+func ExecAlone(ctx context.Context, d time.Duration, q string, args ...any) (int64, error) {
+	if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
+		return 0, ErrNoDatabase
+	}
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, q, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// FlushCommits returns once every commit made before it is on disk, which a
+// VACUUM needs to mark the pages those commits wrote whole. A VACUUM marks a
+// page whole only when it can take each of its rows for committed (its hint
+// bit), and Postgres sets that bit only once the commit is on disk. A server
+// whose commits don't wait for the disk (synchronous_commit off: the
+// integration harness's, and a tuning self-hosted servers take) leaves the
+// disk to its WAL writer, up to a few fifths of a second later. Its commit log
+// keeps one such point for each 32 transactions, so one commit that isn't on
+// disk yet holds back the rows of its 31 neighbours too: a VACUUM right after
+// a 5,000-row fill marked none of its cell index whole (V-150).
+//
+// It waits for the server's WAL writer rather than commit one of its own: a
+// transaction that writes nothing but its xid commits without waiting for
+// the disk, synchronous_commit on or not. It reads how far the log is written
+// as it begins (pg_current_wal_insert_lsn), past every commit made before it,
+// and polls how far it is on disk (pg_current_wal_flush_lsn) every flushPoll
+// until that is as far, on the pool, within d. On a server whose commits wait
+// for the disk it is as far at once, or at the WAL writer's next round. A
+// record that ended on a page's end puts the written point behind the next
+// page's header, which the disk never reaches before more log comes: a log
+// on disk to that boundary is as far (flushedPast; V-155: an idle server
+// waited ~15 s, past d).
+func FlushCommits(ctx context.Context, d time.Duration) error {
+	if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
+		return ErrNoDatabase
+	}
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	pool := postgresInit.DBConn.SqlDB
+	var at string
+	var block, segment uint64
+	if err := pool.QueryRowContext(ctx, `SELECT pg_current_wal_insert_lsn()::text, current_setting('wal_block_size')::bigint, pg_size_bytes(current_setting('wal_segment_size'))`).Scan(&at, &block, &segment); err != nil {
+		return err
+	}
+	written, err := parseLSN(at)
+	if err != nil {
+		return err
+	}
+	for {
+		if err := pool.QueryRowContext(ctx, `SELECT pg_current_wal_flush_lsn()::text`).Scan(&at); err != nil {
+			return err
+		}
+		flushed, err := parseLSN(at)
+		if err != nil {
+			return err
+		}
+		if flushedPast(flushed, written, block, segment) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(flushPoll):
+		}
+	}
+}
+
+// flushPoll is how often FlushCommits looks how far the log is on disk.
+const flushPoll = 20 * time.Millisecond
 
 // Query runs a statement and reads every row it returns with scan. A
 // failure partway (rows.Err) is an error, never a short list. No rows is an
@@ -229,4 +314,43 @@ func WithTx(ctx context.Context, tx *sql.Tx) context.Context {
 		return ctx
 	}
 	return context.WithValue(ctx, txKey{}, tx)
+}
+
+// The WAL's page headers on a 64-bit server (MAXALIGN 8): a segment's first
+// page carries the long one.
+const (
+	shortPageHeader = 24
+	longPageHeader  = 40
+)
+
+// flushedPast is whether a log on disk to flushed holds everything written
+// before written, on a server whose WAL pages are block bytes and segments
+// segment bytes: as far, or exactly at a page boundary written is only that
+// page's header past (pg_current_wal_insert_lsn says where the next record
+// goes, behind the header once a record ended on the page's end; the disk
+// stops at the boundary). Any other gap is log not on disk yet. Pure.
+func flushedPast(flushed, written, block, segment uint64) bool {
+	if flushed >= written {
+		return true
+	}
+	if block == 0 || flushed%block != 0 {
+		return false
+	}
+	header := uint64(shortPageHeader)
+	if segment != 0 && flushed%segment == 0 {
+		header = longPageHeader
+	}
+	return written-flushed == header
+}
+
+// parseLSN reads a WAL position as Postgres writes one: its high and low 32
+// bits in hex, "16/B374D848". Pure.
+func parseLSN(s string) (uint64, error) {
+	hi, lo, ok := strings.Cut(s, "/")
+	h, herr := strconv.ParseUint(hi, 16, 32)
+	l, lerr := strconv.ParseUint(lo, 16, 32)
+	if !ok || herr != nil || lerr != nil {
+		return 0, fmt.Errorf("pgexec: %q isn't a WAL position", s)
+	}
+	return h<<32 | l, nil
 }

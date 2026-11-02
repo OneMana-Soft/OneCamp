@@ -56,6 +56,10 @@ const (
 	trashListCap = 2000
 	// trashSweepBatch is how many docs one pass of the retention sweep removes.
 	trashSweepBatch = 200
+	// TrashOperationCap is the most pages one trash operation takes. Something
+	// else that holds pages and goes for good with more of them (a table's
+	// rows) hands them to PurgeHostedDocs this many at a time, a pass each.
+	TrashOperationCap = trashSubtreeCap
 )
 
 // Errors the trash answers with.
@@ -773,4 +777,35 @@ func purgeExpiredTrash(ctx context.Context) error {
 
 func init() {
 	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "doc.trash.purge", Every: time.Hour, Run: purgeExpiredTrash})
+}
+
+// PurgeHostedDocs removes for good the pages something other than a doc
+// holds (a table's rows' pages), when what holds them goes for good: through
+// the docs' own purge, each recorded as doc.purged by whoever removed what
+// held them, and why. A page gone already is left out. It says how many it
+// removed.
+func PurgeHostedDocs(ctx context.Context, ids []uuid.UUID, by resourceEventBusiness.Actor, reason string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	uuids := make([]string, len(ids))
+	for i, id := range ids {
+		uuids[i] = id.String()
+	}
+	docs, err := domain.GetDocRowsByUUID(ctx, uuids, "")
+	if err != nil || len(docs) == 0 {
+		return 0, err
+	}
+	n, err := purge(ctx, docs, nil, nil)
+	if err != nil {
+		return n, err
+	}
+	now := time.Now()
+	for _, d := range docs {
+		resourceEventBusiness.Bus.Emit(ctx, resourceEventBusiness.Event{
+			Kind: resourceEventBusiness.DocPurged, ResourceKind: "doc", ResourceUUID: d.Uuid,
+			Actor: by, At: now, Data: map[string]string{"reason": reason},
+		})
+	}
+	return n, nil
 }

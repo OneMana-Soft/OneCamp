@@ -200,13 +200,20 @@ func window(from, to time.Time) (models.Window, error) {
 	if to.Sub(from) > maxRangeDays*24*time.Hour {
 		return models.Window{}, inputError("Ask for 400 days or less at a time.")
 	}
+	return spanWindow(from, to), nil
+}
+
+// spanWindow is the stretch from to to covers, unchecked: for the server's own
+// reads of what it holds (a list's aways over its declines, which lie years
+// apart in the Trash), never for what a person asks for.
+func spanWindow(from, to time.Time) models.Window {
 	from, to = from.UTC(), to.UTC()
 	// A date is a different stretch of time in every zone: the earliest it
 	// starts is 14 hours before its UTC midnight, the latest it ends 12 hours
 	// after the next one. Any date that could touch the window is read.
 	return models.Window{From: from, To: to,
 		FromDate: from.Add(-12 * time.Hour).Format(dateLayout),
-		ToDate:   to.Add(14 * time.Hour).Format(dateLayout)}, nil
+		ToDate:   to.Add(14 * time.Hour).Format(dateLayout)}
 }
 
 // rangeRows is what person is on between from and to, each series' instances
@@ -315,6 +322,7 @@ func (s *service) views(ctx context.Context, reader *model.UserInfo, rows []inst
 	names := s.namesOf(ctx, rows, guests)
 	occ := s.withAnswers(ctx, rows, guests)
 	me := personOf(reader)
+	away := s.awayDecliners(ctx, me, rows, occ)
 	plain := make([]*models.Event, 0, len(rows))
 	for _, i := range rows {
 		plain = append(plain, i.Event)
@@ -367,6 +375,7 @@ func (s *service) views(ctx context.Context, reader *model.UserInfo, rows []inst
 				Proposal: proposalShown(a, inst.Event, me, mayChangeIt)}
 			if a.UserID != nil {
 				at.Person = personNamed(*a.UserID, names)
+				at.OutOfOffice = away[inst.ref][at.UUID]
 			} else {
 				at.Person = Person{Name: a.Name}
 				at.Email = a.Email
@@ -512,8 +521,12 @@ func changedFields(a, b *models.Event, guestsChanged bool) []string {
 	add("title", a.Title != b.Title)
 	add("notes", a.Notes != b.Notes || a.NotesFormat != b.NotesFormat)
 	add("location", a.Location != b.Location)
+	// A zone's other name moves no time (helpers.SameZone), and an end in the
+	// start's zone ends there whether it names it or not (whenOf).
+	_, endA := whenOf(a)
+	_, endB := whenOf(b)
 	add("time", !sameTime(a.StartAt, b.StartAt) || !sameTime(a.EndAt, b.EndAt) || a.StartDate != b.StartDate ||
-		a.EndDate != b.EndDate || a.TZ != b.TZ || a.EndTZ != b.EndTZ)
+		a.EndDate != b.EndDate || !helpers.SameZone(a.TZ, b.TZ) || !helpers.SameZone(endA.Zone, endB.Zone))
 	add("show_as", a.Transparency != b.Transparency)
 	add("visibility", a.Visibility != b.Visibility)
 	add("colour", a.Hue != b.Hue)
@@ -825,7 +838,6 @@ func (s *service) Get(ctx context.Context, who *model.UserInfo, id string) (*Eve
 func (s *service) view(ctx context.Context, reader *model.UserInfo, inst instance, guests []models.Attendee) *Event {
 	v := s.views(ctx, reader, []instance{inst}, map[uuid.UUID][]models.Attendee{inst.owner().ID: guests})
 	out := &v[0]
-	s.markAwayDeclines(ctx, inst, out)
 	// An out-of-office's decline rule, to its owner alone (head 5b).
 	if owner := inst.owner(); EventKind(owner.Kind) == EventAway && owner.CreatedBy == personOf(reader) {
 		if rules, err := s.store.oooRules(ctx, []uuid.UUID{owner.ID}); err == nil {
@@ -833,6 +845,11 @@ func (s *service) view(ctx context.Context, reader *model.UserInfo, inst instanc
 				out.OutOfOffice = &OOOView{Decline: r.Decline, Message: r.Message}
 			}
 		}
+	}
+	// The own time a save keeping its guests can't make it, to whoever may
+	// change it, in the words that save is refused with (CR-113 S1).
+	if owner := inst.owner(); mayChange(roleOf(owner, guests, personOf(reader)), owner) == nil {
+		out.OwnTimeRefused = ownTimeRefused(inst.Kind, owner.CreatedBy, guests)
 	}
 	return out
 }

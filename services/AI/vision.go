@@ -126,7 +126,7 @@ func (o *OpenAIProvider) DescribeImages(ctx context.Context, images []ImageInput
 		return "", fmt.Errorf("openai vision: decode: %w", err)
 	}
 	if cr.Error != nil {
-		return "", fmt.Errorf("openai vision: %s", cr.Error.Message)
+		return "", FromProvider(fmt.Errorf("openai vision: %s", cr.Error.Message))
 	}
 	if len(cr.Choices) == 0 {
 		return "", fmt.Errorf("openai vision: no choices returned")
@@ -242,7 +242,7 @@ func (a *AnthropicProvider) DescribeImages(ctx context.Context, images []ImageIn
 		return "", fmt.Errorf("anthropic vision: decode: %w", err)
 	}
 	if cr.Error != nil {
-		return "", fmt.Errorf("anthropic vision: %s", cr.Error.Message)
+		return "", FromProvider(fmt.Errorf("anthropic vision: %s", cr.Error.Message))
 	}
 	if len(cr.Content) == 0 {
 		return "", fmt.Errorf("anthropic vision: no content returned")

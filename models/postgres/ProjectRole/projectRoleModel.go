@@ -2,6 +2,11 @@
 // member, commenter or viewer (migration 320). The graph's member and admin
 // edges say who is in a project; a row says how much they may do there
 // (business/WorkAccess decides, business/Project writes).
+//
+// A role taken away is kept (V-184 head 3, migration 549): the row is marked
+// deleted_at and deleted_by (whoever took it; NULL for the parity sweep), every
+// read says softDelete.Live, and giving the role again brings the same row
+// back, live.
 package models
 
 import (
@@ -11,6 +16,7 @@ import (
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 )
 
@@ -41,7 +47,7 @@ func RolesIn(ctx context.Context, userID uuid.UUID, projectIDs []uuid.UUID) (map
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
-		`SELECT project_id, role FROM project_roles WHERE user_id = $1 AND project_id = ANY($2)`, userID, projectIDs)
+		`SELECT project_id, role FROM project_roles WHERE user_id = $1 AND project_id = ANY($2) AND `+softDelete.Live(""), userID, projectIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +71,7 @@ func Roles(ctx context.Context, projectID uuid.UUID) (map[uuid.UUID]string, erro
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
-		`SELECT user_id, role FROM project_roles WHERE project_id = $1`, projectID)
+		`SELECT user_id, role FROM project_roles WHERE project_id = $1 AND `+softDelete.Live(""), projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +102,7 @@ func RolesOfMany(ctx context.Context, projects []uuid.UUID) (map[uuid.UUID]map[u
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
-		`SELECT project_id, user_id, role FROM project_roles WHERE project_id = ANY($1)`, projects)
+		`SELECT project_id, user_id, role FROM project_roles WHERE project_id = ANY($1) AND `+softDelete.Live(""), projects)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +123,9 @@ func RolesOfMany(ctx context.Context, projects []uuid.UUID) (map[uuid.UUID]map[u
 
 // Set gives someone a role in a project, by whom (uuid.Nil for nobody: the
 // parity sweep). A project with no row of its own (one the graph has and
-// Postgres doesn't) takes no role: the graph's answer stands for it.
+// Postgres doesn't) takes no role: the graph's answer stands for it. A role
+// taken away earlier comes back on its own row, live, even when it is the
+// same role.
 func Set(ctx context.Context, projectID, userID uuid.UUID, role string, by uuid.UUID) error {
 	if !connected() {
 		return ErrNoDatabase
@@ -131,27 +139,30 @@ func Set(ctx context.Context, projectID, userID uuid.UUID, role string, by uuid.
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(c, `
 		INSERT INTO project_roles (project_id, user_id, role, granted_by, granted_at)
 		SELECT $1, $2, $3, $4, NOW() WHERE EXISTS (SELECT 1 FROM projects WHERE id = $1)
-		ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role, granted_by = EXCLUDED.granted_by, granted_at = NOW()
-		 WHERE project_roles.role <> EXCLUDED.role`,
+		ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role, granted_by = EXCLUDED.granted_by, granted_at = NOW(),
+		 deleted_at = NULL, deleted_by = NULL
+		 WHERE project_roles.role <> EXCLUDED.role OR project_roles.deleted_at IS NOT NULL`,
 		projectID, userID, role, grantedBy)
 	return err
 }
 
-// Delete takes someone's role in a project away.
-func Delete(ctx context.Context, projectID, userID uuid.UUID) error {
+// Delete takes someone's role in a project away, by whom (uuid.Nil for
+// nobody). The row stays, marked: no read sees it, and Set brings it back.
+func Delete(ctx context.Context, projectID, userID, by uuid.UUID) error {
 	if !connected() {
 		return ErrNoDatabase
 	}
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(c,
-		`DELETE FROM project_roles WHERE project_id = $1 AND user_id = $2`, projectID, userID)
+		`UPDATE project_roles SET deleted_at = NOW(), deleted_by = $3 WHERE project_id = $1 AND user_id = $2 AND `+softDelete.Live(""),
+		projectID, userID, softDelete.By(by))
 	return err
 }
 
-// DeleteIn takes someone's roles in all of the projects away: they left the
-// projects' team.
-func DeleteIn(ctx context.Context, userID uuid.UUID, projectIDs []uuid.UUID) error {
+// DeleteIn takes someone's roles in all of the projects away, by whom: they
+// left the projects' team. The rows stay, marked, as Delete's.
+func DeleteIn(ctx context.Context, userID uuid.UUID, projectIDs []uuid.UUID, by uuid.UUID) error {
 	if len(projectIDs) == 0 {
 		return nil
 	}
@@ -161,13 +172,16 @@ func DeleteIn(ctx context.Context, userID uuid.UUID, projectIDs []uuid.UUID) err
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(c,
-		`DELETE FROM project_roles WHERE user_id = $1 AND project_id = ANY($2)`, userID, projectIDs)
+		`UPDATE project_roles SET deleted_at = NOW(), deleted_by = $3 WHERE user_id = $1 AND project_id = ANY($2) AND `+softDelete.Live(""),
+		userID, projectIDs, softDelete.By(by))
 	return err
 }
 
-// Keep makes a project's rows say exactly roles (by person): it adds and
-// changes rows, and takes away those of people who aren't in roles, in one
-// transaction. For the parity sweep; by is nobody.
+// Keep makes a project's live rows say exactly roles (by person): it adds,
+// changes and brings back rows, and takes away those of people who aren't in
+// roles (marked, as Delete's), in one transaction. For the parity sweep; by
+// is nobody, so a row it brings back has no granter and one it takes away no
+// taker.
 func Keep(ctx context.Context, projectID uuid.UUID, roles map[uuid.UUID]string) (changed int, err error) {
 	if !connected() {
 		return 0, ErrNoDatabase
@@ -182,8 +196,10 @@ func Keep(ctx context.Context, projectID uuid.UUID, roles map[uuid.UUID]string) 
 			people = append(people, person)
 			res, err := tx.ExecContext(ctx, `
 				INSERT INTO project_roles (project_id, user_id, role) VALUES ($1, $2, $3)
-				ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role, granted_at = NOW()
-				 WHERE project_roles.role <> EXCLUDED.role`, projectID, person, role)
+				ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role, granted_at = NOW(),
+				 granted_by = CASE WHEN project_roles.deleted_at IS NULL THEN project_roles.granted_by END,
+				 deleted_at = NULL, deleted_by = NULL
+				 WHERE project_roles.role <> EXCLUDED.role OR project_roles.deleted_at IS NOT NULL`, projectID, person, role)
 			if err != nil {
 				return err
 			}
@@ -192,7 +208,8 @@ func Keep(ctx context.Context, projectID uuid.UUID, roles map[uuid.UUID]string) 
 			}
 		}
 		res, err := tx.ExecContext(ctx,
-			`DELETE FROM project_roles WHERE project_id = $1 AND NOT (user_id = ANY($2))`, projectID, people)
+			`UPDATE project_roles SET deleted_at = NOW(), deleted_by = NULL WHERE project_id = $1 AND NOT (user_id = ANY($2)) AND `+softDelete.Live(""),
+			projectID, people)
 		if err != nil {
 			return err
 		}
@@ -216,7 +233,7 @@ func RolesAmong(ctx context.Context, userIDs, projectIDs []uuid.UUID) (map[uuid.
 		role          string
 	}
 	rows, err := pgexec.Query(ctx,
-		`SELECT user_id, project_id, role FROM project_roles WHERE user_id = ANY($1) AND project_id = ANY($2)`,
+		`SELECT user_id, project_id, role FROM project_roles WHERE user_id = ANY($1) AND project_id = ANY($2) AND `+softDelete.Live(""),
 		func(r pgexec.Row) (row, error) {
 			var x row
 			err := r.Scan(&x.user, &x.project, &x.role)

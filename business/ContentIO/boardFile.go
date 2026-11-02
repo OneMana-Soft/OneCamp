@@ -64,11 +64,7 @@ func excalidrawFile(ctx context.Context, boardUUID, appURL string, budget int64)
 	elements := []map[string]any{}
 	files := map[string]any{}
 	if state != "" {
-		raw, err := base64.StdEncoding.DecodeString(state)
-		if err != nil {
-			return nil, pics, fmt.Errorf("board %s: its state isn't base64: %w", boardUUID, err)
-		}
-		roots, err := scene.Maps(raw)
+		roots, err := scene.StateRoots(state)
 		if err != nil {
 			return nil, pics, fmt.Errorf("board %s: %w", boardUUID, err)
 		}
@@ -77,7 +73,7 @@ func excalidrawFile(ctx context.Context, boardUUID, appURL string, budget int64)
 				elements = append(elements, el)
 			}
 		}
-		sort.Slice(elements, func(i, j int) bool { return stackedBefore(elements[i], elements[j]) })
+		sort.Slice(elements, func(i, j int) bool { return scene.StackedBefore(elements[i], elements[j]) })
 		pics, err = embedPictures(ctx, boardUUID, elements, roots["files"], budget, files)
 		if err != nil {
 			return nil, pics, err
@@ -92,19 +88,6 @@ func excalidrawFile(ctx context.Context, boardUUID, appURL string, budget int64)
 		"files":    files,
 	})
 	return out, pics, err
-}
-
-// stackedBefore is Excalidraw's stacking rule (orderByFractionalIndex): by
-// fractional index, ties and elements without one by id.
-func stackedBefore(a, b map[string]any) bool {
-	ai, _ := a["index"].(string)
-	bi, _ := b["index"].(string)
-	if ai != bi {
-		return ai < bi
-	}
-	aid, _ := a["id"].(string)
-	bid, _ := b["id"].(string)
-	return aid < bid
 }
 
 // embedPictures puts the pictures the image elements show into files, by

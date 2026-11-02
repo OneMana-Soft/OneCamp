@@ -17,9 +17,12 @@ import (
 // rewrites spells it through Live or Deleted, among them ten of
 // domain/Project's that gained the restricted-task mark; 161 with L-1, whose
 // two reads of a project's places, GetDgraphProjectTaskPlaces and
-// GetDgraphProjectRanks, spell it through Live). It only goes down: move a
-// filter onto Live or Deleted, then lower this to the count the test reports.
-const epochLiteralBaseline = 161
+// GetDgraphProjectRanks, spell it through Live; 160 with V-140, whose one read
+// of a recording for its delete or restore spells it through Deleted; 158 with
+// V-161, which moved the runs list's and the overview counts' project filters
+// onto Live). It only goes down: move a filter onto Live or Deleted, then
+// lower this to the count the test reports.
+const epochLiteralBaseline = 158
 
 // The liveness boundary is spelled in one place.
 //

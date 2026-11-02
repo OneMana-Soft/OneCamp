@@ -262,7 +262,8 @@ func (c *Client) call(ctx context.Context, method string, params interface{}) (j
 		return nil, err
 	}
 	if resp.Error != nil {
-		return nil, resp.Error
+		// The remote server's own words: for the server's log, never a person (V-157).
+		return nil, ai.FromProvider(resp.Error)
 	}
 	return resp.Result, nil
 }
@@ -311,7 +312,7 @@ func (c *Client) do(ctx context.Context, reqBody jsonRPCRequest) (*jsonRPCRespon
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(res.Body, 512))
-		return nil, fmt.Errorf("MCP server returned %d: %s", res.StatusCode, strings.TrimSpace(string(snippet)))
+		return nil, ai.FromProvider(fmt.Errorf("MCP server returned %d: %s", res.StatusCode, strings.TrimSpace(string(snippet))))
 	}
 
 	body := io.LimitReader(res.Body, maxResponseBytes)

@@ -21,7 +21,6 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
@@ -62,7 +61,7 @@ func me(r *http.Request) userModels.UserInfo {
 // restricted, who is let in by name, and whether the reader may change that.
 // Anyone who may see the task may read it.
 func Restriction(w http.ResponseWriter, r *http.Request) {
-	id, task, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_ref"), workAccess.NeedView)
+	id, task, ok := projectaccess.RequireTask(w, r, helpers.PathText(r, "task_ref"), workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -132,7 +131,7 @@ func SetRestriction(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A task its whole project can see lets no one in by name."})
 		return
 	}
-	id, task, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_ref"), workAccess.NeedView)
+	id, task, ok := projectaccess.RequireTask(w, r, helpers.PathText(r, "task_ref"), workAccess.NeedView)
 	if !ok {
 		return
 	}

@@ -216,6 +216,23 @@ func resolveBoardState(ctx context.Context, b *dgraphStruct.DgraphBoard) {
 	b.State = string(plain)
 }
 
+// boardStateReads is how many boards' state objects resolveBoardStates reads
+// at once.
+const boardStateReads = 8
+
+// resolveBoardStates is resolveBoardState for several boards: the objects of
+// those that keep their state there are read side by side, boardStateReads at
+// a time, as object storage has no read of many.
+func resolveBoardStates(ctx context.Context, boards []*dgraphStruct.DgraphBoard) {
+	var stored []*dgraphStruct.DgraphBoard
+	for _, b := range boards {
+		if b != nil && b.State == "" && b.StateKey != "" {
+			stored = append(stored, b)
+		}
+	}
+	helpers.EachBounded("board.state-reads", stored, boardStateReads, func(b *dgraphStruct.DgraphBoard) { resolveBoardState(ctx, b) })
+}
+
 // storeSnapshot gzips and uploads the state blob, records the index row, then
 // prunes the board to the per-board cap (removing the orphaned objects).
 // contributors is the set of editor uuids attributed to this version.
@@ -450,6 +467,7 @@ func RestoreBoardSnapshot(ctx context.Context, boardUUID string, snapshotID uuid
 			return errors.New("could not restore the board")
 		}
 	}
+	boardTexts.Ask(boardUUID, stateB64)
 	return nil
 }
 

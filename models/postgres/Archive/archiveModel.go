@@ -266,6 +266,16 @@ func Live(ctx context.Context, table string, ids []string) ([]string, error) {
 	return pgexec.Query(ctx, fmt.Sprintf(`SELECT id::text FROM %s WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`, table), pgexec.Text, pq.Array(ids))
 }
 
+// Known is which of these ids name a row of a table, archived or live: what a
+// restore may name. A restore naming anything else is refused whole, and one
+// naming a live row heals what an earlier restore left part done.
+func Known(ctx context.Context, table string, ids []string) ([]string, error) {
+	if !Archivable(table) {
+		return nil, fmt.Errorf("restore: no such table %q", table)
+	}
+	return pgexec.Query(ctx, fmt.Sprintf(`SELECT id::text FROM %s WHERE id = ANY($1::uuid[])`, table), pgexec.Text, pq.Array(ids))
+}
+
 // Archived is one soft-deleted row and when.
 type Archived struct {
 	ID string

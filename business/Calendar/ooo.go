@@ -227,60 +227,91 @@ func (s *service) declineAll(ctx context.Context, all []oooDecline) {
 	}
 }
 
-// markAwayDeclines marks, on one occurrence as read, each member who declined
-// it while out of office with a rule that declines: the guest-facing "Out of
-// office" beside their answer (head 5c, gcal-9b). Only guests out already
-// shows are marked. The mark is inferred, not recorded: a decline made by
-// hand inside such an away, or before the away was made, reads "Out of
-// office" too (CR-68 SF; recording who made the answer needs a column).
-func (s *service) markAwayDeclines(ctx context.Context, inst instance, out *Event) {
-	if out == nil {
-		return
+// awayDecliners is, for each occurrence by its ref, those who declined it
+// while out of office with a rule that declines when it starts: the "Out of
+// office" beside their answer (head 5c, gcal-9b), the one rule by which every
+// read of guests' answers marks it, a list's as one event's. It tells when
+// someone is away, so reader is told it only of people whose busy times they
+// may see (seesWhenOthersAreBusy), and the public invitation pages never carry
+// it. One read of the decliners' aways over the occurrences' starts and one of
+// their rules, none when nobody declined; time off marks nobody on itself.
+// The mark is inferred, not recorded: a decline made by hand inside such an
+// away, or before the away was made, reads "Out of office" too (CR-68 SF;
+// recording who made the answer needs a column). A failed read marks nobody.
+func (s *service) awayDecliners(ctx context.Context, reader uuid.UUID, rows []instance, occ map[string][]models.Attendee) map[string]map[string]bool {
+	type decline struct {
+		ref    string
+		start  time.Time
+		person uuid.UUID
 	}
-	var declined []string
-	for _, g := range out.Attendees {
-		if g.Response == responseDeclined {
-			declined = append(declined, g.UUID)
+	var declines []decline
+	for _, inst := range rows {
+		if EventKind(inst.owner().Kind) == EventAway {
+			continue
+		}
+		var start time.Time
+		for _, a := range occ[inst.ref] {
+			if a.Response == responseDeclined && a.UserID != nil {
+				if start.IsZero() {
+					start, _ = spanOf(inst.Event)
+				}
+				declines = append(declines, decline{inst.ref, start, *a.UserID})
+			}
 		}
 	}
-	away := s.awayDecliners(ctx, inst, declined)
-	for i := range out.Attendees {
-		out.Attendees[i].OutOfOffice = out.Attendees[i].Response == responseDeclined && away[out.Attendees[i].UUID]
+	if len(declines) == 0 {
+		return nil
 	}
-}
-
-// awayDecliners is which of these members, who declined inst, were out of
-// office with a rule that declines when it starts: one read of their aways
-// and one of the rules, none when nobody declined or inst is itself time off.
-// A failed read names nobody.
-func (s *service) awayDecliners(ctx context.Context, inst instance, declined []string) map[string]bool {
-	if len(declined) == 0 || EventKind(inst.owner().Kind) == EventAway {
+	sees, err := s.seesWhenOthersAreBusy(ctx, reader)
+	if err != nil {
 		return nil
 	}
 	var people []uuid.UUID
-	for _, d := range declined {
-		if id, err := uuid.Parse(d); err == nil {
-			people = append(people, id)
+	var first, last time.Time
+	asked := map[uuid.UUID]bool{}
+	for _, d := range declines {
+		if !sees && d.person != reader {
+			continue
+		}
+		if !asked[d.person] {
+			asked[d.person] = true
+			people = append(people, d.person)
+		}
+		if first.IsZero() || d.start.Before(first) {
+			first = d.start
+		}
+		if d.start.After(last) {
+			last = d.start
 		}
 	}
 	if len(people) == 0 {
 		return nil
 	}
-	start, _ := spanOf(inst.Event)
-	w, err := window(start, start.Add(time.Minute))
-	if err != nil {
-		return nil
-	}
-	aways, rules := s.awaysWithRules(ctx, people, w)
-	away := map[string]bool{}
+	aways, rules := s.awaysWithRules(ctx, people, spanWindow(first, last.Add(time.Minute)))
+	// Each person's aways that decline, their spans worked out once, so a
+	// decline is matched against its own person's alone. Only a rule that
+	// declines is kept (none is deleted; the table's CHECK).
+	type span struct{ from, to time.Time }
+	spans := map[uuid.UUID][]span{}
 	for _, a := range aways {
-		r, ok := rules[a.ID]
-		as, ae := spanOf(a)
-		if ok && r.Decline != models.OOODeclineNone && !start.Before(as) && start.Before(ae) {
-			away[a.CreatedBy.String()] = true
+		if _, ok := rules[a.ID]; ok {
+			from, to := spanOf(a)
+			spans[a.CreatedBy] = append(spans[a.CreatedBy], span{from, to})
 		}
 	}
-	return away
+	marks := map[string]map[string]bool{}
+	for _, d := range declines {
+		for _, sp := range spans[d.person] {
+			if !d.start.Before(sp.from) && d.start.Before(sp.to) {
+				if marks[d.ref] == nil {
+					marks[d.ref] = map[string]bool{}
+				}
+				marks[d.ref][d.person.String()] = true
+				break
+			}
+		}
+	}
+	return marks
 }
 
 // awaysWithRules is these people's out-of-office events in w and their rules:

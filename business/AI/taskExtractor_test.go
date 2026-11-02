@@ -225,6 +225,13 @@ func TestMeetingRoomAccessible(t *testing.T) {
 		{"dm participant (self first)", me.String() + " " + peer.String(), true},
 		{"dm participant (self second)", peer.String() + " " + me.String(), true},
 		{"dm non-participant", peer.String() + " " + stranger.String(), false},
+		{"dm that isn't one (three people)", me.String() + " " + peer.String() + " " + stranger.String(), false},
+		{"a meeting's room, which no conversation holds", "meet-" + uuid.New().String(), false},
+		// A breakout room's transcripts are its call's: a channel call's
+		// breakouts are read by the channel's members and nobody else.
+		{"a breakout of my channel's call", channelUUID + "~b2", true},
+		{"a breakout of a channel I'm not in", uuid.New().String() + "~b1", false},
+		{"a meeting's breakout, which no conversation holds", "meet-" + uuid.New().String() + "~b1", false},
 		{"empty room", "", false},
 		{"whitespace room", "   ", false},
 	}

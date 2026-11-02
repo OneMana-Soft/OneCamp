@@ -363,11 +363,11 @@ func (o *OpenAIProvider) Chat(ctx context.Context, messages []ChatMessage, opts 
 
 	var chatResp openaiChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return "", fmt.Errorf("openai: failed to decode response: %w", err)
+		return "", FromProvider(fmt.Errorf("openai: failed to decode response: %w", err))
 	}
 
 	if chatResp.Error != nil {
-		return "", fmt.Errorf("openai: API error: %s", chatResp.Error.Message)
+		return "", FromProvider(fmt.Errorf("openai: API error: %s", chatResp.Error.Message))
 	}
 
 	if len(chatResp.Choices) == 0 {
@@ -500,10 +500,10 @@ func (o *OpenAIProvider) ChatWithTools(ctx context.Context, messages []ChatMessa
 
 	var chatResp openaiChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return "", nil, fmt.Errorf("openai: failed to decode tools response: %w", err)
+		return "", nil, FromProvider(fmt.Errorf("openai: failed to decode tools response: %w", err))
 	}
 	if chatResp.Error != nil {
-		return "", nil, fmt.Errorf("openai: API error: %s", chatResp.Error.Message)
+		return "", nil, FromProvider(fmt.Errorf("openai: API error: %s", chatResp.Error.Message))
 	}
 	if len(chatResp.Choices) == 0 {
 		return "", nil, fmt.Errorf("openai: no choices returned")
@@ -687,7 +687,7 @@ func (o *OpenAIProvider) ChatStream(ctx context.Context, messages []ChatMessage,
 		}
 
 		if err := scanner.Err(); err != nil {
-			ch <- StreamChunk{Done: true, Error: fmt.Errorf("openai: stream read error: %w", err)}
+			ch <- StreamChunk{Done: true, Error: FromProvider(fmt.Errorf("openai: stream read error: %w", err))}
 		}
 	})
 
@@ -739,7 +739,7 @@ func (o *OpenAIProvider) Embed(ctx context.Context, texts []string) ([][]float32
 	}
 
 	if embedResp.Error != nil {
-		return nil, fmt.Errorf("openai: embed API error: %s", embedResp.Error.Message)
+		return nil, FromProvider(fmt.Errorf("openai: embed API error: %s", embedResp.Error.Message))
 	}
 
 	embeddings := make([][]float32, len(embedResp.Data))
@@ -793,7 +793,7 @@ func (o *OpenAIProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("openai: models returned %d: %s", resp.StatusCode, string(b))
+		return nil, FromProvider(fmt.Errorf("openai: models returned %d: %s", resp.StatusCode, string(b)))
 	}
 
 	var mr openaiModelsResponse
@@ -801,7 +801,7 @@ func (o *OpenAIProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
 		return nil, fmt.Errorf("openai: decode models: %w", err)
 	}
 	if mr.Error != nil {
-		return nil, fmt.Errorf("openai: models error: %s", mr.Error.Message)
+		return nil, FromProvider(fmt.Errorf("openai: models error: %s", mr.Error.Message))
 	}
 
 	out := make([]ModelInfo, 0, len(mr.Data))

@@ -126,6 +126,27 @@ func Create(ctx context.Context, f Form) (*Form, error) {
 	return Get(ctx, f.ProjectUUID, id)
 }
 
+// home is the transaction lock and the count of where a form lives, for its
+// most: its project, or for a table's own form (no project: uuid.Nil) its
+// table.
+func home(project, table uuid.UUID) (string, func(context.Context) (int, error), error) {
+	switch {
+	case project != uuid.Nil:
+		return "project_forms:" + project.String(), func(ctx context.Context) (int, error) { return Count(ctx, project) }, nil
+	case table != uuid.Nil:
+		return "table_forms:" + table.String(), func(ctx context.Context) (int, error) { return CountOfTable(ctx, table) }, nil
+	}
+	return "", nil, errNoHome
+}
+
+// Bound is the most forms where a deleted form lives (home), for its
+// restore: the lock and the count CreateWithin takes, with limit, and full,
+// what a restore past it answers.
+func Bound(project, table uuid.UUID, limit int, full error) (softDelete.Bound, error) {
+	key, count, err := home(project, table)
+	return softDelete.Bound{Lock: key, Most: limit, Count: count, Full: full}, err
+}
+
 // CreateWithin stores a new form, as Create does, while where it lives has
 // fewer than limit forms: its project, or for a table's own form (no project)
 // its table. When there's no room it stores nothing and answers a nil form
@@ -133,17 +154,17 @@ func Create(ctx context.Context, f Form) (*Form, error) {
 // on that project or table (pgexec.Capped): counted apart from the insert,
 // two forms made at once could each see room for the last place.
 func CreateWithin(ctx context.Context, f Form, limit int) (*Form, int, error) {
-	key, count := "project_forms:"+f.ProjectUUID.String(), func(ctx context.Context) (int, error) { return Count(ctx, f.ProjectUUID) }
-	if f.ProjectUUID == uuid.Nil {
-		if f.TargetTable == nil {
-			return nil, 0, errNoHome
-		}
-		table := *f.TargetTable
-		key, count = "table_forms:"+table.String(), func(ctx context.Context) (int, error) { return CountOfTable(ctx, table) }
+	table := uuid.Nil
+	if f.TargetTable != nil {
+		table = *f.TargetTable
+	}
+	key, count, err := home(f.ProjectUUID, table)
+	if err != nil {
+		return nil, 0, err
 	}
 	var made *Form
 	found := 0
-	_, err := pgexec.Capped(ctx, key, limit,
+	_, err = pgexec.Capped(ctx, key, limit,
 		func(ctx context.Context) (int, error) {
 			n, err := count(ctx)
 			found = n
@@ -262,4 +283,36 @@ func UpdateOfTable(ctx context.Context, table uuid.UUID, f Form) (*Form, error) 
 // does a project's.
 func DeleteOfTable(ctx context.Context, table, id, by uuid.UUID) (bool, error) {
 	return softDelete.Delete(ctx, softDelete.Form, id, by, "target_table = $3 AND project_uuid IS NULL", table)
+}
+
+// LooksOfTables are the files the tables' own forms (no project) wear as cover
+// or logo, those forms held until the caller's transaction ends, for the
+// caller to archive before ForgetOfTables (V-121 F1). idx_project_forms_table
+// serves it.
+func LooksOfTables(ctx context.Context, tables []uuid.UUID) ([]uuid.UUID, error) {
+	pairs, err := pgexec.Query(ctx, `SELECT cover_id, logo_id FROM project_forms
+		WHERE target_table = ANY($1::uuid[]) AND project_uuid IS NULL FOR UPDATE`, func(r pgexec.Row) ([2]*uuid.UUID, error) {
+		var p [2]*uuid.UUID
+		err := r.Scan(&p[0], &p[1])
+		return p, err
+	}, tables)
+	var looks []uuid.UUID
+	for _, p := range pairs {
+		for _, id := range p {
+			if id != nil {
+				looks = append(looks, *id)
+			}
+		}
+	}
+	return looks, err
+}
+
+// ForgetOfTables deletes the tables' own forms (no project) for good, deleted
+// ones too, when the tables go for good (V-121 F1): their answers go with them
+// (form_submissions cascade), their links answer as gone, and a file a visitor
+// is still sending goes on the uploads sweep's next pass (Unsent). A project's
+// form that adds rows to one of the tables stays the project's.
+func ForgetOfTables(ctx context.Context, tables []uuid.UUID) error {
+	_, err := pgexec.Exec(ctx, `DELETE FROM project_forms WHERE target_table = ANY($1::uuid[]) AND project_uuid IS NULL`, tables)
+	return err
 }

@@ -96,11 +96,14 @@ func keepReadableDocs(ctx context.Context, userInfo *userModels.UserInfo, result
 type readRef struct{ doc, board string }
 
 // refOf reads an item's readRef from its index fields. Only doc comments carry
-// doc_uuid and only board comments board_uuid.
+// doc_uuid; board comments carry board_uuid, and a board's own entry (what it
+// says) is the board.
 func refOf(contentType, contentUUID, docUUID, boardUUID string) readRef {
 	switch contentType {
 	case "doc":
 		return readRef{doc: contentUUID}
+	case ai.BoardContentType:
+		return readRef{board: contentUUID}
 	case "comment":
 		return readRef{doc: docUUID, board: boardUUID}
 	}

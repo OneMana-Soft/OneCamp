@@ -13,7 +13,15 @@ func mountCalendarAnswers(rt calendarRouters) {
 	rt.Member.Post("/calendar/events/{eventId}/proposal/dismiss", eventController.DismissCalendarProposal)
 	rt.Member.Post("/calendar/events/{eventId}/nudge", eventController.NudgeCalendarGuests)
 	rt.Member.Post("/calendar/events/{eventId}/guest-link", eventController.CalendarGuestLink)
-	// The event's own call (calendar B11): given and taken off by whoever may change the event.
+	// The event's own call (calendar B11): given and taken off by whoever may change the event,
+	// who also says whether its invitees knock (meet-02).
 	rt.Member.Post("/calendar/events/{eventId}/call", eventController.AddCalendarEventCall)
 	rt.Member.Delete("/calendar/events/{eventId}/call", eventController.RemoveCalendarEventCall)
+	rt.Member.Post("/calendar/events/{eventId}/call/lobby", eventController.SetCalendarEventCallLobby)
+	rt.Member.Get("/calendar/events/{eventId}/call/artefacts", eventController.GetCalendarEventCallArtefacts)
+	rt.Member.Get("/calendar/events/{eventId}/call/artefacts/{key}/recording", eventController.GetCalendarEventCallRecording)
+	rt.Member.Get("/calendar/events/{eventId}/call/artefacts/{key}/transcript", eventController.GetCalendarEventCallTranscript)
+	// What the event's call made is deleted, and brought back, by whoever may change the event.
+	rt.Member.Delete("/calendar/events/{eventId}/call/artefacts/{key}", eventController.DeleteCalendarEventCallArtefact)
+	rt.Member.Post("/calendar/events/{eventId}/call/artefacts/{key}/restore", eventController.RestoreCalendarEventCallArtefact)
 }

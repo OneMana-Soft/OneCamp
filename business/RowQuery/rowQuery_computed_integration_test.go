@@ -146,6 +146,9 @@ func TestComputedFieldsSortAndFilterAt100k(t *testing.T) {
 	}
 	statementsGetAMinute(t)
 	integration.SetupDgraph(t)
+	// The planner knows the tables filled at once only as they are counted
+	// below, whenever the autovacuum looks.
+	noAutovacuumOn(ctx, t, "data_table_rows", "data_table_links", "data_table_cell_index")
 	me := uuid.New()
 	if _, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `INSERT INTO users (id, email_id, username, display_name, created_at, updated_at)
 		VALUES ($1, 'owner@example.test', 'owner', 'Owner', NOW(), NOW())`, me); err != nil {
@@ -274,12 +277,24 @@ func TestComputedFieldsSortAndFilterAt100k(t *testing.T) {
 	})
 	link(rel.Id, links)
 	link(pLedger.Id, owes)
-	// Made whole as the repair sweep makes tables filled at once.
+	// Made whole as the repair sweep makes tables filled at once. The server
+	// counts the tables for the planner after each (CountAfterFill), but a
+	// count that fails twice, as one held past its time on a loaded machine can,
+	// is only logged, and the planner keeps what it counted before. Here the
+	// projects' count fails, so the test counts the tables itself before it
+	// measures.
 	for _, tb := range []*model.DataTable{ledger, vendors, projects} {
-		if err := rowQuery.IndexTable(ctx, tb.Id); err != nil {
+		restore := func() {}
+		if tb == projects {
+			restore = rowQuery.FailCounts()
+		}
+		err := rowQuery.IndexTable(ctx, tb.Id)
+		restore()
+		if err != nil {
 			t.Fatalf("index %s: %v", tb.Name, err)
 		}
 	}
+	countForThePlanner(ctx, t)
 
 	f := func(m *model.Field) string { return "field:" + m.Id.String() }
 	num := func(x float64) []query.Value { return []query.Value{{Number: &x}} }

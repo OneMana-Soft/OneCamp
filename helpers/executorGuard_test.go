@@ -18,14 +18,18 @@ import (
 // landed on it, the two its branch had moved onto the generics; 1,150 with
 // the calls stack, whose C10 fix writes MarkRemoved through pgexec; 1,143
 // once UpdateAttachmentDeletedTimeByUUID went; 1,141 once UpsertWorkspaceMapping
-// went). It only goes down: move a
+// went; 1,134 once the tables' vacuums ran through pgexec.ExecAlone; 1,130
+// once V-184 head 2 counted and inserted fields and statuses through pgexec
+// under their create lock; 1,128 once head 3b took and gave admin roles
+// through pgexec). It only goes down: move a
 // function onto the generics, then lower this to the count the test reports.
-const handExecutorBaseline = 1134
+const handExecutorBaseline = 1127
 
 // backgroundTimeoutBaseline is how many times models/ starts a statement's
 // timeout from context.Background() instead of the caller's ctx (206 at the
-// audit, 199 when this landed). It only goes down.
-const backgroundTimeoutBaseline = 148
+// audit, 199 when this landed; 146 once V-184 head 3b moved the two admin
+// role writes onto the request's ctx through pgexec). It only goes down.
+const backgroundTimeoutBaseline = 146
 
 // executorCalls are the calls that run a statement or a query on a store
 // client, or open a graph transaction to run one in (an HTTP client's Do is

@@ -64,6 +64,14 @@ const (
 	// ChangeField is a field's cells rewritten with the field: an option
 	// renamed, a type changed.
 	ChangeField ChangeKind = "field"
+	// ChangeReplace, ChangeTrim, ChangeDedupe and ChangeSplit are a step over
+	// a view's rows (business/DataTable Transform): find and replace, trim
+	// spaces, remove duplicate rows, split a text column. A step's change
+	// sets share one operation, which one undo takes back.
+	ChangeReplace ChangeKind = "replace"
+	ChangeTrim    ChangeKind = "trim"
+	ChangeDedupe  ChangeKind = "dedupe"
+	ChangeSplit   ChangeKind = "split"
 )
 
 // By is who made a change, and how.

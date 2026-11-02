@@ -117,7 +117,7 @@ func TestAFailedIdMapWriteFailsItsItem(t *testing.T) {
 		}},
 		{"a task matched before", "task-1", importModels.EntityTask, func() error {
 			return importOneTask(ctx, job, &importProvider.SourceTask{SourceID: "task-1", Name: "Ship it"}, uuid.Nil, nil,
-				nil, nil, nil, nil, importer, nil, nil, nil, nil, nil)
+				nil, nil, nil, nil, importer, nil, nil, nil, nil, nil, nil)
 		}},
 		{"a person matched before", "user-1", importModels.EntityUser, func() error {
 			return resolveOneUser(ctx, job, &importProvider.SourceUser{SourceID: "user-1"}, &UserResolveStats{}, &memberNames{})

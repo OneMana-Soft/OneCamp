@@ -331,7 +331,7 @@ func ListProviderModels(ctx context.Context, providerID uuid.UUID, forceRefresh 
 
 	models, err := client.lister.ListModels(listCtx)
 	if err != nil {
-		return nil, fmt.Errorf("%s", sanitizeProbeError(err))
+		return nil, fmt.Errorf("%s", sanitizeProbeError(ctx, err))
 	}
 
 	views := toModelViews(models)
@@ -434,7 +434,7 @@ func TestConnection(ctx context.Context, req adapter.TestConnectionRequest) (*ad
 
 	models, err := client.lister.ListModels(ctx)
 	if err != nil {
-		return &adapter.TestConnectionResponse{OK: false, Message: sanitizeProbeError(err)}, nil
+		return &adapter.TestConnectionResponse{OK: false, Message: sanitizeProbeError(ctx, err)}, nil
 	}
 
 	return &adapter.TestConnectionResponse{
@@ -445,8 +445,9 @@ func TestConnection(ctx context.Context, req adapter.TestConnectionRequest) (*ad
 }
 
 // sanitizeProbeError converts low-level transport errors into safe,
-// admin-friendly messages without leaking internals.
-func sanitizeProbeError(err error) string {
+// admin-friendly messages without leaking internals. Anything else gets ClientWords: a provider's
+// reply (its account, hosts, limits) is withheld and logged, and our own words are kept (V-157).
+func sanitizeProbeError(ctx context.Context, err error) string {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "blocked for security"):
@@ -460,7 +461,7 @@ func sanitizeProbeError(err error) string {
 	case strings.Contains(msg, "no such host"):
 		return "Host not found. Check the base URL hostname."
 	default:
-		return msg
+		return ai.ClientWords(ctx, err)
 	}
 }
 
@@ -773,7 +774,7 @@ func SetEmbeddingModel(ctx context.Context, req adapter.SetEmbeddingModelRequest
 	defer cancel()
 	measuredDim, probeErr := probeEmbeddingDimension(probeCtx, p, model)
 	if probeErr != nil {
-		return fmt.Errorf("could not verify embedding model %q: %s", model, sanitizeProbeError(probeErr))
+		return fmt.Errorf("could not verify embedding model %q: %s", model, sanitizeProbeError(ctx, probeErr))
 	}
 	if measuredDim != req.Dimension {
 		// The measured value is authoritative; the index must match what the

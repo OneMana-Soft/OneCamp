@@ -93,15 +93,31 @@ func AskAISystemPrompt(withTools bool) string {
 // tools relevant to `question` are described (with a safe full-catalog
 // fallback), cutting the per-call token cost so agent turns stay under tight
 // provider token-per-minute limits.
-func AskAISystemPromptForQuery(withTools bool, question string) string {
+//
+// The tool section, with the chart, page and date notes that come with it, is held to toolTokens of lim's tokenizer;
+// too few for the notes and one tool leaves the tools out, so a small model or a provider's per-request cap gets the
+// answer without them rather than a refusal (V-157).
+func AskAISystemPromptForQuery(withTools bool, question string, lim ai.ModelLimits, toolTokens int) string {
 	prompt := askAISystemPrompt
-	if withTools && len(ai.Executors) > 0 {
-		prompt += ai.BuildToolPromptFiltered(question)
-		prompt += ChartCapabilityPrompt()
-		prompt += htmlArtifactCapabilityPrompt()
-		prompt += askAIDatePrompt(time.Now().UTC())
+	if withTools && len(ai.Executors) > 0 && toolTokens > 0 {
+		notes := ChartCapabilityPrompt() + htmlArtifactCapabilityPrompt() + askAIDatePrompt(time.Now().UTC())
+		if room := toolTokens - lim.EstimateTokens(notes); room > 0 {
+			if tools := ai.BuildToolPromptWithin(lim, question, room); tools != "" {
+				prompt += tools + notes
+			}
+		}
 	}
 	return prompt
+}
+
+// askConversationalPromptWithin is the conversational prompt with the tools most relevant to the question in at
+// most toolTokens: it took the whole catalog, ~7,300 tokens, so even "hi" overflowed a provider's per-request cap.
+func askConversationalPromptWithin(lim ai.ModelLimits, connected []string, question string, toolTokens int) string {
+	prompt := conversationalSystemPrompt
+	if len(ai.Executors) > 0 && toolTokens > 0 {
+		prompt += ai.BuildToolPromptWithin(lim, question, toolTokens)
+	}
+	return prompt + connectorAwarenessPrompt(connected)
 }
 
 // askAIDatePrompt anchors the assistant's tools (a task's due date, an event's
@@ -157,8 +173,8 @@ func AskAISystemPromptWithConnectors(withTools bool, connected []string) string 
 
 // AskAISystemPromptWithConnectorsForQuery is AskAISystemPromptWithConnectors
 // with tool routing scoped to `question` (see AskAISystemPromptForQuery).
-func AskAISystemPromptWithConnectorsForQuery(withTools bool, connected []string, question string) string {
-	return AskAISystemPromptForQuery(withTools, question) + connectorAwarenessPrompt(connected)
+func AskAISystemPromptWithConnectorsForQuery(withTools bool, connected []string, question string, lim ai.ModelLimits, toolTokens int) string {
+	return AskAISystemPromptForQuery(withTools, question, lim, toolTokens) + connectorAwarenessPrompt(connected)
 }
 
 // AskAIConversationalPromptWithConnectors is the conversational variant with
@@ -528,7 +544,22 @@ func streamChatAnswerRaw(ctx context.Context, llm ai.LLMProvider, cb *ai.Circuit
 		cb.RecordResult(err)
 		return "", err
 	}
+	return drainAnswerStream(chunks, cb, onDelta)
+}
 
+// streamChatAnswerFitted is streamChatAnswerRaw for a request built from parts: fitted to the model's limit, and
+// refitted once to a provider's stated one (V-157).
+func streamChatAnswerFitted(ctx context.Context, llm ai.LLMProvider, cb *ai.CircuitBreaker, parts ai.PromptParts, opts ai.ChatOptions, onDelta func(running string)) (string, error) {
+	chunks, _, err := ai.ChatStreamFitted(ctx, llm, opts, parts)
+	if err != nil {
+		cb.RecordResult(err)
+		return "", err
+	}
+	return drainAnswerStream(chunks, cb, onDelta)
+}
+
+// drainAnswerStream reads a streamed answer to its end, think-filtered, calling onDelta with the running text.
+func drainAnswerStream(chunks <-chan ai.StreamChunk, cb *ai.CircuitBreaker, onDelta func(running string)) (string, error) {
 	filter := &StreamThinkFilter{}
 	var acc strings.Builder
 	for chunk := range chunks {
@@ -917,7 +948,7 @@ func askAIWithStream(ctx context.Context, userInfo *userModels.UserInfo, questio
 	// multi-turn conversation can't crowd out the system prompt + workspace
 	// context and push the prompt past the model's context window (which
 	// would make Ollama silently truncate from the front).
-	history = limits.TrimHistoryForPrompt(ctx, history, limits.HistoryBudget())
+	// PromptParts.Fit trims it, with the tools and the context, to what the model takes (V-157).
 
 	// Fast-path: skip expensive context building for conversational inputs.
 	// buildUserContext generates an embedding + k-NN search (~3-5s on CPU/Ollama),
@@ -935,11 +966,10 @@ func askAIWithStream(ctx context.Context, userInfo *userModels.UserInfo, questio
 		// prompt (scaffold + history + context + response reserve) stays
 		// within the model's window. buildUserContext emits highest-priority
 		// sections first, so truncating the tail degrades gracefully.
-		context_text = limits.TruncateForPrompt(ctx, context_text, limits.ContextBudget())
 	}
 
 	// Select appropriate strategy: factual RAG vs. creative conversation
-	var systemPrompt string
+	var system func(toolTokens int) string
 	opts := ai.ChatOptions{
 		MaxTokens:  1024,
 		Seed:       int(time.Now().UnixNano() % 1000000),
@@ -952,13 +982,17 @@ func askAIWithStream(ctx context.Context, userInfo *userModels.UserInfo, questio
 	connected := connectorBusiness.ConnectedProviderNames(ctx, userUUID)
 
 	if ai.IsConversational(question) {
-		systemPrompt = AskAIConversationalPromptWithConnectors(true, connected)
+		system = func(toolTokens int) string {
+			return askConversationalPromptWithin(limits, connected, question, toolTokens)
+		}
 		opts.Temperature = 0.8
 		opts.TopP = 0.9
 	} else {
 		// Skip tool definitions for read-only/summary questions to save ~500 tokens
 		includeTools := !ai.IsSummaryOrReadIntent(question)
-		systemPrompt = AskAISystemPromptWithConnectorsForQuery(includeTools, connected, question)
+		system = func(toolTokens int) string {
+			return AskAISystemPromptWithConnectorsForQuery(includeTools, connected, question, limits, toolTokens)
+		}
 		opts.Temperature = 0.3
 	}
 
@@ -967,42 +1001,25 @@ func askAIWithStream(ctx context.Context, userInfo *userModels.UserInfo, questio
 	// can never override safety/grounding/tool-use. Best-effort: a lookup error
 	// just means the default prompt.
 	if ci, cerr := GetUserCustomInstructions(ctx, userUUID); cerr == nil && strings.TrimSpace(ci) != "" {
-		systemPrompt = applyUserCustomInstructions(systemPrompt, ci)
+		base := system
+		system = func(toolTokens int) string { return applyUserCustomInstructions(base(toolTokens), ci) }
 	}
 
-	// Construct messages: system → history → current question with context
-	messages := []ai.ChatMessage{
-		{Role: "system", Content: systemPrompt},
-	}
+	// The request is fitted to the model's limit, and refitted once to a provider's stated one (V-157).
+	parts := ai.PromptParts{System: system, History: history, Context: context_text, Question: question}
 
-	// Inject conversation history (previous turns)
-	if len(history) > 0 {
-		messages = append(messages, history...)
-	}
-
-	// Current turn with workspace context
-	userContent := question
-	if context_text != "" {
-		userContent = fmt.Sprintf("Context from workspace:\n%s\n\nQuestion: %s", context_text, question)
-	}
-	messages = append(messages, ai.ChatMessage{
-		Role:    "user",
-		Content: userContent,
-	})
-
-	// Single completion. When a live view is attached (onDelta), stream it so
-	// the reply types in; streamChatAnswerRaw records the breaker itself and
-	// returns the raw (think-filtered) text so tool calls below still parse.
-	// Otherwise run the normal blocking call.
+	// Single completion. When a live view is attached (onDelta), stream it so the reply types in;
+	// streamChatAnswerFitted records the breaker itself and returns the raw (think-filtered) text so tool
+	// calls below still parse. Otherwise run the normal blocking call.
 	var answer string
 	var err error
 	if onDelta != nil {
-		answer, err = streamChatAnswerRaw(ctx, llm, cb, messages, opts, onDelta)
+		answer, err = streamChatAnswerFitted(ctx, llm, cb, parts, opts, onDelta)
 		if err != nil {
 			return nil, fmt.Errorf("AI Q&A failed: %w", err)
 		}
 	} else {
-		answer, err = ai.ChatWithRescue(ctx, llm, messages, opts)
+		answer, _, err = ai.ChatFitted(ctx, llm, opts, parts)
 		if err != nil {
 			cb.RecordResult(err)
 			return nil, fmt.Errorf("AI Q&A failed: %w", err)

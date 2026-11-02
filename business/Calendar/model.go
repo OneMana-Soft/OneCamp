@@ -185,6 +185,11 @@ type Event struct {
 	// OutOfOffice is an out-of-office event's decline rule, read by its
 	// owner alone (head 5b).
 	OutOfOffice *OOOView `json:"out_of_office,omitempty"`
+	// OwnTimeRefused says, to whoever may change the event, each kind of own
+	// time it can't be made by a save that keeps its guests, in the words the
+	// save would be refused with (keepOwnTime's own answer; CR-113 S1). The
+	// form offers only the rest. Absent when every kind is taken.
+	OwnTimeRefused map[EventKind]string `json:"own_time_refused,omitempty"`
 }
 
 // GuestInput is a guest named in a write: a workspace member by id, or

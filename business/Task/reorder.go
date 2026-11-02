@@ -10,6 +10,7 @@ import (
 
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
+	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 	domain "github.com/akashc777/OneCamp/domain/Task"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
@@ -82,6 +83,11 @@ func Reorder(ctx context.Context, projectUUID string, moved []*dgraphStruct.Dgra
 	if err := reorderSeams.write(ctx, writes); err != nil {
 		return err
 	}
+	ranked := make([]workFeed.TaskChange, 0, len(writes))
+	for _, w := range writes {
+		ranked = append(ranked, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectUUID, Task: w, Fields: []string{"task_rank"}})
+	}
+	logChange(ctx, nil, ranked...)
 	reorderSeams.publish(ctx, &mqttStruct.MqttTaskChanged{TaskUuid: moved[0].Uuid, ProjectUuid: projectUUID})
 	return nil
 }

@@ -106,7 +106,8 @@ func SaveMeeting(ctx context.Context, id string, owner uuid.UUID) error {
 }
 
 // SetLobby changes who waits in a meeting's lobby: guests (true) or nobody.
-// An event call's guests wait as it was made: all but its invitees.
+// An event call's guests wait as its host left them: its invitees too when
+// they were made to knock (SetInviteesWait), else all but its invitees.
 func SetLobby(ctx context.Context, meetingID string, guestsWait bool) (bool, error) {
 	lobby := model.LobbyNobody
 	if guestsWait {
@@ -115,11 +116,34 @@ func SetLobby(ctx context.Context, meetingID string, guestsWait bool) (bool, err
 		if err != nil {
 			return false, err
 		}
-		if m != nil && m.Kind == model.KindEvent {
+		if m != nil && m.Kind == model.KindEvent && m.Lobby != model.LobbyGuests {
 			lobby = model.LobbyInvitees
 		}
 	}
 	return model.SetLobby(ctx, meetingID, lobby)
+}
+
+// SetInviteesWait makes the invitees of the event call in room knock and wait
+// like anyone from outside (Meet's quick access off), or come in by their own
+// invitation again, answering whether room is an open event call's. A call
+// anyone with the link joins at once stays so: its invitees come in anyway.
+func SetInviteesWait(ctx context.Context, room string, wait bool) (bool, error) {
+	ref, kind, ok := callStateBusiness.RefOfRoom(room)
+	if !ok || kind != model.KindMeeting {
+		return false, nil
+	}
+	m, err := model.MeetingOf(ctx, ref.ID)
+	if err != nil || m == nil || m.Kind != model.KindEvent || m.ArchivedAt != nil {
+		return false, err
+	}
+	lobby := model.LobbyGuests
+	if !wait {
+		if m.Lobby != model.LobbyGuests {
+			return true, nil
+		}
+		lobby = model.LobbyInvitees
+	}
+	return model.SetLobby(ctx, m.ID, lobby)
 }
 
 // Knock records someone from outside asking to come into a room's call

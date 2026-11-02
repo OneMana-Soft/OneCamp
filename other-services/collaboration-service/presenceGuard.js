@@ -24,8 +24,16 @@
 //   - a call's guest who draws: their pointer and button under their name,
 //     nothing else (no presenter for anyone to follow);
 //   - a member, reader or editor: what they publish, under their own name and
-//     id (their presenting too); the colour their id gives them, and no hue of
-//     their choosing (tabs work it out from the name and id).
+//     id; the colour their id gives them, and no hue of their choosing (tabs
+//     work it out from the name and id);
+//   - but only an editor presents, holds everyone on their view or brings
+//     everyone to it: a member who may only read publishes no presenting
+//     (a hold rides in it) and no bring.
+// Each member's user carries edit, set here from their sign-in (the API's
+// canEdit, from the board's member list, and the connection's read-only),
+// never from what their tab says: a tab honours another's presenting, hold
+// and bring only from a user stamped edit: true. A guest is on no member
+// list: their user carries no edit, and they publish neither.
 // A tab speaks only for its own presence: what it says for a client another
 // connection holds (or the server's own) is dropped.
 
@@ -136,12 +144,17 @@ export function presenceAllowed(state, who) {
     }
     const out = { ...state }
     if (named) {
-        out.user = { id: who.id, name: who.name, color: colourOf(who.id) }
+        out.user = { id: who.id, name: who.name, color: colourOf(who.id), edit: !who.readOnly }
         if (typeof state.user.profileKey === 'string') out.user.profileKey = state.user.profileKey
     } else if ('user' in out) {
         out.user = null
     }
-    if (isObject(state.presenting)) out.presenting = { ...state.presenting, userId: who.id, name: who.name }
+    if (who.readOnly) {
+        delete out.presenting
+        delete out.bring
+    } else if (isObject(state.presenting)) {
+        out.presenting = { ...state.presenting, userId: who.id, name: who.name }
+    }
     return out
 }
 

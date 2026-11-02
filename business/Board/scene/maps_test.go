@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -133,5 +134,25 @@ func TestDecodeRefusesAStateScreensWrote(t *testing.T) {
 		if _, err := Decode(s.bytes); err == nil {
 			t.Errorf("Decode read %s", s.Name)
 		}
+	}
+}
+
+func TestStateRootsReadsAStoredState(t *testing.T) {
+	if roots, err := StateRoots(""); err != nil || roots != nil {
+		t.Fatalf("a board never drawn on: %v, %v; want no roots, no error", roots, err)
+	}
+	if _, err := StateRoots("not base64!"); err == nil || !strings.Contains(err.Error(), "isn't base64") {
+		t.Fatalf("a state that isn't base64: %v", err)
+	}
+	state, _, err := State(7, []Element{Frame("f1", "Logistics", 0, 0, 100, 100, 1)}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, err := StateRoots(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if el, ok := roots["elements"]["f1"].(map[string]any); !ok || el["name"] != "Logistics" {
+		t.Fatalf("the frame wasn't read back: %v", roots["elements"])
 	}
 }

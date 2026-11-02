@@ -260,13 +260,26 @@ func searched(e *models.Event) bool {
 	return e != nil && e.SeriesID == nil && e.DeletedAt == nil && !slices.Contains(unsearchedKinds, e.Kind)
 }
 
+// setEntryWhen writes when e is on into an entry: a timed event's instants,
+// an all-day one's dates, and the zone they are said in. Pure.
+func setEntryWhen(entry *openSearchStruct.OpenSearchEvent, e *models.Event) {
+	entry.EventStartDate, entry.EventEndDate, entry.EventZone = e.StartDate, e.EndDate, e.TZ
+	entry.EventStart, entry.EventEnd = 0, 0
+	if e.StartAt != nil {
+		entry.EventStart = e.StartAt.Unix()
+	}
+	if e.EndAt != nil {
+		entry.EventEnd = e.EndAt.Unix()
+	}
+}
+
 // searchEntryOf is an event's whole entry, from the event, its guests, the
 // calendar it is on and the people they name. A guest's name is kept only
 // while the guests may see one another. Pure.
 func searchEntryOf(e *models.Event, guests []models.Attendee, cal models.Calendar, people map[string]*dgraphStruct.DgraphUser) openSearchStruct.OpenSearchEvent {
 	entry := openSearchStruct.OpenSearchEvent{
 		Uuid: e.ID.String(), EventTitle: e.Title, EventNotes: notesAsText(e), EventLocation: e.Location, EventKind: e.Kind,
-		EventStartDate: e.StartDate, EventEndDate: e.EndDate, EventZone: e.TZ, EventRepeats: e.RRule != "",
+		EventRepeats:       e.RRule != "",
 		EventOrganiserUuid: e.CreatedBy.String(),
 		EventPeople:        []string{e.CreatedBy.String()},
 		EventGuestNames:    []string{},
@@ -275,12 +288,7 @@ func searchEntryOf(e *models.Event, guests []models.Attendee, cal models.Calenda
 		EventCreatedAt:     e.CreatedAt.Unix(),
 		EventUpdatedAt:     e.UpdatedAt.Unix(),
 	}
-	if e.StartAt != nil {
-		entry.EventStart = e.StartAt.Unix()
-	}
-	if e.EndAt != nil {
-		entry.EventEnd = e.EndAt.Unix()
-	}
+	setEntryWhen(&entry, e)
 	if p := people[e.CreatedBy.String()]; p != nil {
 		entry.EventOrganiserFullName = p.DisplayName()
 	}

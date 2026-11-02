@@ -294,7 +294,7 @@ func handleToolCall(w http.ResponseWriter, r *http.Request, req jsonRPCRequest) 
 	if err != nil {
 		// Tool errors are returned as a successful JSON-RPC response with
 		// isError=true, per the MCP spec, so the client can surface them.
-		writeRPCResult(w, req.ID, toolResult(err.Error(), true))
+		writeRPCResult(w, req.ID, toolResult(ai.ClientWords(ctx, err), true))
 		return
 	}
 	res := toolResult(msg, false)

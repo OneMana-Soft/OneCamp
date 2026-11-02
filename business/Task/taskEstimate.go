@@ -13,6 +13,7 @@ import (
 	"time"
 
 	estimateScale "github.com/akashc777/OneCamp/business/EstimateScale"
+	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 	domain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -64,6 +65,7 @@ func UpdateTaskEstimate(ctx context.Context, taskUUID uuid.UUID, minutes int, ta
 		helpers.LogErrorWithContext(ctx, "business/UpdateTaskEstimate dgraph err: %+v", err)
 		return err
 	}
+	logChange(ctx, user, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectOf(task), Task: write, Fields: []string{"task_estimate_minutes"}})
 	return nil
 }
 
@@ -121,5 +123,6 @@ func UpdateTaskPoints(ctx context.Context, taskUUID uuid.UUID, points *float64, 
 		helpers.LogErrorWithContext(ctx, "business/UpdateTaskPoints dgraph err: %+v", err)
 		return err
 	}
+	logChange(ctx, user, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectOf(task), Task: write, Fields: []string{"task_estimate_points"}})
 	return nil
 }

@@ -18,18 +18,19 @@ const (
 )
 
 // SetBoard puts a board on a live call's stage for by (their call identity),
-// with everyone drawing and the call's guests not, and keeps it among the
-// boards the call showed. Unless takeover, it goes on only while the stage has
-// no board or by's own. Answers whether it went on, and the board it took the
-// stage from (uuid.Nil for none), read under the row's lock, so a stop or
-// another present racing it can't make the caller close the wrong board's
-// sockets.
+// with everyone drawing, the call's guests not, and the whole board shown (no
+// slide), and keeps it among the boards the call showed. Unless takeover, it
+// goes on only while the stage has no board or by's own. Answers whether it
+// went on, and the board it took the stage from (uuid.Nil for none), read
+// under the row's lock, so a stop or another present racing it can't make the
+// caller close the wrong board's sockets.
 func SetBoard(ctx context.Context, session, board uuid.UUID, by string, takeover bool) (bool, uuid.UUID, error) {
 	was, on, err := pgexec.QueryOne(ctx, `WITH old AS (
 			SELECT id, board_uuid FROM call_sessions WHERE id = $1 FOR UPDATE
 		), s AS (
 			UPDATE call_sessions c
-			SET board_uuid = $2, board_by = $3, board_draw = $5, board_guests_draw = false, board_guests_kept = false
+			SET board_uuid = $2, board_by = $3, board_draw = $5, board_guests_draw = false, board_guests_kept = false,
+				board_slide = NULL
 			FROM old
 			WHERE c.id = old.id AND c.ended_at IS NULL AND ($4 OR c.board_uuid IS NULL OR c.board_by = $3)
 			RETURNING old.board_uuid AS was
@@ -50,7 +51,8 @@ func ClearBoard(ctx context.Context, session uuid.UUID, by string) (uuid.UUID, e
 			SELECT id, board_uuid FROM call_sessions WHERE id = $1 FOR UPDATE
 		)
 		UPDATE call_sessions c
-		SET board_uuid = NULL, board_by = NULL, board_draw = $2, board_guests_draw = false, board_guests_kept = false
+		SET board_uuid = NULL, board_by = NULL, board_draw = $2, board_guests_draw = false, board_guests_kept = false,
+			board_slide = NULL
 		FROM old
 		WHERE c.id = old.id AND c.ended_at IS NULL AND c.board_uuid IS NOT NULL AND ($3 = '' OR c.board_by = $3)
 		RETURNING old.board_uuid`, scanNullID, session, DrawEveryone, by)
@@ -84,6 +86,18 @@ type BoardState struct {
 	By         string
 	Draw       string
 	GuestsDraw bool
+	// Slide is the frame everyone is shown, "" for the whole board.
+	Slide string
+}
+
+// boardStateColumns is a BoardState as a write on call_sessions returns it,
+// read by scanBoardState.
+const boardStateColumns = `board_uuid, COALESCE(board_by, ''), board_draw, board_guests_draw, COALESCE(board_slide, '')`
+
+func scanBoardState(r pgexec.Row) (BoardState, error) {
+	var b BoardState
+	err := r.Scan(&b.UUID, &b.By, &b.Draw, &b.GuestsDraw, &b.Slide)
+	return b, err
 }
 
 // SetBoardDraw sets who draws on the board on a live call's stage: draw
@@ -95,12 +109,18 @@ func SetBoardDraw(ctx context.Context, session uuid.UUID, draw *string, guests *
 	return pgexec.QueryOne(ctx, `UPDATE call_sessions
 		SET board_draw = COALESCE($2, board_draw), board_guests_draw = COALESCE($3, board_guests_draw)
 		WHERE id = $1 AND ended_at IS NULL AND board_uuid IS NOT NULL
-		RETURNING board_uuid, COALESCE(board_by, ''), board_draw, board_guests_draw`,
-		func(r pgexec.Row) (BoardState, error) {
-			var b BoardState
-			err := r.Scan(&b.UUID, &b.By, &b.Draw, &b.GuestsDraw)
-			return b, err
-		}, session, draw, guests)
+		RETURNING `+boardStateColumns, scanBoardState, session, draw, guests)
+}
+
+// SetBoardSlide shows everyone in a live call slide, a frame on the board on
+// its stage ("" for the whole board), only while that board is still there
+// and, unless by is "", by put it there: a move racing another board's
+// arrival, or a host's takeover of the presenter's stage, lands on nothing.
+// Answers the board as it is now, false when the move landed on nothing.
+func SetBoardSlide(ctx context.Context, session, board uuid.UUID, by, slide string) (BoardState, bool, error) {
+	return pgexec.QueryOne(ctx, `UPDATE call_sessions SET board_slide = NULLIF($4, '')
+		WHERE id = $1 AND ended_at IS NULL AND board_uuid = $2 AND ($3 = '' OR board_by = $3)
+		RETURNING `+boardStateColumns, scanBoardState, session, board, by, slide)
 }
 
 // scanNullID is a nullable uuid column, uuid.Nil for NULL.

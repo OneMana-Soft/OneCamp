@@ -281,7 +281,7 @@ func GenerateBoardDiagram(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		helpers.LogErrorWithContext(ctx, "controllers/GenerateBoardDiagram failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
@@ -324,7 +324,7 @@ func PlanBoardDiagram(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		helpers.LogErrorWithContext(ctx, "controllers/PlanBoardDiagram failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
@@ -391,11 +391,8 @@ func GenerateBoardDiagramStream(w http.ResponseWriter, r *http.Request) {
 		func(stage string) { sseSend(w, flusher, map[string]interface{}{"stage": stage}) },
 	)
 	if genErr != nil {
-		msg := genErr.Error()
-		if errors.Is(genErr, ai.ErrRateLimited) || errors.Is(genErr, ai.ErrCircuitOpen) {
-			msg = ai.FriendlyProviderError(genErr)
-		}
-		sseSend(w, flusher, map[string]interface{}{"error": msg})
+		// Our words, never the provider's (V-157).
+		sseSend(w, flusher, map[string]interface{}{"error": ai.ClientWords(ctx, genErr)})
 		return
 	}
 	sseSend(w, flusher, map[string]interface{}{"result": result})
@@ -445,7 +442,7 @@ func RefineBoardDiagram(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		helpers.LogErrorWithContext(ctx, "controllers/RefineBoardDiagram failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
@@ -494,7 +491,7 @@ func ClusterBoard(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		helpers.LogErrorWithContext(ctx, "controllers/ClusterBoard failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
@@ -535,7 +532,7 @@ func GenerateBoardUI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		helpers.LogErrorWithContext(ctx, "controllers/GenerateBoardUI failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
@@ -578,7 +575,7 @@ func RefineBoardUI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		helpers.LogErrorWithContext(ctx, "controllers/RefineBoardUI failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 

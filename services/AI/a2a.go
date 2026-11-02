@@ -508,7 +508,7 @@ func (p *A2AProvider) call(ctx context.Context, body map[string]any) (*a2aObject
 		if resp.StatusCode == http.StatusTooManyRequests {
 			err = fmt.Errorf("%w: %v", ErrProviderRateLimited, err)
 		}
-		return nil, err
+		return nil, FromProvider(err)
 	}
 	var env struct {
 		Result *a2aObject `json:"result"`
@@ -518,10 +518,10 @@ func (p *A2AProvider) call(ctx context.Context, body map[string]any) (*a2aObject
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
-		return nil, fmt.Errorf("a2a: the remote's answer is not JSON-RPC: %s", clip(string(data), 200))
+		return nil, FromProvider(fmt.Errorf("a2a: the remote's answer is not JSON-RPC: %s", clip(string(data), 200)))
 	}
 	if env.Error != nil {
-		return nil, fmt.Errorf("a2a: remote error %d: %s", env.Error.Code, env.Error.Message)
+		return nil, FromProvider(fmt.Errorf("a2a: remote error %d: %s", env.Error.Code, env.Error.Message))
 	}
 	if env.Result == nil {
 		return nil, errors.New("a2a: the remote answered with no result")

@@ -29,6 +29,8 @@ import (
 	"unicode/utf8"
 
 	taskAdapter "github.com/akashc777/OneCamp/adapter/Task"
+	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
+	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
@@ -340,26 +342,27 @@ func gatherMeetingTranscript(ctx context.Context, userInfo *userModels.UserInfo,
 // meetingRoomAccessible reports whether the user may read the transcript of a
 // call room, using only their in-memory access graph (no extra queries). This
 // is the same permission boundary the rest of AI enforces: a member of the
-// channel/group, or a participant of the DM.
+// channel or group the call belongs to, or one of the DM's two people. A
+// breakout room ("<channel>~bN") belongs to its call's conversation, so a
+// channel call's breakout transcripts are read by the channel's members, as
+// the call's own are, and by nobody else. A meeting's call (and so a
+// meeting's breakout) belongs to no conversation, and a name no call uses to
+// none.
 func meetingRoomAccessible(userInfo *userModels.UserInfo, roomName string) bool {
-	switch {
-	case strings.Contains(roomName, " "):
-		// DM room: the requester must be one of the two participants (the
-		// room name is the space-joined sorted pair of user UUIDs).
-		me := userInfo.UserDgraphInfo.Uuid
-		mePg := userInfo.UserPostgresInfo.Id.String()
-		for _, p := range strings.Fields(roomName) {
-			if p != "" && (p == me || p == mePg) {
-				return true
-			}
-		}
+	ref, _, ok := callStateBusiness.RefOfRoom(roomName)
+	if !ok {
 		return false
-	case !strings.Contains(roomName, "-") && len(roomName) == 32:
-		return containsStr(accessibleGroupingIDs(userInfo), roomName)
-	default:
-		channels, _ := getAccessibleResourceUUIDs(userInfo)
-		return containsStr(channels, roomName)
 	}
+	switch ref.Kind {
+	case conversationBusiness.KindDM:
+		return ref.Other(userInfo.UserDgraphInfo.Uuid) != ""
+	case conversationBusiness.KindGroup:
+		return containsStr(accessibleGroupingIDs(userInfo), ref.ID)
+	case conversationBusiness.KindChannel:
+		channels, _ := getAccessibleResourceUUIDs(userInfo)
+		return containsStr(channels, ref.ID)
+	}
+	return false
 }
 
 // decodeTaskItems reads the model's answer in any of the shapes it comes in.

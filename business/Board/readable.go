@@ -137,26 +137,10 @@ func EditableBy(ctx context.Context, boardUUID, userUUID string) (bool, error) {
 // for tests.
 var writeBoardCommentSearch = opensearchModels.SetBoardCommentAccess
 
-// syncBoardCommentSearch writes the board's privacy and sharing as perms holds
-// them (GetBoardPermissions; read here when nil) onto its comments' search
-// entries. Best-effort: global search asks the board itself about every hit,
-// so an entry this misses is still not shown to someone who can't read the
-// board.
-func syncBoardCommentSearch(ctx context.Context, boardUUID string, perms *dgraphStruct.DgraphBoard) {
-	if perms == nil {
-		var err error
-		if perms, err = readBoardSharing(ctx, boardUUID); err != nil || perms == nil {
-			helpers.LogErrorWithContext(ctx, "business/syncBoardCommentSearch could not read board %s's sharing: %v", boardUUID, err)
-			return
-		}
-	}
-	if err := writeBoardCommentsNow(ctx, boardUUID, perms); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/syncBoardCommentSearch %s: %v", boardUUID, err)
-	}
-}
-
 // writeBoardCommentsNow writes the board's privacy and sharing, as perms holds
 // them, onto its comments' search entries, and says if that failed.
+// Best-effort: global search asks the board itself about every hit, so an
+// entry this misses is still not shown to someone who can't read the board.
 func writeBoardCommentsNow(ctx context.Context, boardUUID string, perms *dgraphStruct.DgraphBoard) error {
 	access := opensearchModels.BoardCommentAccess{
 		Public:     perms.IsPrivate == nil || !*perms.IsPrivate,
@@ -204,6 +188,7 @@ func writeBoardSearchNow(ctx context.Context, boardUUID string) error {
 	if err != nil {
 		err = fmt.Errorf("could not write the board's search entry: %w", err)
 	}
+	writeBoardAIAccess(boardUUID, boardAccessOf(perms))
 	return errors.Join(err, writeBoardCommentsNow(ctx, boardUUID, perms))
 }
 
@@ -234,16 +219,24 @@ func SettleBoardSearch(ctx context.Context, boardUUID string) {
 	defer cancel()
 	if err := writeBoardSearchNow(wctx, boardUUID); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/SettleBoardSearch %s: search not settled, written again in the background: %v", boardUUID, err)
-		helpers.GoSafeNamed("board.search-settle", func() {
-			bctx, cancel := context.WithTimeout(context.Background(), boardRewriteTimeout)
-			defer cancel()
-			SyncBoardSearch(bctx, boardUUID)
-		})
+		syncBoardSearchLater(boardUUID)
 		return
 	}
 	if err := refreshBoardSearch(wctx); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/SettleBoardSearch %s: %v", boardUUID, err)
 	}
+}
+
+// syncBoardSearchLater is SyncBoardSearch in the background, bounded by
+// boardRewriteTimeout: for a change that took the board from nobody (made
+// public), which search and the AI may grant a moment later, and for a settle
+// that failed, written again from the board as it is then.
+func syncBoardSearchLater(boardUUID string) {
+	helpers.GoSafeNamed("board.search-sync", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), boardRewriteTimeout)
+		defer cancel()
+		SyncBoardSearch(ctx, boardUUID)
+	})
 }
 
 // settleBoardDelete marks a deleted board's entry and its comments' deleted,

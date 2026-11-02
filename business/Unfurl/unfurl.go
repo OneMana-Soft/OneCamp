@@ -117,7 +117,7 @@ func read(ctx context.Context, u *url.URL) Card {
 	meta := readPage(res.Body, res.Header.Get("Content-Type"))
 	meta.fill(&card, res.URL)
 	if card.SiteName == "" {
-		card.SiteName = strings.TrimPrefix(strings.ToLower(res.URL.Hostname()), "www.")
+		card.SiteName = SiteHost(res.URL)
 	}
 	// A page with nothing to say may point at its own oEmbed answer.
 	if card.Title == "" && meta.oembed != "" {

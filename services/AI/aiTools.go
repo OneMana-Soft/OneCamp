@@ -705,17 +705,6 @@ func BuildToolPrompt() string {
 	return buildToolPrompt(ToolRegistry)
 }
 
-// BuildToolPromptFiltered is like BuildToolPrompt but describes only the tools
-// relevant to the user's request (tool routing). The full catalog dominates
-// the prompt's token cost; sending only the tools a request implies keeps each
-// agent call small enough to stay under tight provider token-per-minute
-// limits, with no loss of capability for that request. If the request matches
-// no group, the FULL catalog is used, so routing can never make the agent
-// strictly worse.
-func BuildToolPromptFiltered(question string) string {
-	return buildToolPrompt(selectToolsForQuery(question))
-}
-
 // agentToolFullThreshold is the enabled-tool count at or below which an agent's
 // tool prompt always renders EVERY tool with full parameter schemas (identical
 // to the original behaviour). Above it — the large tool-sets that blow past
@@ -906,13 +895,19 @@ func toolMatchesWords(t ToolDef, words []string) bool {
 	if len(words) == 0 {
 		return false
 	}
+	return toolWordScore(t, words) > 0
+}
+
+// toolWordScore counts the significant query words in the tool's name or description (case-insensitive substring).
+func toolWordScore(t ToolDef, words []string) int {
 	hay := strings.ToLower(t.Name + " " + t.Description)
+	n := 0
 	for _, w := range words {
 		if strings.Contains(hay, w) {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 // ToolSpecsForRun builds NATIVE function-calling specs (JSON-Schema) for an
@@ -1183,21 +1178,85 @@ func buildToolPrompt(tools []ToolDef) string {
 	// ── 5. AVAILABLE TOOLS ──
 	sb.WriteString("AVAILABLE TOOLS:\n")
 	for _, tool := range tools {
-		sb.WriteString(fmt.Sprintf("- %s: %s\n", tool.Name, tool.Description))
-		sb.WriteString("  Params: ")
-		var params []string
-		for _, p := range tool.Parameters {
-			req := ""
-			if p.Required {
-				req = " (required)"
-			}
-			params = append(params, fmt.Sprintf("%s%s — %s", p.Name, req, p.Description))
-		}
-		sb.WriteString(strings.Join(params, ", "))
-		sb.WriteString("\n")
+		sb.WriteString(toolLine(tool))
 	}
 
 	return sb.String()
+}
+
+// toolLine is one tool as the assistant's prompt lists it: what it does and its parameters.
+func toolLine(tool ToolDef) string {
+	var params []string
+	for _, p := range tool.Parameters {
+		req := ""
+		if p.Required {
+			req = " (required)"
+		}
+		params = append(params, fmt.Sprintf("%s%s — %s", p.Name, req, p.Description))
+	}
+	return fmt.Sprintf("- %s: %s\n  Params: %s\n", tool.Name, tool.Description, strings.Join(params, ", "))
+}
+
+// BuildToolPromptWithin describes, in at most maxTokens of lim's tokenizer, the tools most relevant to the question:
+// the tools of the groups it names; when it names none, the tools whose name or description share its words, most
+// shared first; when none do, the workspace search. Never the whole catalog: sent for every question that named no
+// group, it was ~7,300 tokens, and a free-tier provider refused every question about a board (V-157). It returns ""
+// when not even one tool fits, so a tight budget drops the section rather than overflowing.
+func BuildToolPromptWithin(lim ModelLimits, question string, maxTokens int) string {
+	ranked := groupToolsForQuery(question)
+	if len(ranked) == 0 {
+		ranked = toolsByWords(question)
+	}
+	used := lim.EstimateTokens(buildToolPrompt(nil))
+	keep := make(map[string]bool, len(ranked))
+	for _, t := range ranked {
+		if !toolEnabled(t.Name) {
+			continue
+		}
+		if cost := lim.EstimateTokens(toolLine(t)); used+cost <= maxTokens {
+			used += cost
+			keep[t.Name] = true
+		}
+	}
+	if len(keep) == 0 {
+		return ""
+	}
+	tools := make([]ToolDef, 0, len(keep))
+	for _, t := range ToolRegistry {
+		if keep[t.Name] {
+			tools = append(tools, t)
+		}
+	}
+	return buildToolPrompt(tools)
+}
+
+// toolsByWords ranks the catalog by how many of the question's significant words a tool's name or description
+// holds, most first, ties in registry order. The workspace search stands in when no tool holds any.
+func toolsByWords(question string) []ToolDef {
+	words := significantWords(question)
+	type scored struct {
+		tool ToolDef
+		n    int
+	}
+	var hits []scored
+	for _, t := range ToolRegistry {
+		if n := toolWordScore(t, words); n > 0 {
+			hits = append(hits, scored{t, n})
+		}
+	}
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].n > hits[j].n })
+	out := make([]ToolDef, 0, len(hits)+1)
+	for _, h := range hits {
+		out = append(out, h.tool)
+	}
+	if len(out) == 0 {
+		for _, t := range ToolRegistry {
+			if t.Name == "search_workspace" {
+				out = append(out, t)
+			}
+		}
+	}
+	return out
 }
 
 // toolGroup bundles tools by domain with the keywords that imply that domain.
@@ -1210,6 +1269,13 @@ type toolGroup struct {
 }
 
 var toolGroups = []toolGroup{
+	{
+		// Boards have no tools of their own: what a board says is on its search entry, and what it is linked to
+		// is what the connection tools read (kind "board"). Without this group a board question named no group
+		// and took the whole catalog (V-157).
+		keywords: []string{"board", "boards", "whiteboard", "whiteboards", "sticky", "stickies", "sticky note", "sticky notes", "canvas", "retro", "retros", "brainstorm", "mind map", "flowchart", "diagram", "diagrams"},
+		tools:    []string{"search_workspace", "related_items", "how_connected"},
+	},
 	{
 		keywords: []string{"task", "tasks", "todo", "todos", "ticket", "tickets", "assign", "assignee", "reassign", "unassign", "due", "deadline", "backlog", "overdue", "mark", "done", "in progress", "inprogress", "in review", "status"},
 		tools:    []string{"list_tasks", "list_project_tasks", "create_task", "update_task_status", "assign_task", "set_task_due_date", "list_projects"},
@@ -1266,6 +1332,14 @@ var toolGroups = []toolGroup{
 // degrades to "send everything" (today's behaviour) rather than stranding a
 // needed tool.
 func selectToolsForQuery(question string) []ToolDef {
+	if picked := groupToolsForQuery(question); len(picked) > 0 {
+		return picked
+	}
+	return ToolRegistry
+}
+
+// groupToolsForQuery returns the tools of every group whose keywords the request names, in registry order, or none.
+func groupToolsForQuery(question string) []ToolDef {
 	lower := strings.ToLower(question)
 	picked := make(map[string]bool)
 	for _, g := range toolGroups {
@@ -1274,9 +1348,6 @@ func selectToolsForQuery(question string) []ToolDef {
 				picked[name] = true
 			}
 		}
-	}
-	if len(picked) == 0 {
-		return ToolRegistry
 	}
 	out := make([]ToolDef, 0, len(picked))
 	for _, t := range ToolRegistry {

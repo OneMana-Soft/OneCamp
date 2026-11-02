@@ -32,7 +32,12 @@ COPY . .
 # -s -w drop the symbol and DWARF tables. They are only useful for debugging a
 # core dump, which is not how this service is diagnosed, and they are a large
 # fraction of the binary.
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o go-one-camp cmd/server/*.go
+#
+# -tags onecamp_demo embeds the demo's own media (business/DemoSeed's sample
+# recording). Only the demo builds this image. Customer binaries are compiled
+# by onemana.dev from a release tag with no tags, and release lines carry no
+# file under this tag, so the media never reaches them.
+RUN CGO_ENABLED=0 go build -tags onecamp_demo -ldflags="-s -w" -o go-one-camp cmd/server/*.go
 
 # ONLY THE BINARY GOES TO THE RUNTIME.
 #

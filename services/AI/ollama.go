@@ -240,7 +240,7 @@ func (o *OllamaProvider) Chat(ctx context.Context, messages []ChatMessage, opts 
 
 	var chatResp ollamaChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return "", fmt.Errorf("ollama: failed to decode response: %w", err)
+		return "", FromProvider(fmt.Errorf("ollama: failed to decode response: %w", err))
 	}
 
 	// Feed Ollama's real prompt token count (prompt_eval_count) into the
@@ -383,7 +383,7 @@ func (o *OllamaProvider) ChatStream(ctx context.Context, messages []ChatMessage,
 		}
 
 		if err := scanner.Err(); err != nil {
-			ch <- StreamChunk{Done: true, Error: fmt.Errorf("ollama: stream read error: %w", err)}
+			ch <- StreamChunk{Done: true, Error: FromProvider(fmt.Errorf("ollama: stream read error: %w", err))}
 		}
 	})
 

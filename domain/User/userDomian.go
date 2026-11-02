@@ -27,6 +27,8 @@ import (
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	OpenSearchModels "github.com/akashc777/OneCamp/models/openSearch/User"
 	"github.com/akashc777/OneCamp/models/pgexec"
+	configModel "github.com/akashc777/OneCamp/models/postgres/Config"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
@@ -159,7 +161,7 @@ func GetUserSignInFlags(ctx context.Context, userID uuid.UUID) (isAdmin, isSSOMa
 	f, err := one(ctx, `
 		SELECT (au.id IS NOT NULL), COALESCE(u.is_sso_managed, false)
 		FROM users u
-		LEFT JOIN admin_users au ON au.email_id = u.email_id
+		LEFT JOIN admin_users au ON au.email_id = u.email_id AND `+softDelete.Live("au")+`
 		WHERE u.id = $1
 		LIMIT 1`, func(r pgexec.Row) (f flags, err error) { err = r.Scan(&f.admin, &f.sso); return }, userID)
 	if err != nil {
@@ -390,7 +392,7 @@ func GetActiveUserWithAdminFlagByUserUUID(ctx context.Context, userUUID uuid.UUI
 			u.is_external,
 			u.is_bot
 		FROM users u
-		LEFT JOIN admin_users au ON u.email_id = au.email_id
+		LEFT JOIN admin_users au ON u.email_id = au.email_id AND ` + softDelete.Live("au") + `
 		WHERE u.id = $1
 		AND u.deleted_at IS NULL;
     `
@@ -502,7 +504,7 @@ func GetAllAdminUsers(ctx context.Context, pageIndex int, pageSize int) (usersIn
 		JOIN 
 			admin_users a 
 		ON 
-			u.email_id = a.email_id
+			u.email_id = a.email_id AND ` + softDelete.Live("a") + `
 		LIMIT $1 OFFSET $2
     `
 
@@ -519,16 +521,16 @@ func GetAllAdminUsers(ctx context.Context, pageIndex int, pageSize int) (usersIn
 	return
 }
 
-func HardDeleteAdminUserByEmailId(ctx context.Context, emailId string, userUUID ...string) (err error) {
-	query := `
-		DELETE FROM admin_users
-        WHERE LOWER(email_id) = LOWER($1)
-	`
-	err = models.HardDeleteAdminUserByEmailId(query, emailId)
-
+// RevokeAdminUserByEmailId takes the workspace admin role away from whoever
+// holds emailId, by whom (uuid.Nil for nobody: the directory at sign-in). The
+// row stays, marked (V-184 head 3b): no read of the role sees it, and
+// CreateAdminUser brings it back.
+func RevokeAdminUserByEmailId(ctx context.Context, emailId string, by uuid.UUID, userUUID ...string) (err error) {
+	_, err = pgexec.Exec(ctx, `UPDATE admin_users SET deleted_at = NOW(), deleted_by = $2
+		WHERE LOWER(email_id) = LOWER($1) AND `+softDelete.Live(""), emailId, softDelete.By(by))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"domain/HardDeleteAdminUserByEmailId Failed to delete admin user err: %+v",
+			"domain/RevokeAdminUserByEmailId Failed to take the admin role away err: %+v",
 			err)
 		return
 	}
@@ -537,16 +539,26 @@ func HardDeleteAdminUserByEmailId(ctx context.Context, emailId string, userUUID 
 	return
 }
 
+// CreateAdminUser makes whoever holds emailId a workspace admin. A role taken
+// away earlier comes back on its own row, live.
+//
+// The same statement marks the workspace as given an admin (adminSetupKey),
+// so first-admin setup is shut by the first role given, however it came: the
+// setup, the admin page, or the directory at sign-in. One statement, so there
+// is never a role without the mark, nor a mark without a role.
 func CreateAdminUser(ctx context.Context, emailId string, userUUID ...string) (err error) {
-	query := `
-		INSERT INTO admin_users (email_id)
-        VALUES (COALESCE(
-			(SELECT email_id FROM users WHERE LOWER(email_id) = LOWER($1) AND is_external = false AND is_bot = false ` + sameAddressFirst + `),
-			LOWER($1)))
-        ON CONFLICT (email_id) DO NOTHING;
-	`
-	err = models.CreateAdminUser(query, emailId)
-
+	_, err = pgexec.Exec(ctx, `
+		WITH granted AS (
+			INSERT INTO admin_users (email_id)
+			VALUES (COALESCE(
+				(SELECT email_id FROM users WHERE LOWER(email_id) = LOWER($1) AND is_external = false AND is_bot = false `+sameAddressFirst+`),
+				LOWER($1)))
+			ON CONFLICT (email_id) DO UPDATE SET deleted_at = NULL, deleted_by = NULL
+			WHERE admin_users.deleted_at IS NOT NULL
+			RETURNING 1)
+		INSERT INTO system_configs (key, value, updated_at)
+		SELECT $2, 'done', NOW() WHERE EXISTS (SELECT 1 FROM granted)
+		ON CONFLICT (key) DO NOTHING`, emailId, adminSetupKey)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/CreateAdminUser Failed to create admin user err: %+v",
@@ -761,6 +773,7 @@ func GetAllInvitations(ctx context.Context) (invitations []*models.Invitation, e
 	invitations, err = pgexec.Query(ctx, `
 		SELECT `+invitationColumns+`
 		FROM invitations
+		WHERE `+softDelete.Live("")+`
 		ORDER BY created_at DESC`, scanInvitation)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetAllInvitations Failed to get invitations err: %+v", err)
@@ -793,9 +806,19 @@ func one[T any](ctx context.Context, q string, scan func(pgexec.Row) (T, error),
 	return v, err
 }
 
-func DeleteInvitationByEmail(ctx context.Context, email string) (err error) {
-	if _, err = pgexec.Exec(ctx, `DELETE FROM invitations WHERE LOWER(email) = LOWER($1)`, email); err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/DeleteInvitationByEmail Failed to delete invitation err: %+v", err)
+// WithdrawInvitationsByEmail withdraws every live invitation to email, by
+// whom (the admin withdrawing it from the list). Each row stays, marked
+// (V-184 head 3c), so who invited whom, and who withdrew it and when, stay on
+// record, and no read of invitations sees it. Its link goes with the
+// withdrawal: the link is the invited person's credential, so a withdrawn
+// invitation can never let anyone in. Inviting the address again makes a new
+// invitation.
+func WithdrawInvitationsByEmail(ctx context.Context, email string, by uuid.UUID) (err error) {
+	if _, err = pgexec.Exec(ctx, `
+		UPDATE invitations
+		SET deleted_at = NOW(), deleted_by = $2, token_hash = NULL, token_sealed = '', token = NULL
+		WHERE LOWER(email) = LOWER($1) AND `+softDelete.Live(""), email, softDelete.By(by)); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/WithdrawInvitationsByEmail Failed to withdraw the invitation err: %+v", err)
 	}
 	return
 }
@@ -1574,6 +1597,10 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 
 }
 
+// GetDgraphUserProjectList is the projects the person is in, to pick one from:
+// live ones only, through the shared zero-epoch filter. The graph keeps a
+// person's projects oldest first, so an archived one used to lead the list,
+// and the board's "Add from OneCamp" opened it (V-161).
 func GetDgraphUserProjectList(ctx context.Context, userUUID string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
 	variables := make(map[string]string)
 	variables["$id"] = userUUID
@@ -1582,7 +1609,7 @@ func GetDgraphUserProjectList(ctx context.Context, userUUID string) (dgraphUser 
 				userInfo(func: eq(user_uuid, $id)) {
 					uid
 					user_uuid
-					user_projects {
+					user_projects @filter(` + dgraphquery.Live("project_deleted_at") + `) {
 						project_uuid
 						project_name
 						project_deleted_at
@@ -1902,7 +1929,7 @@ type MembersFilter struct {
 func AdminUserIDs(ctx context.Context) ([]string, error) {
 	return pgexec.Query(ctx, `
 		SELECT u.id FROM users u
-		JOIN admin_users a ON LOWER(a.email_id) = LOWER(u.email_id)
+		JOIN admin_users a ON LOWER(a.email_id) = LOWER(u.email_id) AND `+softDelete.Live("a")+`
 		WHERE u.deleted_at IS NULL`, func(r pgexec.Row) (string, error) {
 		var id uuid.UUID
 		err := r.Scan(&id)
@@ -2357,7 +2384,7 @@ func GetInvitationByLink(ctx context.Context, hash []byte) (invitation *models.I
 	invitation, err = one(ctx, `
 		SELECT `+invitationColumns+`
 		FROM invitations
-		WHERE token_hash = $1`, scanInvitation, hash)
+		WHERE token_hash = $1 AND `+softDelete.Live(""), scanInvitation, hash)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetInvitationByLink Failed to get invitation err: %+v", err)
 		return nil, err
@@ -2366,7 +2393,7 @@ func GetInvitationByLink(ctx context.Context, hash []byte) (invitation *models.I
 }
 
 func UpdateInvitationStatus(ctx context.Context, invitationID uuid.UUID, status string) (err error) {
-	if _, err = pgexec.Exec(ctx, `UPDATE invitations SET status = $1 WHERE id = $2`, status, invitationID); err != nil {
+	if _, err = pgexec.Exec(ctx, `UPDATE invitations SET status = $1 WHERE id = $2 AND `+softDelete.Live(""), status, invitationID); err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/UpdateInvitationStatus Failed to update invitation status err: %+v", err)
 	}
 	return
@@ -2381,12 +2408,45 @@ func AddInvitationWithLink(ctx context.Context, email string, invitedBy uuid.UUI
 	return
 }
 
-func CheckIfAnyAdminExists(ctx context.Context) (exists bool, err error) {
-	exists, err = pgexec.Scalar[bool](ctx, `SELECT EXISTS (SELECT 1 FROM admin_users LIMIT 1)`)
+// adminSetupKey is the mark, in system_configs, that this workspace has been
+// given an admin role. First-admin setup (POST /auth/admin-setup) is one-time,
+// and this mark is what keeps it shut. CreateAdminUser writes it with the
+// first role it gives, and the grants migration wrote it for every workspace
+// that already had people (bots aside). Nothing removes it: an operator whose
+// workspace lost every admin restores one on the server
+// (docs/customer-onboarding.md, "First Admin Account").
+const adminSetupKey = "first_admin_setup"
+
+// adminSetupLock is the session advisory lock one first-admin setup holds
+// while it makes the account: "AdminSet" in ASCII.
+const adminSetupLock int64 = 0x41646d696e536574
+
+// AdminSetupDone reports whether first-admin setup is done for good: the
+// mark is there (adminSetupKey), or admin_users holds a row, live or taken.
+// It never reopens because admin rows go. Before V-184 head 3b, taking the
+// last admin role away deleted its row, and setup then let anyone who reached
+// it make themselves the admin. The rows still count, for a workspace given
+// an admin by hand, in SQL.
+func AdminSetupDone(ctx context.Context) (done bool, err error) {
+	done, err = configModel.IsDone(adminSetupKey)
+	if err == nil && !done {
+		done, err = pgexec.Scalar[bool](ctx, `SELECT EXISTS (SELECT 1 FROM admin_users LIMIT 1)`)
+	}
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/CheckIfAnyAdminExists Failed to check admin existence err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "domain/AdminSetupDone Failed to read whether setup is done err: %+v", err)
 	}
 	return
+}
+
+// LockAdminSetup takes first-admin setup for one request, when no other
+// request holds it (held is false then): two requests racing past
+// AdminSetupDone must not both make an admin. The lock is the session's
+// (pgexec.TryAdvisoryLock), so a server that dies mid-setup gives it back
+// with its connection. Nothing else needs undoing: CreateAdminUser writes the
+// mark with the role, so a setup that fails before the grant leaves setup
+// open, and one that gets past it leaves an admin.
+func LockAdminSetup(ctx context.Context) (release func() error, held bool, err error) {
+	return pgexec.TryAdvisoryLock(ctx, adminSetupLock)
 }
 
 // UpdateInvitationLinkByID gives one invitation a new link and expiry, from
@@ -2398,11 +2458,17 @@ func CheckIfAnyAdminExists(ctx context.Context) (exists bool, err error) {
 // them to the same new link broke on its unique index, so sending such an
 // invitation again failed. The caller renews the newest
 // (GetInvitationByEmail).
+//
+// A withdrawn invitation is never renewed: one withdrawn since the caller
+// read it answers sql.ErrNoRows, so no link is sent for it.
 func UpdateInvitationLinkByID(ctx context.Context, id uuid.UUID, link models.InvitationLink, expiresAt time.Time, invitedBy uuid.UUID) error {
-	_, err := pgexec.Exec(ctx, `
+	n, err := pgexec.Exec(ctx, `
 		UPDATE invitations
 		SET token_hash = $1, token_sealed = $2, token_expires_at = $3, status = 'sent', invited_by = $5
-		WHERE id = $4`, link.Hash, link.Sealed, expiresAt, id, invitedBy)
+		WHERE id = $4 AND `+softDelete.Live(""), link.Hash, link.Sealed, expiresAt, id, invitedBy)
+	if err == nil && n == 0 {
+		err = sql.ErrNoRows
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/UpdateInvitationLinkByID Failed to update invitation link err: %+v", err)
@@ -2416,7 +2482,7 @@ func GetInvitationByEmail(ctx context.Context, email string) (*models.Invitation
 	inv, found, err := pgexec.QueryOne(ctx, `
 		SELECT `+invitationColumns+`
 		FROM invitations
-		WHERE LOWER(email) = LOWER($1)
+		WHERE LOWER(email) = LOWER($1) AND `+softDelete.Live("")+`
 		ORDER BY created_at DESC
 		LIMIT 1`, scanInvitation, email)
 	if err != nil {
@@ -2436,7 +2502,7 @@ func HasUsableInvitation(ctx context.Context, email string) (bool, error) {
 	invs, err := pgexec.Query(ctx, `
 		SELECT `+invitationColumns+`
 		FROM invitations
-		WHERE LOWER(email) = LOWER($1)`, scanInvitation, email)
+		WHERE LOWER(email) = LOWER($1) AND `+softDelete.Live(""), scanInvitation, email)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/HasUsableInvitation err: %+v", err)
 		return false, err
@@ -2456,7 +2522,7 @@ func HasUsableInvitation(ctx context.Context, email string) (bool, error) {
 func MarkInvitationJoined(ctx context.Context, email string) (marked bool, err error) {
 	n, err := pgexec.Exec(ctx, `
 		UPDATE invitations SET status = 'joined'
-		WHERE LOWER(email) = LOWER($1) AND status <> 'joined'`, email)
+		WHERE LOWER(email) = LOWER($1) AND status <> 'joined' AND `+softDelete.Live(""), email)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/MarkInvitationJoined err: %+v", err)
 	}

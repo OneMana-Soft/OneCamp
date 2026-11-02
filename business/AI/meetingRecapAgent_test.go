@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
+	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
 )
 
@@ -71,7 +73,7 @@ func TestRecapToHTML_EscapesAndStructures(t *testing.T) {
 
 func TestRecapToHTML_AppendsRecordingEmbed(t *testing.T) {
 	// Channel surface: kind=channel + sid.
-	attrs := recordingPlayAttrs("550e8400-e29b-41d4-a716-446655440000", "EG_123")
+	attrs := recordingPlayAttrs(conversationBusiness.Ref{Kind: conversationBusiness.KindChannel, ID: "550e8400-e29b-41d4-a716-446655440000"}, "EG_123")
 	html := recapToHTML("**Summary**\n- done", attrs, "", "")
 	if !strings.Contains(html, `data-type="recording-embed"`) {
 		t.Fatalf("recap HTML must contain the recording-embed node: %s", html)
@@ -81,14 +83,30 @@ func TestRecapToHTML_AppendsRecordingEmbed(t *testing.T) {
 	}
 
 	// DM surface: kind=dm carries both participant ids.
-	dmAttrs := recordingPlayAttrs("uuidA uuidB", "EG_9")
+	dmAttrs := recordingPlayAttrs(conversationBusiness.Ref{Kind: conversationBusiness.KindDM, ID: "uuidA uuidB"}, "EG_9")
 	if !strings.Contains(dmAttrs, `data-kind="dm"`) || !strings.Contains(dmAttrs, `data-u1="uuidA"`) || !strings.Contains(dmAttrs, `data-u2="uuidB"`) {
 		t.Fatalf("dm recording attrs must carry both participants: %s", dmAttrs)
 	}
 
 	// No egress → no node appended.
-	if got := recapToHTML("x", recordingPlayAttrs("c", ""), "", ""); strings.Contains(got, "recording-embed") {
+	if got := recapToHTML("x", recordingPlayAttrs(conversationBusiness.Ref{Kind: conversationBusiness.KindChannel, ID: "c"}, ""), "", ""); strings.Contains(got, "recording-embed") {
 		t.Fatalf("no egress id must not append a recording node: %s", got)
+	}
+}
+
+// A recap plays its recording from the conversation its call belongs to, as
+// the call's home says (business/CallState HomeOf), never from a guess at the
+// room's name: a group's is addressed by its grouping id, and a meeting's call,
+// which belongs to no conversation, has no conversation to play it from (it
+// was read as a channel named "meet-...").
+func TestARecapPlaysItsRecordingFromTheConversationItsCallBelongsTo(t *testing.T) {
+	group := conversationBusiness.Ref{Kind: conversationBusiness.KindGroup, ID: "0123456789abcdef0123456789abcdef"}
+	if got := recordingPlayAttrs(group, "EG_1"); !strings.Contains(got, `data-kind="group" data-sid="0123456789abcdef0123456789abcdef"`) {
+		t.Errorf("a group call's recording: %s", got)
+	}
+	meeting := conversationBusiness.Ref{Kind: callStateBusiness.KindMeeting, ID: "6f1c0e2a-1111-4222-8333-944455556666"}
+	if got := recordingPlayAttrs(meeting, "EG_1"); got != "" {
+		t.Errorf("a meeting's recording is played from %s, want nowhere", got)
 	}
 }
 

@@ -317,42 +317,6 @@ func UpdateDeletedTimeToNullByUUID(query string, updateTime *time.Time, userUUID
 	return
 }
 
-func HardDeleteAdminUserByEmailId(query string, emailId string) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		emailId,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/HardDeleteAdminUserByEmailId Failed to hard delete user err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-func CreateAdminUser(query string, emailId string) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		emailId,
-	)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateAdminUser Failed to create new admin user err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func GetAllAdminUsers(query string, args ...any) (usersInfo []*User, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()

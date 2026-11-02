@@ -1,6 +1,12 @@
 // Package models (TaskRestriction) keeps restricted tasks and the people let
 // into them (migration 472; design/projects-vs-asana-jira/WA2_PLAN.md).
 // business/WorkAccess decides by these rows who may read a restricted task.
+//
+// Nothing here is deleted (V-179, the owner's rule: every delete is soft).
+// Lifting a restriction, taking a person off and a person's leaving the
+// project mark the rows (deleted_at, deleted_by) and keep them; every read
+// takes live rows only (SoftDelete.Live). A task restricted again, or a
+// person let in again, brings its own row back.
 package models
 
 import (
@@ -10,6 +16,7 @@ import (
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -52,7 +59,8 @@ func Candidates(ctx context.Context, reader uuid.UUID) ([]Candidate, error) {
 		       NOT ($1::uuid = '00000000-0000-0000-0000-000000000000'::uuid OR (`+keptOut("$1::uuid")+`)) AS let_in
 		FROM task_restrictions r
 		JOIN tasks t ON t.id = r.task_id
-		LEFT JOIN tasks v ON v.id = r.via_task_id`,
+		LEFT JOIN tasks v ON v.id = r.via_task_id
+		WHERE `+softDelete.Live("r"),
 		func(r pgexec.Row) (Candidate, error) {
 			var (
 				x   Candidate
@@ -71,7 +79,8 @@ func keptOut(who string) string {
 	return `t.created_by IS DISTINCT FROM ` + who + `
 		AND (r.via_task_id IS NULL OR v.created_by IS DISTINCT FROM ` + who + `)
 		AND NOT EXISTS (SELECT 1 FROM task_restriction_grants g
-		                WHERE g.task_id = COALESCE(r.via_task_id, r.task_id) AND g.user_id = ` + who + `)`
+		                WHERE g.task_id = COALESCE(r.via_task_id, r.task_id) AND g.user_id = ` + who + `
+		                AND ` + softDelete.Live("g") + `)`
 }
 
 // CandidatesAmong is Candidates for each of readers (people; nobody has none
@@ -96,7 +105,8 @@ func CandidatesAmong(ctx context.Context, readers []uuid.UUID) (map[uuid.UUID][]
 		FROM unnest($1::uuid[]) AS rd(id)
 		CROSS JOIN task_restrictions r
 		JOIN tasks t ON t.id = r.task_id
-		LEFT JOIN tasks v ON v.id = r.via_task_id`,
+		LEFT JOIN tasks v ON v.id = r.via_task_id
+		WHERE `+softDelete.Live("r"),
 		func(r pgexec.Row) (row, error) {
 			var (
 				x   row
@@ -155,7 +165,7 @@ func OfMany(ctx context.Context, taskIDs []uuid.UUID) (map[uuid.UUID]Restriction
 	}
 	rows, err := pgexec.Query(ctx, `
 		SELECT task_id, project_id, restricted_by, restricted_at, via_task_id
-		FROM task_restrictions WHERE task_id = ANY($1::uuid[])`, func(r pgexec.Row) (row, error) {
+		FROM task_restrictions WHERE task_id = ANY($1::uuid[]) AND `+softDelete.Live(""), func(r pgexec.Row) (row, error) {
 		var (
 			x       row
 			by, via uuid.NullUUID
@@ -178,8 +188,8 @@ func OfMany(ctx context.Context, taskIDs []uuid.UUID) (map[uuid.UUID]Restriction
 	grants, err := pgexec.Query(ctx, `
 		SELECT r.task_id, g.user_id
 		FROM task_restrictions r
-		JOIN task_restriction_grants g ON g.task_id = COALESCE(r.via_task_id, r.task_id)
-		WHERE r.task_id = ANY($1::uuid[]) ORDER BY g.granted_at, g.user_id`, func(r pgexec.Row) (grant, error) {
+		JOIN task_restriction_grants g ON g.task_id = COALESCE(r.via_task_id, r.task_id) AND `+softDelete.Live("g")+`
+		WHERE r.task_id = ANY($1::uuid[]) AND `+softDelete.Live("r")+` ORDER BY g.granted_at, g.user_id`, func(r pgexec.Row) (grant, error) {
 		var g grant
 		err := r.Scan(&g.task, &g.user)
 		return g, err
@@ -196,30 +206,45 @@ func OfMany(ctx context.Context, taskIDs []uuid.UUID) (map[uuid.UUID]Restriction
 }
 
 // Restrict keeps the task to its project's admins, assignee and creator and
-// the people granted, replacing any grants it had, and with it each of under
-// (the tasks below it) that isn't restricted already: whoever may see the
-// task sees those, and opening the task opens them again (Unrestrict). A task
-// restricted with another before is restricted on its own from now. In one
-// transaction, of four statements whatever the number of people.
+// the people granted, and with it each of under (the tasks below it) that
+// isn't restricted already: whoever may see the task sees those, and opening
+// the task opens them again (Unrestrict). Those let in before and not now are
+// taken off (their rows marked, by by); those let in before and now keep the
+// grant they had; a person let in again, or a task restricted again, has its
+// own row back. A task restricted with another before is restricted on its
+// own from now. In one transaction, of five statements whatever the number of
+// people.
 func Restrict(ctx context.Context, taskID, projectID, by uuid.UUID, grants, under []uuid.UUID, now time.Time) error {
 	if !connected() {
 		return ErrNoDatabase
 	}
+	people := idStrings(grants, uuid.Nil)
 	return pgexec.InTx(ctx, func(ctx context.Context) error {
+		// Restricted already, it keeps who restricted it and when; lifted
+		// before, it is restricted afresh, by by.
 		if _, err := pgexec.Exec(ctx, `
 			INSERT INTO task_restrictions (task_id, project_id, restricted_by, restricted_at)
 			VALUES ($1::uuid, $2::uuid, $3::uuid, $4)
-			ON CONFLICT (task_id) DO UPDATE SET project_id = EXCLUDED.project_id, via_task_id = NULL`,
+			ON CONFLICT (task_id) DO UPDATE SET project_id = EXCLUDED.project_id, via_task_id = NULL,
+				restricted_by = CASE WHEN task_restrictions.deleted_at IS NULL THEN task_restrictions.restricted_by ELSE EXCLUDED.restricted_by END,
+				restricted_at = CASE WHEN task_restrictions.deleted_at IS NULL THEN task_restrictions.restricted_at ELSE EXCLUDED.restricted_at END,
+				deleted_at = NULL, deleted_by = NULL`,
 			taskID, projectID, nullable(by), now); err != nil {
 			return err
 		}
-		if _, err := pgexec.Exec(ctx, `DELETE FROM task_restriction_grants WHERE task_id = $1::uuid`, taskID); err != nil {
+		if _, err := pgexec.Exec(ctx, `
+			UPDATE task_restriction_grants SET deleted_at = $3, deleted_by = $2::uuid
+			WHERE task_id = $1::uuid AND `+softDelete.Live("")+` AND NOT (user_id = ANY($4::uuid[]))`,
+			taskID, nullable(by), now, pq.Array(people)); err != nil {
 			return err
 		}
-		if people := idStrings(grants, uuid.Nil); len(people) > 0 {
+		if len(people) > 0 {
 			if _, err := pgexec.Exec(ctx, `
 				INSERT INTO task_restriction_grants (task_id, user_id, granted_by, granted_at)
-				SELECT $1::uuid, u, $3::uuid, $4::timestamptz FROM unnest($2::uuid[]) AS u`,
+				SELECT $1::uuid, u, $3::uuid, $4::timestamptz FROM unnest($2::uuid[]) AS u
+				ON CONFLICT (task_id, user_id) DO UPDATE SET granted_by = EXCLUDED.granted_by, granted_at = EXCLUDED.granted_at,
+					deleted_at = NULL, deleted_by = NULL
+				WHERE task_restriction_grants.deleted_at IS NOT NULL`,
 				taskID, pq.Array(people), nullable(by), now); err != nil {
 				return err
 			}
@@ -230,7 +255,7 @@ func Restrict(ctx context.Context, taskID, projectID, by uuid.UUID, grants, unde
 			if _, err := pgexec.Exec(ctx, `
 				INSERT INTO task_restrictions (task_id, project_id, restricted_by, restricted_at, via_task_id)
 				SELECT t.id, $2::uuid, $3::uuid, $4::timestamptz, $5::uuid FROM tasks t WHERE t.id = ANY($1::uuid[]) AND t.id <> $5::uuid
-				ON CONFLICT (task_id) DO NOTHING`,
+				`+revivedWith,
 				pq.Array(ids), projectID, nullable(by), now, taskID); err != nil {
 				return err
 			}
@@ -238,6 +263,13 @@ func Restrict(ctx context.Context, taskID, projectID, by uuid.UUID, grants, unde
 		return nil
 	})
 }
+
+// revivedWith ends an insert of tasks restricted with another: one restricted
+// already keeps its own row as it is, and one lifted before has its row back,
+// restricted as the insert says.
+const revivedWith = `ON CONFLICT (task_id) DO UPDATE SET project_id = EXCLUDED.project_id, restricted_by = EXCLUDED.restricted_by,
+	restricted_at = EXCLUDED.restricted_at, via_task_id = EXCLUDED.via_task_id, deleted_at = NULL, deleted_by = NULL
+	WHERE task_restrictions.deleted_at IS NOT NULL`
 
 // Inherit restricts a task just made below a restricted one (from, its
 // parent) with it: with the task from is restricted with, or with from
@@ -249,8 +281,8 @@ func Inherit(ctx context.Context, taskID, from, by uuid.UUID, now time.Time) err
 	_, err := pgexec.Exec(ctx, `
 		INSERT INTO task_restrictions (task_id, project_id, restricted_by, restricted_at, via_task_id)
 		SELECT $1::uuid, r.project_id, $3::uuid, $4::timestamptz, COALESCE(r.via_task_id, r.task_id)
-		FROM task_restrictions r WHERE r.task_id = $2::uuid AND COALESCE(r.via_task_id, r.task_id) <> $1::uuid
-		ON CONFLICT (task_id) DO NOTHING`, taskID, from, nullable(by), now)
+		FROM task_restrictions r WHERE r.task_id = $2::uuid AND `+softDelete.Live("r")+` AND COALESCE(r.via_task_id, r.task_id) <> $1::uuid
+		`+revivedWith, taskID, from, nullable(by), now)
 	return err
 }
 
@@ -268,19 +300,41 @@ func idStrings(ids []uuid.UUID, but uuid.UUID) []string {
 }
 
 // Unrestrict opens the task to its project again, and the tasks restricted
-// with it; false when it wasn't restricted.
-func Unrestrict(ctx context.Context, taskID uuid.UUID) (bool, error) {
+// with it, by by: their rows and their grants are marked, not removed (V-179);
+// false when it wasn't restricted. In one transaction.
+func Unrestrict(ctx context.Context, taskID, by uuid.UUID) (bool, error) {
 	if !connected() {
 		return false, ErrNoDatabase
 	}
-	n, err := pgexec.Exec(ctx, `DELETE FROM task_restrictions WHERE task_id = $1::uuid`, taskID)
-	return n > 0, err
+	lifted := false
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		n, err := pgexec.Exec(ctx, `
+			UPDATE task_restrictions SET deleted_at = NOW(), deleted_by = $2::uuid
+			WHERE task_id = $1::uuid AND `+softDelete.Live(""), taskID, nullable(by))
+		if err != nil || n == 0 {
+			return err
+		}
+		lifted = true
+		// The tasks restricted with it open with it, and whoever was let in goes too.
+		if _, err := pgexec.Exec(ctx, `
+			UPDATE task_restrictions SET deleted_at = NOW(), deleted_by = $2::uuid
+			WHERE via_task_id = $1::uuid AND `+softDelete.Live(""), taskID, nullable(by)); err != nil {
+			return err
+		}
+		_, err = pgexec.Exec(ctx, `
+			UPDATE task_restriction_grants SET deleted_at = NOW(), deleted_by = $2::uuid
+			WHERE task_id IN (SELECT task_id FROM task_restrictions WHERE task_id = $1::uuid OR via_task_id = $1::uuid)
+			AND `+softDelete.Live(""), taskID, nullable(by))
+		return err
+	})
+	return lifted && err == nil, err
 }
 
 // DropGrantsIn takes someone's grants on the projects' restricted tasks
-// away: they left the projects (a team takes all of its), and leaving a
-// project leaves its work. One statement.
-func DropGrantsIn(ctx context.Context, projectIDs []uuid.UUID, userID uuid.UUID) error {
+// away, by by (uuid.Nil when no one person did it): they left the projects (a
+// team takes all of its), and leaving a project leaves its work. The grants
+// are marked, not removed (V-179). One statement.
+func DropGrantsIn(ctx context.Context, projectIDs []uuid.UUID, userID, by uuid.UUID) error {
 	if !connected() {
 		return ErrNoDatabase
 	}
@@ -289,9 +343,10 @@ func DropGrantsIn(ctx context.Context, projectIDs []uuid.UUID, userID uuid.UUID)
 		return nil
 	}
 	_, err := pgexec.Exec(ctx, `
-		DELETE FROM task_restriction_grants g
-		USING task_restrictions r
-		WHERE g.task_id = r.task_id AND r.project_id = ANY($1::uuid[]) AND g.user_id = $2::uuid`, pq.Array(ids), userID)
+		UPDATE task_restriction_grants g SET deleted_at = NOW(), deleted_by = $3::uuid
+		FROM task_restrictions r
+		WHERE g.task_id = r.task_id AND r.project_id = ANY($1::uuid[]) AND g.user_id = $2::uuid AND `+softDelete.Live("g"),
+		pq.Array(ids), userID, nullable(by))
 	return err
 }
 

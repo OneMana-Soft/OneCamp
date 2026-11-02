@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	query "github.com/akashc777/OneCamp/business/QuerySpec"
@@ -20,6 +21,15 @@ func FailSummaries() (restore func()) {
 		return errors.New("the summaries read failed (FailSummaries)")
 	}
 	return func() { summarize = saved }
+}
+
+// FailCounts has the planner's count after a fill (CountAfterFill) fail until
+// restore is called, its retry too, as one held past its time can fail twice:
+// the fill goes on, and the planner keeps what it last counted.
+func FailCounts() (restore func()) {
+	saved := vacuumRows
+	vacuumRows = func(context.Context) error { return errors.New("the planner's count failed (FailCounts)") }
+	return func() { vacuumRows = saved }
 }
 
 // AfterIndexBatch has fn run after each batch IndexTable commits, until
@@ -90,3 +100,23 @@ func IndexTablesPass(ctx context.Context) error { return indexTables(ctx) }
 // RetryFirst is how long the repair sweep leaves a table after its first
 // failure, before the jitter helpers.Backoff adds (up to a quarter more).
 const RetryFirst = retryFirst
+
+// SaidOnTableTopics keeps what a fill's end says on the tables' live topics
+// (V-124) until restore is called, each as "<table id> <message's JSON>".
+func SaidOnTableTopics() (said func() []string, restore func()) {
+	saved := publishTableRow
+	var mu sync.Mutex
+	var out []string
+	publishTableRow = func(table string, data interface{}) {
+		b, _ := json.Marshal(data)
+		mu.Lock()
+		defer mu.Unlock()
+		out = append(out, table+" "+string(b))
+	}
+	said = func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), out...)
+	}
+	return said, func() { publishTableRow = saved }
+}

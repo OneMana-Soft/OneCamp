@@ -10,8 +10,10 @@ package integration_test
 // repeats, never someone else's private one (its owner's alone), only the
 // asker's own when the workspace keeps busy times private, and 400 for a day
 // that isn't one. 5c: a decline made by an out of office carries its message
-// and is marked out_of_office in the guest list, in the web's read and the
-// calendar's own; one made by hand is not.
+// and is marked out_of_office in the guest list, in every read that returns
+// guests' answers (the web's and the calendar's own, one event and a list);
+// one made by hand is not, the public invitation page never says it, and a
+// workspace that keeps busy times private shows it to its owner alone.
 //
 // Run: go test -tags=integration ./tests/integration/ -run 'TestWhereSomeoneWorksOverHTTP|TestAnOutOfOfficeDeclineIsMarkedOverHTTP' -v
 
@@ -19,7 +21,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -186,57 +190,136 @@ func TestAnOutOfOfficeDeclineIsMarkedOverHTTP(t *testing.T) {
 	makeEvent(t, maya, `{"kind":"out_of_office","title":"Out of office","start":{"at":"`+rfc(from)+`","zone":"UTC"},"end":{"at":"`+rfc(from.Add(72*time.Hour))+`"},`+
 		`"out_of_office":{"decline":"new","message":"Back Monday."}}`)
 
-	// Sam invites Maya and Lee to a sync while Maya is away; Lee declines it by hand.
+	// Sam invites Maya, Lee and Alex (by email) to a sync while Maya is away;
+	// Lee declines it by hand.
 	st := from.Add(26 * time.Hour)
 	id := makeEvent(t, sam, `{"title":"Sync","start":{"at":"`+rfc(st)+`","zone":"UTC"},"end":{"at":"`+rfc(st.Add(30*time.Minute))+`"},`+
-		`"attendees":[{"user_uuid":"`+maya.UserDgraphInfo.Uuid+`"},{"user_uuid":"`+lee.UserDgraphInfo.Uuid+`"}]}`).ID
+		`"attendees":[{"user_uuid":"`+maya.UserDgraphInfo.Uuid+`"},{"user_uuid":"`+lee.UserDgraphInfo.Uuid+`"},{"email":"alex@example.org"}]}`).ID
 	if code, out := v2(t, eventController.AnswerCalendarEvent, http.MethodPost, "/calendar/events/"+id+"/answer", lee, `{"answer":"declined","note":"Clash"}`, id); code != http.StatusOK {
 		t.Fatalf("Lee's answer: %d %s", code, out["msg"])
 	}
 
+	// marks is the guests' answers as each read that returns them shows them
+	// to reader: the web's (GET /event/getEvent/{eventId} and the calendar's
+	// list, GET /event/getEvents) and the calendar API's (one event and a list).
+	type webEvent struct {
+		Uuid   string `json:"event_uuid"`
+		Guests []struct {
+			UserUUID    string `json:"user_uuid"`
+			Response    string `json:"response"`
+			Note        string `json:"note"`
+			OutOfOffice bool   `json:"out_of_office"`
+		} `json:"event_guests"`
+	}
+	marks := func(reader *userModels.UserInfo) map[string]map[string]guestMark {
+		t.Helper()
+		out := map[string]map[string]guestMark{}
+		fromWeb := func(read string, e webEvent) {
+			out[read] = map[string]guestMark{}
+			for _, g := range e.Guests {
+				out[read][g.UserUUID] = guestMark{g.Response, g.Note, g.OutOfOffice}
+			}
+		}
+		fromCalendar := func(read string, e calendarBusiness.Event) {
+			out[read] = map[string]guestMark{}
+			for _, g := range e.Attendees {
+				out[read][g.UUID] = guestMark{g.Response, g.Note, g.OutOfOffice}
+			}
+		}
+		rec := call(t, eventController.GetEventController, http.MethodGet, "/event/getEvent/"+id, reader, "", map[string]string{"eventId": id})
+		var one struct {
+			Data webEvent `json:"data"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &one) != nil {
+			t.Fatalf("the web's read, to %s: %d %s", reader.UserDgraphInfo.UserName, rec.Code, rec.Body.String())
+		}
+		fromWeb("the web's read", one.Data)
+		q := url.Values{"startDate": {rfc(st.Add(-time.Hour))}, "endDate": {rfc(st.Add(time.Hour))}}
+		rec = call(t, eventController.GetEventsListController, http.MethodGet, "/event/getEvents?"+q.Encode(), reader, "", nil)
+		var list struct {
+			Data []webEvent `json:"data"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &list) != nil {
+			t.Fatalf("the web's list, to %s: %d %s", reader.UserDgraphInfo.UserName, rec.Code, rec.Body.String())
+		}
+		for _, e := range list.Data {
+			if e.Uuid == id {
+				fromWeb("the web's list", e)
+			}
+		}
+		code, body := v2(t, eventController.GetCalendarEvent, http.MethodGet, "/calendar/events/"+id, reader, "", id)
+		if code != http.StatusOK {
+			t.Fatalf("the calendar's read, to %s: %d %s", reader.UserDgraphInfo.UserName, code, body["msg"])
+		}
+		fromCalendar("the calendar's read", dataEvent(t, body))
+		for _, e := range apiList(t, reader, rfc(st.Add(-time.Hour)), rfc(st.Add(time.Hour))) {
+			if e.ID == id {
+				fromCalendar("the calendar's list", e)
+			}
+		}
+		return out
+	}
+	expect := func(reader *userModels.UserInfo, want map[string]guestMark) {
+		t.Helper()
+		got := marks(reader)
+		for _, read := range []string{"the web's read", "the web's list", "the calendar's read", "the calendar's list"} {
+			for who, w := range want {
+				if got[read][who] != w {
+					t.Errorf("%s, to %s: %s is %+v, want %+v", read, reader.UserDgraphInfo.UserName, who, got[read][who], w)
+				}
+			}
+		}
+	}
+	// The organiser and every guest read the same marks in every read.
 	want := map[string]guestMark{
 		maya.UserDgraphInfo.Uuid: {Response: "declined", Note: "Back Monday.", OutOfOffice: true},
 		lee.UserDgraphInfo.Uuid:  {Response: "declined", Note: "Clash"},
 	}
-	// The organiser and another guest read the same marks, in the web's read
-	// (GET /event/getEvent/{eventId}) and in the calendar's own.
-	for _, reader := range []*userModels.UserInfo{sam, lee} {
-		rec := call(t, eventController.GetEventController, http.MethodGet, "/event/getEvent/"+id, reader, "", map[string]string{"eventId": id})
-		var web struct {
-			Data struct {
-				Guests []struct {
-					UserUUID    string `json:"user_uuid"`
-					Response    string `json:"response"`
-					Note        string `json:"note"`
-					OutOfOffice bool   `json:"out_of_office"`
-				} `json:"event_guests"`
-			} `json:"data"`
-		}
-		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &web) != nil {
-			t.Fatalf("the web's read, to %s: %d %s", reader.UserDgraphInfo.UserName, rec.Code, rec.Body.String())
-		}
-		marks := map[string]guestMark{}
-		for _, g := range web.Data.Guests {
-			marks[g.UserUUID] = guestMark{g.Response, g.Note, g.OutOfOffice}
-		}
-		for who, w := range want {
-			if marks[who] != w {
-				t.Errorf("the web's read, to %s: %s is %+v, want %+v", reader.UserDgraphInfo.UserName, who, marks[who], w)
-			}
-		}
+	for _, reader := range []*userModels.UserInfo{sam, lee, maya} {
+		expect(reader, want)
+	}
 
-		code, out := v2(t, eventController.GetCalendarEvent, http.MethodGet, "/calendar/events/"+id, reader, "", id)
-		if code != http.StatusOK {
-			t.Fatalf("the calendar's read, to %s: %d %s", reader.UserDgraphInfo.UserName, code, out["msg"])
+	// Alex's page, the public invitation, says Maya's answer and never why: an
+	// outsider never learns where a member is.
+	code, body := v2(t, eventController.CalendarGuestLink, http.MethodPost, "/calendar/events/"+id+"/guest-link", sam, `{"email":"alex@example.org"}`, id)
+	var link struct {
+		URL string `json:"url"`
+	}
+	if code != http.StatusOK || json.Unmarshal(body["data"], &link) != nil || !strings.Contains(link.URL, "/rsvp/") {
+		t.Fatalf("Alex's link: %d %v", code, body)
+	}
+	secret := link.URL[strings.LastIndex(link.URL, "/")+1:]
+	code, page := public(t, eventController.GetPublicInvitation, http.MethodGet, "/public/rsvp/"+secret, "", map[string]string{"token": secret})
+	var seen calendarBusiness.InvitationView
+	if code != http.StatusOK || json.Unmarshal(page["data"], &seen) != nil {
+		t.Fatalf("Alex's page: %d %v", code, page)
+	}
+	if !slices.Contains(seen.Guests, calendarBusiness.InvitationGuest{Name: "Maya", Response: "declined"}) || strings.Contains(string(page["data"]), "out_of_office") {
+		t.Errorf("Alex's page: %s", page["data"])
+	}
+	code, page = public(t, eventController.AnswerPublicInvitation, http.MethodPost, "/public/rsvp/"+secret, `{"answer":"accepted"}`, map[string]string{"token": secret})
+	if code != http.StatusOK || strings.Contains(string(page["data"]), "out_of_office") {
+		t.Errorf("Alex's answer: %d %s", code, page["data"])
+	}
+
+	// A guest-role account, no member now, reads Maya's answer alone while the
+	// workspace shares busy times: the mark is only for members (CR-110 F3).
+	answerOnly := map[string]guestMark{maya.UserDgraphInfo.Uuid: {Response: "declined", Note: "Back Monday."}}
+	for _, external := range []bool{true, false} {
+		if _, err := env.PG.Exec(`UPDATE users SET is_external = $2 WHERE id = $1`, lee.UserPostgresInfo.Id, external); err != nil {
+			t.Fatal(err)
 		}
-		marks = map[string]guestMark{}
-		for _, g := range dataEvent(t, out).Attendees {
-			marks[g.UUID] = guestMark{g.Response, g.Note, g.OutOfOffice}
-		}
-		for who, w := range want {
-			if marks[who] != w {
-				t.Errorf("the calendar's read, to %s: %s is %+v, want %+v", reader.UserDgraphInfo.UserName, who, marks[who], w)
-			}
+		if external {
+			expect(lee, answerOnly)
 		}
 	}
+
+	// A workspace that keeps when members are busy to themselves keeps the
+	// mark too: Maya reads her own, and the others read her answer alone.
+	prev := policyBusiness.Policies
+	policyBusiness.Policies = busyKeptPrivate{prev}
+	t.Cleanup(func() { policyBusiness.Policies = prev })
+	expect(sam, answerOnly)
+	expect(lee, answerOnly)
+	expect(maya, want)
 }

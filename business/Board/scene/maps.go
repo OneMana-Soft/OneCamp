@@ -6,6 +6,7 @@ package scene
 // writes; Maps reads what a Y.Doc shows.
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -354,4 +355,17 @@ func Maps(b []byte) (map[string]map[string]any, error) {
 		roots[root] = m
 	}
 	return roots, nil
+}
+
+// StateRoots is Maps over a board's state as it is stored: base64 of a whole
+// Yjs state. A board never drawn on ("") has no roots and no error.
+func StateRoots(stateB64 string) (map[string]map[string]any, error) {
+	if stateB64 == "" {
+		return nil, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(stateB64)
+	if err != nil {
+		return nil, fmt.Errorf("its state isn't base64: %w", err)
+	}
+	return Maps(raw)
 }

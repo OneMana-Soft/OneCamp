@@ -141,7 +141,10 @@ func HandleGetStats(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"stats": stats})
 }
 
-// HandleRestore restores archived items.
+// HandleRestore restores archived items, by the ids their archive list gave:
+// a uuid, or a recording's key. 400 for a kind the archive doesn't keep or an
+// id not of its kind's shape, 404 {"code":"not_in_archive"} when one names
+// nothing here, and then nothing is restored.
 func HandleRestore(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -158,8 +161,8 @@ func HandleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var input struct {
-		EntityType string      `json:"entity_type"`
-		EntityIds  []uuid.UUID `json:"entity_ids"`
+		EntityType string   `json:"entity_type"`
+		EntityIds  []string `json:"entity_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "Invalid request body"})
@@ -178,11 +181,16 @@ func HandleRestore(w http.ResponseWriter, r *http.Request) {
 	count, err := business.RestoreItems(ctx, input.EntityType, input.EntityIds)
 	if err != nil {
 		var alreadyRunning *business.ArchiveAlreadyRunningError
-		if errors.As(err, &alreadyRunning) {
+		switch {
+		case errors.As(err, &alreadyRunning):
 			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"error": err.Error(), "code": "archive_running"})
-			return
+		case errors.Is(err, business.ErrUnknownArchiveKind), errors.Is(err, business.ErrBadArchiveID):
+			helpers.WriteError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, business.ErrNotInArchive):
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"code": "not_in_archive", "msg": err.Error()})
+		default:
+			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
 		}
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
 		return
 	}
 

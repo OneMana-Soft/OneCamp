@@ -65,6 +65,15 @@ type Service interface {
 	// Both for whoever may change the event (calendar B11, eventCall.go).
 	AddCall(ctx context.Context, who *model.UserInfo, id string) (*dgraphStruct.EventCall, error)
 	RemoveCall(ctx context.Context, who *model.UserInfo, id string) error
+	// SetCallLobby makes the event's invitees knock at its call, or come in by
+	// their own invitation again, for whoever may change the event (meet-02).
+	SetCallLobby(ctx context.Context, who *model.UserInfo, id string, inviteesWait bool) (*dgraphStruct.EventCall, error)
+	// CallArtefactKeys is what the event's call files what it makes under,
+	// for whoever may read the event (meet-02, callPeople.go).
+	CallArtefactKeys(ctx context.Context, who *model.UserInfo, id string) (CallKeys, error)
+	// CallArtefactKeysToChange is CallArtefactKeys for whoever may change the
+	// event, to delete what its call made or bring it back (callPeople.go).
+	CallArtefactKeysToChange(ctx context.Context, who *model.UserInfo, id string) (CallKeys, error)
 	// Reminders is the person's own reminders for an event or series (an
 	// instance's are its series'), and whether they are the default's.
 	Reminders(ctx context.Context, who *model.UserInfo, id string) (Reminders, error)

@@ -16,6 +16,9 @@ package business
 //     it only through the call's grant while it is on the stage.
 //   - Stop: the presenter and the people running the call; in a DM's or a
 //     group's call, which nobody runs, anyone from the workspace in it.
+//   - Slides (Slides control, meet-14): whoever may stop the board chooses
+//     which of its frames everyone is shown, or the whole board again
+//     (movesStage). Never a guest.
 //   - Choose who draws ("Everyone can draw", on by default for the call's
 //     members, and "Guests can draw", off by default): the presenter and the
 //     people running the call.
@@ -33,6 +36,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"regexp"
 	"slices"
 
 	boardAdapter "github.com/akashc777/OneCamp/adapter/Board"
@@ -56,7 +60,11 @@ const (
 	ActBoardDraw    = "board_draw"   // draw: everyone or presenter
 	ActBoardGuests  = "board_guests" // on: the call's guests draw too, or not
 	ActUndoGuests   = "undo_guests"  // take back what guests did since they could draw
+	ActBoardSlide   = "board_slide"  // slide: show everyone that frame of the board, "" the whole board
 )
+
+// slideShape is a slide's frame as the board names its elements.
+var slideShape = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // metaBoard is the room metadata key the board on the stage lives under.
 const metaBoard = "board"
@@ -71,11 +79,24 @@ var (
 	ErrNoSuchDraw   = &Refusal{http.StatusBadRequest, "no_such_draw", "Drawing is for everyone in the call or only the presenter."}
 	ErrNoGuestDraws = &Refusal{http.StatusConflict, "no_guest_drawing", "Guests haven't drawn on this board in the call."}
 	ErrBoardBusy    = &Refusal{http.StatusServiceUnavailable, "board_busy", "The board couldn't be reached just now. Try again."}
+	ErrNoSuchSlide  = &Refusal{http.StatusBadRequest, "no_such_slide", "That isn't a frame on the board."}
 )
 
 // boardAction is one of the board actions. Pure.
 func boardAction(action string) bool {
-	return slices.Contains([]string{ActPresentBoard, ActNewBoard, ActStopBoard, ActBoardDraw, ActBoardGuests, ActUndoGuests}, action)
+	return slices.Contains([]string{ActPresentBoard, ActNewBoard, ActStopBoard, ActBoardDraw, ActBoardGuests, ActUndoGuests, ActBoardSlide}, action)
+}
+
+// movesStage is whether me may take the board off s's stage or choose its
+// slide: its presenter, the people running the call, and in a DM's or a
+// group's call, which nobody runs, anyone from the workspace in it with a part
+// in the call; never a guest. Pure.
+func movesStage(s *callStateBusiness.Session, me *callStateBusiness.Person) bool {
+	if me.Guest || me.Role == model.RoleGuest {
+		return false
+	}
+	presenter := s.Board != nil && s.Board.By == me.Identity
+	return presenter || model.RunsCall(me.Role) || (equalCall(s.Resource.Kind) && len(AbilitiesOf(s.Resource.Kind, me.Role)) > 0)
 }
 
 // boardRefusal is why me may not do a board action in s, or nil. Pure.
@@ -94,14 +115,17 @@ func boardRefusal(s *callStateBusiness.Session, me *callStateBusiness.Person, a 
 			return ErrBoardShown
 		}
 		return nil
-	case ActStopBoard:
+	case ActStopBoard, ActBoardSlide:
 		if s.Board == nil {
 			return ErrNoBoard
 		}
-		if presenter || runs || (equalCall(s.Resource.Kind) && len(AbilitiesOf(s.Resource.Kind, me.Role)) > 0) {
-			return nil
+		if !movesStage(s, me) {
+			return ErrNotAllowed
 		}
-		return ErrNotAllowed
+		if a.Action == ActBoardSlide && a.Slide != "" && !slideShape.MatchString(a.Slide) {
+			return ErrNoSuchSlide
+		}
+		return nil
 	case ActBoardDraw, ActBoardGuests, ActUndoGuests:
 		if s.Board == nil {
 			return ErrNoBoard
@@ -173,6 +197,24 @@ func actOnBoard(ctx context.Context, actor *dgraphStruct.DgraphUser, s *callStat
 		roomLocks.Acquire(s.Room, 0)
 		defer roomLocks.Release(s.Room)
 		return undoGuests(ctx, s.Board.UUID)
+	case ActBoardSlide:
+		// Only on the board the mover saw, and a presenter's only while it is
+		// still theirs (stopBy): a move racing a new board or a host's
+		// takeover lands on nothing. Who may open the board doesn't change,
+		// so its sockets stay as they are.
+		roomLocks.Acquire(s.Room, 0)
+		defer roomLocks.Release(s.Room)
+		now, err := callStateBusiness.SetBoardSlide(ctx, s, s.Board.UUID, stopBy(s, me), a.Slide)
+		if err = settle(err); err != nil {
+			return Result{}, err
+		}
+		if now == nil {
+			return Result{}, ErrNoBoard
+		}
+		if err := tellBoard(ctx, s.Room, now); err != nil {
+			return Result{}, err
+		}
+		return Result{Affected: 1}, nil
 	}
 	var draw *string
 	var guests *bool
@@ -277,10 +319,10 @@ func sharers(people []*dgraphStruct.DgraphUser, maker string) []*dgraphStruct.Dg
 	return out
 }
 
-// stopBy is whose board a stop by me may take off: only their own for a
-// presenter who doesn't run the call, so a stop racing a host's takeover
-// leaves the host's board up; whatever is on the stage ("") for the people
-// running the call, and for anyone in a DM's or a group's call. Pure.
+// stopBy is whose board a stop or a slide move by me may change: only their
+// own for a presenter who doesn't run the call, so a stop racing a host's
+// takeover leaves the host's board up; whatever is on the stage ("") for the
+// people running the call, and for anyone in a DM's or a group's call. Pure.
 func stopBy(s *callStateBusiness.Session, me *callStateBusiness.Person) string {
 	if model.RunsCall(me.Role) || equalCall(s.Resource.Kind) {
 		return ""

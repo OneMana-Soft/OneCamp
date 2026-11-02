@@ -22,6 +22,7 @@ import (
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	githubCommentMappingDomain "github.com/akashc777/OneCamp/domain/GitHubCommentMapping"
@@ -475,6 +476,11 @@ func CreateSubTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.U
 		helpers.LogErrorWithContext(ctx, "business/CreateSubTask failed to create new sub task in dgraph err: %+v", err)
 		return
 	}
+	made := *dgraphTask
+	made.Assignee = assigneeDgraphInfo
+	made.ParentTask = &dgraphStruct.DgraphTask{Uuid: projectDgraphInfo.Tasks[0].Uuid, Name: projectDgraphInfo.Tasks[0].Name}
+	logChange(ctx, &userInfo.UserDgraphInfo, workFeed.TaskChange{Kind: workFeed.KindCreated, Project: projectUUID.String(),
+		Task: &made, Fields: workFeed.TaskMade})
 
 	var emptyAttachments []*dgraphStruct.DgraphAttachment
 
@@ -843,15 +849,11 @@ func CreateTaskAsked(ctx context.Context, projectUUID uuid.UUID, userInfo *model
 		domain.CreateOrUpdateDgraphTask(ctx, dgTask)
 	}
 
-	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "task.created", map[string]interface{}{
-		"task_id":     taskUUID.String(),
-		"project_id":  projectUUID.String(),
-		"name":        taskInfo.TaskName,
-		"description": taskInfo.TaskDescription,
-		"status":      taskInfo.Status,
-		"priority":    taskInfo.Priority,
-		"created_by":  userInfo.UserDgraphInfo.Uuid,
-	})
+	// Its entry is its task.created too, through the Outbox (taskWebhooks.go).
+	made := dgraphTask
+	made.Assignee = assigneeDgraphInfo
+	logChange(ctx, &userInfo.UserDgraphInfo, workFeed.TaskChange{Kind: workFeed.KindCreated, Project: projectUUID.String(),
+		Task: &made, Fields: workFeed.TaskMade})
 
 	// If the task was created already assigned to an AI teammate, hand it off
 	// immediately (same durable path as a later re-assignment).
@@ -1163,6 +1165,10 @@ func UpdateTaskNameByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskName 
 		syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "name", map[string]interface{}{"name": taskName})
 	})
 	dispatchTaskChanged(ctx, dgraphTaskInfo, FieldName, dgraphTaskInfo.Name, taskName, userInfo)
+	if dgraphTaskInfo.Name != taskName {
+		logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectOf(dgraphTaskInfo),
+			Task: &dgraphStruct.DgraphTask{Uuid: taskUUID.String(), Name: taskName}, Fields: []string{"task_name"}})
+	}
 
 	return
 }
@@ -1196,6 +1202,10 @@ func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAs
 
 	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
 
+	if userUUIDOf(dgraphTaskInfo.Assignee) != userUUIDOf(newAssigneeDgraphInfo) {
+		logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectOf(dgraphTaskInfo),
+			Task: &dgraphStruct.DgraphTask{Uuid: taskUUID.String(), Assignee: newAssigneeDgraphInfo}, Fields: []string{"task_assignee"}})
+	}
 	if newAssigneeDgraphInfo != nil {
 		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), newAssigneeDgraphInfo.Uuid)
 	}
@@ -1363,6 +1373,15 @@ func afterDates(ctx context.Context, dgraphTaskInfo *dgraphStruct.DgraphTask, da
 		if dates.Due != nil {
 			due = dates.Due
 		}
+		var fields []string
+		if dates.Start != nil {
+			fields = append(fields, "task_start_date")
+		}
+		if dates.Due != nil {
+			fields = append(fields, "task_due_date")
+		}
+		logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: dgraphTaskInfo.Project.Uuid,
+			Task: &dgraphStruct.DgraphTask{Uuid: taskUUID, StartDate: start, DueDate: due}, Fields: fields})
 		go mqttBusiness.PublishTaskDates(&mqttStruct.MqttTaskDates{
 			TaskUuid: taskUUID, ProjectUuid: dgraphTaskInfo.Project.Uuid,
 			StartDate: wireDate(start), DueDate: wireDate(due), By: userInfo.Uuid,
@@ -1486,6 +1505,8 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 	}
 	dgraphTaskInfo.Status = next.Category
 	dgraphTaskInfo.CustomStatus, dgraphTaskInfo.CustomStatusName = dgraphTask.CustomStatus, dgraphTask.CustomStatusName
+	logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectID, Task: dgraphTask,
+		Fields: []string{"task_status", "task_custom_status", "task_custom_status_name", "task_status_since"}})
 	if WentOn != nil {
 		WentOn(ctx, taskUUID, false)
 	}
@@ -1597,6 +1618,10 @@ func UpdateTaskPriorityByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskP
 
 	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
 	dispatchTaskChanged(ctx, dgraphTaskInfo, FieldPriority, dgraphTaskInfo.Priority, taskPriority, userInfo)
+	if dgraphTaskInfo.Priority != taskPriority {
+		logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectOf(dgraphTaskInfo),
+			Task: &dgraphStruct.DgraphTask{Uuid: taskUUID.String(), Priority: taskPriority}, Fields: []string{"task_priority"}})
+	}
 
 	return
 }
@@ -1656,6 +1681,10 @@ func UpdateTaskLabelByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskLabe
 		oldLabel = *dgraphTaskInfo.Label
 	}
 	dispatchTaskChanged(ctx, dgraphTaskInfo, FieldTags, oldLabel, taskLabel, userInfo)
+	if oldLabel != taskLabel {
+		logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectOf(dgraphTaskInfo),
+			Task: &dgraphStruct.DgraphTask{Uuid: taskUUID.String(), Label: &taskLabel}, Fields: []string{"task_label"}})
+	}
 	helpers.GoSafeNamed("syncBusiness.EnqueueGitHubSync", func() {
 		syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "label", map[string]interface{}{
 			"label":     taskLabel,
@@ -1746,13 +1775,11 @@ func ArchiveTaskByTaskUUID(ctx context.Context, taskUUID uuid.UUID, dgraphTaskIn
 		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), dgraphTaskInfo.Assignee.Uuid)
 	}
 
-	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "task.deleted", map[string]interface{}{
-		"task_id":    taskUUID.String(),
-		"project_id": dgraphTaskInfo.Project.Uuid,
-		"name":       dgraphTaskInfo.Name,
-		"status":     dgraphTaskInfo.Status,
-		"deleted_by": userInfo.Uid,
-	})
+	// Its entry is its task.deleted too, through the Outbox (taskWebhooks.go),
+	// so it carries the name and status that event has always sent.
+	logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindDeleted, Project: projectOf(dgraphTaskInfo),
+		Task:   &dgraphStruct.DgraphTask{Uuid: taskUUID.String(), DeletedAt: &currentTime, Name: dgraphTaskInfo.Name, Status: dgraphTaskInfo.Status},
+		Fields: workFeed.TaskGone})
 
 	if dgraphTaskInfo.Status != "canceled" {
 		go syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "status", map[string]interface{}{"status": "canceled"})
@@ -1820,14 +1847,11 @@ func UnArchiveTaskByTaskUUID(ctx context.Context, taskUUID uuid.UUID, dgraphTask
 
 	go syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "status", map[string]interface{}{"status": dgraphTaskInfo.Status})
 
-	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() {
-		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "task.restored", map[string]interface{}{
-			"task_id":     taskUUID.String(),
-			"project_id":  dgraphTaskInfo.Project.Uuid,
-			"name":        dgraphTaskInfo.Name,
-			"restored_by": userInfo.Uid,
-		})
-	})
+	// Its entry is its task.restored too, through the Outbox (taskWebhooks.go).
+	restored := *dgraphTaskInfo
+	restored.DeletedAt = nil
+	logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindRestored, Project: projectOf(dgraphTaskInfo),
+		Task: &restored, Fields: append([]string{"task_deleted_at"}, workFeed.TaskBasics...)})
 
 	return
 }

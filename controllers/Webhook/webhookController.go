@@ -347,6 +347,10 @@ var EventTypes = []string{
 	// A task's priority, due date, tags or name changed (business/Task
 	// taskChanged.go), with the field, what it was and what it is.
 	"task.changed",
+	// Every change to a task's fields, from the Work Change Log through the
+	// Outbox (business/Task taskUpdated.go): the fields it changed and their
+	// new values, the log's number for it, who made it and from where.
+	"task.updated",
 	"channel.created", "channel.archived",
 	"user.joined", "user.left",
 	// Docs (business/Follow's webhook sink): doc.updated is at most one a

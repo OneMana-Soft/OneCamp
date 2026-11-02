@@ -20,6 +20,7 @@ import (
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -186,7 +187,7 @@ func TestConnection(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, err)
 			return
 		}
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"ok": false, "msg": err.Error()})
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"ok": false, "msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"ok": true, "data": business.ClassifyTools(tools)})

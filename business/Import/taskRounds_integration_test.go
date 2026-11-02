@@ -153,4 +153,4 @@ func TestAnImportsTaskStatementsGrowOnlyWithWhatItMakes(t *testing.T) {
 // importTaskStatements is what making a task takes in Postgres, its row and
 // its mapping, and reading whether it was made before (its mapping, the
 // workspace's): a person is read once a chunk.
-const importTaskStatements = 4.1
+const importTaskStatements = 4.18 // 4.10 makes the task; + 0.04, the Work Change Log's one insert a written batch of 25 (1/25 a task: WCL-1b, main's yes 31 Oct); + 0.04, the Outbox's one insert a written batch of 25, its task.created (linear-39 round 2, ec0dd35df; main's yes 1 Nov)

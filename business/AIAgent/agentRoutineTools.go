@@ -16,6 +16,7 @@ package business
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -152,6 +153,11 @@ func mayCreateRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunScop
 	return routine, true
 }
 
+// errUnknownAsker is a routine refused because nobody can be named as the
+// person who asked for it (routineCreator). The tool call carries it as its
+// error (V-208: an error string starts in lower case).
+var errUnknownAsker = errors.New("couldn't tell who asked for this routine, so it wasn't set up")
+
 // routineCreator is who a new routine is recorded as created by: the person
 // who asked for it, not the sponsor. A routine runs later with nobody
 // watching, and its runs act for whoever created it (routineRunFor), so
@@ -160,7 +166,7 @@ func mayCreateRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunScop
 func routineCreator(ctx context.Context, agent *model.AiAgent) (uuid.UUID, error) {
 	id, known := askerOf(ctx, agent)
 	if !known {
-		return uuid.Nil, fmt.Errorf("I couldn't tell who asked for this routine, so I didn't set it up")
+		return uuid.Nil, errUnknownAsker
 	}
 	return id, nil
 }

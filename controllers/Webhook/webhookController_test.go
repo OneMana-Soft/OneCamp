@@ -216,3 +216,22 @@ func TestTheCatalogueOffersACallsBeginningAndEnd(t *testing.T) {
 		}
 	}
 }
+
+// linear-39: every change to a task's fields is an event of its own,
+// task.updated, which the admin can pick.
+func TestTheCatalogueOffersEveryChangeToATask(t *testing.T) {
+	rec := httptest.NewRecorder()
+	HandleGetWebhookEventTypes(rec, httptest.NewRequest(http.MethodGet, "/webhooks/event-types", nil))
+	var got struct {
+		EventTypes []string `json:"event_types"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range got.EventTypes {
+		if k == "task.updated" {
+			return
+		}
+	}
+	t.Errorf("the catalogue doesn't offer task.updated: %v", got.EventTypes)
+}

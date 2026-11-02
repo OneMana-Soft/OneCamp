@@ -108,12 +108,31 @@ func meetingNotesTitle(surfaceName string, at time.Time) string {
 // two are recorded by different mechanisms and only one of them is proof: if
 // Redis dropped the set or a webhook never arrived, the transcript is still
 // evidence they were there.
-func notesAudience(ctx context.Context, call liveKitBusiness.FinishedCall, speakerUIDs []string) []string {
+//
+// An event's call's notes reach its people (meet-02): the organiser and the
+// members it invites, as the calendar has them now (recapHomeOf reads them
+// once), including those who missed the call. Someone in the call who isn't
+// one of them (let in by its link) is left out, as is a guest by email.
+func notesAudience(ctx context.Context, call liveKitBusiness.FinishedCall, home recapHome, speakerUIDs []string) []string {
 	attendees, err := liveKitBusiness.CallAttendees(ctx, call.SessionKey)
 	if err != nil {
 		// Degrade to speakers rather than failing: fewer people on the document
 		// is recoverable, no document is not.
 		helpers.LogErrorWithContext(ctx, "AI meeting notes: could not read the call's attendees: %+v", err)
+	}
+	if home.event != nil {
+		ofEvent := make(map[string]bool, len(home.members))
+		for _, m := range home.members {
+			ofEvent[m.Uid] = true
+			attendees = append(attendees, m.Uid)
+		}
+		var out []string
+		for _, uid := range mergeAudience(speakerUIDs, attendees) {
+			if ofEvent[uid] {
+				out = append(out, uid)
+			}
+		}
+		return out
 	}
 	var out []string
 	for _, uid := range mergeAudience(speakerUIDs, attendees) {
@@ -212,12 +231,13 @@ func createMeetingNotesDoc(
 	ctx context.Context,
 	surfaceName string,
 	call liveKitBusiness.FinishedCall,
+	home recapHome,
 	speakerUIDs []string,
 	recap, gapNote string,
 	lines []transcriptDomain.TranscriptLine,
 	nameByUID map[string]string,
 ) (string, error) {
-	audience := notesAudience(ctx, call, speakerUIDs)
+	audience := notesAudience(ctx, call, home, speakerUIDs)
 	author := resolveNotesOwner(ctx, audience)
 	if author == nil {
 		// Nobody on the call resolves to a live user, so there is no one to own

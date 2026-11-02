@@ -92,7 +92,7 @@ func TestATableWholeAlreadyIsNotWalkedAgain(t *testing.T) {
 
 // A big import into a table whose index is whole is counted for the planner,
 // as a walk's rows are (V-48). IndexTable has the planner count the rows and
-// the cell index again once it has indexed 1,000 rows (AnalyzeRows), but an
+// the cell index again once it has indexed 1,000 rows (VacuumRows), but an
 // import into a table the index kept up with skips the walk, and the count
 // with it. Until autovacuum's next look, that table's first grouped or summed
 // window ran past its budget, and its summaries and groups were left out: a

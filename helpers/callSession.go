@@ -1,6 +1,9 @@
 package helpers
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // A call that nobody records still produces speech worth keeping.
 //
@@ -51,3 +54,14 @@ func CallSessionID(key string) string {
 	}
 	return strings.TrimPrefix(key, callSessionPrefix)
 }
+
+// recordingKey is a recording's key as LiveKit makes it: an egress id ("EG_")
+// or the call session key of a room's session id ("call-RM_"), then the id's
+// letters and digits (LiveKit writes 12; 32 bounds them).
+var recordingKey = regexp.MustCompile(`^(EG|call-RM)_[A-Za-z0-9]{12,32}$`)
+
+// IsRecordingKey reports whether s is a recording's key exactly as the archive
+// lists it: an egress id, or the call session key (CallSessionKeyFor of a
+// LiveKit room's session id) of a call's transcript-only node. Nothing else is
+// one: no uuid, no other prefix, no space or line around it. Pure.
+func IsRecordingKey(s string) bool { return recordingKey.MatchString(s) }

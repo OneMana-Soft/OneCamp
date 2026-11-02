@@ -49,8 +49,8 @@ type CallSessionNode struct {
 	StartedAt time.Time
 	EndedAt   time.Time
 	DeletedAt time.Time
-	// Linked is whether it belongs to a channel or a DM, which is how anybody
-	// can ever find it.
+	// Linked is whether it belongs to a channel, a DM or a calendar event
+	// (meet-02), which is how anybody can ever find it.
 	Linked bool
 	// LastLine is when its newest line was spoken; zero when it has none.
 	LastLine time.Time
@@ -91,6 +91,7 @@ const callSessionNodesQuery = `query Sessions($first: int, $after: string) {
 			recording_deleted_at
 			linked_channel: count(recording_channel)
 			linked_dm: count(recording_dm)
+			recording_event
 			recording_transcript (orderdesc: transcript_timestamp, first: 1) {
 				transcript_timestamp
 			}
@@ -108,6 +109,7 @@ func parseCallSessionNodes(raw []byte) ([]CallSessionNode, error) {
 			DeletedAt     *time.Time `json:"recording_deleted_at"`
 			LinkedChannel int        `json:"linked_channel"`
 			LinkedDm      int        `json:"linked_dm"`
+			Event         string     `json:"recording_event"`
 			Transcript    []struct {
 				At int64 `json:"transcript_timestamp"`
 			} `json:"recording_transcript"`
@@ -118,7 +120,7 @@ func parseCallSessionNodes(raw []byte) ([]CallSessionNode, error) {
 	}
 	out := make([]CallSessionNode, 0, len(resp.RecordingInfo))
 	for _, r := range resp.RecordingInfo {
-		n := CallSessionNode{Uid: r.Uid, Key: r.Key, Linked: r.LinkedChannel > 0 || r.LinkedDm > 0}
+		n := CallSessionNode{Uid: r.Uid, Key: r.Key, Linked: r.LinkedChannel > 0 || r.LinkedDm > 0 || r.Event != ""}
 		if r.StartedAt != nil {
 			n.StartedAt = *r.StartedAt
 		}
@@ -154,14 +156,15 @@ func MarkCallSessionNodeEnded(ctx context.Context, key string, ended time.Time) 
 }
 
 // FindCallSessionNode answers the uid of the node holding a call's
-// transcript, and whether it is linked to a conversation. "" when there is
-// none yet.
+// transcript, and whether it is linked to its home: a conversation, or the
+// calendar event whose call it was. "" when there is none yet.
 func FindCallSessionNode(ctx context.Context, key string) (uid string, linked bool, err error) {
 	query := `query Session($key: string) {
 		recordingInfo(func: eq(recording_egress_id, $key)) {
 			uid
 			linked_channel: count(recording_channel)
 			linked_dm: count(recording_dm)
+			recording_event
 		}
 	}`
 	raw, err := dgraphModels.QueryRecordingsJSON(ctx, query, map[string]string{"$key": key})
@@ -173,13 +176,14 @@ func FindCallSessionNode(ctx context.Context, key string) (uid string, linked bo
 			Uid           string `json:"uid"`
 			LinkedChannel int    `json:"linked_channel"`
 			LinkedDm      int    `json:"linked_dm"`
+			Event         string `json:"recording_event"`
 		} `json:"recordingInfo"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return "", false, err
 	}
 	for _, r := range resp.RecordingInfo {
-		if r.LinkedChannel > 0 || r.LinkedDm > 0 {
+		if r.LinkedChannel > 0 || r.LinkedDm > 0 || r.Event != "" {
 			return r.Uid, true, nil
 		}
 		uid = r.Uid

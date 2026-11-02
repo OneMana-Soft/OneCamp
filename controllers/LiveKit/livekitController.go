@@ -19,8 +19,8 @@ import (
 	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
+	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 
-	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	business "github.com/akashc777/OneCamp/business/LiveKit"
 	workflowBusiness "github.com/akashc777/OneCamp/business/Workflow"
 	"github.com/akashc777/OneCamp/helpers"
@@ -85,7 +85,7 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		if !callControlBusiness.OnEnded(ctx, roomName, event.Room.Sid, callStateModel.EndedRoomFinished) {
 			break
 		}
-		broadcastCallStop(ctx, roomName)
+		broadcastCallStop(roomName)
 		callFinished(ctx, event.Room)
 
 	case "participant_joined":
@@ -127,7 +127,7 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		if !callControlBusiness.OnEnded(ctx, roomName, event.Room.Sid, callStateModel.EndedLastLeft) {
 			break
 		}
-		broadcastCallStop(ctx, roomName)
+		broadcastCallStop(roomName)
 
 		// Best-effort: evict the room so the lingering transcription
 		// agent disconnects promptly and LiveKit reclaims resources,
@@ -172,16 +172,12 @@ func callFinished(ctx context.Context, room *livekit.Room) {
 	}
 
 	// Ambient AI: turn the finished call's transcript into a recap
-	// (summary + decisions + action items) posted to the surface the
-	// call happened in. Fire-and-forget; self-gates on the
-	// meeting_recap_enabled setting and is idempotent per call.
-	//
-	// Skipped for instant meetings (meet-<uuid>): they are not tied to
-	// a channel/DM/group conversation, so there is no surface to post
-	// a recap into.
-	if !guestBusiness.IsMeetingRoom(call.Room) {
-		aiBusiness.MaybeRunMeetingRecap(call)
-	}
+	// (summary + decisions + action items) posted where the call keeps
+	// what it makes: its conversation, or for an event's call the
+	// conversation of the event's people (meet-02). Fire-and-forget;
+	// self-gates on the meeting_recap_enabled setting, is idempotent per
+	// call, and does nothing for an instant meeting, which keeps nothing.
+	aiBusiness.MaybeRunMeetingRecap(call)
 
 	// A finished call is the workspace event most likely to produce
 	// work — a decision to record, a task somebody agreed to, a status
@@ -192,31 +188,32 @@ func callFinished(ctx context.Context, room *livekit.Room) {
 	workflowBusiness.NotifyMeetingEnded(call.Room)
 }
 
-// Room naming conventions (business/CallState rooms.go):
-//   - DM call:     space-separated sorted UUIDs ("uuidA uuidB")
-//   - Group chat:  32-char hex hash (no hyphens, no spaces)
-//   - Channel:     a UUID (hyphens, no spaces)
-func broadcastCallStop(ctx context.Context, roomName string) {
-	switch {
-	case callStateBusiness.IsBreakoutRoom(roomName):
+// What a call's end publishes to clear a conversation's call dot (seams for
+// tests): a DM's or a group's by its grouping id, a channel's by its uuid.
+var (
+	publishChatStop    = chatBusiness.PublishStopChatCall
+	publishChannelStop = channelBusiness.PublishChannelCallStop
+)
+
+// broadcastCallStop clears the call dot of the conversation whose call ended
+// in a room (business/CallState RefOfRoom).
+func broadcastCallStop(roomName string) {
+	ref, kind, ok := callStateBusiness.RefOfRoom(roomName)
+	if !ok || kind == callStateModel.KindBreakout {
 		// A breakout room has no call dot of its own: its call's is lit
-		// while the call goes on.
+		// while the call goes on. RefOfRoom answers a breakout with its
+		// call's ref, so this is the one line that keeps a breakout's end
+		// from clearing the live call's dot.
 		return
-	case guestBusiness.IsMeetingRoom(roomName):
-		// Instant meeting: not pinned to a sidebar conversation, so there is
-		// no call-active dot to clear. Guests/host observe call end via
-		// LiveKit's own disconnect events. Nothing to broadcast.
-		return
-	case strings.Contains(roomName, " "):
-		// DM call
-		chatBusiness.PublishStopChatCall(roomName)
-	case !strings.Contains(roomName, "-"):
-		// Group chat call (hash)
-		chatBusiness.PublishStopChatCall(roomName)
-	default:
-		// Channel call (UUID)
-		channelBusiness.PublishChannelCallStop(roomName)
 	}
+	switch ref.Kind {
+	case conversationBusiness.KindDM, conversationBusiness.KindGroup:
+		publishChatStop(ref.ID)
+	case conversationBusiness.KindChannel:
+		publishChannelStop(ref.ID)
+	}
+	// A meeting is pinned to no sidebar conversation, so it has no call dot to
+	// clear: its guests and host see the end through LiveKit's own disconnect.
 }
 
 // transcriptRefusal answers a line the server declines to keep, with the code

@@ -230,11 +230,11 @@ func (a *AnthropicProvider) Chat(ctx context.Context, messages []ChatMessage, op
 
 	var chatResp anthropicResponse
 	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return "", fmt.Errorf("anthropic: failed to decode response: %w", err)
+		return "", FromProvider(fmt.Errorf("anthropic: failed to decode response: %w", err))
 	}
 
 	if chatResp.Error != nil {
-		return "", fmt.Errorf("anthropic: API error: %s", chatResp.Error.Message)
+		return "", FromProvider(fmt.Errorf("anthropic: API error: %s", chatResp.Error.Message))
 	}
 
 	if len(chatResp.Content) == 0 {
@@ -399,13 +399,13 @@ func (a *AnthropicProvider) ChatStream(ctx context.Context, messages []ChatMessa
 				if event.Error != nil {
 					errMsg = event.Error.Message
 				}
-				ch <- StreamChunk{Done: true, Error: fmt.Errorf("anthropic: stream error: %s", errMsg)}
+				ch <- StreamChunk{Done: true, Error: FromProvider(fmt.Errorf("anthropic: stream error: %s", errMsg))}
 				return
 			}
 		}
 
 		if err := scanner.Err(); err != nil {
-			ch <- StreamChunk{Done: true, Error: fmt.Errorf("anthropic: stream read error: %w", err)}
+			ch <- StreamChunk{Done: true, Error: FromProvider(fmt.Errorf("anthropic: stream read error: %w", err))}
 		}
 	})
 
@@ -443,7 +443,7 @@ func (a *AnthropicProvider) ListModels(ctx context.Context) ([]ModelInfo, error)
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("anthropic: models returned %d: %s", resp.StatusCode, string(b))
+		return nil, FromProvider(fmt.Errorf("anthropic: models returned %d: %s", resp.StatusCode, string(b)))
 	}
 
 	var mr anthropicModelsResponse
@@ -451,7 +451,7 @@ func (a *AnthropicProvider) ListModels(ctx context.Context) ([]ModelInfo, error)
 		return nil, fmt.Errorf("anthropic: decode models: %w", err)
 	}
 	if mr.Error != nil {
-		return nil, fmt.Errorf("anthropic: models error: %s", mr.Error.Message)
+		return nil, FromProvider(fmt.Errorf("anthropic: models error: %s", mr.Error.Message))
 	}
 
 	out := make([]ModelInfo, 0, len(mr.Data))
