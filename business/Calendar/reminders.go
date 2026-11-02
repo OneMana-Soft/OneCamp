@@ -67,6 +67,19 @@ var (
 	defaultAllDayReminders = []int{15 * 60}
 )
 
+// defaultsOf is what reminds of an event when nobody chose: none for a
+// working location, which only says where its owner works (head 5d; Google
+// never notifies one), else the default for a timed or an all-day event. Pure.
+func defaultsOf(e *models.Event) []int {
+	switch {
+	case EventKind(e.Kind) == EventWorkingLocation:
+		return nil
+	case e.AllDay():
+		return defaultAllDayReminders
+	}
+	return defaultTimedReminders
+}
+
 // reminderStore is where reminders and their jobs are kept (models
 // reminderModel.go): a seam of its own, so a test keeps them in memory.
 type reminderStore interface {
@@ -130,9 +143,10 @@ func checkReminders(minutes []int, allDay bool) ([]int, error) {
 }
 
 // remindersIn is what reminds someone of one occurrence: their own for the
-// event (set says they chose, own may be none), else the default when they
-// organise it or said yes or maybe. Never an occurrence they declined. Pure.
-func remindersIn(own []int, set, allDay, organiser bool, response string) []int {
+// event (set says they chose, own may be none), else its defaults (defaultsOf)
+// when they organise it or said yes or maybe. Never an occurrence they
+// declined. Pure.
+func remindersIn(own []int, set bool, defaults []int, organiser bool, response string) []int {
 	if !organiser && response == responseDeclined {
 		return nil
 	}
@@ -140,10 +154,7 @@ func remindersIn(own []int, set, allDay, organiser bool, response string) []int 
 		return own
 	}
 	if organiser || response == responseAccepted || response == responseTentative {
-		if allDay {
-			return defaultAllDayReminders
-		}
-		return defaultTimedReminders
+		return defaults
 	}
 	return nil
 }
@@ -281,7 +292,7 @@ func (s *service) planAfter(ctx context.Context, id uuid.UUID, only []uuid.UUID,
 			if a := answerOf(answers[inst.ref], models.GuestKey{UserID: &person}); a != nil {
 				response = a.Response
 			}
-			return remindersIn(mine, set, inst.Event.AllDay(), person == e.CreatedBy, response)
+			return remindersIn(mine, set, defaultsOf(inst.Event), person == e.CreatedBy, response)
 		})
 		switch {
 		case ok:
@@ -526,7 +537,7 @@ func (s *service) remindersView(ctx context.Context, e *models.Event, guests []m
 	if a := answerOf(guests, models.GuestKey{UserID: &person}); a != nil {
 		response = a.Response
 	}
-	return Reminders{Minutes: remindersIn(nil, false, e.AllDay(), person == e.CreatedBy, response), Default: true}, nil
+	return Reminders{Minutes: remindersIn(nil, false, defaultsOf(e), person == e.CreatedBy, response), Default: true}, nil
 }
 
 // SetReminders sets who's own reminders for an event or series (nil goes
@@ -615,7 +626,7 @@ func (s *service) withReminders(ctx context.Context, rows []instance, occ map[st
 		if a := answerOf(occ[inst.ref], models.GuestKey{UserID: &reader}); a != nil {
 			response = a.Response
 		}
-		minutes := slices.Clone(remindersIn(mine, set, owner.AllDay(), reader == owner.CreatedBy, response))
+		minutes := slices.Clone(remindersIn(mine, set, defaultsOf(owner), reader == owner.CreatedBy, response))
 		if minutes == nil {
 			minutes = []int{}
 		}

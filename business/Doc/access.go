@@ -101,12 +101,13 @@ func IsOwner(doc *dgraphStruct.DgraphDoc, userUID string) bool {
 }
 
 // What bringing a doc back from the trash or the archive, and deleting it for
-// good, take of the level someone had before it was deleted (Was). CanRestore,
-// CanPurge and the trash's handlers (accessBusiness.OpenDeleted) all ask
-// these, so the doc page's 410, the trash list and the trash's answers agree.
+// good, take of the level someone had before it was deleted (Was): every
+// kind's one rule (business/Access/level). CanRestore, CanPurge and the
+// trash's handlers (accessBusiness.OpenDeleted) all ask these, so the doc
+// page's 410, the trash list and the trash's answers agree.
 const (
-	RestoreNeeds = level.Edit
-	PurgeNeeds   = level.Full
+	RestoreNeeds = level.RestoreNeeds
+	PurgeNeeds   = level.PurgeNeeds
 )
 
 // CanRestore is who may bring a doc back from the trash or the archive: the

@@ -1,8 +1,8 @@
 package domain
 
-// The reads and writes behind permanent removal of recordings: archived ones
-// past their purge date, and one someone deletes. See business/Archive/purge.go
-// for the rule; this file only knows the graph.
+// The reads and writes behind permanent removal of recordings: archived ones,
+// and deleted ones, past their purge date. See business/Archive/purge.go for
+// the rule; this file only knows the graph.
 
 import (
 	"context"
@@ -50,28 +50,6 @@ func ListRecordingsArchivedBefore(ctx context.Context, cutoff time.Time, limit i
 	return toPurge(recs), nil
 }
 
-// RecordingsToPurge returns what a purge needs to know about the recording
-// with this egress id, to remove it now: each node holding the id (the
-// recording, and any stray node an old archive or delete made for it, which
-// has no file and goes too).
-func RecordingsToPurge(ctx context.Context, egressId string) ([]ArchivedRecording, error) {
-	query := `query Recording($id: string){
-		recordingInfo(func: eq(recording_egress_id, $id)) {
-			uid
-			recording_egress_id
-			recording_obj_key
-			recording_size
-			recording_transcript { uid }
-		}
-	}`
-	recs, err := dgraphModels.GetDgraphRecordingsList(ctx, query, map[string]string{"$id": egressId})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/RecordingsToPurge failed: %v", err)
-		return nil, err
-	}
-	return toPurge(recs), nil
-}
-
 func toPurge(recs []*dgraphStruct.DgraphRecording) []ArchivedRecording {
 	out := make([]ArchivedRecording, 0, len(recs))
 	for _, r := range recs {
@@ -94,7 +72,7 @@ var (
 		"recording_egress_id", "recording_stared_at", "recording_ended_at", "recording_duration",
 		"recording_obj_key", "recording_transcript", "recording_started_by", "recording_channel",
 		"recording_dm", "recording_size", "recording_deleted_at", "recording_transcript_only",
-		"recording_status", "dgraph.type",
+		"recording_status", "recording_event", "recording_notes_doc", "recording_recap_chat", "dgraph.type",
 	}
 	transcriptPredicates = []string{
 		"transcript_from", "transcript_text", "transcript_timestamp", "transcript_offset_ms",

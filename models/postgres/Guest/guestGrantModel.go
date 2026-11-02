@@ -473,3 +473,25 @@ func Unpublish(ctx context.Context, id uuid.UUID) (*GuestGrant, error) {
 	}
 	return g, nil
 }
+
+// LiveGrantIDsOf is the ids of the live grants to these resources of one
+// type, in one read.
+func LiveGrantIDsOf(ctx context.Context, resourceType string, resourceIDs []string) ([]uuid.UUID, error) {
+	if len(resourceIDs) == 0 {
+		return nil, nil
+	}
+	return pgexec.Query(ctx, `SELECT id FROM guest_grants WHERE resource_type = $1 AND resource_id = ANY($2) AND `+liveSQL(3),
+		func(r pgexec.Row) (id uuid.UUID, err error) {
+			err = r.Scan(&id)
+			return id, err
+		}, resourceType, resourceIDs, LinkCapDays(ctx))
+}
+
+// ForgetResources removes every grant, live or not, to these resources of
+// one type, gone for good. It says how many it removed.
+func ForgetResources(ctx context.Context, resourceType string, resourceIDs []string) (int64, error) {
+	if len(resourceIDs) == 0 {
+		return 0, nil
+	}
+	return pgexec.Exec(ctx, `DELETE FROM guest_grants WHERE resource_type = $1 AND resource_id = ANY($2)`, resourceType, resourceIDs)
+}

@@ -18,7 +18,8 @@ import (
 )
 
 // A unit test has no calendar store: whoever searches sees no calendars
-// beyond their own events and invitations, unless a test says otherwise.
+// beyond their own events and invitations, and a repeating event's hit says
+// its first instance, unless a test says otherwise.
 //
 // Nor does it repair search entries: a search's repairs run where it was
 // made and write nothing, unless a test records them. One left running in
@@ -26,6 +27,7 @@ import (
 // later test has put in its place (TestNoRepairOutlivesTheSearchThatAskedForIt).
 func TestMain(m *testing.M) {
 	searchCalendars = func(context.Context, accessBusiness.Subject) ([]string, []string, error) { return nil, nil, nil }
+	nextInstances = func(context.Context, []*openSearchStruct.OpenSearchEvent) {}
 	goRepairs = func(repair func()) { repair() }
 	repairEntry = func(kind, id string) {}
 	os.Exit(m.Run())
@@ -213,5 +215,56 @@ func TestADroppedEventComesOffItsCountAndHasItsEntryRepairedOnce(t *testing.T) {
 	}
 	if want := []string{"event:" + gone}; !reflect.DeepEqual(repaired, want) {
 		t.Errorf("repaired %v; want %v, once", repaired, want)
+	}
+}
+
+// A repeating event's hit says when it is next on (V-22): the page's repeating
+// events the person may open go to the calendar's one rule together, once a
+// search, after those they can't open are left out. Events that don't repeat
+// aren't asked about, and keep their entries as written.
+func TestARepeatingEventHitSaysWhenItIsNextOn(t *testing.T) {
+	allReady(t)
+	withChecks(t, nil)
+	weekly, hidden, once := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	swap(t, &readableEvents, func(context.Context, accessBusiness.Subject, []string) (map[string]bool, error) {
+		return map[string]bool{weekly: true, once: true}, nil
+	})
+	const first, next = int64(1792480500), int64(1793690100)
+	var asked [][]string
+	swap(t, &nextInstances, func(_ context.Context, entries []*openSearchStruct.OpenSearchEvent) {
+		var ids []string
+		for _, e := range entries {
+			ids = append(ids, e.Uuid)
+			e.EventStart = next
+		}
+		asked = append(asked, ids)
+	})
+	repeating := func(id string) *openSearchStruct.GlobalSearchOpenSearchResp {
+		h := eventHit(id)
+		h.Event.EventRepeats, h.Event.EventStart = true, first
+		return h
+	}
+	single := eventHit(once)
+	single.Event.EventStart = first
+	swap(t, &searchIndex, func(context.Context, []string, []byte) (opensearchModels.SearchAnswer, error) {
+		return opensearchModels.SearchAnswer{
+			Hits:    []*openSearchStruct.GlobalSearchOpenSearchResp{repeating(weekly), repeating(hidden), single},
+			ByIndex: map[string]int{openSearchStruct.EVENT_INDEX: 3},
+			Total:   3,
+		}, nil
+	})
+	p, err := Search(context.Background(), Reach{UserUUID: "U"}, launch(), Page{Size: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := [][]string{{weekly}}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("asked about %v; want %v, once", asked, want)
+	}
+	starts := map[string]int64{}
+	for _, h := range p.Page {
+		starts[h.Event.Uuid] = h.Event.EventStart
+	}
+	if want := map[string]int64{weekly: next, once: first}; !reflect.DeepEqual(starts, want) {
+		t.Errorf("the page's starts %v; want %v", starts, want)
 	}
 }

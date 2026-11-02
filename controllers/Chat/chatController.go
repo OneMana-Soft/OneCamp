@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"net/http"
 	"strconv"
 
@@ -1930,7 +1932,7 @@ func StartVideoCallRecordingForGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.StartRecordingChatCall(ctx, &userInfo.UserDgraphInfo, makeVideoCallInfo.GrpUuid)
+	err = liveKitBusiness.StartCallRecording(ctx, makeVideoCallInfo.GrpUuid, &userInfo.UserDgraphInfo)
 
 	if err != nil {
 
@@ -2000,7 +2002,10 @@ func StopVideoCallRecordingForGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.StopRecordingChatCall(ctx, makeVideoCallInfo.GrpUuid)
+	err = liveKitBusiness.StopRecording(ctx, makeVideoCallInfo.GrpUuid)
+	if httpx.WriteNothingRecording(w, err) {
+		return
+	}
 
 	if err != nil {
 
@@ -2165,7 +2170,7 @@ func StartVideoCallRecordingForChat(w http.ResponseWriter, r *http.Request) {
 
 	actualGrpId := helpers.GetGroupingId(userInfo.UserDgraphInfo.Uuid, userUUIDString)
 
-	err = business.StartRecordingChatCall(ctx, &userInfo.UserDgraphInfo, actualGrpId)
+	err = liveKitBusiness.StartCallRecording(ctx, actualGrpId, &userInfo.UserDgraphInfo)
 
 	if err != nil {
 
@@ -2249,7 +2254,10 @@ func StopVideoCallRecordingForChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.StopRecordingChatCall(ctx, grpId)
+	err = liveKitBusiness.StopRecording(ctx, grpId)
+	if httpx.WriteNothingRecording(w, err) {
+		return
+	}
 
 	if err != nil {
 

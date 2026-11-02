@@ -15,7 +15,8 @@ import (
 // RestoreForm brings a deleted form back: its link takes answers again, and
 // its submissions and what they made are its own again (POST
 // /restore/form/{id}, controllers/Restore). A project's form: its project's
-// admins; a table's form: whoever manages the table. Each as its delete.
+// admins; a table's form: whoever manages the table. Each as its delete, and
+// while its project or table has room for it, as a new form needs.
 func RestoreForm(w http.ResponseWriter, r *http.Request, id uuid.UUID, owner softDelete.Owner) {
 	if owner.Project != uuid.Nil {
 		if _, _, ok := projectaccess.RequireID(w, r, owner.Project.String(), workAccess.NeedManage, denied); !ok {
@@ -31,7 +32,7 @@ func RestoreForm(w http.ResponseWriter, r *http.Request, id uuid.UUID, owner sof
 			return
 		}
 	}
-	if err := softDelete.RestoreAs(r.Context(), softDelete.Form, id, nil); err != nil {
+	if err := formBusiness.Restore(r.Context(), id, owner); err != nil {
 		write(w, r, "RestoreForm", err)
 		return
 	}

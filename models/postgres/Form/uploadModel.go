@@ -96,13 +96,15 @@ func Release(ctx context.Context, ids []uuid.UUID, project uuid.UUID) error {
 	return err
 }
 
-// Unsent is up to n files that waited since before and were never sent, and
-// aren't waiting for a retry after now, the oldest first: the sweep removes
-// their objects, then forgets them (Forget); one whose removal failed waits
-// for its retry_at (Tried), so it never holds the rest.
+// Unsent is up to n files that were never sent and aren't waiting for a retry
+// after now, the oldest first: those that waited since before, and any whose
+// form is gone (a table's purge takes its own forms, V-121 F1). The sweep
+// removes their objects, then forgets them (Forget); one whose removal failed
+// waits for its retry_at (Tried), so it never holds the rest.
 func Unsent(ctx context.Context, before, now time.Time, n int) ([]Upload, error) {
 	return pgexec.Query(ctx, `SELECT `+uploadColumns+`, purge_tries FROM form_uploads
-		WHERE created_at < $1 AND claimed_at IS NULL AND (retry_at IS NULL OR retry_at <= $2)
+		WHERE claimed_at IS NULL AND (retry_at IS NULL OR retry_at <= $2)
+		  AND (created_at < $1 OR NOT EXISTS (SELECT 1 FROM project_forms f WHERE f.id = form_uploads.form_id))
 		ORDER BY created_at LIMIT $3`, func(r pgexec.Row) (Upload, error) {
 		var u Upload
 		err := r.Scan(&u.ID, &u.Form, &u.Claim, &u.Question, &u.Key, &u.Name, &u.ContentType, &u.Size, &u.Tries)

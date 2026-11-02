@@ -49,10 +49,11 @@ var (
 )
 
 // IsConflict is an error a controller answers 409: nothing to undo or redo,
-// a change undone already, a row changed since it was read.
+// a change undone already, a row changed since it was read, a delete for good
+// of a table that isn't in the trash.
 func IsConflict(err error) bool {
 	var re *RowConflict
-	return err == errNothingToUndo || err == errNothingToRedo || err == errUndoneAlready || errors.As(err, &re)
+	return err == errNothingToUndo || err == errNothingToRedo || err == errUndoneAlready || err == errNotInTrash || errors.As(err, &re)
 }
 
 // RowConflict is a write refused because a row changed since the version it
@@ -144,7 +145,8 @@ type BatchResult struct {
 // batch does.
 func batchKind(in BatchInput) rowLedger.ChangeKind {
 	switch rowLedger.ChangeKind(in.Kind) {
-	case rowLedger.ChangePaste, rowLedger.ChangeFill, rowLedger.ChangeImport, rowLedger.ChangeEdit:
+	case rowLedger.ChangePaste, rowLedger.ChangeFill, rowLedger.ChangeImport, rowLedger.ChangeEdit,
+		rowLedger.ChangeReplace, rowLedger.ChangeTrim, rowLedger.ChangeDedupe, rowLedger.ChangeSplit:
 		return rowLedger.ChangeKind(in.Kind)
 	}
 	switch {
@@ -326,11 +328,11 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 	return out, nil
 }
 
-// tellLinkedLater has the readers of the tables linking with table look
+// tellLinkedLater has the readers of the tables linking with these tables look
 // again, off the request.
-func tellLinkedLater(ctx context.Context, table uuid.UUID) {
+func tellLinkedLater(ctx context.Context, tables ...uuid.UUID) {
 	later := context.WithoutCancel(ctx)
-	helpers.GoSafeNamed("tables.linked.tell", func() { tellTablesLinkedWith(later, table) })
+	helpers.GoSafeNamed("tables.linked.tell", func() { tellTablesLinkedWith(later, tables...) })
 }
 
 // batchErr is what a refused write says: its rows' errors, a conflict with

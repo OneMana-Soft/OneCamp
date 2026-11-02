@@ -1,6 +1,35 @@
 package business
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	model "github.com/akashc777/OneCamp/models/postgres/CallState"
+	"github.com/google/uuid"
+)
+
+// The board on a call's stage carries its slide (Slides control) from its row,
+// and from every write that answers it, to every screen: the room's metadata
+// names the frame while one is shown and says nothing of slides for the whole
+// board.
+func TestTheBoardOnTheStageCarriesItsSlide(t *testing.T) {
+	id := uuid.New()
+	row := &model.Session{BoardUUID: &id, BoardBy: "0x1", BoardDraw: DrawEveryone, BoardSlide: "frame-2"}
+	if b := boardOf(row); b == nil || b.Slide != "frame-2" || b.UUID != id.String() {
+		t.Fatalf("the row's board: %+v", b)
+	}
+	if out, _ := json.Marshal(boardOf(row)); !strings.Contains(string(out), `"slide":"frame-2"`) {
+		t.Errorf("the metadata of a board on its second frame: %s", out)
+	}
+	row.BoardSlide = ""
+	if out, _ := json.Marshal(boardOf(row)); strings.Contains(string(out), "slide") {
+		t.Errorf("the metadata of the whole board names a slide: %s", out)
+	}
+	if b := boardFrom(model.BoardState{UUID: id, By: "0x1", Draw: DrawPresenter, GuestsDraw: true, Slide: "f"}); b.Slide != "f" || b.Draw != DrawPresenter || !b.Guests || b.By != "0x1" {
+		t.Errorf("a write's answer: %+v", b)
+	}
+}
 
 // Who draws on the board on a call's stage (calls package B, main's ruling of
 // 26 Oct): everyone in the call from the workspace by default; only the

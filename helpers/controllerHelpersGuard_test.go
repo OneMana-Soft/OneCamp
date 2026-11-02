@@ -22,7 +22,7 @@ const (
 	httpErrorBaseline = 13
 	// {"error": ...} bodies; the shape is {"msg": ...} (WriteError, 207 before F5).
 	// without-ai's own count (187 on main).
-	errorBodyBaseline = 185
+	errorBodyBaseline = 179
 )
 
 // unauthorizedWithReason are 401s that say why on purpose: a sign-in that

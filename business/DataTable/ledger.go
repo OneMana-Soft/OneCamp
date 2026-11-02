@@ -295,21 +295,10 @@ func liveChanged(cs *model.ChangeSet) map[string]interface{} {
 	return msg
 }
 
-// trashPurge and historyPurge are the ledger's sweeps (business/RowLedger
-// SweepTrashPurge, SweepHistoryPurge): removing what has been in the trash,
-// and changes kept, past their policies' days. Both are 0, keep, until the
-// owner decides (PROGRAM.md §13 O3), so each runs and removes nothing.
-func trashPurge(ctx context.Context, days int, now time.Time) error {
-	if days <= 0 {
-		return nil
-	}
-	rows, fields, tables, err := model.PurgeTrash(ctx, now.AddDate(0, 0, -days))
-	if err == nil && rows+fields+tables > 0 {
-		helpers.LogInfoWithContext(ctx, "tables.trash.purge: removed %d rows, %d fields and %d tables", rows, fields, tables)
-	}
-	return err
-}
-
+// historyPurge is the ledger's other sweep (business/RowLedger
+// SweepHistoryPurge; the trash's is trashPurge, purge.go): removing the
+// changes kept past the policy's days. It is 0, keep, until the owner decides
+// (PROGRAM.md §13 O3), so it runs and removes nothing.
 func historyPurge(ctx context.Context, days int, now time.Time) error {
 	if days <= 0 {
 		return nil

@@ -61,4 +61,5 @@ func mountProjectsProgramme(rt projectsRouters) {
 	mountApprovals(rt)    // package 9 R2: status rules and approvals
 	mountProjectForms(rt) // package 9 R4: a form's submissions
 	mountRestore(rt)      // V-78: the one restore route for soft deletes
+	mountWorkChanges(rt)  // WCL-1: the Work Change Log's read
 }

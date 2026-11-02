@@ -24,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -31,7 +33,6 @@ import (
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
-	"github.com/google/uuid"
 )
 
 func TestDemotingAnAdminRefusesTheirNextRequest(t *testing.T) {
@@ -81,7 +82,7 @@ func TestDemotingAnAdminRefusesTheirNextRequest(t *testing.T) {
 	}
 
 	t.Run("demoted, their next request is refused", func(t *testing.T) {
-		if err := userBusiness.HardDeleteAdminUserByEmailId(ctx, email, id); err != nil {
+		if err := userBusiness.RevokeAdminUserByEmailId(ctx, email, uuid.Nil, id); err != nil {
 			t.Fatal(err)
 		}
 		if code := request(); code != http.StatusForbidden {
@@ -99,7 +100,7 @@ func TestDemotingAnAdminRefusesTheirNextRequest(t *testing.T) {
 	})
 
 	t.Run("a read in flight during the demotion can't keep the old role for long", func(t *testing.T) {
-		if err := userBusiness.HardDeleteAdminUserByEmailId(ctx, email, id); err != nil {
+		if err := userBusiness.RevokeAdminUserByEmailId(ctx, email, uuid.Nil, id); err != nil {
 			t.Fatal(err)
 		}
 		// What a request that read the row just before the demotion writes just

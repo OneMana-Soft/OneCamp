@@ -162,25 +162,24 @@ func UpdateBoard(ctx context.Context, input *adapter.InputUpdateBoard) (err erro
 		collab.ReauthBoardLater(input.BoardId, nil)
 	}
 
-	// Keep the search index in sync for title/privacy changes (map update so a
-	// false privacy boolean is written, not dropped).
+	// Keep the search index's title and edit time in sync.
 	if input.Title != nil || input.IsPrivate != nil {
 		fields := map[string]interface{}{"updated_date": time.Now().Unix()}
 		if input.Title != nil {
 			fields["board_title"] = *input.Title
 		}
-		if input.IsPrivate != nil {
-			fields["board_private"] = *input.IsPrivate
-		}
 		go openSearchBoardModels.UpdateBoardFieldsInOpenSearch(context.Background(), input.BoardId, fields)
 	}
-	// Its comments' entries carry a copy of its privacy. Made private, search
-	// stops granting it before this returns.
+	// A change of privacy is a change of who may read the board: its search
+	// entry, its AI entries and its comments' entries are written from the
+	// graph, as for any change of sharing (writeBoardSearchNow). Made private,
+	// search stops granting it before this returns; made public, search and
+	// the AI grant it once the background write lands.
 	switch {
 	case input.IsPrivate != nil && *input.IsPrivate:
 		SettleBoardSearch(ctx, input.BoardId)
 	case input.IsPrivate != nil:
-		go syncBoardCommentSearch(context.Background(), input.BoardId, nil)
+		syncBoardSearchLater(input.BoardId)
 	}
 	return
 }
@@ -243,6 +242,9 @@ func UpdateBoardFromCollab(ctx context.Context, input *adapter.InputBoardCollabU
 	if next.counted {
 		resourceViewBusiness.SetCachedStateSize(ctx, resourceViewBusiness.ResourceBoardElements, input.BoardUuid, next.elements)
 	}
+
+	// What the board says, for search and the AI, after a short wait.
+	boardTexts.Ask(input.BoardUuid, input.State)
 
 	// Evaluate/capture a snapshot off the persist path (version history +
 	// mass-delete recovery). Never blocks or fails the persist.
@@ -605,14 +607,7 @@ func indexAndEmbedBoardComment(ctx context.Context, boardUUID, commentUUID, comm
 		return
 	}
 
-	boardPrivate := perms.IsPrivate != nil && *perms.IsPrivate
-	readingUsers := boardUserUUIDs(perms.ReadingUser)
-	editingUsers := boardUserUUIDs(perms.EditingUser)
-	commentingUsers := boardUserUUIDs(perms.CommentingUser)
-	createdByUUID := ""
-	if perms.CreatedBy != nil {
-		createdByUUID = perms.CreatedBy.Uuid
-	}
+	access := boardAccessOf(perms)
 
 	var byProfile *string
 	if createdByUser.ProfileKey != nil {
@@ -626,11 +621,11 @@ func indexAndEmbedBoardComment(ctx context.Context, boardUUID, commentUUID, comm
 		CommentByProfile:              byProfile,
 		CommentBoardUuid:              boardUUID,
 		CommentBoardTitle:             perms.Title,
-		CommentBoardPublic:            !boardPrivate,
-		CommentBoardReadingUsers:      readingUsers,
-		CommentBoardEditingUsers:      editingUsers,
-		CommentBoardCommentingUsers:   commentingUsers,
-		CommentBoardCreatedByUserUuid: createdByUUID,
+		CommentBoardPublic:            access.Public,
+		CommentBoardReadingUsers:      access.Reading,
+		CommentBoardEditingUsers:      access.Editing,
+		CommentBoardCommentingUsers:   access.Commenting,
+		CommentBoardCreatedByUserUuid: access.CreatedBy,
 		CommentCreatedAt:              currentTime.Unix(),
 		CommentDeletedAt:              nil,
 	}

@@ -10,6 +10,7 @@ package integration_test
 // made with the invitees' lobby.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -19,11 +20,13 @@ import (
 	"testing"
 	"time"
 
+	callLobbyBusiness "github.com/akashc777/OneCamp/business/CallLobby"
 	_ "github.com/akashc777/OneCamp/business/CallRoom" // hands the calendar its event calls
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
 	guestController "github.com/akashc777/OneCamp/controllers/Guest"
 	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/google/uuid"
 )
@@ -213,5 +216,78 @@ func TestAnEventsInviteesComeIntoItsCallWithoutKnocking(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("%d event meetings, want 2", n)
+	}
+
+	// Its host can make the invitees knock too (Meet's quick access off): whoever may change the event says so on
+	// its call, and Alex's own invitation then waits at the door like anyone's. Someone who may not change the event
+	// changes nothing, and turning it back lets him straight in again.
+	inviteesWait := func(who *userModels.UserInfo, wait string) (int, map[string]json.RawMessage) {
+		t.Helper()
+		return v2(t, eventController.SetCalendarEventCallLobby, http.MethodPost, "/calendar/events/"+design+"/call/lobby", who,
+			`{"invitees_wait":`+wait+`}`, design)
+	}
+	type eventCall struct {
+		Slug         string `json:"slug"`
+		InviteesWait bool   `json:"invitees_wait"`
+	}
+	kim := seedCalendarPerson(t, env.PG, dg, "Kim")
+	if code, body := inviteesWait(kim, "true"); code == http.StatusOK {
+		t.Errorf("Kim, who isn't on the design review, made its invitees knock: %d %v", code, body)
+	}
+	if code, m := join(designCall, "Alex Kim", alexKey); code != http.StatusOK || m["token"] == nil {
+		t.Fatalf("Alex by his invitation after Kim's try: %d %v, want a call token at once", code, m)
+	}
+	// A change that doesn't say whether they wait is refused, never read as one way or the other.
+	var said string
+	if code, body := v2(t, eventController.SetCalendarEventCallLobby, http.MethodPost, "/calendar/events/"+design+"/call/lobby", sam,
+		`{}`, design); code != http.StatusBadRequest || json.Unmarshal(body["msg"], &said) != nil || said != "That request couldn't be read." {
+		t.Errorf("Sam's change that says nothing: %d %v, want 400 \"That request couldn't be read.\"", code, body)
+	}
+	var call eventCall
+	if code, body := inviteesWait(sam, "true"); code != http.StatusOK || json.Unmarshal(body["data"], &call) != nil ||
+		!call.InviteesWait || call.Slug != designCall {
+		t.Fatalf("Sam makes the design review's invitees knock: %d %v, want its call with invitees_wait", code, body)
+	}
+	if code, m := join(designCall, "Alex Kim", alexKey); code != http.StatusAccepted || m["waiting"] != true || m["token"] != nil {
+		t.Errorf("Alex by his invitation once invitees knock: %d %v, want a knock that waits", code, m)
+	}
+	// Saying again from inside the call that guests wait (a retry, a second tab) keeps the invitees knocking.
+	var meeting string
+	if err := env.PG.QueryRow(`SELECT id FROM call_meetings WHERE kind = 'event' AND lobby = $1`, callStateModel.LobbyGuests).Scan(&meeting); err != nil {
+		t.Fatalf("the design review's meeting, its invitees knocking: %v", err)
+	}
+	if found, err := callLobbyBusiness.SetLobby(context.Background(), meeting, true); err != nil || !found {
+		t.Fatalf("guests wait again at the design review: %v %v", found, err)
+	}
+	if code, m := join(designCall, "Alex Kim", alexKey); code != http.StatusAccepted || m["waiting"] != true {
+		t.Errorf("Alex once guests wait again from the call: %d %v, want a knock that waits", code, m)
+	}
+	// The event as its page reads it (GET /event/getEvent, which carries its call) says so.
+	code, body = v2(t, eventController.GetEventController, http.MethodGet, "/event/getEvent/"+design, sam, "", design)
+	var read struct {
+		Call *eventCall `json:"event_call"`
+	}
+	if code != http.StatusOK || json.Unmarshal(body["data"], &read) != nil || read.Call == nil || !read.Call.InviteesWait {
+		t.Errorf("the design review as its page reads it: %d %s, want its call saying its invitees knock", code, body["data"])
+	}
+	if code, m := join(boardCall, "Jo", joKey); code != http.StatusOK || m["token"] == nil {
+		t.Errorf("Jo by her invitation at her own event's call: %d %v, want a call token: another event's rule is its own", code, m)
+	}
+	if code, body := inviteesWait(sam, "false"); code != http.StatusOK || json.Unmarshal(body["data"], &call) != nil || call.InviteesWait {
+		t.Fatalf("Sam lets the design review's invitees in again: %d %v", code, body)
+	}
+	if code, m := join(designCall, "Alex Kim", alexKey); code != http.StatusOK || m["token"] == nil {
+		t.Errorf("Alex by his invitation once let in again: %d %v, want a call token at once", code, m)
+	}
+	// A call anyone with the link joins at once (nobody waits, said from inside the call) stays so when its invitees
+	// are let in again: it never becomes a lobby where a guest who isn't invited knocks.
+	if found, err := callLobbyBusiness.SetLobby(context.Background(), meeting, false); err != nil || !found {
+		t.Fatalf("nobody waits at the design review: %v %v", found, err)
+	}
+	if code, body := inviteesWait(sam, "false"); code != http.StatusOK || json.Unmarshal(body["data"], &call) != nil || call.InviteesWait {
+		t.Fatalf("Sam lets the design review's invitees in while nobody waits: %d %v", code, body)
+	}
+	if code, m := join(designCall, "Pat", ""); code != http.StatusOK || m["token"] == nil {
+		t.Errorf("a guest with no invitation while nobody waits: %d %v, want a call token at once", code, m)
 	}
 }

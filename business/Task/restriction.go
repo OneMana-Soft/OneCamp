@@ -44,7 +44,7 @@ func SetRestriction(ctx context.Context, task *dgraphStruct.DgraphTask, restrict
 		err = restrictTask(ctx, task, who.By, people, at)
 		changed = err == nil
 	} else {
-		changed, err = openTask(ctx, task)
+		changed, err = openTask(ctx, task, who.By)
 	}
 	if err != nil || !changed {
 		return false, err

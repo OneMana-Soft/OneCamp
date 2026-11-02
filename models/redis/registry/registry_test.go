@@ -117,6 +117,7 @@ func all() []Spec {
 		MCPToolReadRate,
 		MCPToolWriteRate,
 		ApiTokenTouch,
+		BoardTextDigest,
 		GuestAccessAudit,
 		GuestNotifyOnce,
 		AITokenBudget,

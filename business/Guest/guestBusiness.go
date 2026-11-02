@@ -589,13 +589,6 @@ func NewMeetingLink(ctx context.Context, room string, host *dgraphStruct.DgraphU
 	}, nil
 }
 
-// IsMeetingRoom reports whether a LiveKit room name is an instant-meeting room
-// (the `meet-` namespace). Used by the call webhook router to distinguish
-// instant meetings from channel/DM/group rooms.
-func IsMeetingRoom(roomName string) bool {
-	return strings.HasPrefix(roomName, MeetingRoomPrefix)
-}
-
 // --- helpers ---
 
 // randomToken is a fresh raw link token (helpers.NewLinkSecret).
@@ -709,4 +702,17 @@ func sanitizeGuestName(in string) string {
 		out = strings.TrimSpace(out)
 	}
 	return out
+}
+
+// ForgetGrantsOf takes every guest link to these resources of one type, gone
+// for good: the live ones are revoked first (RevokeGrants: their guests lose
+// what they have open at once), then every link, live or not, is removed.
+func ForgetGrantsOf(ctx context.Context, resourceType string, resourceIDs []string) error {
+	live, err := guestModel.LiveGrantIDsOf(ctx, resourceType, resourceIDs)
+	if err != nil {
+		return err
+	}
+	RevokeGrants(ctx, live)
+	_, err = guestModel.ForgetResources(ctx, resourceType, resourceIDs)
+	return err
 }

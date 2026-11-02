@@ -38,6 +38,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	formModel "github.com/akashc777/OneCamp/models/postgres/Form"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	taskFieldModel "github.com/akashc777/OneCamp/models/postgres/TaskField"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -359,9 +360,31 @@ func newForm(ctx context.Context, f formModel.Form, home string) (*formModel.For
 	}
 	made, n, err := createForm(ctx, f, maxForms)
 	if err == nil && made == nil {
-		return nil, &FormError{fmt.Sprintf("This %s has %d forms. Delete one to make another.", home, n)}
+		return nil, full(home, n)
 	}
 	return made, err
+}
+
+// full is the refusal of a form where its home (a "project" or a "table")
+// has n forms.
+func full(home string, n int) error {
+	return &FormError{fmt.Sprintf("This %s has %d forms. Delete one to make another.", home, n)}
+}
+
+// Restore brings a deleted form back with its submissions (POST
+// /restore/form/{id}) to where it lives, its project or, for a table's own
+// form, its table, while that has room for it, as a new form needs:
+// refused in a new form's words (full) when it has maxForms already.
+func Restore(ctx context.Context, id uuid.UUID, owner softDelete.Owner) error {
+	home := "project"
+	if owner.Project == uuid.Nil {
+		home = "table"
+	}
+	b, err := formModel.Bound(owner.Project, owner.Table, maxForms, full(home, maxForms))
+	if err != nil {
+		return err
+	}
+	return softDelete.RestoreAs(ctx, softDelete.Form, id, nil, b)
 }
 
 // Save creates or updates a project's form. A question that fills one of the

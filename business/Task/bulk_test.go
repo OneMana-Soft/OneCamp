@@ -3,10 +3,12 @@ package business
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -159,5 +161,73 @@ func TestChangeRefusalsAskOnceForAll(t *testing.T) {
 	}
 	if len(got) != 2 || got[ids[1]] != "Only this project's admins can change its tasks." || got[ids[2]] != "That task doesn't exist or you can't see it." {
 		t.Fatalf("%v", got)
+	}
+}
+
+// A bulk priority or label change is kept in the Work Change Log and told to
+// the project's open boards like any single change (WCL-1, CR-120 row 2082):
+// ONE record for the batch's writes (one restriction read, one insert; over
+// 25, one Reread a project), each task as it now is, and nothing for a batch
+// that changed nothing.
+func TestABulkPriorityOrLabelChangeIsLoggedOnceForTheBatch(t *testing.T) {
+	p := uuid.NewString()
+	ids := []uuid.UUID{uuid.New(), uuid.New()}
+	live := time.Time{}
+	tag := "copy"
+	old, oldRecord := bulkSeams, recordTasks
+	t.Cleanup(func() { bulkSeams, recordTasks = old, oldRecord })
+	bulkSeams.read = func(context.Context, []string, string) ([]*dgraphStruct.DgraphTask, error) {
+		return []*dgraphStruct.DgraphTask{
+			{Uid: "0x1", Uuid: ids[0].String(), Priority: "high", Label: &tag, DeletedAt: &live, Project: &dgraphStruct.DgraphProject{Uuid: p}},
+			{Uid: "0x2", Uuid: ids[1].String(), Priority: "low", DeletedAt: &live, Project: &dgraphStruct.DgraphProject{Uuid: p}},
+		}, nil
+	}
+	bulkSeams.check = func(context.Context, *model.UserInfo, []*dgraphStruct.DgraphTask, workAccess.Need) map[string]error {
+		return nil
+	}
+	bulkSeams.touch = func(context.Context, []uuid.UUID, time.Time) error { return nil }
+	bulkSeams.write = func(context.Context, []*dgraphStruct.DgraphTask) error { return nil }
+	bulkSeams.index = func([]*dgraphStruct.DgraphTask) {}
+	bulkSeams.githubSync = func(context.Context, uuid.UUID, string, map[string]interface{}) {}
+	bulkSeams.visible = func(*dgraphStruct.DgraphTask, string) bool { return true }
+	var logged [][]workFeed.TaskChange
+	recordTasks = func(_ context.Context, _ string, cs ...workFeed.TaskChange) []workFeed.Entry {
+		logged = append(logged, cs)
+		return nil
+	}
+	who := &model.UserInfo{UserDgraphInfo: dgraphStruct.DgraphUser{Uid: "0x9", Uuid: uuid.NewString()}}
+
+	if _, err := Bulk(context.Background(), who, ids, BulkChange{Op: BulkPriority, Value: "high"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(logged) != 1 || len(logged[0]) != 1 {
+		t.Fatalf("priority: want one record of the one task changed, got %d records: %+v", len(logged), logged)
+	}
+	c := logged[0][0]
+	if c.Kind != workFeed.KindUpdated || c.Project != p || c.Task == nil || c.Task.Uuid != ids[1].String() || c.Task.Priority != "high" ||
+		len(c.Fields) != 1 || c.Fields[0] != "task_priority" {
+		t.Fatalf("priority: %+v (task %+v)", c, c.Task)
+	}
+
+	logged = nil
+	if _, err := Bulk(context.Background(), who, ids, BulkChange{Op: BulkTagAdd, Value: "review"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(logged) != 1 || len(logged[0]) != 2 {
+		t.Fatalf("labels: want one record of both tasks, got %+v", logged)
+	}
+	for _, c := range logged[0] {
+		if c.Kind != workFeed.KindUpdated || c.Project != p || c.Task == nil || c.Task.Label == nil ||
+			!strings.Contains(*c.Task.Label, "review") || len(c.Fields) != 1 || c.Fields[0] != "task_label" {
+			t.Fatalf("labels: %+v", c)
+		}
+	}
+
+	logged = nil
+	if _, err := Bulk(context.Background(), who, ids[:1], BulkChange{Op: BulkPriority, Value: "high"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(logged) != 0 {
+		t.Fatalf("a batch that changed nothing logs nothing: %+v", logged)
 	}
 }

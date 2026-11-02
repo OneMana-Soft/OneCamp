@@ -20,7 +20,7 @@ import (
 // GetDgraphProjectRanks, spell it through Live). It only goes down: move a
 // filter onto Live or Deleted, then lower this to the count the test reports.
 // without-ai's own count, without the AI edition's packages (161 on main).
-const epochLiteralBaseline = 158
+const epochLiteralBaseline = 155
 
 // The liveness boundary is spelled in one place.
 //

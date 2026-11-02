@@ -54,16 +54,51 @@ func plannedEntries(ctx context.Context, t *testing.T, field uuid.UUID) float64 
 	return plan[0].Plan.Rows
 }
 
-// noAutovacuumOnTheCellIndex keeps the autovacuum off the cell index until
-// the test ends, so the planner knows of it only what the server counted.
-func noAutovacuumOnTheCellIndex(ctx context.Context, t *testing.T) {
+// noAutovacuumOn keeps the autovacuum off tables until the test ends, so the
+// planner knows of them only what the server, or the test, counted.
+func noAutovacuumOn(ctx context.Context, t *testing.T, tables ...string) {
 	t.Helper()
-	if _, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `ALTER TABLE data_table_cell_index SET (autovacuum_enabled = false)`); err != nil {
-		t.Fatal(err)
+	for _, table := range tables {
+		if _, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `ALTER TABLE `+table+` SET (autovacuum_enabled = false)`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_, _ = postgresInit.DBConn.SqlDB.ExecContext(context.Background(), `ALTER TABLE `+table+` RESET (autovacuum_enabled)`)
+		})
 	}
-	t.Cleanup(func() {
-		_, _ = postgresInit.DBConn.SqlDB.ExecContext(context.Background(), `ALTER TABLE data_table_cell_index RESET (autovacuum_enabled)`)
-	})
+}
+
+// countForThePlanner has the planner count the tables a test fills at once
+// (the rows, their links and the cell index) as they stand, before the test
+// measures what its reads cost: the rows and the cell index as the server's
+// count after a fill does (model.VacuumRows), the links as they stand until
+// their upkeep's next vacuum (an ANALYZE). What it measures then never hangs
+// on the server's count after a fill (CountAfterFill), which only logs a
+// failure, or on when the autovacuum looks.
+func countForThePlanner(ctx context.Context, t *testing.T) {
+	t.Helper()
+	start := time.Now()
+	if err := model.VacuumRows(ctx); err != nil {
+		t.Fatalf("the planner's count of the rows and the cell index: %v", err)
+	}
+	t.Logf("the planner's count (model.VacuumRows) took %v", time.Since(start).Round(time.Millisecond))
+	for _, table := range []string{"data_table_rows", "data_table_cell_index"} {
+		whole, pages := pagesWhole(ctx, t, table)
+		t.Logf("the planner's count: %d of %s's %d pages whole", whole, table, pages)
+	}
+	if _, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `ANALYZE data_table_links`); err != nil {
+		t.Fatalf("the planner's count of the links: %v", err)
+	}
+}
+
+// pagesWhole is how many of table's pages the planner takes for whole
+// (pg_class.relallvisible), of how many it counts (relpages).
+func pagesWhole(ctx context.Context, t *testing.T, table string) (whole, pages int64) {
+	t.Helper()
+	if err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `SELECT relallvisible, relpages FROM pg_class WHERE oid = to_regclass($1)`, table).Scan(&whole, &pages); err != nil {
+		t.Fatalf("%s's counts: %v", table, err)
+	}
+	return whole, pages
 }
 
 // sweepUntilFilled runs the sweep until field's kept entries are filled at
@@ -96,7 +131,7 @@ func TestAFreshFormulaSortedViewAnswersAtOnce(t *testing.T) {
 	integration.SetupDgraph(t)
 	db := postgresInit.DBConn.SqlDB
 	// The autovacuum's look is what this server mustn't wait for.
-	noAutovacuumOnTheCellIndex(ctx, t)
+	noAutovacuumOn(ctx, t, "data_table_cell_index")
 	me := uuid.New()
 	if _, err := db.ExecContext(ctx, `INSERT INTO users (id, email_id, username, display_name, created_at, updated_at)
 		VALUES ($1, 'fresh@example.test', 'fresh', 'Fresh', NOW(), NOW())`, me); err != nil {
@@ -181,4 +216,80 @@ func TestAFreshFormulaSortedViewAnswersAtOnce(t *testing.T) {
 		t.Errorf("the first window sorted by Double came without its sum (left out past its budget, after %v)", took)
 	}
 	t.Logf("first window, count and sum in %v", took)
+}
+
+// V-150 (main, 31 Oct): Postgres 12 vacuums a table for the rows its writes
+// left dead, never for rows added, so after an import the visibility map
+// holds none of the pages its rows and their cell index entries went to. An
+// ANALYZE counts them, but takes the map's count of whole pages as it finds
+// it (pg_class.relallvisible): none. So the planner costs each read of an
+// index there as a read of the table's page too, and a window filtered and
+// sorted by stored numbers over 100,000 rows was planned at times as a read
+// of every row (TestComputedFieldsSortAndFilterAt100k's CONTROL). The
+// server's count after a fill (CountAfterFill) vacuums the two tables as it
+// counts them: the pages the fill wrote are whole for the planner.
+//
+// The harness's server doesn't wait for the disk at commit (synchronous_commit
+// off), and a VACUUM marks a page whole only once the commits that wrote it
+// are on disk. So this also proves the count flushes the fill's commits first
+// (model.VacuumRows): without the flush, none of the cell index's 205 pages
+// were marked when it ran alone, and 122 of 205 after the fresh-formula test,
+// split where the fill's transactions crossed a 32-transaction group of the
+// commit log (31 Oct, TABLES-LEAD-108).
+//
+// Run: integ_rel.sh <worktree> <log> '^TestAFilledTableIsWholeForThePlanner$' with PKGS='./business/RowQuery/'
+func TestAFilledTableIsWholeForThePlanner(t *testing.T) {
+	env := integration.SetupEnv(t)
+	ctx := context.Background()
+	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	statementsGetAMinute(t)
+	integration.SetupDgraph(t)
+	db := postgresInit.DBConn.SqlDB
+	// Only the server's count may mark the pages whole here.
+	noAutovacuumOn(ctx, t, "data_table_rows", "data_table_cell_index")
+	me := uuid.New()
+	if _, err := db.ExecContext(ctx, `INSERT INTO users (id, email_id, username, display_name, created_at, updated_at)
+		VALUES ($1, 'whole@example.test', 'whole', 'Whole', NOW(), NOW())`, me); err != nil {
+		t.Fatal(err)
+	}
+	owner := dataTable.Actor{UserID: me}
+	tb, err := dataTable.CreateTable(ctx, dataTable.TableInput{Name: "Imported vendors", Visibility: "workspace"}, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := dataTable.CreateField(ctx, tb.Id, dataTable.FieldInput{Name: "Name", Type: model.FieldText}, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spend, err := dataTable.CreateField(ctx, tb.Id, dataTable.FieldInput{Name: "Spend", Type: model.FieldNumber}, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const rows = 5000
+	ids := make([]uuid.UUID, rows)
+	for i := range ids {
+		ids[i] = uuid.New()
+	}
+	fill(ctx, t, tb.Id, me, ids, func(i int) map[string]interface{} {
+		return map[string]interface{}{name.Id.String(): fmt.Sprintf("Vendor %05d", i), spend.Id.String(): float64((i * 7919) % 50000)}
+	})
+	// Made whole as an import's table is, and counted then.
+	if err := rowQuery.IndexTable(ctx, tb.Id); err != nil {
+		t.Fatal(err)
+	}
+
+	// The database is the test's own: the fill's pages are nearly all of them.
+	for _, table := range []string{"data_table_rows", "data_table_cell_index"} {
+		whole, pages := pagesWhole(ctx, t, table)
+		if pages == 0 {
+			t.Errorf("after a fill of %d rows the planner counts no pages of %s: it wasn't counted", rows, table)
+			continue
+		}
+		if whole < pages*9/10 {
+			t.Errorf("after a fill of %d rows the planner takes %d of %s's %d pages for whole: it costs each read of an index there as a read of the table too", rows, whole, table, pages)
+		}
+		t.Logf("%s: %d of %d pages whole", table, whole, pages)
+	}
 }

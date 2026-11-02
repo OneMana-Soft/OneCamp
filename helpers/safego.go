@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"sync"
 )
 
 // goSafeWork is every goroutine the GoSafe family started that hasn't
@@ -38,6 +39,26 @@ func GoSafeBounded(slots chan struct{}, name string, fn func()) {
 		defer func() { <-slots }()
 		fn()
 	})
+}
+
+// EachBounded runs fn on every item, at most limit at once, each guarded as
+// GoSafeBounded's are, and returns when every one is done. It is the batch
+// read of a store that has no read of many (object storage has no multi-get):
+// the items' requests run side by side, not one after another.
+func EachBounded[T any](name string, items []T, limit int, fn func(T)) {
+	if limit < 1 {
+		limit = 1
+	}
+	slots := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	for _, item := range items {
+		wg.Add(1)
+		GoSafeBounded(slots, name, func() {
+			defer wg.Done()
+			fn(item)
+		})
+	}
+	wg.Wait()
 }
 
 // TryGoSafeBounded is GoSafeBounded for work that has somewhere else to go:

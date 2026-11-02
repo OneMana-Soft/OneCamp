@@ -151,3 +151,24 @@ func FilesOfPlace(ctx context.Context, srcKey, srcValue string, ids []string) (m
 	}
 	return out, nil
 }
+
+// ArchivePlaces archives the files of places gone for good (src_key srcKey,
+// src_value one of srcValues), at at, so the attachments purge takes their
+// bytes, as it does a doc's. It says how many it archived.
+func ArchivePlaces(ctx context.Context, srcKey string, srcValues []string, at time.Time) (int64, error) {
+	if len(srcValues) == 0 {
+		return 0, nil
+	}
+	return pgexec.Exec(ctx, `UPDATE attachments SET deleted_at = $3
+		WHERE src_key = $1 AND src_value = ANY($2) AND deleted_at IS NULL`, srcKey, pq.Array(srcValues), at)
+}
+
+// ArchiveFiles archives the attachments ids at at, as ArchivePlaces does a
+// place's, for files kept by id rather than by place, such as a form's cover
+// and logo. It says how many it archived.
+func ArchiveFiles(ctx context.Context, ids []uuid.UUID, at time.Time) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	return pgexec.Exec(ctx, `UPDATE attachments SET deleted_at = $2 WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`, ids, at)
+}

@@ -67,6 +67,17 @@ func TestAMeetingNeverNamesAMemberByTheirAddress(t *testing.T) {
 	ctx := context.Background()
 	named := &dgraphStruct.DgraphUser{Uid: "0x1", UserFullName: "Mia Kapoor", EmailID: "mia.k@example.test"}
 	nameless := &dgraphStruct.DgraphUser{Uid: "0x2", EmailID: "mia.k@example.test"}
+	// The start's steps past the egress are another test's
+	// (TestACallIsRecordedWhereItKeepsWhatItMakes): here "meet-6f1c" is an
+	// event's call, so a meeting's recording starts at all.
+	wasEvent, wasSave, wasFile, wasRunning := callEvent, saveRecordingNode, fileUnder, recordingRunning
+	defer func() {
+		callEvent, saveRecordingNode, fileUnder, recordingRunning = wasEvent, wasSave, wasFile, wasRunning
+	}()
+	callEvent = func(context.Context, string) (string, error) { return "6f1c0a52-8d1e-4a35-9a51-5d8f0a1b2c3d", nil }
+	saveRecordingNode = func(context.Context, *dgraphStruct.DgraphRecording) (string, error) { return "0x9", nil }
+	fileUnder = func(context.Context, string, callHome) error { return nil }
+	recordingRunning = func(context.Context, string, string, *dgraphStruct.DgraphUser) {}
 	for _, c := range []struct {
 		room string
 		user *dgraphStruct.DgraphUser
@@ -95,7 +106,7 @@ func TestAMeetingNeverNamesAMemberByTheirAddress(t *testing.T) {
 		mu.Lock()
 		startedBy = nil
 		mu.Unlock()
-		if _, _, err := StartRecording(ctx, c.room, c.user); err != nil {
+		if err := StartCallRecording(ctx, c.room, c.user); err != nil {
 			t.Fatal(err)
 		}
 		mu.Lock()

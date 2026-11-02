@@ -3,14 +3,17 @@
 
 package integration_test
 
-// Archiving, restoring and deleting a recording reach the recording.
+// Archiving, restoring and deleting a recording reach the recording, and only
+// the purge removes it for good.
 //
 // Each of those mutations used to name no node, so each made a new node
 // holding only the egress id and a time: no recording was ever archived,
 // restored or deleted, the purge removed those stray nodes and never a
 // recording's file, and a deleted recording stayed listed and playable. The
 // reads that open a recording by its egress id didn't ask whether it was
-// deleted either.
+// deleted either. Then a channel's or a chat's delete purged at once, with no
+// Undo; since V-140 it is soft, as every delete is, and the workspace's purge
+// setting is what removes a deleted recording's file.
 //
 // This runs the real queries and mutations against Dgraph. MinIO is a fake S3
 // endpoint that records what it was asked to remove.
@@ -20,6 +23,7 @@ package integration_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +38,7 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
+	archiveBusiness "github.com/akashc777/OneCamp/business/Archive"
 	recordingBusiness "github.com/akashc777/OneCamp/business/Recording"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
@@ -134,7 +139,7 @@ func TestRecordingLifecycle(t *testing.T) {
 		{"uid": "_:u", "user_uuid": uuid.NewString(), "user_name": "maya"},
 		{"uid": "_:ch", "ch_uuid": channel, "ch_name": "eng", "ch_private": true,
 			"ch_members":   []map[string]any{{"uid": "_:u"}},
-			"ch_recording": []map[string]any{{"uid": "_:live"}, {"uid": "_:stuck"}, {"uid": "_:cdn"}}},
+			"ch_recording": []map[string]any{{"uid": "_:live"}, {"uid": "_:stuck"}, {"uid": "_:cdn"}, {"uid": "_:session"}}},
 		recording("_:live", "EG_live", "recordings/eng/EG_live.mp4", map[string]any{"recording_channel": map[string]any{"uid": "_:ch"}}, "_:t1", "_:t2"),
 		// Typed "Recording", as business/LiveKit.SaveTranscript writes a line.
 		{"uid": "_:t1", "dgraph.type": "Recording", "transcript_text": "the salary bands", "transcript_timestamp": 1},
@@ -143,6 +148,11 @@ func TestRecordingLifecycle(t *testing.T) {
 		{"uid": "_:stray", "dgraph.type": "Recording", "recording_egress_id": "EG_live", "recording_deleted_at": ended},
 		recording("_:stuck", "EG_stuck", "recordings/eng/EG_stuck.mp4", map[string]any{"recording_channel": map[string]any{"uid": "_:ch"}}),
 		recording("_:cdn", "EG_cdn", "recordings/eng/EG_cdn.mp4", map[string]any{"recording_channel": map[string]any{"uid": "_:ch"}}),
+		// A call nobody recorded keeps its words on a transcript-only node; one
+		// the boot repair ended (MarkCallSessionNodeEnded) has no start time,
+		// and the channel's list shows it all the same.
+		{"uid": "_:session", "dgraph.type": "Recording", "recording_egress_id": "call-RM_lifecycle", "recording_ended_at": ended,
+			"recording_transcript_only": true, "recording_channel": map[string]any{"uid": "_:ch"}},
 		{"uid": "_:dm", "dm_grouping_id": grouping, "dm_participants": []map[string]any{{"uid": "_:u"}},
 			"dm_recording": []map[string]any{{"uid": "_:call"}}},
 		recording("_:call", "EG_call", "recordings/dm/EG_call.mp4", map[string]any{"recording_dm": map[string]any{"uid": "_:dm"}}, "_:t3"),
@@ -251,21 +261,82 @@ func TestRecordingLifecycle(t *testing.T) {
 		t.Errorf("restoring made nodes: EG_live is held by %d", n)
 	}
 
-	// Deleting removes the file, then the recording, its transcript, and the
-	// stray node the old delete made.
+	// Deleting from a channel is soft (V-140): the recording is stamped, never
+	// purged. It leaves the list and the player at once, its file stays in
+	// storage, and its restore (the Undo) brings it back. The delete reads it
+	// only while live and the restore only once deleted, and neither reads the
+	// stray node that holds the same egress id.
 	livePath := "/" + bucket + "/recordings/eng/EG_live.mp4"
 	store.objects[livePath] = 5000
+	if r, err := recordingDomain.GetDeletedChannelRecordingInfo(ctx, "EG_live", user); !errors.Is(err, recordingDomain.ErrNotFound) {
+		t.Errorf("a live recording reads as deleted, to restore it: %+v, %v", r, err)
+	}
 	if err := recordingBusiness.DeleteRecording(ctx, "EG_live"); err != nil {
 		t.Fatal(err)
 	}
+	if !archived("EG_live") || opens("EG_live") {
+		t.Error("a deleted recording is still live, or can still be played by its egress id")
+	}
+	if n := len(nodes("EG_live")); len(store.removed) != 0 || n != 2 {
+		t.Errorf("the delete purged: storage removed %v, and EG_live is held by %d nodes, want 2", store.removed, n)
+	}
+	if r, err := recordingDomain.GetDgraphChannelRecordingInfoByEgressId(ctx, "EG_live", user); !errors.Is(err, recordingDomain.ErrNotFound) {
+		t.Errorf("a deleted recording reads as live, to delete it again: %+v, %v", r, err)
+	}
+	if r, err := recordingDomain.GetDeletedChannelRecordingInfo(ctx, "EG_live", user); err != nil || r == nil || r.Channel == nil || r.ObjectKey != "recordings/eng/EG_live.mp4" {
+		t.Errorf("the restore can't read the deleted recording under its channel: %+v, %v", r, err)
+	}
+	if err := recordingBusiness.RestoreRecording(ctx, "EG_live"); err != nil {
+		t.Fatal(err)
+	}
+	if archived("EG_live") || !opens("EG_live") {
+		t.Error("the Undo didn't bring the deleted recording back")
+	}
+
+	// A transcript with no start time is deleted and brought back the same way.
+	if err := recordingBusiness.DeleteRecording(ctx, "call-RM_lifecycle"); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := recordingDomain.GetDgraphChannelRecordingInfoByEgressId(ctx, "call-RM_lifecycle", user); !errors.Is(err, recordingDomain.ErrNotFound) {
+		t.Errorf("a deleted transcript with no start time is still live: %+v, %v", r, err)
+	}
+	if err := recordingBusiness.RestoreRecording(ctx, "call-RM_lifecycle"); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := recordingDomain.GetDgraphChannelRecordingInfoByEgressId(ctx, "call-RM_lifecycle", user); err != nil || r == nil {
+		t.Errorf("the Undo didn't bring the transcript back: %+v, %v", r, err)
+	}
+
+	// The purge (the workspace's retention setting) is what removes a deleted
+	// recording for good: its file, then the recording, its transcript, and
+	// the stray node the old delete made.
+	purge := func(egress string) error {
+		t.Helper()
+		due, err := recordingDomain.ListRecordingsArchivedBefore(ctx, time.Now().Add(time.Minute), 500)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range due {
+			if a.EgressId != egress {
+				continue
+			}
+			if _, err := archiveBusiness.PurgeRecording(ctx, a); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := recordingBusiness.DeleteRecording(ctx, "EG_live"); err != nil {
+		t.Fatal(err)
+	}
+	if err := purge("EG_live"); err != nil {
+		t.Fatal(err)
+	}
 	if !slices.Contains(store.removed, livePath) {
-		t.Errorf("the recording's file wasn't removed: storage removed %v", store.removed)
+		t.Errorf("the purge didn't remove the deleted recording's file: storage removed %v", store.removed)
 	}
 	if n := len(nodes("EG_live")); n != 0 {
-		t.Errorf("EG_live is still held by %d nodes after it was deleted", n)
-	}
-	if opens("EG_live") {
-		t.Error("a deleted recording can still be played by its egress id")
+		t.Errorf("EG_live is still held by %d nodes after its purge", n)
 	}
 	for _, line := range []string{uids["t1"], uids["t2"]} {
 		res, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx, `query q($t: string) {
@@ -275,17 +346,24 @@ func TestRecordingLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		if string(res.Json) != `{"q":[]}` {
-			t.Errorf("the deleted recording's transcript is still there: %s", res.Json)
+			t.Errorf("the purged recording's transcript is still there: %s", res.Json)
 		}
 	}
 
-	// When storage won't remove the file, the recording stays, so the file
-	// can still be found and the delete tried again.
+	// When storage won't remove the file, the purge leaves the recording, so
+	// the file can still be found and the purge tried again, and the recording
+	// can still be brought back.
 	stuckPath := "/" + bucket + "/recordings/eng/EG_stuck.mp4"
 	store.objects[stuckPath] = 5000
 	store.refuse[stuckPath] = true
-	if err := recordingBusiness.DeleteRecording(ctx, "EG_stuck"); err == nil {
-		t.Error("a delete whose file storage refused reported success")
+	if err := recordingBusiness.DeleteRecording(ctx, "EG_stuck"); err != nil {
+		t.Fatal(err)
+	}
+	if err := purge("EG_stuck"); err == nil {
+		t.Error("a purge whose file storage refused reported success")
+	}
+	if err := recordingBusiness.RestoreRecording(ctx, "EG_stuck"); err != nil {
+		t.Fatal(err)
 	}
 	if !opens("EG_stuck") {
 		t.Error("the recording went although its file is still in storage")
@@ -294,19 +372,22 @@ func TestRecordingLifecycle(t *testing.T) {
 	// Behind a CDN that turns the first HEAD into a GET, storage refuses that
 	// first HEAD (V-31: every first delete on the demo answered 500 "Failed to
 	// delete recording", and a retry 200). The size it asks is only for the
-	// totals, and a delete is the same whether the file is there or not: the
+	// totals, and a purge is the same whether the file is there or not: the
 	// first try removes the file and the recording.
 	cdnPath := "/" + bucket + "/recordings/eng/EG_cdn.mp4"
 	store.objects[cdnPath] = 5000
 	store.headTurnedGet[cdnPath] = true
 	if err := recordingBusiness.DeleteRecording(ctx, "EG_cdn"); err != nil {
-		t.Errorf("the first delete behind a CDN failed: %v", err)
+		t.Fatal(err)
+	}
+	if err := purge("EG_cdn"); err != nil {
+		t.Errorf("the first purge behind a CDN failed: %v", err)
 	}
 	if !slices.Contains(store.removed, cdnPath) {
 		t.Errorf("the file behind a CDN wasn't removed: storage removed %v", store.removed)
 	}
 	if n := len(nodes("EG_cdn")); n != 0 {
-		t.Errorf("EG_cdn is still held by %d nodes after its first delete", n)
+		t.Errorf("EG_cdn is still held by %d nodes after its first purge", n)
 	}
 
 	// The archive job names hundreds at once: they go in batches, and the one

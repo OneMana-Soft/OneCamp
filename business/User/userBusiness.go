@@ -662,11 +662,13 @@ func GetAllAdminUsers(ctx context.Context, pageIndex int, pageSize int) (usersIn
 	return
 }
 
-func HardDeleteAdminUserByEmailId(ctx context.Context, emailId string, userUUID ...string) (err error) {
-	err = domain.HardDeleteAdminUserByEmailId(ctx, emailId, userUUID...)
+// RevokeAdminUserByEmailId takes the workspace admin role away from whoever
+// holds emailId, by whom; the role's row is kept, marked (V-184 head 3b).
+func RevokeAdminUserByEmailId(ctx context.Context, emailId string, by uuid.UUID, userUUID ...string) (err error) {
+	err = domain.RevokeAdminUserByEmailId(ctx, emailId, by, userUUID...)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"business/HardDeleteAdminUserByEmailId Failed to delete admin user err: %+v",
+			"business/RevokeAdminUserByEmailId Failed to take the admin role away err: %+v",
 			err,
 		)
 		err = errors.New("failed delete admin user")
@@ -701,10 +703,12 @@ func GetAllInvitations(ctx context.Context) (invitations []*userModels.Invitatio
 	return
 }
 
-func DeleteInvitationByEmail(ctx context.Context, email string) (err error) {
-	err = domain.DeleteInvitationByEmail(ctx, email)
+// WithdrawInvitationsByEmail withdraws the invitation to email, by whom; its
+// rows are kept, marked, and its link goes (V-184 head 3c).
+func WithdrawInvitationsByEmail(ctx context.Context, email string, by uuid.UUID) (err error) {
+	err = domain.WithdrawInvitationsByEmail(ctx, email, by)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/DeleteInvitationByEmail Failed to delete invitation err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "business/WithdrawInvitationsByEmail Failed to withdraw the invitation err: %+v", err)
 		err = errors.New("failed to delete invitation")
 		return
 	}

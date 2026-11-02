@@ -6,13 +6,23 @@ import (
 	callControlBusiness "github.com/akashc777/OneCamp/business/CallControl"
 )
 
-// Every board action on a call's stage says, in the audit log, what it did.
+// Every board action on a call's stage says, in the audit log, what it did,
+// and a slide move keeps which frame it showed, the whole board included.
 func TestBoardActionsSayWhatTheyDid(t *testing.T) {
 	for _, a := range []string{callControlBusiness.ActPresentBoard, callControlBusiness.ActNewBoard, callControlBusiness.ActStopBoard, callControlBusiness.ActBoardDraw,
-		callControlBusiness.ActBoardGuests, callControlBusiness.ActUndoGuests} {
+		callControlBusiness.ActBoardGuests, callControlBusiness.ActUndoGuests, callControlBusiness.ActBoardSlide} {
 		if actSummaries[a] == "" {
 			t.Errorf("%s has no audit summary", a)
 		}
+	}
+	if m := actMeta("s1", callControlBusiness.Action{Action: callControlBusiness.ActBoardSlide, Slide: "frame-2"}, callControlBusiness.Result{Affected: 1}); m["slide"] != "frame-2" {
+		t.Errorf("a move to frame-2 is kept as %v", m)
+	}
+	if m := actMeta("s1", callControlBusiness.Action{Action: callControlBusiness.ActBoardSlide}, callControlBusiness.Result{Affected: 1}); m["slide"] != "" {
+		t.Errorf("a move back to the whole board is kept as %v", m)
+	}
+	if m := actMeta("s1", callControlBusiness.Action{Action: callControlBusiness.ActStopBoard}, callControlBusiness.Result{Affected: 1}); m["slide"] != nil {
+		t.Errorf("a stop keeps a slide: %v", m)
 	}
 }
 

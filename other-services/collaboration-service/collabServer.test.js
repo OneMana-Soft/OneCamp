@@ -304,6 +304,48 @@ test("a call's guest draws on the board on its stage only when the API says so",
     assert.deepEqual(rejections, [])
 })
 
+test("a board member who may only read cannot draw, move or delete: canEdit false, or left out of the API's answer (V-230)", async () => {
+    const { redis, backend } = world()
+    backend.boards.set(ID, { board_state: '' })
+    backend.levels.set('viewer', 'view')
+    backend.levels.set('unsaid', 'unsaid')
+    const collab = await startServer({ redis, backend })
+    const board = () => collab.server.hocuspocus.documents.get(`board:${ID}`).getMap('elements')
+
+    const editor = new TestClient({ url: collab.url, name: `board:${ID}`, token: '{"sub":"editor"}' })
+    assert.equal(await editor.connect(), 'synced')
+    assert.equal(editor.scope, 'read-write')
+    for (const who of ['viewer', 'unsaid']) {
+        const reader = new TestClient({ url: collab.url, name: `board:${ID}`, token: `{"sub":"${who}"}` })
+        assert.equal(await reader.connect(), 'synced', who)
+        assert.equal(reader.scope, 'readonly', who)
+        // The editor draws two shapes; the reader sees both.
+        const [kept, gone] = [`kept-${who}`, `gone-${who}`]
+        editor.doc.getMap('elements').set(kept, { id: kept, version: 1, x: 0 })
+        editor.doc.getMap('elements').set(gone, { id: gone, version: 1, x: 0 })
+        await until(() => reader.doc.getMap('elements').has(gone), 2000, `the ${who} sees the shapes`)
+
+        // The reader draws one, moves one and deletes one: none of it reaches the board or the editor.
+        const drawn = `drawn-${who}`
+        reader.doc.getMap('elements').set(drawn, { id: drawn, version: 1, x: 0 })
+        reader.doc.getMap('elements').set(kept, { id: kept, version: 2, x: 99 })
+        reader.doc.getMap('elements').delete(gone)
+        await until(() => reader.statuses.includes(false), 2000, `the ${who}'s refusal`)
+        await sleep(100)
+        for (const [copy, elements] of [['the board', board()], ["the editor's tab", editor.doc.getMap('elements')]]) {
+            assert.equal(elements.has(drawn), false, `${who}: ${copy} has no drawn shape`)
+            assert.deepEqual(elements.get(kept), { id: kept, version: 1, x: 0 }, `${who}: ${copy} kept the shape in place`)
+            assert.equal(elements.has(gone), true, `${who}: ${copy} kept the deleted shape`)
+        }
+        await reader.close()
+        reader.destroy()
+    }
+    await editor.close()
+    editor.destroy()
+    await collab.stop()
+    assert.deepEqual(rejections, [])
+})
+
 test('an editor a hard lock holds at comment reconnects read-only: their edits never reach the doc', async () => {
     const { redis, backend } = world()
     const collab = await startServer({ redis, backend })

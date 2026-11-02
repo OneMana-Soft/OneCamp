@@ -21,6 +21,7 @@ import (
 	milestoneBusiness "github.com/akashc777/OneCamp/business/Milestone"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 	domain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -290,6 +291,8 @@ func bulkFields(ctx context.Context, tasks []*dgraphStruct.DgraphTask, change Bu
 	zero := time.Time{}
 	var writes []*dgraphStruct.DgraphTask
 	var ids []uuid.UUID
+	// Each task as it now is, for the Work Change Log.
+	var logged []workFeed.TaskChange
 	type tagSync struct {
 		id       uuid.UUID
 		from, to string
@@ -310,6 +313,7 @@ func bulkFields(ctx context.Context, tasks []*dgraphStruct.DgraphTask, change Bu
 			}
 			w.Priority, w.DeletedAt = change.Value, &zero
 			act.Type, act.PrevState, act.NextState = dgraphStruct.ACTIVITY_TYPE_PRIORITY, t.Priority, change.Value
+			logged = append(logged, changedTask(t, "task_priority", func(n *dgraphStruct.DgraphTask) { n.Priority = change.Value }))
 		default:
 			from := ""
 			if t.Label != nil {
@@ -326,6 +330,7 @@ func bulkFields(ctx context.Context, tasks []*dgraphStruct.DgraphTask, change Bu
 			}
 			w.Label = &to
 			act.Type, act.PrevState, act.NextState = dgraphStruct.ACTIVITY_TYPE_LABEL, from, to
+			logged = append(logged, changedTask(t, "task_label", func(n *dgraphStruct.DgraphTask) { n.Label = &to }))
 			tags = append(tags, tagSync{id, from, to})
 		}
 		w.Activity = []*dgraphStruct.DgraphTaskActivity{act}
@@ -344,6 +349,9 @@ func bulkFields(ctx context.Context, tasks []*dgraphStruct.DgraphTask, change Bu
 	for _, w := range writes {
 		res.Changed = append(res.Changed, strings.ToLower(w.Uuid))
 	}
+	// The Work Change Log, once for the batch: one restriction read, one
+	// insert, and over 25 changes one Reread a project (business/WorkFeed).
+	logChange(ctx, by, logged...)
 	// Search and GitHub follow, as for a single change, off the request.
 	index, githubSync := bulkSeams.index, bulkSeams.githubSync
 	helpers.GoSafeNamed("Task.Bulk:index", func() { index(writes) })
@@ -353,6 +361,20 @@ func bulkFields(ctx context.Context, tasks []*dgraphStruct.DgraphTask, change Bu
 		})
 	}
 	return nil
+}
+
+// changedTask is a bulk field change for the Work Change Log: the task as the
+// write leaves it, and the one field it changed, by the task answer's name.
+// Cycles and milestones aren't logged here: no list or board shows them
+// (workFeed.TaskBasics).
+func changedTask(t *dgraphStruct.DgraphTask, field string, set func(*dgraphStruct.DgraphTask)) workFeed.TaskChange {
+	now := *t
+	set(&now)
+	project := ""
+	if t.Project != nil {
+		project = t.Project.Uuid
+	}
+	return workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: project, Task: &now, Fields: []string{field}}
 }
 
 // changeOne makes a change that has a writer of its own to one task.

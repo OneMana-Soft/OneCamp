@@ -689,7 +689,8 @@ func syncSSOAdmin(ctx context.Context, email string, isSSOManaged, currentlyAdmi
 	// stripping admin from a local user who happened to also have an SSO
 	// session (cross-auth scenarios are real for break-glass admins).
 	if !shouldBeAdmin && currentlyAdmin && isSSOManaged {
-		if err := domain.HardDeleteAdminUserByEmailId(ctx, email); err != nil {
+		// Taken by nobody: the directory, not a person, took it (V-184).
+		if err := domain.RevokeAdminUserByEmailId(ctx, email, uuid.Nil); err != nil {
 			helpers.LogErrorWithContext(ctx, "controllers/syncSSOAdmin revoke err: %+v", err)
 		} else {
 			recordDirectoryAdmin(ctx, "admin.revoked", "The directory took someone's workspace admin role away", email, claimedGroups)

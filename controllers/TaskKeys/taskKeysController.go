@@ -270,7 +270,7 @@ func SetTaskType(w http.ResponseWriter, r *http.Request) {
 // names, for the task's own page at /app/task/Q4-12. A task the caller can't
 // open answers exactly as one that doesn't exist.
 func ResolveTask(w http.ResponseWriter, r *http.Request) {
-	ref := chi.URLParam(r, "ref")
+	ref := helpers.PathText(r, "ref")
 	notFound := func() {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no task " + strings.ToUpper(strings.TrimSpace(ref)) + " that you can open."})
 	}

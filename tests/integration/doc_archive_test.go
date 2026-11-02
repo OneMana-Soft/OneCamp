@@ -410,10 +410,17 @@ func TestArchivingAndRestoringADoc(t *testing.T) {
 	searchShows("search shows the doc's comment as gone again", func() bool {
 		return deletedInSearch("comments", comment.Uuid) && deletedInSearch("ai_embeddings", "comment:"+comment.Uuid)
 	})
-	n, err := archiveBusiness.RestoreItems(as(sam), "docs", []uuid.UUID{uuid.MustParse(ids["Old plan"]), uuid.MustParse(ids["Deleted by its owner"]),
-		uuid.MustParse(ids["Recent draft"]), uuid.New()})
+	// A restore naming a doc that isn't here is refused whole (V-141):
+	// nothing comes back.
+	if n, err := archiveBusiness.RestoreItems(as(sam), "docs", []string{ids["Old plan"], uuid.New().String()}); !errors.Is(err, archiveBusiness.ErrNotInArchive) || n != 0 {
+		t.Fatalf("restoring with a doc that doesn't exist: %d, %v; want ErrNotInArchive and nothing restored", n, err)
+	}
+	if got := stateOf("Old plan"); got == (state{}) {
+		t.Error("a refused restore brought Old plan back")
+	}
+	n, err := archiveBusiness.RestoreItems(as(sam), "docs", []string{ids["Old plan"], ids["Deleted by its owner"], ids["Recent draft"]})
 	if err != nil || n != 2 {
-		t.Fatalf("restoring from the list: %d, %v; want the 2 deleted docs (a live one and a doc that doesn't exist count for nothing)", n, err)
+		t.Fatalf("restoring from the list: %d, %v; want the 2 deleted docs (a live one counts for nothing)", n, err)
 	}
 	for _, name := range []string{"Old plan", "Deleted by its owner", "Recent draft"} {
 		if got := stateOf(name); got != (state{}) {

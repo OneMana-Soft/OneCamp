@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	planBusiness "github.com/akashc777/OneCamp/business/ProjectPlan"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/ProjectUpdate"
@@ -18,6 +19,8 @@ type Overview struct {
 	projectDomain.ProjectCounts
 	Health    string     `json:"health,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+	// Plan is its plan (linear-15): lead, dates, priority, status, labels.
+	Plan *planBusiness.View `json:"plan,omitempty"`
 }
 
 // Overviews is every project the person is in, by name. now is in their
@@ -41,12 +44,19 @@ func Overviews(ctx context.Context, userDgraphUID string, now time.Time) ([]Over
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/ProjectUpdate/Overviews updates err: %+v", err)
 	}
+	plans, err := planBusiness.Views(ctx, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/ProjectUpdate/Overviews plans err: %+v", err)
+	}
 	out := make([]Overview, 0, len(counts))
 	for _, c := range counts {
 		o := Overview{ProjectCounts: c}
 		if id, err := uuid.Parse(c.UUID); err == nil {
 			if u, ok := latest[id]; ok {
 				o.Health, o.UpdatedAt = u.Health, &u.CreatedAt
+			}
+			if v, ok := plans[id]; ok {
+				o.Plan = &v
 			}
 		}
 		out = append(out, o)

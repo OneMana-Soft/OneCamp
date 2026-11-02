@@ -218,9 +218,9 @@ type NotProjectPeopleError struct{ UserUUID string }
 func (e *NotProjectPeopleError) Error() string { return ErrNotProjectPeople.Error() }
 func (e *NotProjectPeopleError) Unwrap() error { return ErrNotProjectPeople }
 
-// Unrestrict opens task to its project again; false when it wasn't
-// restricted.
-func Unrestrict(ctx context.Context, task *dgraphStruct.DgraphTask) (bool, error) {
+// Unrestrict opens task to its project again, by by, who is kept as the one
+// who lifted it (V-179); false when it wasn't restricted.
+func Unrestrict(ctx context.Context, task *dgraphStruct.DgraphTask, by uuid.UUID) (bool, error) {
 	if task == nil {
 		return false, ErrNoProject
 	}
@@ -228,7 +228,7 @@ func Unrestrict(ctx context.Context, task *dgraphStruct.DgraphTask) (bool, error
 	if err != nil {
 		return false, err
 	}
-	return unrestrict(ctx, taskID)
+	return unrestrict(ctx, taskID, by)
 }
 
 type likeKey struct{}

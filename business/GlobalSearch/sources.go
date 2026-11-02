@@ -231,7 +231,7 @@ var sources = []source{
 				term("board_private", false),
 			)
 		},
-		text:   fixed("board_title^5", "board_snippet", "board_created_by_user_full_name^2"),
+		text:   fixed("board_title^5", "board_snippet", "board_created_by_user_full_name^2", "board_text"),
 		prefix: []string{"board_title"}, prefixBoost: 10,
 		title:  []string{"board_title"},
 		fields: map[string][]string{fieldFrom: {"board_created_by_user_id"}},

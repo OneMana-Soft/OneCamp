@@ -109,9 +109,13 @@ RowsToFillAfter
 StartAIFill
 StartChangeSet
 StopAIFill
+# The meeting recap's reads: the AI edition's recap (business/AI meetingEventHome.go) is their only
+# caller; this edition has no recap (v1.62.0, 1 Nov 2026).
+business/Calendar.EventCallPeople
+business/CallState.ConversationOf
+domain/Recording.RecordCallArtefacts
 # Read only by the AI edition's agents (business/AIAgent agentEventAccess, and the webhook hand-off's
 # origin for them; this edition's hand-off carries GitHub alone) (v1.61.0, 30 Oct 2026).
-IsPublicSubmission
 DispatchMemoryDigestTestNow
 SearchPeople
 RotateSecret

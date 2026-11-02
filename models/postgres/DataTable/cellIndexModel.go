@@ -12,13 +12,13 @@ package models
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -305,18 +305,47 @@ func CellIndexState(ctx context.Context, table uuid.UUID) (whole bool, version i
 	return s.at.Valid, s.version, nil
 }
 
-// AnalyzeRows has the planner count the rows and the cell index again
-// (business/RowQuery IndexTable, after a table filled at once). Sampling two
-// large tables can take longer than a statement's DBTimeout, or pgexec.InTx's
-// TxTimeout, so it keeps BulkTimeout: in a transaction of its own with that
-// bound, which pgexec runs it in.
-func AnalyzeRows(ctx context.Context) error {
-	err := postgresInit.InTx(ctx, postgresInit.BulkTimeout, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := pgexec.Exec(pgexec.WithTx(ctx, tx), `ANALYZE data_table_rows, data_table_cell_index`)
-		return err
-	})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/AnalyzeRows err: %+v", err)
-	}
-	return err
+// VacuumRows vacuums the rows and the cell index, and has the planner count
+// them again (business/RowQuery CountAfterFill, after a table filled at
+// once). Postgres 12 vacuums a table for the rows its writes left dead, never
+// for rows added, so after an import the visibility map holds none of the
+// pages written. An ANALYZE alone counts the rows but takes the map as it
+// finds it (pg_class.relallvisible), and the planner then costs each read of
+// an index there as a read of the table's page too (V-150).
+//
+// A VACUUM marks a page whole only once the commits that wrote it are on
+// disk, so the fill's commits are flushed first (pgexec.FlushCommits): on a
+// server whose commits don't wait for the disk, a VACUUM right after a
+// 5,000-row fill marked none of its cell index whole. The ANALYZE runs once
+// both tables are vacuumed, never between them as VACUUM (ANALYZE) a, b runs
+// it: its own commit, not on disk either, held back the cell index's newest
+// rows the same way (flushed, then VACUUM (ANALYZE) of both: 0 of 205 pages).
+//
+// A VACUUM can't run in a transaction, so each statement runs alone
+// (pgexec.ExecAlone), the three within vacuumTimeout. It waits for an
+// autovacuum's vacuum or ANALYZE of the tables, which Postgres stops for it
+// after deadlock_timeout; SKIP_LOCKED would pass over the very tables a fill
+// set the autovacuum counting. TRUNCATE FALSE: it never takes a table's
+// exclusive lock to hand back empty pages at its end, which the autovacuum's
+// own vacuums do.
+//
+// A flush that fails (a server in trouble) still has both statements run,
+// its error joined to theirs: the ANALYZE ran after every fill before V-150,
+// and the count never does less than that (V-155).
+func VacuumRows(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, vacuumTimeout)
+	defer cancel()
+	flushed := flushCommits(ctx, flushWait)
+	_, vacuumed := pgexec.ExecAlone(ctx, vacuumTimeout, `VACUUM (TRUNCATE FALSE) data_table_rows, data_table_cell_index`)
+	_, analyzed := pgexec.ExecAlone(ctx, vacuumTimeout, `ANALYZE data_table_rows, data_table_cell_index`)
+	return errors.Join(flushed, vacuumed, analyzed)
 }
+
+// flushWait bounds VacuumRows' wait for the fill's commits to reach the disk:
+// the WAL writer writes them out within a few of its rounds (wal_writer_delay,
+// 200 ms by default). A server past it is in trouble, and the count is tried
+// once more (business/RowQuery counts).
+const flushWait = 10 * time.Second
+
+// flushCommits is pgexec.FlushCommits; a test has it fail.
+var flushCommits = pgexec.FlushCommits

@@ -6,10 +6,13 @@ import (
 
 // mountRowLedger mounts the row ledger's routes (tables A2) beside today's
 // table routes, on router.go's /tables behind the member group: batches,
-// moves, undo and redo, a row's history, and the trash. /tables/trash is a
-// path of its own, which chi matches before /tables/{id}.
+// steps over a view's rows (find, replace, trim, dedupe, split), moves, undo
+// and redo, a row's history, and the trash (a deleted table back, or deleted
+// for good). /tables/trash is a path of its own, which chi matches before
+// /tables/{id}.
 func mountRowLedger(rt tablesRouters) {
 	rt.Tables.Post("/{id}/rows/batch", rowLedgerController.Batch)
+	rt.Tables.Post("/{id}/rows/transform", rowLedgerController.Transform)
 	rt.Tables.Post("/{id}/rows/move", rowLedgerController.MoveRows)
 	rt.Tables.Post("/{id}/undo", rowLedgerController.Undo)
 	rt.Tables.Post("/{id}/redo", rowLedgerController.Redo)
@@ -18,4 +21,5 @@ func mountRowLedger(rt tablesRouters) {
 	rt.Tables.Post("/{id}/trash/restore", rowLedgerController.RestoreFromTrash)
 	rt.Tables.Get("/trash", rowLedgerController.TablesTrash)
 	rt.Tables.Post("/{id}/restore", rowLedgerController.RestoreTable)
+	rt.Tables.Post("/{id}/purge", rowLedgerController.PurgeTable)
 }

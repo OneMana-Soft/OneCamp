@@ -133,27 +133,32 @@ func Get(ctx context.Context, projectID, id uuid.UUID) (*Field, error) {
 	return f, err
 }
 
-// Count is how many fields a project has.
+// Count is how many fields a project has. It reads in the caller's
+// transaction, if any (pgexec), as a Bound's count must.
 func Count(ctx context.Context, projectID uuid.UUID) (int, error) {
-	c, cancel := withTimeout(ctx)
-	defer cancel()
-	var n int
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `SELECT COUNT(*) FROM task_fields WHERE project_id = $1 AND `+softDelete.Live(""), projectID).Scan(&n)
-	return n, err
+	return pgexec.Scalar[int](ctx, `SELECT COUNT(*) FROM task_fields WHERE project_id = $1 AND `+softDelete.Live(""), projectID)
 }
 
-// Create adds a field at the end of the project's order.
+// Bound is a project's most fields, for its creates and its fields' restores
+// alike: they count under one lock, so two at once can't both take the last
+// place. full is what a write past it answers.
+func Bound(project uuid.UUID, most int, full error) softDelete.Bound {
+	return softDelete.Bound{Lock: "task_fields:" + project.String(), Most: most, Full: full,
+		Count: func(ctx context.Context) (int, error) { return Count(ctx, project) }}
+}
+
+// Create adds a field at the end of the project's order, in the caller's
+// transaction, if any.
 func Create(ctx context.Context, f *Field, createdBy uuid.UUID) (*Field, error) {
 	options, err := json.Marshal(f.Options)
 	if err != nil {
 		return nil, err
 	}
-	c, cancel := withTimeout(ctx)
-	defer cancel()
-	out, err := scan(postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+	out, _, err := pgexec.QueryOne(ctx, `
 		INSERT INTO task_fields (id, project_id, name, type, options, currency, on_card, position, created_by)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE((SELECT MAX(position) + 1 FROM task_fields WHERE project_id = $2), 0), $8)
-		RETURNING `+columns, uuid.New(), f.ProjectID, f.Name, f.Type, options, nullCurrency(f.Currency), f.OnCard, createdBy))
+		RETURNING `+columns, func(r pgexec.Row) (*Field, error) { return scan(r) },
+		uuid.New(), f.ProjectID, f.Name, f.Type, options, nullCurrency(f.Currency), f.OnCard, createdBy)
 	if isUniqueViolation(err) {
 		return nil, ErrNameTaken
 	}

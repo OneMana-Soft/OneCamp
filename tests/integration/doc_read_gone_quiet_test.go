@@ -37,13 +37,16 @@ import (
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
-// errorLines keeps the error lines logged while a test runs.
+// errorLines keeps the error lines logged while a test runs, and the warnings too when warnings is set.
 type errorLines struct {
-	mu    sync.Mutex
-	lines []string
+	mu       sync.Mutex
+	warnings bool
+	lines    []string
 }
 
-func (h *errorLines) Enabled(_ context.Context, l slog.Level) bool { return l >= slog.LevelError }
+func (h *errorLines) Enabled(_ context.Context, l slog.Level) bool {
+	return l >= slog.LevelError || (h.warnings && l >= slog.LevelWarn)
+}
 func (h *errorLines) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

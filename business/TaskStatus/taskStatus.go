@@ -311,19 +311,24 @@ func (in *Input) Validate() error {
 	return fmt.Errorf("%w: unknown colour %q", ErrInvalid, in.Color)
 }
 
-// Create adds a custom status to a project.
+// bound is a project's MaxPerProject custom statuses, which its creates and
+// its statuses' restores are held to alike (ErrTooMany).
+func bound(project uuid.UUID) softDelete.Bound {
+	return model.Bound(project, MaxPerProject, ErrTooMany)
+}
+
+// Create adds a custom status to a project, under its most (bound).
 func Create(ctx context.Context, projectID, userID uuid.UUID, in Input) (*model.TaskStatus, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err
 	}
-	n, err := model.Count(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
-	if n >= MaxPerProject {
-		return nil, ErrTooMany
-	}
-	return model.Create(ctx, &model.TaskStatus{ProjectID: projectID, Name: in.Name, Category: in.Category, Color: in.Color}, userID)
+	var made *model.TaskStatus
+	err := bound(projectID).Add(ctx, func(ctx context.Context) error {
+		var err error
+		made, err = model.Create(ctx, &model.TaskStatus{ProjectID: projectID, Name: in.Name, Category: in.Category, Color: in.Color}, userID)
+		return err
+	})
+	return made, err
 }
 
 // Update changes a custom status. Its tasks follow: a new name is shown on
@@ -397,11 +402,12 @@ func Delete(ctx context.Context, projectID, id uuid.UUID, moveTo string, by uuid
 // fails partway is finished by the next: each move takes only what is still
 // where the delete put it, so doing it again moves nothing twice. A status
 // deleted again before its restore finished brings back what both deletes
-// moved.
-// ErrNameTaken: a live status of the project has its name now. ErrUnfinished:
-// it is back, but not yet all its delete moved.
-func Restore(ctx context.Context, id uuid.UUID) (*model.TaskStatus, error) {
-	s, moved, err := model.Restore(ctx, id)
+// moved. It comes back under project's most as a create does (bound).
+// ErrNameTaken: a live status of the project has its name now. ErrTooMany:
+// the project has its most. ErrUnfinished: it is back, but not yet all its
+// delete moved.
+func Restore(ctx context.Context, project, id uuid.UUID) (*model.TaskStatus, error) {
+	s, moved, err := model.Restore(ctx, id, bound(project))
 	if errors.Is(err, softDelete.ErrTaken) {
 		return nil, ErrNameTaken
 	}

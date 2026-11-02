@@ -97,6 +97,10 @@ func dispatchCacheKey(eventType, scopeType string, scopeEntityId *uuid.UUID) str
 	return fmt.Sprintf("%s|%s|%s", eventType, scopeType, scopeID)
 }
 
+// activeOutgoingWebhooks is the Postgres read behind the cache, a seam for
+// tests (a read that fails must reach a durable source, to run it again).
+var activeOutgoingWebhooks = domain.GetActiveOutgoingWebhooksByEvent
+
 // getActiveOutgoingWebhooksByEventCached is the hot-path dispatch
 // helper. It reads from the in-memory cache, falling back to the
 // Postgres query on miss / stale generation, and stores fresh results
@@ -115,7 +119,7 @@ func getActiveOutgoingWebhooksByEventCached(ctx context.Context, eventType, scop
 	}
 	atomic.AddUint64(&dispatchCacheMisses, 1)
 
-	webhooks, err := domain.GetActiveOutgoingWebhooksByEvent(ctx, eventType, scopeType, scopeEntityId)
+	webhooks, err := activeOutgoingWebhooks(ctx, eventType, scopeType, scopeEntityId)
 	if err != nil {
 		return nil, err
 	}

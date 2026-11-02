@@ -581,7 +581,18 @@ func ProcessIncomingWebhook(ctx context.Context, token string) (*webhookModel.We
 // Imported content is recorded directly to PG/Dgraph without any need
 // to notify external systems retroactively.
 func DispatchEvent(ctx context.Context, eventType string, data interface{}) {
-	dispatch(ctx, eventType, data)
+	_ = dispatch(ctx, uuid.Nil, eventType, data)
+}
+
+// DispatchDurable is DispatchEvent for a source that runs an event again
+// until it is queued (an Outbox sink, business/WorkFeed sinks.go): eventID is
+// the event's own, the same on every run, so a webhook that has it queued
+// already is left as it is (business/Hooks keeps one delivery per webhook and
+// event) and listeners see the same id (the rules engine runs a rule once per
+// id). An error says the event isn't queued: run it again. data isn't
+// written to.
+func DispatchDurable(ctx context.Context, eventID uuid.UUID, eventType string, data map[string]interface{}) error {
+	return dispatch(ctx, eventID, eventType, data)
 }
 
 // queueDeliveries hands the webhooks an event goes to, each with the body cut
@@ -589,9 +600,12 @@ func DispatchEvent(ctx context.Context, eventType string, data interface{}) {
 // and sends them until they arrive; a seam for tests.
 var queueDeliveries = hooksBusiness.Queue
 
-func dispatch(ctx context.Context, eventType string, data interface{}) {
+// dispatch hands the event to the listeners and queues it for the webhooks
+// it goes to, as eventID (one is made for uuid.Nil). An error says it reached
+// no webhook it should have: its lookup, its body or its queue failed.
+func dispatch(ctx context.Context, eventID uuid.UUID, eventType string, data interface{}) error {
 	if helpers.IsBulkImport(ctx) {
-		return
+		return nil
 	}
 
 	// Fan out to in-process listeners (e.g. the Workflow engine) BEFORE the
@@ -605,6 +619,9 @@ func dispatch(ctx context.Context, eventType string, data interface{}) {
 	// we skip listener fan-out for those so a workflow's reply can't trigger
 	// another workflow in an infinite loop. Outgoing webhooks still fire.
 	if m, ok := data.(map[string]interface{}); ok && !helpers.IsWorkflowGenerated(ctx) {
+		if eventID != uuid.Nil {
+			m = withTheEventID(m, eventID)
+		}
 		notifyEventListeners(ctx, eventType, m)
 	}
 
@@ -613,7 +630,7 @@ func dispatch(ctx context.Context, eventType string, data interface{}) {
 	m, _ := data.(map[string]interface{})
 	place := placeOf(eventType, m)
 	if place.conversation {
-		return
+		return nil
 	}
 	lookupKind := place.kind
 	if place.id == nil {
@@ -625,11 +642,11 @@ func dispatch(ctx context.Context, eventType string, data interface{}) {
 		helpers.LogErrorWithContext(ctx,
 			"business/DispatchEvent Failed to get outgoing webhooks for event %s err: %+v",
 			eventType, err)
-		return
+		return err
 	}
 
 	if len(webhooks) == 0 {
-		return
+		return nil
 	}
 
 	// Whether a channel event's channel is public, asked only when a
@@ -647,7 +664,9 @@ func dispatch(ctx context.Context, eventType string, data interface{}) {
 
 	// The two payloads a webhook may be sent: the event whole, or its ids,
 	// each with the event's id, the same on every try.
-	eventID := uuid.New()
+	if eventID == uuid.Nil {
+		eventID = uuid.New()
+	}
 	payloadFor := func(body interface{}) ([]byte, error) {
 		return json.Marshal(OutgoingWebhookPayload{
 			Event:     eventType,
@@ -661,11 +680,11 @@ func dispatch(ctx context.Context, eventType string, data interface{}) {
 		helpers.LogErrorWithContext(ctx,
 			"business/DispatchEvent Failed to marshal payload err: %+v",
 			err)
-		return
+		return err
 	}
 	idBytes, err := payloadFor(idsOnly(m))
 	if err != nil {
-		return
+		return err
 	}
 
 	// Extract plain text for trigger word matching
@@ -730,7 +749,9 @@ func dispatch(ctx context.Context, eventType string, data interface{}) {
 	}
 	if err := queueDeliveries(ctx, eventID, eventType, targets); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/DispatchEvent %s reached no webhook: %v", eventType, err)
+		return err
 	}
+	return nil
 }
 
 // triggerRegexCacheEntry holds compiled regexes plus a content hash for safe invalidation.

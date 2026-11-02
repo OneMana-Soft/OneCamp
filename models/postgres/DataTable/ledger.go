@@ -1915,7 +1915,7 @@ func DeletedTables(ctx context.Context, user uuid.UUID, isAdmin bool, limit int)
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	rs, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, `SELECT `+tableColumns+`, deleted_by FROM data_tables
-		WHERE deleted_at IS NOT NULL AND ($2 OR created_by = $1) ORDER BY deleted_at DESC, id DESC LIMIT $3`, user, isAdmin, limit)
+		WHERE deleted_at IS NOT NULL AND purge_at IS NULL AND ($2 OR created_by = $1) ORDER BY deleted_at DESC, id DESC LIMIT $3`, user, isAdmin, limit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/DeletedTables err: %+v", err)
 		return nil, nil, err
@@ -1942,7 +1942,7 @@ func GetDeletedTable(ctx context.Context, id uuid.UUID) (*DataTable, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	t, err := scanTable(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, `SELECT `+tableColumns+` FROM data_tables
-		WHERE id = $1 AND deleted_at IS NOT NULL`, id))
+		WHERE id = $1 AND deleted_at IS NOT NULL AND purge_at IS NULL`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1954,7 +1954,7 @@ func RestoreTable(ctx context.Context, id uuid.UUID) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, `UPDATE data_tables SET deleted_at = NULL, deleted_by = NULL, updated_at = NOW()
-		WHERE id = $1 AND deleted_at IS NOT NULL`, id)
+		WHERE id = $1 AND deleted_at IS NOT NULL AND purge_at IS NULL`, id)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/RestoreTable err: %+v", err)
 		return err
@@ -2054,11 +2054,12 @@ func keyRowsWithoutTx(ctx context.Context, tx *sql.Tx, table uuid.UUID, keys Key
 	return len(ids), SyncPlaces(pgexec.WithTx(ctx, tx), ids)
 }
 
-// PurgeTrash removes for good what has been in the trash since before
-// cutoff: deleted rows (with their change log), deleted fields (with their
-// links) and deleted tables. It says how many rows, fields and tables it
-// removed.
-func PurgeTrash(ctx context.Context, cutoff time.Time) (rows, fields, tables int64, err error) {
+// PurgeTrash removes for good the rows and fields in a table's own trash
+// since before cutoff: deleted rows (with their change log) and deleted
+// fields (with their links). It says how many rows and fields it removed.
+// Deleted tables go through their delete for good (ClaimTablesPastRetention,
+// DeleteTablesForGood), which takes what they hold elsewhere first.
+func PurgeTrash(ctx context.Context, cutoff time.Time) (rows, fields int64, err error) {
 	err = postgresInit.InTx(ctx, postgresInit.BulkTimeout, func(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM data_table_changes WHERE row_id IN (
 			SELECT id FROM data_table_rows WHERE deleted_at < $1)`, cutoff); err != nil {
@@ -2077,13 +2078,9 @@ func PurgeTrash(ctx context.Context, cutoff time.Time) (rows, fields, tables int
 			return err
 		}
 		fields, _ = res.RowsAffected()
-		if res, err = tx.ExecContext(ctx, `DELETE FROM data_tables WHERE deleted_at < $1`, cutoff); err != nil {
-			return err
-		}
-		tables, _ = res.RowsAffected()
 		return nil
 	})
-	return rows, fields, tables, err
+	return rows, fields, err
 }
 
 // PurgeHistory removes the change sets made before cutoff, and their

@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"encoding/json"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -54,7 +55,7 @@ func TestARecordingWithNothingToPlaySaysWhy(t *testing.T) {
 		{&dgraphStruct.DgraphRecording{EndedAt: &ended, Status: "empty"}, "empty"},
 	} {
 		w := httptest.NewRecorder()
-		writeRecordingURL(w, httptest.NewRequest(http.MethodGet, "/", nil), c.rec)
+		httpx.WriteRecordingURL(w, httptest.NewRequest(http.MethodGet, "/", nil), c.rec)
 		var got map[string]any
 		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 			t.Fatal(err)

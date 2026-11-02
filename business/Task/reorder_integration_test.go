@@ -11,6 +11,7 @@ package business
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -85,7 +86,7 @@ func TestOneOrderEverywhere(t *testing.T) {
 	if got := order("todo"); got != "t2,t1" {
 		t.Fatalf("To do is %s", got)
 	}
-	if told == nil || *told != (mqttStruct.MqttTaskChanged{TaskUuid: id["t2"], ProjectUuid: project}) {
+	if told == nil || !reflect.DeepEqual(*told, mqttStruct.MqttTaskChanged{TaskUuid: id["t2"], ProjectUuid: project}) {
 		t.Fatalf("told %+v", told)
 	}
 

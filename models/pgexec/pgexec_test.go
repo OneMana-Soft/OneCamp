@@ -7,6 +7,9 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
+
+	"github.com/akashc777/OneCamp/initializers/postgresInit"
 )
 
 // ran is a statement the recorder was given: its text, whether its
@@ -17,8 +20,12 @@ type ran struct {
 }
 
 // recorder is a database/sql connector whose connections record the
-// statements they are given and run none.
-type recorder struct{ log []ran }
+// statements they are given and run none, and the time each statement with
+// a deadline had left (left).
+type recorder struct {
+	log  []ran
+	left []time.Duration
+}
 
 func (r *recorder) Connect(context.Context) (driver.Conn, error) { return &recConn{r: r}, nil }
 func (r *recorder) Driver() driver.Driver                        { return recDriver{} }
@@ -43,8 +50,11 @@ func (c *recConn) Begin() (driver.Tx, error) { c.inTx = true; return c, nil }
 func (c *recConn) Commit() error             { c.inTx = false; return nil }
 func (c *recConn) Rollback() error           { c.inTx = false; return nil }
 func (c *recConn) ExecContext(ctx context.Context, q string, _ []driver.NamedValue) (driver.Result, error) {
-	_, deadline := ctx.Deadline()
+	at, deadline := ctx.Deadline()
 	c.r.log = append(c.r.log, ran{q: q, inTx: c.inTx, deadline: deadline})
+	if deadline {
+		c.r.left = append(c.r.left, time.Until(at))
+	}
 	return driver.RowsAffected(1), nil
 }
 
@@ -92,5 +102,102 @@ func TestWithTxRunsStatementsInTheHandedTransaction(t *testing.T) {
 	}
 	if len(rec.log) != len(want) {
 		t.Fatalf("a statement after the transaction ended ran: %+v", rec.log[len(want):])
+	}
+}
+
+// Upkeep runs alone: on the pool, outside the transaction ctx carries, within
+// the bound its caller gives.
+//
+// WHY. Postgres refuses a VACUUM inside a transaction block, and a vacuum of
+// a filled table outlasts a request's DBTimeout, so the table models ran
+// theirs by hand on the pool, each its own executor (V-150). ExecAlone runs
+// one on the pool even from a ctx inside a transaction, bounded by its
+// caller's d rather than DBTimeout; with no pool it is refused, never a nil
+// pointer.
+func TestExecAloneRunsOnThePoolWithinItsCallersBound(t *testing.T) {
+	ctx := context.Background()
+	was := postgresInit.DBConn
+	t.Cleanup(func() { postgresInit.DBConn = was })
+	postgresInit.DBConn = &postgresInit.DB{}
+	if _, err := ExecAlone(ctx, time.Hour, "VACUUM nowhere"); !errors.Is(err, ErrNoDatabase) {
+		t.Fatalf("with no pool: %v, want ErrNoDatabase", err)
+	}
+
+	rec := &recorder{}
+	pool := sql.OpenDB(rec)
+	defer pool.Close()
+	postgresInit.DBConn = &postgresInit.DB{SqlDB: pool, DBTimeout: time.Second}
+	tx, err := pool.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if n, err := ExecAlone(WithTx(ctx, tx), time.Hour, "VACUUM alone"); err != nil || n != 1 {
+		t.Fatalf("upkeep from a ctx in a transaction: %d rows, %v", n, err)
+	}
+	want := []ran{{q: "VACUUM alone", deadline: true}}
+	if !slices.Equal(rec.log, want) {
+		t.Fatalf("the driver ran %+v, want %+v (on the pool, outside the transaction, with a deadline)", rec.log, want)
+	}
+	if rec.left[0] < 59*time.Minute {
+		t.Fatalf("upkeep given an hour had %v left: bounded by the pool's DBTimeout (1s), not its caller's", rec.left[0])
+	}
+}
+
+// A VACUUM after a fill first has the fill's commits on disk (FlushCommits);
+// with no pool it is refused, never a nil pointer.
+//
+// WHY. A VACUUM marks a page whole only once the commits that wrote it are on
+// disk, and on a server whose commits don't wait for the disk a 5,000-row
+// fill's cell index had none of its pages marked (V-150). Its wait on a real
+// server is proven in pgexec_integration_test.go (a VACUUM after commits
+// that didn't wait marks every page once it returns).
+func TestFlushCommitsIsRefusedWithNoPool(t *testing.T) {
+	was := postgresInit.DBConn
+	t.Cleanup(func() { postgresInit.DBConn = was })
+	postgresInit.DBConn = &postgresInit.DB{}
+	if err := FlushCommits(context.Background(), time.Hour); !errors.Is(err, ErrNoDatabase) {
+		t.Fatalf("with no pool: %v, want ErrNoDatabase", err)
+	}
+}
+
+// Past a page's end, the server says the log is written to just behind the
+// next page's header (pg_current_wal_insert_lsn), while the disk stops at the
+// boundary: a log on disk to the boundary holds everything written then. A
+// header is 40 bytes at a segment's start and 24 at any other page's; any
+// other gap is log not on disk yet (V-155).
+func TestAFlushOnAPageBoundaryHoldsWhatWasWritten(t *testing.T) {
+	const block, segment = 8192, 16 << 20
+	page := uint64(0x16_0000_0000 + 5*block) // a page boundary inside a segment
+	seg := uint64(0x16_0000_0000 + 2*segment)
+	cases := []struct {
+		flushed, written uint64
+		want             bool
+	}{
+		{page, page, true},
+		{page + 8, page, true},
+		{page, page + 24, true},
+		{page, page + 40, false},
+		{page, page + 41, false},
+		{page, page + 16, false},
+		{page + 8, page + 32, false},
+		{seg, seg + 40, true},
+		{seg, seg + 24, false},
+		{seg - block, seg + 40, false},
+	}
+	for _, c := range cases {
+		if got := flushedPast(c.flushed, c.written, block, segment); got != c.want {
+			t.Errorf("flushedPast(%X, %X) = %v, want %v", c.flushed, c.written, got, c.want)
+		}
+	}
+	for s, want := range map[string]uint64{"0/0": 0, "16/B374D848": 0x16_B374_D848, "0/1000000": 1 << 24} {
+		if got, err := parseLSN(s); err != nil || got != want {
+			t.Errorf("parseLSN(%q) = %X, %v; want %X", s, got, err, want)
+		}
+	}
+	for _, s := range []string{"", "16", "x/1", "1/y", "1/2/3"} {
+		if _, err := parseLSN(s); err == nil {
+			t.Errorf("parseLSN(%q) took it", s)
+		}
 	}
 }

@@ -12,8 +12,8 @@ import (
 	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
-	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 	domain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
@@ -109,25 +109,19 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 	tellCtx := context.WithoutCancel(ctx)
 	helpers.GoSafeNamed("Task.CreateTasks:tell", func() { tellOfNewTasks(tellCtx, project.Uuid, top, me) })
 	// Made outside any restricted task (a copy of one went one by one, above),
-	// so they are open: their events, and what those set going, read no
-	// restriction of theirs.
+	// so they are open: their entries read no restriction of theirs. Each
+	// task's entry, a sub-task's included, is its task.created too, through
+	// the Outbox (taskWebhooks.go).
 	eventCtx := helpers.WithOpenTasks(context.WithoutCancel(ctx), ids...)
-	helpers.GoSafeNamed("Task.CreateTasks:events", func() {
-		for i, t := range tasks {
-			if t.Parent >= 0 {
-				continue
-			}
-			webhookBusiness.DispatchEvent(eventCtx, "task.created", map[string]interface{}{
-				"task_id":     ids[i].String(),
-				"project_id":  projectUUID.String(),
-				"name":        t.Input.TaskName,
-				"description": t.Input.TaskDescription,
-				"status":      t.Input.Status,
-				"priority":    t.Input.Priority,
-				"created_by":  me.Uuid,
-			})
+	made := make([]workFeed.TaskChange, 0, len(nodes))
+	for i, n := range nodes {
+		v := *n
+		if p := tasks[i].Parent; p >= 0 {
+			v.ParentTask = &dgraphStruct.DgraphTask{Uuid: nodes[p].Uuid, Name: nodes[p].Name}
 		}
-	})
+		made = append(made, workFeed.TaskChange{Kind: workFeed.KindCreated, Project: project.Uuid, Task: &v, Fields: workFeed.TaskMade})
+	}
+	logChange(eventCtx, &me, made...)
 	return ids, nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	business "github.com/akashc777/OneCamp/business/DataTable"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -96,6 +97,27 @@ func Batch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := business.Batch(business.WithZone(r.Context(), r.URL.Query().Get("tz")), id, in, actorFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": out})
+}
+
+// Transform POST /tables/{id}/rows/transform {step, spec | rows, fields,
+// find, replace, match_case, whole_cell, regex, separator, into, dry_run,
+// from}: a find over a view's rows, or a replace, trim, dedupe or split of
+// them, written in change sets of one operation, which one undo takes back.
+func Transform(w http.ResponseWriter, r *http.Request) {
+	id, ok := tableID(w, r)
+	if !ok {
+		return
+	}
+	var in business.TransformInput
+	if !decode(w, r, &in) {
+		return
+	}
+	out, err := business.Transform(business.WithZone(r.Context(), r.URL.Query().Get("tz")), id, in, actorFrom(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -233,4 +255,21 @@ func RestoreTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": t})
+}
+
+// PurgeTable POST /tables/{id}/purge: a table in the trash, deleted for
+// good, with what it holds (its rows' pages, comments, files and guest
+// links), for its owner, someone with full access or an admin, as docs
+// decide. 202: the table has left the trash, and what it holds goes next.
+func PurgeTable(w http.ResponseWriter, r *http.Request) {
+	id, ok := tableID(w, r)
+	if !ok {
+		return
+	}
+	_, who := accessBusiness.RequestSubject(r)
+	if err := business.PurgeTable(r.Context(), id, who, actorFrom(r)); err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"msg": "Deleted for good."})
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -351,4 +352,37 @@ func ByTask(ctx context.Context, task uuid.UUID) ([]*Row, error) {
 // Tied is up to limit threads tied to a task, the most recently changed first.
 func Tied(ctx context.Context, limit int) ([]*Row, error) {
 	return listWhere(ctx, `task_uuid IS NOT NULL`, limit)
+}
+
+// forgetChunk is how many things one ForgetResources statement names.
+const forgetChunk = 5000
+
+// ForgetResources removes the threads on these things, gone for good, with
+// their comments (and the comments' reactions) and who took part in them: a
+// batch of names at a time, comments first, so a forget cut short leaves no
+// comment without its thread. The comments go by their threads' ids, which
+// both sides index in full (idx_threads_resource, idx_thread_comments_thread):
+// by the names alone only the comments' partial index (live ones) could
+// serve, and a chunk scanned every comment, 20 s at 400,000 on Postgres 12,
+// past the transaction's time (V-121 F2). It takes the same comments: each
+// comment's names are its thread's, and a thread is only ever deleted here or
+// empty (business/Thread, a first post that failed).
+func ForgetResources(ctx context.Context, kind string, resourceUUIDs []string) error {
+	for len(resourceUUIDs) > 0 {
+		chunk := resourceUUIDs[:min(forgetChunk, len(resourceUUIDs))]
+		resourceUUIDs = resourceUUIDs[len(chunk):]
+		err := pgexec.InTx(ctx, func(ctx context.Context) error {
+			if _, err := pgexec.Exec(ctx, `DELETE FROM thread_comments
+				WHERE thread_id IN (SELECT id FROM threads WHERE resource_kind = $1 AND resource_uuid = ANY($2))`, kind, chunk); err != nil {
+				return err
+			}
+			_, err := pgexec.Exec(ctx, `DELETE FROM threads WHERE resource_kind = $1 AND resource_uuid = ANY($2)`, kind, chunk)
+			return err
+		})
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "models/Thread ForgetResources failed: %+v", err)
+			return err
+		}
+	}
+	return nil
 }

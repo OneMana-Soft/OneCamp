@@ -178,7 +178,7 @@ func GetDgraphProjectListByAdminDgraphUID(ctx context.Context, userDgraphUID str
 				var(func: uid($user_id)) {
 					admins as ~project_admins
 				}
-				projectInfo(func: uid(admins)) @filter(has(project_uuid) AND NOT gt(project_deleted_at, "1970-01-01T00:00:00Z")) {
+				projectInfo(func: uid(admins)) @filter(has(project_uuid) AND ` + dgraphquery.Live("project_deleted_at") + `) {
 					uid
 					project_uuid
 					project_name
@@ -638,6 +638,7 @@ func GetBasicDgraphProjectInfoWithGivenMemberUUID(ctx context.Context, projectUU
 						user_uuid
 						user_name
 						is_external
+						user_deleted_at
 					}
 					project_admins @filter(eq(user_uuid, $memberUuid)){
 						uid
@@ -1250,7 +1251,7 @@ func GetDgraphProjectCounts(ctx context.Context, userDgraphUID string, today, we
 				}
 			}
 			me(func: uid($user)) {
-				user_projects @filter(not gt(project_deleted_at, "1970-01-01T00:00:00Z")) {
+				user_projects @filter(` + dgraphquery.Live("project_deleted_at") + `) {
 					min_start: val(min_start)
 					max_start: val(max_start)
 					min_due: val(min_due)

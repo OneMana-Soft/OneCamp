@@ -265,6 +265,12 @@ func (s *LiveKitServiceStruct) StartRecording(ctx context.Context, roomName stri
 	return egressInfo, filename, nil
 }
 
+// ErrNoActiveRecording: a stop found nothing recording the room. Its
+// recording was stopped already (from another tab, by another host) or ended
+// with its room, so the asker's view of the call is behind: never the call
+// server failing.
+var ErrNoActiveRecording = errors.New("nothing is recording this call")
+
 func (s *LiveKitServiceStruct) StopRecording(ctx context.Context, roomName string) (lastEgress *livekit.EgressInfo, err error) {
 	// Find active egress for the room
 	egressList, err := s.EgressClient.ListEgress(ctx, &livekit.ListEgressRequest{
@@ -276,7 +282,7 @@ func (s *LiveKitServiceStruct) StopRecording(ctx context.Context, roomName strin
 	}
 
 	if len(egressList.Items) == 0 {
-		return nil, fmt.Errorf("no active recording found for room %s", roomName)
+		return nil, fmt.Errorf("%w (room %s)", ErrNoActiveRecording, roomName)
 	}
 
 	var lastErr error

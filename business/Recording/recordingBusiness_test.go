@@ -5,51 +5,46 @@ import (
 	"errors"
 	"slices"
 	"testing"
-
-	domain "github.com/akashc777/OneCamp/domain/Recording"
 )
 
-// Deleting a recording purges every node holding its egress id (the recording,
-// and any stray node the old soft delete made), and reports what stopped it.
-func TestDeleteRecordingPurgesEveryNodeOfIt(t *testing.T) {
-	prevR, prevP := recordingsToPurge, purgeRecording
-	t.Cleanup(func() { recordingsToPurge, purgeRecording = prevR, prevP })
+// Deleting a recording is soft, as every delete is: it stamps the recording's
+// deletion with the archive's own write, and its file stays in storage until
+// the workspace's purge setting removes it. Restoring clears the stamp the
+// same way (the web's Undo). A write that failed is reported.
+func TestADeletedRecordingIsKeptUntilRetentionAndComesBack(t *testing.T) {
+	prevA, prevB := archiveRecordings, restoreRecordings
+	t.Cleanup(func() { archiveRecordings, restoreRecordings = prevA, prevB })
 	ctx := context.Background()
 
-	recordingsToPurge = func(_ context.Context, egressId string) ([]domain.ArchivedRecording, error) {
-		return []domain.ArchivedRecording{
-			{Uid: "0x1", EgressId: egressId, ObjectKey: "rec/" + egressId + ".mp4"},
-			{Uid: "0x2", EgressId: egressId},
-		}, nil
+	var archived, restored []string
+	archiveRecordings = func(_ context.Context, ids []string) error {
+		archived = append(archived, ids...)
+		return nil
 	}
-	var purged []string
-	purgeRecording = func(_ context.Context, r domain.ArchivedRecording) (int64, error) {
-		purged = append(purged, r.Uid)
-		return 0, nil
+	restoreRecordings = func(_ context.Context, ids []string) error {
+		restored = append(restored, ids...)
+		return nil
 	}
+
 	if err := DeleteRecording(ctx, "EG_1"); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(purged, []string{"0x1", "0x2"}) {
-		t.Errorf("purged %v", purged)
+	if !slices.Equal(archived, []string{"EG_1"}) {
+		t.Errorf("a delete archived %v, want EG_1", archived)
+	}
+	if err := RestoreRecording(ctx, "EG_1"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(restored, []string{"EG_1"}) {
+		t.Errorf("a restore restored %v, want EG_1", restored)
 	}
 
-	purgeRecording = func(context.Context, domain.ArchivedRecording) (int64, error) {
-		return 0, errors.New("storage says no")
-	}
+	archiveRecordings = func(context.Context, []string) error { return errors.New("graph unreachable") }
+	restoreRecordings = archiveRecordings
 	if err := DeleteRecording(ctx, "EG_1"); err == nil {
-		t.Error("a purge that failed was reported as a delete")
+		t.Error("a delete whose write failed was reported as done")
 	}
-
-	recordingsToPurge = func(context.Context, string) ([]domain.ArchivedRecording, error) {
-		return nil, errors.New("graph unreachable")
-	}
-	purged = nil
-	purgeRecording = func(_ context.Context, r domain.ArchivedRecording) (int64, error) {
-		purged = append(purged, r.Uid)
-		return 0, nil
-	}
-	if err := DeleteRecording(ctx, "EG_1"); err == nil || len(purged) != 0 {
-		t.Errorf("a lookup that failed: err=%v, purged %v", err, purged)
+	if err := RestoreRecording(ctx, "EG_1"); err == nil {
+		t.Error("a restore whose write failed was reported as done")
 	}
 }

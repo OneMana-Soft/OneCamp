@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -28,8 +29,9 @@ type ImportedPerson struct {
 	SourceBot  bool
 	SourceLeft bool
 	// Invited is whether a LIVE invitation to their address exists
-	// (userModels.InvitationLiveSQL): someone whose invitation expired, or was
-	// used by an account since gone, is offered again.
+	// (userModels.InvitationLiveSQL, and not withdrawn): someone whose
+	// invitation expired, was withdrawn, or was used by an account since gone,
+	// is offered again.
 	Invited bool
 }
 
@@ -46,7 +48,7 @@ func ListImportedPeople(ctx context.Context, importId uuid.UUID) ([]ImportedPers
 		       bool_or(m.metadata->>'is_bot' = 'true') AS source_bot,
 		       bool_or(m.metadata->>'deleted' = 'true') AS source_left,
 		       EXISTS (SELECT 1 FROM invitations i WHERE lower(i.email) = lower(u.email_id)
-		               AND `+userModels.InvitationLiveSQL("i")+`) AS invited
+		               AND `+userModels.InvitationLiveSQL("i")+` AND `+softDelete.Live("i")+`) AS invited
 		FROM import_id_map m
 		JOIN users u ON u.id = m.onecamp_uuid
 		WHERE m.import_id = $1 AND m.entity_type = $2

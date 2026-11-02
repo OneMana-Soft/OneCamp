@@ -43,4 +43,8 @@ const (
 	// A picture for a form's cover or logo (tables B5c-2, business/Form
 	// look.go): a visitor gets it by its form's link, never by a file route.
 	ATTACHMENT_SRC_FORM = "form"
+	// A project link's icon or picture, read from its page by this server
+	// (basecamp-16, business/ProjectLink): served only by the link's own
+	// route, never by a file route, and never uploaded by a person.
+	ATTACHMENT_SRC_PROJECT_LINK = "projectLink"
 )

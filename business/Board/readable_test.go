@@ -159,9 +159,9 @@ func TestABoardIsLiveUntilItIsDeleted(t *testing.T) {
 	}
 }
 
-// Making a board private, or changing who it's shared with, writes the
-// board's privacy and sharing onto its comments' search entries, which held
-// a copy from when each comment was written.
+// Making a board private or public, or changing who it's shared with, writes
+// the board's privacy and sharing onto its comments' search entries, which
+// held a copy from when each comment was written.
 func TestBoardSharingIsWrittenOntoItsComments(t *testing.T) {
 	yes := true
 	var gotBoard string
@@ -172,12 +172,14 @@ func TestBoardSharingIsWrittenOntoItsComments(t *testing.T) {
 		gotBoard, got = boardUUID, access
 		return 2, nil
 	}
-	syncBoardCommentSearch(context.Background(), "board-1", &dgraphStruct.DgraphBoard{
+	if err := writeBoardCommentsNow(context.Background(), "board-1", &dgraphStruct.DgraphBoard{
 		IsPrivate:      &yes,
 		CreatedBy:      &dgraphStruct.DgraphUser{Uuid: "owner"},
 		ReadingUser:    []*dgraphStruct.DgraphUser{{Uuid: "reader"}},
 		CommentingUser: []*dgraphStruct.DgraphUser{{Uuid: "commenter"}, nil},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if gotBoard != "board-1" || got.Public || got.CreatedBy != "owner" ||
 		len(got.Reading) != 1 || got.Reading[0] != "reader" ||
 		len(got.Commenting) != 1 || got.Commenting[0] != "commenter" || len(got.Editing) != 0 {
@@ -192,6 +194,7 @@ func TestBoardSharingIsWrittenOntoItsComments(t *testing.T) {
 // board as it is then.
 func TestABoardSettleThatFailsIsWrittenAgainInTheBackground(t *testing.T) {
 	oldRead, oldWrite, oldComments, oldRefresh := readBoardSharing, writeBoardSearch, writeBoardCommentSearch, refreshBoardSearch
+	stubBoardAIAccess(t)
 	t.Cleanup(func() {
 		readBoardSharing, writeBoardSearch, writeBoardCommentSearch, refreshBoardSearch = oldRead, oldWrite, oldComments, oldRefresh
 	})
@@ -240,6 +243,7 @@ func TestABoardSettleThatFailsIsWrittenAgainInTheBackground(t *testing.T) {
 // becomes of the request.
 func TestABoardSettleOutlivesItsRequestWithinItsBound(t *testing.T) {
 	oldRead, oldWrite, oldComments, oldRefresh := readBoardSharing, writeBoardSearch, writeBoardCommentSearch, refreshBoardSearch
+	stubBoardAIAccess(t)
 	oldDelete, oldCascade := deleteBoardSearch, cascadeBoardDelete
 	t.Cleanup(func() {
 		readBoardSharing, writeBoardSearch, writeBoardCommentSearch, refreshBoardSearch = oldRead, oldWrite, oldComments, oldRefresh

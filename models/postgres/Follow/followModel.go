@@ -117,11 +117,24 @@ func FollowModes(ctx context.Context, kind, resourceUUID string) (map[string]str
 
 // ForgetResources removes every follow, notice and mention of these things,
 // and the record of their mentions' first keeping, for when they are gone for
-// good. Each table is tried on its own.
+// good: a batch of names at a time (a whole table's rows go at once). Each
+// table is tried on its own.
 func ForgetResources(ctx context.Context, kind string, resourceUUIDs []string) error {
-	if len(resourceUUIDs) == 0 {
-		return nil
+	var first error
+	for len(resourceUUIDs) > 0 {
+		chunk := resourceUUIDs[:min(forgetChunk, len(resourceUUIDs))]
+		resourceUUIDs = resourceUUIDs[len(chunk):]
+		if err := forgetResources(ctx, kind, chunk); err != nil && first == nil {
+			first = err
+		}
 	}
+	return first
+}
+
+// forgetChunk is how many things one forgetResources statement names.
+const forgetChunk = 5000
+
+func forgetResources(ctx context.Context, kind string, resourceUUIDs []string) error {
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	var first error

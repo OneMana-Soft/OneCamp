@@ -17,8 +17,6 @@ import (
 	"sync"
 	"time"
 
-	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
-	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -39,9 +37,10 @@ var linkedSessions sync.Map
 // somewhere to live, and that readers can find it.
 //
 // A no-op for a real recording, which already has a node created and linked
-// when recording started. Refused for a room that belongs to no channel or DM
-// (an instant meeting): its lines once landed on a node linked to nothing,
-// which no list showed, nobody could delete and retention never reached.
+// when recording started. An event's call files its node under the event
+// (meet-02). Refused for a room that belongs to no channel, DM or event (an
+// instant meeting): its lines once landed on a node linked to nothing, which
+// no list showed, nobody could delete and retention never reached.
 func EnsureCallSessionNode(ctx context.Context, sessionKey, roomName string) error {
 	if !helpers.IsCallSessionKey(sessionKey) {
 		return nil
@@ -50,9 +49,10 @@ func EnsureCallSessionNode(ctx context.Context, sessionKey, roomName string) err
 		return nil
 	}
 
-	channelUUID, chatGroupID := helpers.ClassifyRoom(roomName)
-	if channelUUID == "" && chatGroupID == "" {
-		return ErrTranscriptNotKept
+	// A breakout room keeps its transcript where its call does (homeOfCall).
+	home, err := homeOfCall(ctx, roomName)
+	if err != nil {
+		return err
 	}
 
 	recordingUID, linked, err := recordingDomain.FindCallSessionNode(ctx, sessionKey)
@@ -88,26 +88,7 @@ func EnsureCallSessionNode(ctx context.Context, sessionKey, roomName string) err
 	// A node that exists unlinked (an earlier link failed) is linked now. The
 	// old code only ever linked a node it had just made, so one failed link left
 	// a transcript nobody could find, for ever.
-
-	if channelUUID != "" {
-		_, err = channelDomain.CreateOrUpdateDgraphChannel(ctx, &dgraphStruct.DgraphChannel{
-			Uid:  "uid(ch)",
-			Uuid: channelUUID,
-			Recordings: []*dgraphStruct.DgraphRecording{{
-				Uid:     recordingUID,
-				Channel: &dgraphStruct.DgraphChannel{Uid: "uid(ch)"},
-			}},
-		})
-	} else {
-		_, _, err = chatDomain.CreateDM(ctx, &dgraphStruct.DgraphDm{
-			Uid: "uid(dm)",
-			Recordings: []*dgraphStruct.DgraphRecording{{
-				Uid: recordingUID,
-				Dm:  &dgraphStruct.DgraphDm{Uid: "uid(dm)"},
-			}},
-		}, chatGroupID)
-	}
-	if err != nil {
+	if err := fileUnderHome(ctx, recordingUID, home); err != nil {
 		return err
 	}
 

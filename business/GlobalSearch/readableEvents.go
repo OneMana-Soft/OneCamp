@@ -20,7 +20,8 @@ func eventOfHit(h *openSearchStruct.GlobalSearchOpenSearchResp) string {
 
 // The seams the events' checks read through: which events who may open now
 // (the Access Resolver, at view: the calendar's one rule, which an agent's
-// bounds narrow too), and the calendars whose events who finds.
+// bounds narrow too), the calendars whose events who finds, and when each
+// repeating event is next on (the calendar's own rule, read once a page).
 var (
 	readableEvents = func(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]bool, error) {
 		res := make([]accessBusiness.Resource, len(ids))
@@ -38,6 +39,7 @@ var (
 		return out, nil
 	}
 	searchCalendars = calendarBusiness.SearchCalendars
+	nextInstances   = calendarBusiness.ShowNextInstances
 )
 
 // eventCalendars are the calendars whose events who finds (Reach.Calendars).
@@ -85,4 +87,18 @@ func keepReadableEventHits(ctx context.Context, who accessBusiness.Subject, hits
 		helpers.LogInfoWithContext(ctx, "search: left out %d events the person can't open", dropped)
 	}
 	return kept
+}
+
+// showNextInstances has each repeating event's hit say when it is next on
+// (V-22): the page's repeating events go to the calendar together, once.
+func showNextInstances(ctx context.Context, hits []*openSearchStruct.GlobalSearchOpenSearchResp) {
+	var entries []*openSearchStruct.OpenSearchEvent
+	for _, h := range hits {
+		if h != nil && h.Event != nil && h.Event.EventRepeats {
+			entries = append(entries, h.Event)
+		}
+	}
+	if len(entries) > 0 {
+		nextInstances(ctx, entries)
+	}
 }

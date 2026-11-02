@@ -17,8 +17,6 @@ import (
 	"time"
 
 	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
-	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
-	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	recordingBusiness "github.com/akashc777/OneCamp/business/Recording"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
@@ -100,15 +98,15 @@ func resumeWhereMadeAgain(ctx context.Context, room, recorded string) {
 
 // resumeRecording records a call again in its own room, made again after
 // LiveKit closed it while everyone was in the call's breakout rooms. It records
-// as the person who keeps the call recorded, the way they started it, so the
-// call's record and its channel both list both parts. It does nothing for a
-// call nobody keeps recorded, while a recording of the call runs or its end
-// hasn't reached us (OnRecordingEnded comes back here), or for a breakout
-// room's call (rooms aren't recorded). Only a channel's call has both rooms
-// and a recording: a DM's or a group's call has no rooms, and an instant
-// meeting isn't recorded.
+// as the person who keeps the call recorded, through the one start
+// (StartCallRecording), so the call's record and its home (its channel, or the
+// event whose call it is) both list both parts. It does nothing for a call
+// nobody keeps recorded, while a recording of the call runs or its end hasn't
+// reached us (OnRecordingEnded comes back here), or for a breakout room's call
+// (rooms aren't recorded). A channel's call and a meeting's have breakout
+// rooms; a DM's or a group's has none, and an instant meeting isn't recorded.
 func resumeRecording(ctx context.Context, s *callStateBusiness.Session) {
-	if s == nil || !s.Live || s.Parent != "" || s.Resource.Kind != conversationBusiness.KindChannel {
+	if s == nil || !s.Live || s.Parent != "" {
 		return
 	}
 	id, err := uuid.Parse(s.ID)
@@ -130,7 +128,7 @@ func resumeRecording(ctx context.Context, s *callStateBusiness.Session) {
 		helpers.LogErrorWithContext(ctx, "business/CallControl could not find %s to record the call in %s again: %+v", by, s.Room, err)
 		return
 	}
-	if err := channelBusiness.StartRecordingChannelCall(ctx, s.Room, who); err != nil {
+	if err := liveKitBusiness.StartCallRecording(ctx, s.Room, who); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/CallControl could not record the call in %s again after its breakout rooms: %+v", s.Room, err)
 	}
 }

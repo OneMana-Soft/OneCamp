@@ -1070,69 +1070,6 @@ func sendChannelCallNotification(title string, body string, channelId string, ch
 	)
 }
 
-func StartRecordingChannelCall(ctx context.Context, channelId string, userDgraphInfo *dgraphStruct.DgraphUser) (err error) {
-	egresssInfo, filepath, err := LiveKitBusiness.StartRecording(ctx, channelId, userDgraphInfo)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/MakeVideoChannelCall Failed to start recording err: %+v",
-			err)
-
-		return
-	}
-
-	zeroEpochTime := time.Time{}
-
-	currentTime := time.Now()
-
-	dgraphChannel := dgraphStruct.DgraphChannel{
-		Uid:  "uid(ch)",
-		Uuid: channelId,
-		Recordings: []*dgraphStruct.DgraphRecording{
-
-			{
-
-				EgressId:  egresssInfo.EgressId,
-				EndedAt:   &zeroEpochTime,
-				StartedAt: &currentTime,
-				ObjectKey: filepath,
-				Channel: &dgraphStruct.DgraphChannel{
-					Uid: "uid(ch)",
-				},
-				RecordingStartedBy: &dgraphStruct.DgraphUser{
-					Uid: userDgraphInfo.Uid,
-				},
-			},
-		},
-	}
-
-	_, err = CreateOrUpdateDgraphChannel(ctx, &dgraphChannel)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/MakeVideoChannelCall Failed to update channel dgraph err: %+v",
-			err)
-
-		return
-	}
-
-	return
-}
-
-func StopRecordingChannelCall(ctx context.Context, channelId string) (err error) {
-	err = LiveKitBusiness.StopRecording(ctx, channelId)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/StopRecordingChannelCall Failed to stop recording err: %+v",
-			err)
-
-		return
-	}
-
-	return
-}
-
 // GetDiscoverableChannels is a page of the public channels the person could
 // join and isn't in, by name, searched on the server (domain).
 func GetDiscoverableChannels(ctx context.Context, userDgraphId string, searchText string, pageIndex int, pageSize int) ([]*dgraphStruct.DgraphChannel, int64, error) {

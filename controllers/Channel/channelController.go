@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	readStateBusiness "github.com/akashc777/OneCamp/business/ReadState"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1583,7 +1585,7 @@ func StartVideoChannelCallRecording(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.StartRecordingChannelCall(ctx, makeVideoChannelCallInfo.ChannelUuid, &userInfo.UserDgraphInfo)
+	err = liveKitBusiness.StartCallRecording(ctx, makeVideoChannelCallInfo.ChannelUuid, &userInfo.UserDgraphInfo)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1655,7 +1657,10 @@ func StopVideoChannelCallRecording(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.StopRecordingChannelCall(ctx, makeVideoChannelCallInfo.ChannelUuid)
+	err = liveKitBusiness.StopRecording(ctx, makeVideoChannelCallInfo.ChannelUuid)
+	if httpx.WriteNothingRecording(w, err) {
+		return
+	}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

@@ -116,6 +116,10 @@ func TestAFileFollowsItsPlacesRule(t *testing.T) {
 		// where it goes), and no file route serves it, to its uploader either.
 		{"a form's picture, for a form not made yet", ann, Place{Kind: postgresStruct.ATTACHMENT_SRC_FORM, ID: "new"}, nil, ErrRefused},
 		{"a form's picture, by the form's id", me, Place{Kind: postgresStruct.ATTACHMENT_SRC_FORM, ID: mine}, nil, ErrRefused},
+		// A project link's picture (basecamp-16): only the server keeps one,
+		// read from the link's page, and only the link's route serves it, even
+		// to someone in the project.
+		{"a project link's picture, in a project I'm in", me, Place{Kind: postgresStruct.ATTACHMENT_SRC_PROJECT_LINK, ID: mine}, ErrRefused, ErrRefused},
 		{"a kind with no rule (an import's task)", me, Place{Kind: postgresStruct.ATTACHMENT_SRC_TASK, ID: mine}, ErrRefused, ErrRefused},
 		{"no kind", me, Place{ID: mine}, ErrRefused, ErrRefused},
 	}

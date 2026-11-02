@@ -2,6 +2,7 @@ package Calendar
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -254,5 +255,146 @@ func TestOutOfOfficeDeclineIsMarkedForEveryoneWhoReadsIt(t *testing.T) {
 		if g.OutOfOffice {
 			t.Fatalf("after the away: %+v marked", g)
 		}
+	}
+}
+
+// Every read of guests' answers marks an out-of-office decline alike (CR-108
+// F1): the lists, the web's (GET /event/getEvents) and the calendar's own,
+// say what one event's reads say, with one read of the aways for a whole
+// list. The mark tells when someone is away, so it follows the calendar's one
+// busy rule: a workspace that keeps busy times private shows each reader
+// their own mark alone.
+func TestEveryReadOfAnswersMarksAnOutOfOfficeDeclineAlike(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	prev := freeBusyPolicy
+	t.Cleanup(func() { freeBusyPolicy = prev })
+	shared := true
+	freeBusyPolicy = func(context.Context) bool { return shared }
+	sam, maya, lee := h.member("Sam"), h.member("Maya"), h.member("Lee")
+	name := map[string]string{sam.UserDgraphInfo.Uuid: "Sam", maya.UserDgraphInfo.Uuid: "Maya", lee.UserDgraphInfo.Uuid: "Lee"}
+	h.away(maya, oooAt(20, 0), oooAt(23, 0), "new", "Away until Friday, ask Lee.")
+	// Lee is away then too, with a rule that declines nothing: Lee's decline
+	// is Lee's own, never marked (CR-110 F4).
+	h.away(lee, oooAt(20, 0), oooAt(23, 0), "none", "")
+	kickoff := h.oooMeeting(sam, "Kickoff", oooAt(19, 10), maya, lee)
+	launch := h.oooMeeting(sam, "Launch sync", oooAt(21, 10), maya, lee)
+	retro := h.oooMeeting(sam, "Retro", oooAt(24, 10), maya, lee)
+	// Maya's rule declines the sync; Lee declines it by hand, and the kickoff
+	// before any away (so a list's first decline isn't the marked one), and
+	// Maya the retro, after her away.
+	for _, id := range []string{launch.ID, kickoff.ID} {
+		if _, err := h.s.Answer(ctx, lee, id, AnswerInput{Answer: Declined}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.s.Answer(ctx, maya, retro.ID, AnswerInput{Answer: Declined}); err != nil {
+		t.Fatal(err)
+	}
+
+	// marked is each read's marks for reader, as "title: name".
+	marked := func(reader *model.UserInfo) map[string][]string {
+		t.Helper()
+		out := map[string][]string{}
+		add := func(read, title, person string, away bool) {
+			if away {
+				out[read] = append(out[read], title+": "+name[person])
+			}
+		}
+		for _, id := range []string{kickoff.ID, launch.ID, retro.ID} {
+			one, err := h.s.Get(ctx, reader, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, g := range one.Attendees {
+				add("event", one.Title, g.UUID, g.OutOfOffice)
+			}
+			web, err := h.s.legacyGet(ctx, reader, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, g := range web.Guests {
+				add("web event", web.Title, g.UserUUID, g.OutOfOffice)
+			}
+		}
+		h.store.resetReads()
+		list, _, err := h.s.Range(ctx, reader, oooAt(19, 0), oooAt(26, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range list {
+			for _, g := range e.Attendees {
+				add("list", e.Title, g.UUID, g.OutOfOffice)
+			}
+		}
+		web, err := h.s.legacyRange(ctx, reader, oooAt(19, 0), oooAt(26, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range web {
+			for _, g := range e.Guests {
+				add("web list", e.Title, g.UserUUID, g.OutOfOffice)
+			}
+		}
+		if n := h.store.readsOf("awayOf"); n > 2 {
+			t.Errorf("%s's two lists read the aways %d times, want once each at most", name[reader.UserDgraphInfo.Uuid], n)
+		}
+		return out
+	}
+	expect := func(reader *model.UserInfo, want ...string) {
+		t.Helper()
+		got := marked(reader)
+		for _, read := range []string{"event", "web event", "list", "web list"} {
+			if !slices.Equal(got[read], want) {
+				t.Errorf("shared %v, %s's %s read marks %q, want %q", shared, name[reader.UserDgraphInfo.Uuid], read, got[read], want)
+			}
+		}
+	}
+	for _, reader := range []*model.UserInfo{sam, maya, lee} {
+		expect(reader, "Launch sync: Maya")
+	}
+	shared = false
+	expect(sam)
+	expect(lee)
+	expect(maya, "Launch sync: Maya")
+	// Shared again, a reader who is no member now (a guest-role account, or
+	// deactivated) still sees their own mark alone (CR-110 F3).
+	shared = true
+	h.store.notMembers[uuid.MustParse(lee.UserDgraphInfo.Uuid)] = true
+	h.store.notMembers[uuid.MustParse(maya.UserDgraphInfo.Uuid)] = true
+	expect(lee)
+	expect(maya, "Launch sync: Maya")
+}
+
+// A list's aways are read over all its declines' starts, however far apart:
+// that read is the server's own, so the 400-day cap on what a person may ask
+// for isn't its. The Trash holds events of any date (CR-110 F2).
+func TestDeclinesYearsApartAreEachMarked(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	sam, maya := h.member("Sam"), h.member("Maya")
+	h.away(maya, oooAt(20, 0), oooAt(23, 0), "new", "Away until Friday.")
+	h.away(maya, oooAt(520, 0), oooAt(523, 0), "new", "Away again.")
+	sync := h.oooMeeting(sam, "Launch sync", oooAt(21, 10), maya)
+	offsite := h.oooMeeting(sam, "Offsite", oooAt(521, 10), maya)
+	for _, e := range []*Event{sync, offsite} {
+		if err := h.s.Delete(ctx, sam, e.ID, "", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	trash, err := h.s.Trash(ctx, sam, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked := map[string]bool{}
+	for _, e := range trash {
+		for _, g := range e.Attendees {
+			if g.UUID == maya.UserDgraphInfo.Uuid {
+				marked[e.Title] = g.OutOfOffice
+			}
+		}
+	}
+	if len(marked) != 2 || !marked["Launch sync"] || !marked["Offsite"] {
+		t.Fatalf("the Trash marks Maya's declines %v, want both", marked)
 	}
 }

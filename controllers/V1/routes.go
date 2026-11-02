@@ -105,7 +105,7 @@ func init() {
 				Reach: reachesIn("project", param("project_uuid")), Handler: CreateTaskV1},
 			{Method: http.MethodPost, Path: "/tasks/{id}/status", Summary: "Change a task's status", Scope: apiTokenBusiness.ScopeTasksWrite, Write: true, Legacy: true, Reach: reaches("task"), Handler: UpdateTaskStatusV1},
 		},
-		Events: []string{"task.created", "task.assigned", "task.status_changed", "task.comment.created", "task.deleted", "task.restored"},
+		Events: []string{"task.created", "task.updated", "task.assigned", "task.status_changed", "task.comment.created", "task.deleted", "task.restored"},
 	})
 	v1api.Register(v1api.Resource{
 		Name: "projects", Owner: "projects",

@@ -3,6 +3,7 @@ package controllers
 import (
 	"net/http"
 
+	milestoneBusiness "github.com/akashc777/OneCamp/business/Milestone"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
@@ -11,13 +12,14 @@ import (
 )
 
 // RestoreMilestone brings a deleted milestone back to every project it showed
-// in, with its tasks (POST /restore/milestone/{id}, controllers/Restore): its
-// home project's admins, as its delete.
+// in, with its tasks, while each has room for it (POST
+// /restore/milestone/{id}, controllers/Restore): its home project's admins,
+// as its delete.
 func RestoreMilestone(w http.ResponseWriter, r *http.Request, id uuid.UUID, owner softDelete.Owner) {
 	if _, _, ok := projectaccess.RequireID(w, r, owner.Project.String(), workAccess.NeedManage, adminsOnly); !ok {
 		return
 	}
-	if err := softDelete.RestoreAs(r.Context(), softDelete.Milestone, id, nil); err != nil {
+	if err := milestoneBusiness.Restore(r.Context(), id); err != nil {
 		write(w, r, "RestoreMilestone", err)
 		return
 	}

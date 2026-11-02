@@ -6,6 +6,7 @@ import (
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Project"
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
@@ -276,12 +277,15 @@ func RemoveMemberFromProject(ctx context.Context, userDgraphUID string, userDrga
 	projectID, perr := uuid.Parse(projectDgraphUUID)
 	who, uerr := uuid.Parse(userDrgaphUUID)
 	if perr == nil && uerr == nil {
-		if derr := deleteRow(ctx, projectID, who); derr != nil {
+		// The role row is kept, marked by whoever took them off (V-184).
+		by, _, _ := auditBusiness.ActorFromContext(ctx)
+		if derr := deleteRow(ctx, projectID, who, by); derr != nil {
 			helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromProject: their role row in %s stays for the sweep: %+v", projectDgraphUUID, derr)
 		}
 		// Leaving a project leaves its restricted tasks too (WA2). A grant
-		// left behind lets no one in: reading a task needs the project.
-		if gerr := restrictionModel.DropGrantsIn(ctx, []uuid.UUID{projectID}, who); gerr != nil {
+		// left behind lets no one in: reading a task needs the project. The
+		// grants are marked, by the same person (V-179).
+		if gerr := restrictionModel.DropGrantsIn(ctx, []uuid.UUID{projectID}, who, by); gerr != nil {
 			helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromProject: their grants in %s stay, and let them into nothing: %+v", projectDgraphUUID, gerr)
 		}
 	}

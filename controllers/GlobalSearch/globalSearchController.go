@@ -10,7 +10,6 @@ import (
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	business "github.com/akashc777/OneCamp/business/GlobalSearch"
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/go-chi/chi/v5"
 )
 
 func GetUnifiedGlobalSearch(w http.ResponseWriter, r *http.Request) {
@@ -27,7 +26,7 @@ func GetUnifiedGlobalSearch(w http.ResponseWriter, r *http.Request) {
 	var searchInfo adapter.GlobalSearchInfo
 
 	if r.Method == http.MethodGet {
-		searchInfo.SearchText = chi.URLParam(r, "search_text")
+		searchInfo.SearchText = helpers.PathText(r, "search_text")
 		searchInfo.After = r.URL.Query().Get("after")
 		searchInfo.Channel = r.URL.Query().Get("channel")
 		searchInfo.DM = r.URL.Query().Get("dm")

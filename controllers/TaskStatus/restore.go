@@ -18,7 +18,7 @@ func Restore(w http.ResponseWriter, r *http.Request, id uuid.UUID, owner softDel
 	if !ok {
 		return
 	}
-	s, err := business.Restore(r.Context(), id)
+	s, err := business.Restore(r.Context(), projectID, id)
 	if errors.Is(err, business.ErrUnfinished) {
 		// It is live again, so open views show it; the next restore (the
 		// Undo's retry) finishes the rest.

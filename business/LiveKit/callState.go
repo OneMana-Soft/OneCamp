@@ -41,6 +41,11 @@ var (
 	// ErrTranscriptNotKept: the call is transcribed for captions only, because
 	// it has no conversation to keep a transcript in (an instant meeting).
 	ErrTranscriptNotKept = errors.New("this call keeps no transcript")
+	// ErrNothingRecording: a stop found nothing recording the call (someone
+	// stopped it already, or it ended with its room). The asker's view is
+	// behind, not the call server failing, and every route that stops a
+	// recording answers it the same way (controllers/httpx WriteNothingRecording).
+	ErrNothingRecording = livekitInit.ErrNoActiveRecording
 	// ErrNotBrowserMode: a browser posted words while the workspace transcribes
 	// on the server, or the server's transcriber posted while it is the
 	// browsers' job. Either would file every line twice.
@@ -107,13 +112,33 @@ func OnCallOwnRoom(fn func(room string) string) {
 	callOwnRoom = fn
 }
 
+// callEvent answers the calendar event whose call is going on in a room (its
+// uuid), "" for a conversation's call or a meeting that is no event's. Call
+// State says how (OnCallEvent: its HomeOf), as for callRooms; until it does,
+// no room is an event's call.
+var callEvent = func(_ context.Context, _ string) (string, error) { return "", nil }
+
+// OnCallEvent tells this package how to find the event whose call a room's
+// call is.
+func OnCallEvent(fn func(ctx context.Context, room string) (string, error)) {
+	callEvent = fn
+}
+
 // keepsTranscript reports whether a call in this room has somewhere to keep a
-// transcript: a channel, a DM or a group. An instant meeting has none until
-// meetings get a home of their own, so it is transcribed for captions only.
-// Pure.
-func keepsTranscript(roomName string) bool {
+// transcript: a channel, a DM, a group, or the calendar event whose call it
+// is (meet-02). An instant meeting has none, so it is transcribed for
+// captions only, and so is a call whose event can't be read just now.
+func keepsTranscript(ctx context.Context, roomName string) bool {
 	channelUUID, chatGroupID := helpers.ClassifyRoom(roomName)
-	return channelUUID != "" || chatGroupID != ""
+	if channelUUID != "" || chatGroupID != "" {
+		return true
+	}
+	event, err := callEvent(ctx, roomName)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/keepsTranscript could not read the event of the call in %s: %+v", roomName, err)
+		return false
+	}
+	return event != ""
 }
 
 func loadCallState(ctx context.Context, roomName string) (callState, error) {
@@ -208,7 +233,7 @@ func SetTranscription(ctx context.Context, roomName, identity, byName string, on
 		ByID:  identity,
 		Since: time.Now().UnixMilli(),
 		Where: transcriptionBusiness.Where(),
-		Kept:  keepsTranscript(rooms[0]),
+		Kept:  keepsTranscript(ctx, rooms[0]),
 	}
 	// Every room is flipped, even past one that fails, so a failure never
 	// leaves more of the call transcribing than it must; the caller retries.
@@ -261,7 +286,7 @@ func FollowCall(ctx context.Context, roomName string) error {
 		if !sw.On {
 			return nil
 		}
-		sw.Kept = roomName == rooms[0] && keepsTranscript(roomName)
+		sw.Kept = roomName == rooms[0] && keepsTranscript(ctx, roomName)
 		return switchRoom(ctx, roomName, &sw)
 	}
 	return nil

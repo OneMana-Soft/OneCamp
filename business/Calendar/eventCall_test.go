@@ -12,12 +12,16 @@ import (
 	"github.com/google/uuid"
 )
 
-// fakeCalls stands in for business/CallRoom's event calls: the calls made,
-// those still answering at their address, and those ended.
+// fakeCalls stands in for business/CallRoom's event calls: the calls made and
+// the events they were made for, those still answering at their address,
+// those ended, and how often a call's invitees were made to knock or let in
+// again.
 type fakeCalls struct {
-	made  int
-	live  map[string]*dgraphStruct.EventCall
-	ended []string
+	made    int
+	events  []uuid.UUID
+	live    map[string]*dgraphStruct.EventCall
+	ended   []string
+	lobbied int
 }
 
 func withFakeCalls(t *testing.T) *fakeCalls {
@@ -26,8 +30,9 @@ func withFakeCalls(t *testing.T) *fakeCalls {
 	was := eventCalls
 	t.Cleanup(func() { eventCalls = was })
 	OnEventCalls(EventCalls{
-		Make: func(_ context.Context, _ uuid.UUID, title string) (*dgraphStruct.EventCall, error) {
+		Make: func(_ context.Context, event, _ uuid.UUID, title string) (*dgraphStruct.EventCall, error) {
 			f.made++
+			f.events = append(f.events, event)
 			room := "meet-" + uuid.NewString()
 			c := &dgraphStruct.EventCall{Room: room, Slug: "call-" + room[5:13], Address: "/r/call-" + room[5:13]}
 			f.live[room] = c
@@ -46,6 +51,14 @@ func withFakeCalls(t *testing.T) *fakeCalls {
 				}
 			}
 			return out, nil
+		},
+		Lobby: func(_ context.Context, room string, inviteesWait bool) (bool, error) {
+			f.lobbied++
+			c := f.live[room]
+			if c != nil {
+				c.InviteesWait = inviteesWait
+			}
+			return c != nil, nil
 		},
 	})
 	return f
@@ -82,6 +95,9 @@ func TestAnEventsOwnCallIsItsOrganisersToGiveAndItsGuestsToJoin(t *testing.T) {
 	again, err := h.s.AddCall(ctx, jonas, ev.ID)
 	if err != nil || again.Room != call.Room || calls.made != 1 {
 		t.Fatalf("asking again made another call (%d made): %+v, %v", calls.made, again, err)
+	}
+	if len(calls.events) != 1 || calls.events[0].String() != ev.ID {
+		t.Fatalf("the call was made for %v, want the event %s, where what it makes lands", calls.events, ev.ID)
 	}
 
 	// Maya sees it where she sees the event, and still may not take it off.
@@ -125,6 +141,48 @@ func TestAnEventsOwnCallIsItsOrganisersToGiveAndItsGuestsToJoin(t *testing.T) {
 	}
 }
 
+// meet-02 (Meet's quick access off): whoever may change an event makes its
+// invitees knock at its call, and its guests read that where they read the
+// event. A guest who may not change it can't, and an event without a call
+// says it has none.
+func TestOnlyWhoMayChangeAnEventMakesItsInviteesKnock(t *testing.T) {
+	h := newHarness(t)
+	calls := withFakeCalls(t)
+	jonas, maya := h.member("Jonas"), h.member("Maya")
+	ctx := context.Background()
+	start, end := timed(time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC), 60, "Europe/London")
+	ev, err := h.s.Create(ctx, jonas, EventInput{Title: "Weekly sync", Start: start, End: end,
+		Attendees: []GuestInput{{UUID: maya.UserDgraphInfo.Uuid}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.s.SetCallLobby(ctx, jonas, ev.ID, true); !errors.Is(err, ErrNoEventCall) {
+		t.Fatalf("Jonas made the invitees of an event without a call knock: %v, want ErrNoEventCall", err)
+	}
+	if _, err := h.s.AddCall(ctx, jonas, ev.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Maya, a guest who may not change it, may not make its invitees knock.
+	if _, err := h.s.SetCallLobby(ctx, maya, ev.ID, true); !errors.Is(err, ErrOnlyCreatorChanges) {
+		t.Fatalf("Maya made Jonas's invitees knock: %v, want it refused", err)
+	}
+	if calls.lobbied != 0 {
+		t.Fatalf("a refused ask changed the call's lobby %d times", calls.lobbied)
+	}
+
+	call, err := h.s.SetCallLobby(ctx, jonas, ev.ID, true)
+	if err != nil || call == nil || !call.InviteesWait {
+		t.Fatalf("Jonas made his invitees knock: %+v, %v; want the call saying they knock", call, err)
+	}
+	if seen, err := h.s.legacyGet(ctx, maya, ev.ID); err != nil || seen.Call == nil || !seen.Call.InviteesWait {
+		t.Fatalf("Maya's read of the event: %+v, %v; want its call saying invitees knock", seen, err)
+	}
+	if call, err := h.s.SetCallLobby(ctx, jonas, ev.ID, false); err != nil || call == nil || call.InviteesWait {
+		t.Fatalf("Jonas let his invitees in again: %+v, %v", call, err)
+	}
+}
+
 // A call whose address stopped answering (an admin turned its link off) isn't
 // shown, and asking for one makes a new call and ends the dead one. Two asks
 // at once make one call: the one that loses ends its own and answers the
@@ -163,8 +221,8 @@ func TestAnEventsCallThatStoppedAnsweringIsReplacedAndARaceMakesOne(t *testing.T
 	winner := "meet-" + uuid.NewString()
 	calls.live[winner] = &dgraphStruct.EventCall{Room: winner, Slug: "won", Address: "/r/won"}
 	race := eventCalls.Make
-	eventCalls.Make = func(ctx context.Context, o uuid.UUID, title string) (*dgraphStruct.EventCall, error) {
-		c, err := race(ctx, o, title)
+	eventCalls.Make = func(ctx context.Context, e, o uuid.UUID, title string) (*dgraphStruct.EventCall, error) {
+		c, err := race(ctx, e, o, title)
 		h.store.mu.Lock()
 		h.store.events[id].CallRoom = winner
 		h.store.mu.Unlock()

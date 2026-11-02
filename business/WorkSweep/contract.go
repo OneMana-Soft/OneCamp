@@ -31,6 +31,9 @@ var (
 	AutoClose = nothing
 	// InsightsRollup rolls the day's work metrics up (B9).
 	InsightsRollup = nothing
+	// WorkChangesPrune drops the Work Change Log's changes older than it
+	// keeps (WCL-1, business/WorkFeed).
+	WorkChangesPrune = nothing
 )
 
 func nothing(context.Context) error { return nil }
@@ -46,6 +49,7 @@ var jobs = []struct {
 	{"projects.reminders", 15 * time.Minute, &Reminders},
 	{"projects.autoclose", time.Hour, &AutoClose},
 	{"projects.insights.rollup", time.Hour, &InsightsRollup},
+	{"projects.workchanges.prune", time.Hour, &WorkChangesPrune},
 }
 
 func init() {

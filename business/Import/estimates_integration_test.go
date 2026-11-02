@@ -54,7 +54,7 @@ func TestAProjectFromLinearKeepsItsTeamsScaleAndPoints(t *testing.T) {
 	maya := &userModels.UserInfo{UserPostgresInfo: userModels.User{Id: by}, UserDgraphInfo: dgraphStruct.DgraphUser{Uid: uids["maya"], Uuid: by.String()}}
 	write := func(name string, points *float64) uuid.UUID {
 		t.Helper()
-		id, _, err := writeTask(ctx, job, importTaskInput{
+		id, _, err := writeTask(ctx, job, nil, importTaskInput{
 			ProjectUUID: launch, Project: &dgraphStruct.DgraphProject{Uid: uids["p"], Uuid: launch.String(), Team: &dgraphStruct.DgraphTeam{Uid: uids["team"]}},
 			Creator: maya, Importer: maya, Name: name, Status: "todo", Priority: "medium", CreatedAt: time.Now().UTC(), EstimatePoints: points,
 		})

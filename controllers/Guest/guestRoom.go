@@ -29,7 +29,6 @@ import (
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
-	"github.com/go-chi/chi/v5"
 )
 
 // Asks per minute from one address, by what is asked of a room's address. A
@@ -82,7 +81,7 @@ func RoomAtAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	state, g, err := roomAt(ctx, chi.URLParam(r, "slug"), r.URL.Query().Get("k"))
+	state, g, err := roomAt(ctx, helpers.PathText(r, "slug"), r.URL.Query().Get("k"))
 	switch {
 	case err != nil:
 		guestReadFailed(w, r, "RoomAtAddress", err, "")
@@ -106,7 +105,7 @@ func UnlockRoom(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That couldn't be read."})
 		return
 	}
-	token, lasts, err := unlockRoom(r.Context(), chi.URLParam(r, "slug"), in.Passcode, helpers.ClientIP(r))
+	token, lasts, err := unlockRoom(r.Context(), helpers.PathText(r, "slug"), in.Passcode, helpers.ClientIP(r))
 	switch {
 	case err == nil:
 		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{"token": token, "expires_in": int(lasts.Seconds())}})
@@ -124,7 +123,7 @@ func UnlockRoom(w http.ResponseWriter, r *http.Request) {
 // answered when there is none: a room with a passcode its page hasn't
 // unlocked is 401 "locked", and every other refusal the uniform 404.
 func entered(w http.ResponseWriter, r *http.Request, where string) (guestBusiness.Door, bool) {
-	g, err := enterRoom(r.Context(), chi.URLParam(r, "slug"), r.URL.Query().Get("k"))
+	g, err := enterRoom(r.Context(), helpers.PathText(r, "slug"), r.URL.Query().Get("k"))
 	var door guestBusiness.Door
 	if err == nil {
 		door, err = guestBusiness.DoorOf(r.Context(), g)

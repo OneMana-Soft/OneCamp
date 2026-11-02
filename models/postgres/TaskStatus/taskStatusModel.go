@@ -151,23 +151,28 @@ func IDsByName(ctx context.Context, name string) ([]string, error) {
 	return out, rows.Err()
 }
 
-// Count returns how many custom statuses a project has.
+// Count returns how many custom statuses a project has. It reads in the
+// caller's transaction, if any (pgexec), as a Bound's count must.
 func Count(ctx context.Context, projectID uuid.UUID) (int, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var n int
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `SELECT COUNT(*) FROM task_statuses WHERE project_id = $1 AND `+softDelete.Live(""), projectID).Scan(&n)
-	return n, err
+	return pgexec.Scalar[int](ctx, `SELECT COUNT(*) FROM task_statuses WHERE project_id = $1 AND `+softDelete.Live(""), projectID)
 }
 
-// Create adds a status at the end of the project's order.
+// Bound is a project's most custom statuses, for its creates and its
+// statuses' restores alike: they count under one lock, so two at once can't
+// both take the last place. full is what a write past it answers.
+func Bound(project uuid.UUID, most int, full error) softDelete.Bound {
+	return softDelete.Bound{Lock: "task_statuses:" + project.String(), Most: most, Full: full,
+		Count: func(ctx context.Context) (int, error) { return Count(ctx, project) }}
+}
+
+// Create adds a status at the end of the project's order, in the caller's
+// transaction, if any.
 func Create(ctx context.Context, s *TaskStatus, createdBy uuid.UUID) (*TaskStatus, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	out, err := scan(postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+	out, _, err := pgexec.QueryOne(ctx, `
 		INSERT INTO task_statuses (id, project_id, name, category, color, position, created_by)
 		VALUES ($1, $2, $3, $4, $5, COALESCE((SELECT MAX(position) + 1 FROM task_statuses WHERE project_id = $2), 0), $6)
-		RETURNING `+columns, uuid.New(), s.ProjectID, s.Name, s.Category, s.Color, createdBy))
+		RETURNING `+columns, func(r pgexec.Row) (*TaskStatus, error) { return scan(r) },
+		uuid.New(), s.ProjectID, s.Name, s.Category, s.Color, createdBy)
 	if isUniqueViolation(err) {
 		return nil, ErrNameTaken
 	}
@@ -282,8 +287,11 @@ func Repointed(ctx context.Context, id uuid.UUID, refs []string) error {
 // deletes made, for its tasks' return. Their record stays until Restored
 // clears it once all are back, so a restore that failed partway is finished
 // by the next: a live status that still holds its moves answers them again.
-// softDelete.ErrTaken: a live status of the project has its name now.
-func Restore(ctx context.Context, id uuid.UUID) (*TaskStatus, Moves, error) {
+// A deleted one comes back within bounds (its project's most, Bound): past
+// it, nothing changes and the bound's Full answers; a live one finishing its
+// restore counts already. softDelete.ErrTaken: a live status of the project
+// has its name now.
+func Restore(ctx context.Context, id uuid.UUID, bounds ...softDelete.Bound) (*TaskStatus, Moves, error) {
 	var moved Moves
 	var s *TaskStatus
 	err := pgexec.InTx(ctx, func(ctx context.Context) error {
@@ -301,7 +309,7 @@ func Restore(ctx context.Context, id uuid.UUID) (*TaskStatus, Moves, error) {
 			return err
 		}
 		if deleted {
-			if _, err := softDelete.Restore(ctx, softDelete.Status, id); err != nil {
+			if _, err := softDelete.Restore(ctx, softDelete.Status, id, bounds...); err != nil {
 				return err
 			}
 		}

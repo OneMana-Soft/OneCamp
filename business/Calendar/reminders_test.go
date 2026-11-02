@@ -144,7 +144,11 @@ func TestRemindersAreTheirOwnOrTheDefault(t *testing.T) {
 		{"their own, but they said no", []int{30}, true, false, false, responseDeclined, nil},
 	}
 	for _, c := range cases {
-		if got := remindersIn(c.own, c.set, c.allDay, c.organiser, c.response); !slices.Equal(got, c.want) {
+		defaults := defaultTimedReminders
+		if c.allDay {
+			defaults = defaultAllDayReminders
+		}
+		if got := remindersIn(c.own, c.set, defaults, c.organiser, c.response); !slices.Equal(got, c.want) {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}
@@ -425,4 +429,61 @@ func TestTheListCarriesTheReadersReminders(t *testing.T) {
 			t.Errorf("%s: %+v %v", who.UserDgraphInfo.UserName, list, err)
 		}
 	}
+}
+
+// A working location only says where its owner works (head 5d): nothing
+// reminds them of it, not even the default a whole day takes, on any of a
+// series' days. Google never notifies one either. A reminder they set
+// themselves still stands.
+func TestAWorkingLocationRemindsNobodyByDefault(t *testing.T) {
+	h, rem := reminding(t)
+	ctx := context.Background()
+	sam := h.member("Sam")
+	e, err := h.s.Create(ctx, sam, EventInput{Kind: EventWorkingLocation, Title: "Home", Start: When{Date: "2026-10-19"}, End: When{Date: "2026-10-20"}, Recurrence: &Recurrence{Rule: "FREQ=WEEKLY;BYDAY=MO"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.s.planReminders(ctx, uuid.MustParse(e.ID), nil); err != nil {
+		t.Fatal(err)
+	}
+	// A series that goes on may keep a wake to plan again at its edge; it reminds nobody.
+	if j, ok := rem.next(sam, e.ID, models.ReminderNext); ok && !j.p.Replan {
+		t.Errorf("Sam is reminded of where he works: %+v", j)
+	}
+	if got, err := h.s.Reminders(ctx, sam, e.ID); err != nil || !got.Default || len(got.Minutes) != 0 {
+		t.Errorf("Sam's: %+v %v", got, err)
+	}
+	// The list (every view, over one of its Mondays) and the card read the same (withReminders).
+	monday := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	reads := func(when string, want []int, byDefault bool) {
+		t.Helper()
+		minutes := func(p *[]int) any {
+			if p == nil {
+				return nil
+			}
+			return *p
+		}
+		list, err := h.s.legacyRange(ctx, sam, monday, monday.Add(24*time.Hour))
+		if err != nil || len(list) != 1 {
+			t.Fatalf("%s: the list over Monday 26 Oct has %d events: %v", when, len(list), err)
+		}
+		if got := list[0]; got.Reminders == nil || !slices.Equal(*got.Reminders, want) || got.RemindersDefault != byDefault {
+			t.Errorf("%s, the list: %v (default %v), want %v (default %v)", when, minutes(got.Reminders), got.RemindersDefault, want, byDefault)
+		}
+		card, err := h.s.legacyGet(ctx, sam, e.ID)
+		if err != nil || card == nil {
+			t.Fatalf("%s: the card: %v", when, err)
+		}
+		if card.Reminders == nil || !slices.Equal(*card.Reminders, want) || card.RemindersDefault != byDefault {
+			t.Errorf("%s, the card: %v (default %v), want %v (default %v)", when, minutes(card.Reminders), card.RemindersDefault, want, byDefault)
+		}
+	}
+	reads("by default", []int{}, true)
+	if got, err := h.s.SetReminders(ctx, sam, e.ID, []int{-540}); err != nil || got.Default || !slices.Equal(got.Minutes, []int{-540}) {
+		t.Fatalf("Sam's own: %+v %v", got, err)
+	}
+	if j, ok := rem.next(sam, e.ID, models.ReminderNext); !ok || j.p.Replan {
+		t.Error("Sam set his own, at 09:00 on the day, and it doesn't remind him")
+	}
+	reads("his own", []int{-540}, false)
 }

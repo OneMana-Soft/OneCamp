@@ -317,7 +317,7 @@ func TestCustomStatuses(t *testing.T) {
 			[]string{"task_custom_status", "task_custom_status_name"}); err != nil {
 			t.Fatal(err)
 		}
-		s, err := Restore(ctx, qa.ID)
+		s, err := Restore(ctx, project, qa.ID)
 		if err != nil || s == nil || s.Name != "Quality check" {
 			t.Fatalf("restore: %+v %v", s, err)
 		}
@@ -330,7 +330,7 @@ func TestCustomStatuses(t *testing.T) {
 		if _, err := Resolve(ctx, project.String(), qaID); err != nil {
 			t.Fatalf("the restored status resolves: %v", err)
 		}
-		if _, err := Restore(ctx, qa.ID); !errors.Is(err, ErrNotFound) {
+		if _, err := Restore(ctx, project, qa.ID); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("restoring twice: %v", err)
 		}
 		if err := Delete(ctx, project, qa.ID, "todo", admin); err != nil {
@@ -349,7 +349,7 @@ func TestCustomStatuses(t *testing.T) {
 		restatusTasksStillIn = func(context.Context, []string, string, string, string, string, string) ([]string, error) {
 			return nil, errors.New("the graph is away")
 		}
-		_, err := Restore(ctx, qa.ID)
+		_, err := Restore(ctx, project, qa.ID)
 		restatusTasksStillIn = move
 		if !errors.Is(err, ErrUnfinished) {
 			t.Fatalf("a restore whose tasks could not move back says it didn't finish: %v", err)
@@ -357,14 +357,14 @@ func TestCustomStatuses(t *testing.T) {
 		if got := readTask(t, a); got.Custom == qaID {
 			t.Fatalf("a is back in QA though its move failed: %+v", got)
 		}
-		s, err := Restore(ctx, qa.ID)
+		s, err := Restore(ctx, project, qa.ID)
 		if err != nil || s == nil || s.Name != "Quality check" {
 			t.Fatalf("the next restore finishes it: %+v %v", s, err)
 		}
 		if got := readTask(t, a); got != (taskRow{Status: "done", Custom: qaID, CustomName: "Quality check"}) {
 			t.Fatalf("a is back in QA: %+v", got)
 		}
-		if _, err := Restore(ctx, qa.ID); !errors.Is(err, ErrNotFound) {
+		if _, err := Restore(ctx, project, qa.ID); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("once it is whole, restoring again: %v", err)
 		}
 	})
@@ -386,7 +386,7 @@ func TestCustomStatuses(t *testing.T) {
 			rule = r.New
 			return []string{"rule"}, nil
 		})
-		if _, err := Restore(ctx, qa.ID); err != nil {
+		if _, err := Restore(ctx, project, qa.ID); err != nil {
 			t.Fatal(err)
 		}
 		if err := Delete(ctx, project, qa.ID, "todo", admin); err != nil {
@@ -399,7 +399,7 @@ func TestCustomStatuses(t *testing.T) {
 		restatusTasksStillIn = func(context.Context, []string, string, string, string, string, string) ([]string, error) {
 			return nil, errors.New("the graph is away")
 		}
-		_, err := Restore(ctx, qa.ID)
+		_, err := Restore(ctx, project, qa.ID)
 		restatusTasksStillIn = move
 		if !errors.Is(err, ErrUnfinished) {
 			t.Fatalf("a restore whose tasks could not move back says it didn't finish: %v", err)
@@ -416,7 +416,7 @@ func TestCustomStatuses(t *testing.T) {
 		if got := readTask(t, b); got != (taskRow{Status: "inProgress"}) {
 			t.Fatalf("the second delete: b %+v", got)
 		}
-		s, err := Restore(ctx, qa.ID)
+		s, err := Restore(ctx, project, qa.ID)
 		if err != nil || s == nil || s.Name != name {
 			t.Fatalf("restore: %+v %v", s, err)
 		}
@@ -430,7 +430,7 @@ func TestCustomStatuses(t *testing.T) {
 		if rule != qaID {
 			t.Errorf("the rule the first delete pointed elsewhere points at QA again: %q", rule)
 		}
-		if _, err := Restore(ctx, qa.ID); !errors.Is(err, ErrNotFound) {
+		if _, err := Restore(ctx, project, qa.ID); !errors.Is(err, ErrNotFound) {
 			t.Errorf("once it is whole, restoring again: %v", err)
 		}
 	})

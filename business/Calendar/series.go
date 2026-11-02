@@ -424,7 +424,7 @@ func changesOf(was, next *models.Event) []string {
 			out = append(out, f.name)
 		}
 	}
-	if !sameWhen(was, next) || (!next.AllDay() && was.TZ != next.TZ) {
+	if !sameWhen(was, next) || (!next.AllDay() && !helpers.SameZone(was.TZ, next.TZ)) {
 		out = append(out, "time")
 	}
 	return out
@@ -538,7 +538,7 @@ func carry(ovs []*models.Event, next *models.Event, oldStart time.Time, oldLoc *
 			continue
 		}
 		rid := *o.RecurrenceID
-		if !oldStart.Equal(newStart) || oldLoc.String() != newLoc.String() {
+		if !oldStart.Equal(newStart) || !helpers.SameZone(oldLoc.String(), newLoc.String()) {
 			rid = rekey(rid, oldStart, oldLoc, newStart, newLoc)
 		}
 		if !isInstance(next, rid) {

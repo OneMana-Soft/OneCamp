@@ -146,6 +146,28 @@ func GetLiveBoardUUIDPage(ctx context.Context, offset, first int) ([]string, err
 	return ids, err
 }
 
+// GetBoardsForText reads, in one query, what writing several boards' text
+// needs: each one's state (inline, or the key of the object that holds it)
+// and its sharing, as GetBoardPermissions reads it. Ids that aren't uuids are
+// left out.
+func GetBoardsForText(ctx context.Context, boardUUIDs []string) ([]*dgraphStruct.DgraphBoard, error) {
+	list := dgraphquery.UUIDList(boardUUIDs)
+	if list == "" {
+		return nil, nil
+	}
+	boards, err := dgexec.List[*dgraphStruct.DgraphBoard](ctx, `{
+		boards(func: eq(board_uuid, [`+list+`])) {
+			board_state
+			board_state_key
+			`+boardSharingBlock+`
+		}
+	}`, nil, "boards")
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetBoardsForText err: %+v", err)
+	}
+	return boards, err
+}
+
 // GetSystemBoardByUUID returns the board state for the collaboration service
 // (no user context; internal-service authenticated upstream).
 func GetSystemBoardByUUID(ctx context.Context, boardUUID string) (dgraphBoard *dgraphStruct.DgraphBoard, err error) {
@@ -186,16 +208,12 @@ func UpdateBoardPermissions(ctx context.Context, input *adapter.InputUpdateBoard
 	return dgraphModels.UpdateBoardPermissions(ctx, input)
 }
 
-// GetBoardPermissions returns the board with its editing/reading/commenting
-// users and owner, for the sharing UI.
-func GetBoardPermissions(ctx context.Context, boardUUID string) (dgraphBoard *dgraphStruct.DgraphBoard, err error) {
-	variables := make(map[string]string)
-	variables["$id"] = boardUUID
-
-	query := `query BoardPermissions($id: string){
-				boardInfo(func: eq(board_uuid, $id)) {
-					uid
+// boardSharingBlock is what GetBoardPermissions reads of a board: its title,
+// deletion time and privacy, its owner and the people it is shared with.
+const boardSharingBlock = `uid
 					board_uuid
+					board_title
+					board_deleted_at
 					board_private
 					board_editing_users {
 						uid
@@ -220,7 +238,17 @@ func GetBoardPermissions(ctx context.Context, boardUUID string) (dgraphBoard *dg
 						user_uuid
 						user_name
 						user_profile_object_key
-					}
+					}`
+
+// GetBoardPermissions returns the board with its editing/reading/commenting
+// users and owner, for the sharing UI.
+func GetBoardPermissions(ctx context.Context, boardUUID string) (dgraphBoard *dgraphStruct.DgraphBoard, err error) {
+	variables := make(map[string]string)
+	variables["$id"] = boardUUID
+
+	query := `query BoardPermissions($id: string){
+				boardInfo(func: eq(board_uuid, $id)) {
+					` + boardSharingBlock + `
 				}
 			}`
 

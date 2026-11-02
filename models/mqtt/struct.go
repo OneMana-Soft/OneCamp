@@ -398,6 +398,15 @@ type MqttTaskChanged struct {
 	// none (business/Mqtt publishToProject). Each view reads its own tasks
 	// again.
 	Reread bool `json:"reread,omitempty"`
+	// Sequence, Kind, Diff and By are a Work Change Log entry
+	// (business/WorkFeed): its number in the log, its kind ("task.updated",
+	// ...), the fields' new values in the app's own answer names, and who
+	// made it. Never set with Reread: a change only a few may see names
+	// nothing.
+	Sequence int64           `json:"sequence,omitempty"`
+	Kind     string          `json:"kind,omitempty"`
+	Diff     json.RawMessage `json:"diff,omitempty"`
+	By       string          `json:"by,omitempty"`
 }
 
 // MqttProjectStatuses says which project's statuses changed: the app reads

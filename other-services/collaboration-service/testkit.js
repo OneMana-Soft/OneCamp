@@ -196,7 +196,9 @@ export class FakeBackend {
             if (level === 'none') throw httpError(403, 'refused')
             const until = this.until.get(sub)
             const name = path.endsWith('/guestAuthorize') ? undefined : this.names.get(sub)
-            return { status: 200, data: { canEdit: level === 'edit' || level === 'full', ...(until ? { until } : {}), ...(name ? { name } : {}) } }
+            // 'unsaid': an answer that leaves canEdit out (V-230: the relay reads that as read-only).
+            const can = level === 'unsaid' ? {} : { canEdit: level === 'edit' || level === 'full' }
+            return { status: 200, data: { ...can, ...(until ? { until } : {}), ...(name ? { name } : {}) } }
         }
         if (path === '/docColab/updateDoc' || path === '/boardColab/updateBoard') this.saveAttempts++
         if (path === '/docColab/updateDoc') {

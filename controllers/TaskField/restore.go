@@ -19,7 +19,7 @@ func RestoreField(w http.ResponseWriter, r *http.Request, id uuid.UUID, owner so
 	if _, _, ok := projectaccess.RequireID(w, r, owner.Project.String(), workAccess.NeedManage, adminOnly); !ok {
 		return
 	}
-	if err := business.Restore(r.Context(), id); err != nil {
+	if err := business.Restore(r.Context(), owner.Project, id); err != nil {
 		if errors.Is(err, business.ErrNameTaken) {
 			// Its own words: create's give no way back.
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "This project already has a field with that name. Rename that one, then restore this field."})

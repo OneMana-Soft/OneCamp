@@ -251,6 +251,9 @@ type Action struct {
 	Board string `json:"board,omitempty"`
 	// Draw is for board_draw: who draws, everyone or the presenter.
 	Draw string `json:"draw,omitempty"`
+	// Slide is for board_slide: the frame of the board on the stage everyone
+	// is shown, its element id, "" for the whole board.
+	Slide string `json:"slide,omitempty"`
 	// A call's breakout rooms (breakouts.go): their names, in order
 	// (breakouts_set); one room, from 1 (breakouts_assign, breakout_choose);
 	// how long until they close by themselves (breakouts_open, 0: until

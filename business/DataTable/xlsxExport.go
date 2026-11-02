@@ -93,16 +93,7 @@ func PrepareExport(ctx context.Context, table uuid.UUID, actor Actor, in ExportI
 	if (in.Spec != nil && in.Rows != nil) || len(in.Rows) > maxExportRowIDs {
 		return nil, errExportRows
 	}
-	var next rowWindows
-	if in.Rows != nil {
-		next = rowsNamed(t.Id, actor, in.Rows)
-	} else {
-		spec := query.Spec{}
-		if in.Spec != nil {
-			spec = *in.Spec
-		}
-		next = rowsFound(t.Id, actor, spec)
-	}
+	next := viewRows(t.Id, actor, in.Spec, in.Rows)
 	e := &TableExport{Name: t.Name, fields: fields, zone: zoneFrom(ctx), next: next}
 	if e.rows, e.more, err = next(ctx); err != nil {
 		// The rows' read checks again (RowsByID): access lost since is as above.
@@ -145,6 +136,21 @@ func fieldsNamed(all []*model.Field, ids []uuid.UUID) ([]*model.Field, error) {
 		out = append(out, f)
 	}
 	return out, nil
+}
+
+// viewRows are a view's rows as an export and a step over them take them:
+// those ids name, in their order, when it names them (rules only the browser
+// works out), else those spec finds, in its order (none for every row in the
+// table's order).
+func viewRows(table uuid.UUID, actor Actor, spec *query.Spec, ids []uuid.UUID) rowWindows {
+	if ids != nil {
+		return rowsNamed(table, actor, ids)
+	}
+	s := query.Spec{}
+	if spec != nil {
+		s = *spec
+	}
+	return rowsFound(table, actor, s)
 }
 
 // rowsFound are spec's rows in its order, a window at a time, as Row Query
@@ -300,10 +306,8 @@ func (e *TableExport) cell(f *model.Field, v any) contentIOBusiness.Cell {
 // as text, a duration's seconds as a length of time, and a percent or an
 // amount of money as one.
 func (e *TableExport) number(f *model.Field, n float64) contentIOBusiness.Cell {
-	if f.Type == model.FieldAutonumber {
-		if p := fieldTypes.IDPrefix(f); p != "" {
-			return contentIOBusiness.Cell{Text: fmt.Sprintf("%s-%d", p, int64(n))}
-		}
+	if s, ok := autonumberText(f, n); ok {
+		return contentIOBusiness.Cell{Text: s}
 	}
 	format := formatOf(f)
 	if f.Type == model.FieldDuration || format.Duration != "" {
@@ -334,6 +338,20 @@ func (e *TableExport) moment(s string) (contentIOBusiness.Cell, bool) {
 // writes it: each item's name in turn, and the items the reader can't open,
 // or that come without a name, as one phrase, never by their ids.
 func listText(items []any) string {
+	names, hidden := listNames(items)
+	switch {
+	case hidden == 1:
+		names = append(names, "Something you can't open")
+	case hidden > 1:
+		names = append(names, helpers.Thousands(int64(hidden))+" things you can't open")
+	}
+	return strings.Join(names, ", ")
+}
+
+// listNames are a list cell's names, or a link's alone, as a person reads
+// them, and how many of its items the reader can't open or come without a
+// name (the export says those as one phrase; a find never matches them).
+func listNames(items []any) ([]string, int) {
 	var names []string
 	hidden := 0
 	for _, it := range items {
@@ -349,11 +367,18 @@ func listText(items []any) string {
 		}
 		names = append(names, fieldTypes.Labels(it)...)
 	}
-	switch {
-	case hidden == 1:
-		names = append(names, "Something you can't open")
-	case hidden > 1:
-		names = append(names, helpers.Thousands(int64(hidden))+" things you can't open")
+	return names, hidden
+}
+
+// autonumberText is an id with its prefix ("INV-12"), as a person reads it;
+// false for any other number, or an id without a prefix.
+func autonumberText(f *model.Field, n float64) (string, bool) {
+	if f.Type != model.FieldAutonumber {
+		return "", false
 	}
-	return strings.Join(names, ", ")
+	p := fieldTypes.IDPrefix(f)
+	if p == "" {
+		return "", false
+	}
+	return fmt.Sprintf("%s-%d", p, int64(n)), true
 }

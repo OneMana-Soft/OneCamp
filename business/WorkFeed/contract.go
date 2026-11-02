@@ -6,9 +6,16 @@
 // catches up from it, and live updates, webhooks, search and history read it
 // rather than being told separately.
 //
-// DAY 0. No change is logged yet, so Since answers none and keeps the cursor
-// it was given, and Publish does nothing. Nothing calls either, so nothing
-// changes by their existing.
+// WCL-1 (feed.go): business/Task's one funnel records each task change after
+// it is stored (the graph holds tasks, so not yet in the same transaction:
+// that waits for tasks in Postgres, A4), Record numbers it in task_changes and
+// tells its project's open views, and Since reads the log back for whoever may
+// see it. The Task Writer becomes the only caller with WCL-4.
+//
+// Sinks (sinks.go, linear-39): what happens because of a change registers
+// for its kinds, and each entry a sink wants is an Outbox event written in
+// the entry's own transaction. Webhooks are the first: task.updated, with the
+// fields a change changed (business/Task taskUpdated.go).
 package business
 
 import (
@@ -34,6 +41,13 @@ type Entry struct {
 	Source       string          `json:"source,omitempty"`
 	At           time.Time       `json:"at"`
 	Tombstone    bool            `json:"tombstone,omitempty"`
+	// Kind is what happened ("task.created", "task.updated", "task.deleted",
+	// "task.restored"); ProjectUUID is the project whose views show it.
+	Kind        string `json:"kind,omitempty"`
+	ProjectUUID string `json:"project_uuid,omitempty"`
+	// Restricted is the log's own mark that only a few may see the task
+	// (WA2), read with its batch; never answered.
+	Restricted bool `json:"-"`
 }
 
 // Feed reads the log for one reader and takes new entries.
@@ -46,13 +60,4 @@ type Feed interface {
 }
 
 // Changes is the feed everything reads.
-var Changes Feed = noChanges{}
-
-// noChanges is today: nothing is logged.
-type noChanges struct{}
-
-func (noChanges) Since(_ context.Context, _ accessBusiness.Subject, cursor Cursor, _ int) ([]Entry, Cursor, error) {
-	return nil, cursor, nil
-}
-
-func (noChanges) Publish(context.Context, []Entry) {}
+var Changes Feed = Log

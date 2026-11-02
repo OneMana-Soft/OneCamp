@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,8 +18,10 @@ import (
 // A board on a call's stage (calls package B), lower parts first: a guest
 // never presents (a board is the workspace's), sharing held holds a board too,
 // a second presenter waits unless they run the call, and only the presenter
-// and the people running the call stop it or choose who draws. In a DM's or a
-// group's call, which nobody runs, anyone from the workspace in it stops it.
+// and the people running the call stop it, move its slides or choose who
+// draws. In a DM's or a group's call, which nobody runs, anyone from the
+// workspace in it stops it and moves its slides. A slide is a frame's id, or
+// "" for the whole board, and who may move comes before what they asked.
 func TestABoardOnTheStageIsForWhoMayShare(t *testing.T) {
 	host := callStateBusiness.Person{Identity: "0x1", Name: "Maya", Role: model.RoleHost}
 	cohost := callStateBusiness.Person{Identity: "0x2", Name: "Jonas", Role: model.RoleCohost}
@@ -69,6 +72,21 @@ func TestABoardOnTheStageIsForWhoMayShare(t *testing.T) {
 		{"a guest can't undo guests' drawing", channel(shown), guest, Action{Action: ActUndoGuests}, ErrNotAllowed},
 		{"the presenter undoes guests' drawing", channel(shown), member, Action{Action: ActUndoGuests}, nil},
 		{"a co-host undoes guests' drawing", channel(shown), cohost, Action{Action: ActUndoGuests}, nil},
+		{"no board, no slides", channel(nil), host, Action{Action: ActBoardSlide, Slide: "frame-2"}, ErrNoBoard},
+		{"a guest can't move the slides", channel(shown), guest, Action{Action: ActBoardSlide, Slide: "frame-2"}, ErrNotAllowed},
+		{"a guest can't move them in a group's call", group(shown), guest, Action{Action: ActBoardSlide, Slide: "frame-2"}, ErrNotAllowed},
+		{"an invitee can't move them in a group's call", group(shown), invitee, Action{Action: ActBoardSlide, Slide: "frame-2"}, ErrNotAllowed},
+		{"a participant can't move someone else's slides", channel(shown), other, Action{Action: ActBoardSlide, Slide: "frame-2"}, ErrNotAllowed},
+		{"who may move comes before what they asked", channel(shown), other, Action{Action: ActBoardSlide, Slide: "not a frame"}, ErrNotAllowed},
+		{"the presenter moves the slides", channel(shown), member, Action{Action: ActBoardSlide, Slide: "Xk3_9-aB"}, nil},
+		{"the presenter goes back to the whole board", channel(shown), member, Action{Action: ActBoardSlide}, nil},
+		{"a co-host moves the slides", channel(shown), cohost, Action{Action: ActBoardSlide, Slide: "frame-2"}, nil},
+		{"a host moves the slides", channel(shown), host, Action{Action: ActBoardSlide, Slide: "frame-2"}, nil},
+		{"anyone from the workspace moves them in a group's call", group(shown), other, Action{Action: ActBoardSlide, Slide: "frame-2"}, nil},
+		{"a slide is a frame's id, not words", channel(shown), member, Action{Action: ActBoardSlide, Slide: "frame 2"}, ErrNoSuchSlide},
+		{"a slide is a frame's id, not markup", channel(shown), member, Action{Action: ActBoardSlide, Slide: `f"}`}, ErrNoSuchSlide},
+		{"a slide's id is at most 64 characters", channel(shown), member, Action{Action: ActBoardSlide, Slide: strings.Repeat("a", 65)}, ErrNoSuchSlide},
+		{"64 characters is a slide", channel(shown), member, Action{Action: ActBoardSlide, Slide: strings.Repeat("a", 64)}, nil},
 		{"a host chooses who draws", channel(shown), host, Action{Action: ActBoardDraw, Draw: callStateBusiness.DrawPresenter}, nil},
 		{"drawing is for everyone or the presenter", channel(shown), host, Action{Action: ActBoardDraw, Draw: "guests"}, ErrNoSuchDraw},
 		{"no board, no switch", channel(nil), host, Action{Action: ActBoardGuests, On: true}, ErrNoBoard},
@@ -87,7 +105,7 @@ func TestABoardOnTheStageIsForWhoMayShare(t *testing.T) {
 // The board actions are Call Control's own: known, never through an API
 // token, and never for someone with no part in a call.
 func TestBoardActionsAreRefusedBeforeAnythingIsRead(t *testing.T) {
-	for _, a := range []string{ActPresentBoard, ActNewBoard, ActStopBoard, ActBoardDraw, ActBoardGuests, ActUndoGuests} {
+	for _, a := range []string{ActPresentBoard, ActNewBoard, ActStopBoard, ActBoardDraw, ActBoardGuests, ActUndoGuests, ActBoardSlide} {
 		if _, err := Act(context.Background(), nil, uuid.NewString(), Action{Action: a}); !errors.Is(err, ErrNotInCall) {
 			t.Errorf("%s with nobody: %v", a, err)
 		}

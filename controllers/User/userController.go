@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	recordingBusiness "github.com/akashc777/OneCamp/business/Recording"
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 
 	adapter "github.com/akashc777/OneCamp/adapter/User"
@@ -71,6 +70,10 @@ func GetLoggedInUserProfile(w http.ResponseWriter, r *http.Request) {
 	profile := userInfo.UserDgraphInfo
 	profile.Handle = business.HandleOnRead(ctx, &userInfo.UserPostgresInfo, &userInfo.UserDgraphInfo)
 	markDemoVisitor(&profile, userInfo.UserPostgresInfo.EmailID)
+	// Its projects are what My Tasks' filters offer, so archived ones stay
+	// out (V-161). The middleware's record keeps every project they're in,
+	// for access; this narrows the copy.
+	profile.Projects = projectBusiness.LiveOnly(ctx, profile.Projects)
 
 	// Their preferences ride with it (design #37), so the app starts with
 	// them; a read that fails leaves them out, and the app asks on its own.
@@ -1672,15 +1675,15 @@ func GetGrpChatRecordingURL(w http.ResponseWriter, r *http.Request) {
 		dgraphRecording = nil
 	} else if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetDmRecordingForPlay err: %+v", err)
-		helpers.WriteRetryLater(w, recordingUnavailable)
+		helpers.WriteRetryLater(w, httpx.RecordingUnavailable)
 		return
 	}
 	if code := chatRecordingAccess(dgraphRecording, grpIdString); code != 0 {
-		writeRecordingRefusal(w, code)
+		httpx.WriteRecordingRefusal(w, code)
 		return
 	}
 
-	writeRecordingURL(w, r, dgraphRecording)
+	httpx.WriteRecordingURL(w, r, dgraphRecording)
 }
 
 func GetChatRecordingURL(w http.ResponseWriter, r *http.Request) {
@@ -1724,15 +1727,15 @@ func GetChatRecordingURL(w http.ResponseWriter, r *http.Request) {
 		dgraphRecording = nil
 	} else if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetDmRecordingForPlay err: %+v", err)
-		helpers.WriteRetryLater(w, recordingUnavailable)
+		helpers.WriteRetryLater(w, httpx.RecordingUnavailable)
 		return
 	}
 	if code := chatRecordingAccess(dgraphRecording, grpId); code != 0 {
-		writeRecordingRefusal(w, code)
+		httpx.WriteRecordingRefusal(w, code)
 		return
 	}
 
-	writeRecordingURL(w, r, dgraphRecording)
+	httpx.WriteRecordingURL(w, r, dgraphRecording)
 }
 
 func GetChannelRecordingURL(w http.ResponseWriter, r *http.Request) {
@@ -1774,15 +1777,15 @@ func GetChannelRecordingURL(w http.ResponseWriter, r *http.Request) {
 		dgraphRecording = nil
 	} else if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetChannelRecordingForPlay err: %+v", err)
-		helpers.WriteRetryLater(w, recordingUnavailable)
+		helpers.WriteRetryLater(w, httpx.RecordingUnavailable)
 		return
 	}
 	if code := channelRecordingAccess(dgraphRecording, channelUUIDString); code != 0 {
-		writeRecordingRefusal(w, code)
+		httpx.WriteRecordingRefusal(w, code)
 		return
 	}
 
-	writeRecordingURL(w, r, dgraphRecording)
+	httpx.WriteRecordingURL(w, r, dgraphRecording)
 }
 
 // channelRecordingAccess is whether a recording opened by a channel's route
@@ -1809,52 +1812,6 @@ func chatRecordingAccess(rec *dgraphStruct.DgraphRecording, groupingID string) i
 		return http.StatusForbidden
 	}
 	return 0
-}
-
-// writeRecordingRefusal answers a recording that may not be played.
-func writeRecordingRefusal(w http.ResponseWriter, code int) {
-	msg := "Recording not found"
-	if code == http.StatusForbidden {
-		msg = "Not authorised"
-	}
-	helpers.WriteJSON(w, code, helpers.Envolope{"msg": msg})
-}
-
-// recordingUnavailable is what people see when a recording can't be read.
-const recordingUnavailable = "The recording couldn't be opened just now."
-
-// writeRecordingURL answers a recording's playback link, or why there is
-// none to play: still being saved, failed, empty (it captured nothing), or a
-// call's transcript with no recording. The link lives for the recording's length and
-// half an hour (business.RecordingURLTTL), and expires_at says when, so the
-// player fetches a new one before or after it runs out, keeping its place.
-func writeRecordingURL(w http.ResponseWriter, r *http.Request, rec *dgraphStruct.DgraphRecording) {
-	switch {
-	case rec.TranscriptOnly:
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "transcript_only"})
-		return
-	case rec.EndedAt == nil || !rec.EndedAt.After(time.Unix(0, 0)):
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "recording"})
-		return
-	case recordingBusiness.Failed(rec.Status), recordingBusiness.Empty(rec.Status):
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": rec.Status})
-		return
-	}
-
-	ttl := business.RecordingURLTTL(rec.Duration)
-	url, err := business.GetRecordingURLByObjectName(r.Context(), rec.ObjectKey, ttl)
-	if err != nil {
-		helpers.LogErrorWithContext(r.Context(), "controllers/writeRecordingURL Failed to get url err: %+v", err)
-		helpers.WriteRetryLater(w, recordingUnavailable)
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg":        "Got the url!",
-		"url":        url,
-		"expires_at": time.Now().Add(ttl).UnixMilli(),
-		"status":     "ready",
-	})
 }
 
 // GetChannelFile answers the address of a channel's file, for whoever may
@@ -2906,7 +2863,8 @@ func RemoveAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.HardDeleteAdminUserByEmailId(ctx, userDgraphInfo.EmailID, inputUserInfoRaw.UserUuid)
+	// The role's row is kept, marked by the admin who took it (V-184).
+	err = business.RevokeAdminUserByEmailId(ctx, userDgraphInfo.EmailID, userInfo.UserPostgresInfo.Id, inputUserInfoRaw.UserUuid)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/RemoveAdmin Failed to delete admin user err: %+v",
@@ -3439,7 +3397,11 @@ func ResendInvitation(w http.ResponseWriter, r *http.Request) {
 
 func DeleteInvitation(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	email := chi.URLParam(r, "email")
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
+	email := helpers.PathText(r, "email")
 	if email == "" {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg":    "email is required",
@@ -3448,7 +3410,9 @@ func DeleteInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := business.DeleteInvitationByEmail(ctx, email)
+	// The invitation's rows are kept, marked by the admin who withdrew it
+	// (V-184).
+	err := business.WithdrawInvitationsByEmail(ctx, email, userInfo.UserPostgresInfo.Id)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
 			"msg":    err.Error(),

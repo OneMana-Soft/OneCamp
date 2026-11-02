@@ -47,6 +47,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/router"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
@@ -73,6 +74,9 @@ const postsBeforeCopies = `{
 func TestTheGrammarSearchesTheIndex(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("CONVERSATION_ACCESS_SOURCE", "graph")
+	// The router's session check, for ⌘K's GET at the end.
+	t.Setenv("JWT_SECRET", "search-grammar-integration-secret")
+	t.Setenv("ALLOWED_USERS", "")
 	env := integration.SetupEnv(t)
 	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
 		t.Fatal(err)
@@ -169,6 +173,13 @@ func TestTheGrammarSearchesTheIndex(t *testing.T) {
 	exec(`INSERT INTO tasks (id, project_id, created_by) VALUES ($1, $2, $3)`, task, project, sam)
 	taskDomain.CreateTaskWithAttachmentsInOpensearch(&openSearchStruct.OpenSearchTask{Uuid: task.String(), TaskName: "Launch checklist", TaskStatus: "inProgress",
 		TaskProjectUuid: project.String(), TaskCreatedByUserUuid: sam.String(), TaskCreatedAt: at("2026-10-03T12:00:00Z"), TaskUpdatedAt: at("2026-10-03T12:00:00Z")}, nil, nil)
+	// A title with an "&", which ⌘K's GET sends as %26 (no "launch" in it: the
+	// searches above don't see it).
+	qa := uuid.New()
+	names[qa.String()] = "q&a"
+	exec(`INSERT INTO tasks (id, project_id, created_by) VALUES ($1, $2, $3)`, qa, project, sam)
+	taskDomain.CreateTaskWithAttachmentsInOpensearch(&openSearchStruct.OpenSearchTask{Uuid: qa.String(), TaskName: "Q&A rehearsal", TaskStatus: "todo",
+		TaskProjectUuid: project.String(), TaskCreatedByUserUuid: sam.String(), TaskCreatedAt: at("2026-10-06T12:00:00Z"), TaskUpdatedAt: at("2026-10-06T12:00:00Z")}, nil, nil)
 	channelDomain.CreateChannelInOpenSearch(&openSearchStruct.OpenSearchChannel{Uuid: launch.String(), ChannelName: "launch", ChannelCreatedAt: at("2026-09-01T12:00:00Z")})
 	projectDomain.CreateProjectInOpenSearch(&openSearchStruct.OpenSearchProject{Uuid: project.String(), ProjectName: "Q4 launch", ProjectTeamUuid: team.String(),
 		ProjectCreatedAt: at("2026-09-01T12:00:00Z")})
@@ -369,6 +380,60 @@ func TestTheGrammarSearchesTheIndex(t *testing.T) {
 		}
 		if got := named(search(asAna, "launch in:Ops")); strings.Contains(got, "project") || strings.Contains(got, "task") {
 			t.Errorf("%s: \"launch in:Ops\" as Ana, who isn't in Ops, names [%s]; want nothing of its project", route, got)
+		}
+	}
+
+	// ⌘K asks by GET, its words in the path as encodeURIComponent writes them
+	// (services/searchService.ts). chi matches on the raw path whenever its
+	// escaping differs from Go's (":" as %3A, "&" as %26) and hands the words
+	// back still escaped, so the grammar read "type%3Atask%20launch" as plain
+	// words: a scoped search found nothing, and "Q&A" was never found
+	// (CODE-REVIEWER-137, row 2161). Through the real router, as Sam signs in;
+	// "rehearsal" has nothing to escape, so chi hands it back as it is.
+	session, err := helpers.SignSessionToken(sam.String(), helpers.TokenTypeAccess, time.Now().Add(10*time.Minute).Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := router.Routes()
+	byPath := func(text string) string {
+		t.Helper()
+		// encodeURIComponent's escaping: QueryEscape's, with a space as %20.
+		req := httptest.NewRequest(http.MethodGet, "/search/unifiedSearch/"+strings.ReplaceAll(url.QueryEscape(text), "+", "%20"), nil)
+		req.AddCookie(&http.Cookie{Name: "Authorization", Value: session})
+		req.AddCookie(&http.Cookie{Name: "DeviceId", Value: "device-1"})
+		rec := httptest.NewRecorder()
+		routes.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %q: %d %s", text, rec.Code, rec.Body)
+		}
+		var answer struct {
+			Data struct {
+				Page []struct {
+					Type string `json:"type"`
+					Task *struct {
+						ID string `json:"task_id"`
+					} `json:"task"`
+				} `json:"page"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+			t.Fatalf("GET %q: %v in %s", text, err, rec.Body)
+		}
+		// Each hit by its name above; one that has none, by its type.
+		var out []string
+		for _, h := range answer.Data.Page {
+			name := h.Type
+			if h.Task != nil && names[h.Task.ID] != "" {
+				name = names[h.Task.ID]
+			}
+			out = append(out, name)
+		}
+		sort.Strings(out)
+		return strings.Join(out, " ")
+	}
+	for text, want := range map[string]string{"type:task launch": "task", "Q&A rehearsal": "q&a", "rehearsal": "q&a"} {
+		if got := byPath(text); got != want {
+			t.Errorf("GET /search/unifiedSearch/ %q lists [%s]; want [%s]", text, got, want)
 		}
 	}
 }

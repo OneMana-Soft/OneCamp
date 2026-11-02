@@ -404,10 +404,11 @@ export function createCollabServer({
                 if (response.status !== 200) {
                     throw new Error('Unauthorized')
                 }
-                // Server-enforced read-only: for boards the authorize endpoint
-                // returns canEdit. Viewers join the live session but Hocuspocus
-                // rejects their writes. Docs use edit-access auth upstream.
-                if (kind === 'board' && response.data && response.data.canEdit === false) {
+                // Server-enforced read-only, failing closed (V-230): for boards the
+                // authorize endpoint returns canEdit, and only canEdit: true writes;
+                // an answer without it joins read-only. Viewers join the live session
+                // but Hocuspocus rejects their writes. Docs use edit-access auth upstream.
+                if (kind === 'board' && response.data?.canEdit !== true) {
                     readOnly()
                     log.log(`[Collab] Board ${id} joined read-only for user ${decoded?.sub}`)
                 }

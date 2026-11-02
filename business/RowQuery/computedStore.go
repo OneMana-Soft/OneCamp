@@ -22,10 +22,12 @@ package business
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 	"time"
 
 	computedStore "github.com/akashc777/OneCamp/business/ComputedStore"
+	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	query "github.com/akashc777/OneCamp/business/QuerySpec"
 	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	tableAccess "github.com/akashc777/OneCamp/business/TableAccess"
@@ -304,8 +306,35 @@ func (k *keeping) done(ctx context.Context) error {
 		id := f.String()
 		fills = append(fills, model.ComputedFill{Field: f, Gen: gen, Kind: k.w.Kinds[id], Reaches: k.w.Reaches[id]})
 	}
-	_, err := model.MarkComputedFilled(ctx, fills, k.mark)
-	return err
+	filled, err := markComputedFilled(ctx, fills, k.mark)
+	if err != nil {
+		return err
+	}
+	announceFilled(k.table, filled)
+	return nil
+}
+
+// markComputedFilled records a fill's end, and publishTableRow says it on the
+// table's live topic (V-124): vars, so a unit test hears what a fill's end says.
+var (
+	markComputedFilled = model.MarkComputedFilled
+	publishTableRow    = mqttBusiness.PublishTableRow
+)
+
+// announceFilled says on the table's live topic which computed fields a fill
+// just marked filled (V-124): ONE message, ids only, through the fan-out every
+// table change uses, which business/MqttAccess opens to the table's readers
+// alone. A view the server held for the fill reads again at once, not at its
+// next wait (2 s doubling to 30 s, still the fallback). done runs outside the
+// fill's batch transactions, so the mark has committed when this says it. A
+// fill that marked nothing says nothing: the next fill says it.
+func announceFilled(table uuid.UUID, fields []uuid.UUID) {
+	if len(fields) == 0 {
+		return
+	}
+	ids := helpers.UUIDStrings(fields)
+	sort.Strings(ids)
+	publishTableRow(table.String(), map[string]interface{}{"action": "computed", "fields": ids})
 }
 
 // fillKept fills table's kept fields that aren't current (fields) again over

@@ -719,7 +719,7 @@ func ResetPassword(w http.ResponseWriter, r *http.Request) {
 func CheckAdminSetup(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	exists, err := domain.CheckIfAnyAdminExists(ctx)
+	done, err := domain.AdminSetupDone(ctx)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/CheckAdminSetup Failed to check admin err: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
@@ -735,30 +735,39 @@ func CheckAdminSetup(w http.ResponseWriter, r *http.Request) {
 	// anyone, and the admin's email is not theirs to have.
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status":   "success",
-		"required": !exists,
+		"required": !done,
 		"pinned":   settingsBusiness.InstallAdminEmail() != "",
 	})
+}
+
+// adminSetupClosed answers a first-admin setup that may not run: 400 once the
+// workspace has been given an admin (domain.AdminSetupDone: for good, whatever
+// becomes of the admin rows), 500 when that can't be read. It reports whether
+// it answered.
+func adminSetupClosed(ctx context.Context, w http.ResponseWriter) bool {
+	done, err := domain.AdminSetupDone(ctx)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
+			"msg":    "internal server error",
+			"status": "failed",
+		})
+		return true
+	}
+	if done {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+			"msg":    "admin already configured",
+			"status": "failed",
+		})
+		return true
+	}
+	return false
 }
 
 // AdminSetup handles POST /auth/admin-setup
 func AdminSetup(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Check if admin already exists
-	exists, err := domain.CheckIfAnyAdminExists(ctx)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-			"msg":    "internal server error",
-			"status": "failed",
-		})
-		return
-	}
-
-	if exists {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    "admin already configured",
-			"status": "failed",
-		})
+	if adminSetupClosed(ctx, w) {
 		return
 	}
 
@@ -823,6 +832,34 @@ func AdminSetup(w http.ResponseWriter, r *http.Request) {
 
 	if requestBody.Username == "" {
 		requestBody.Username = strings.Split(requestBody.Email, "@")[0]
+	}
+
+	// One setup at a time, and the check again under the lock: two requests
+	// racing past the one above must not both make an admin.
+	// domain.LockAdminSetup says why nothing needs undoing if this one fails.
+	release, held, err := domain.LockAdminSetup(ctx)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/AdminSetup Failed to take the setup lock err: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
+			"msg":    "internal server error",
+			"status": "failed",
+		})
+		return
+	}
+	if !held {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+			"msg":    "This workspace is being set up by another request. Reload the page in a moment.",
+			"status": "failed",
+		})
+		return
+	}
+	defer func() {
+		if err := release(); err != nil {
+			helpers.LogWarnWithContext(ctx, "controllers/AdminSetup could not give the setup lock back: %+v", err)
+		}
+	}()
+	if adminSetupClosed(ctx, w) {
+		return
 	}
 
 	// Hash password

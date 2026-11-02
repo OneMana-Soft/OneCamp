@@ -7,29 +7,41 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
+	bulkModel "github.com/akashc777/OneCamp/models/openSearch/Bulk"
 )
 
+// CreateBoardInOpenSearch writes a new board's whole entry, merged into one
+// its text already started (SetBoardTextsInOpenSearch): a create would fail
+// with a conflict there, and the board would stay in search with no title and
+// no access.
 func CreateBoardInOpenSearch(ctx context.Context, openSearchBoard *openSearchStruct.OpenSearchBoard) (err error) {
-	jsonData, err := json.Marshal(openSearchBoard)
+	jsonData, err := json.Marshal(openSearchStruct.BulkUpdate{Doc: openSearchBoard})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateBoardInOpenSearch marshal err: %+v", err)
 		return
 	}
-
-	_, err = opensearchInit.OpenSearchClient.Document.Create(
-		context.Background(),
-		opensearchapi.DocumentCreateReq{
-			Index:      openSearchStruct.BOARD_INDEX,
-			DocumentID: openSearchBoard.Uuid,
-			Body:       openSearchStruct.IndexReader(jsonData),
-		},
-	)
+	err = opensearchInit.UpsertDocument(context.Background(), openSearchStruct.BOARD_INDEX, openSearchBoard.Uuid, openSearchStruct.IndexReader(jsonData))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateBoardInOpenSearch create err: %+v", err)
-		return
 	}
 	return
+}
+
+// BoardText is what one board says, for SetBoardTextsInOpenSearch.
+type BoardText struct {
+	BoardUUID, Text string
+}
+
+// SetBoardTextsInOpenSearch writes what each board says onto its entry, in
+// one bulk request. An entry not written yet is started with the text alone,
+// which no search reaches (it grants no one) until the board's own write
+// fills it.
+func SetBoardTextsInOpenSearch(ctx context.Context, texts []BoardText) error {
+	docs := make([]bulkModel.Upsert, len(texts))
+	for i, t := range texts {
+		docs[i] = bulkModel.Upsert{ID: t.BoardUUID, Doc: map[string]any{"board_uuid": t.BoardUUID, "board_text": t.Text}}
+	}
+	return bulkModel.BulkUpsert(ctx, openSearchStruct.BOARD_INDEX, docs)
 }
 
 // UpdateBoardFieldsInOpenSearch applies a partial field update (used for title,

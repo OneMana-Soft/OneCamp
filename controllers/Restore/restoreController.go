@@ -12,6 +12,8 @@ import (
 	formController "github.com/akashc777/OneCamp/controllers/Form"
 	invoiceController "github.com/akashc777/OneCamp/controllers/Invoice"
 	milestoneController "github.com/akashc777/OneCamp/controllers/Milestone"
+	projectLinkController "github.com/akashc777/OneCamp/controllers/ProjectLink"
+	projectPlanController "github.com/akashc777/OneCamp/controllers/ProjectPlan"
 	taskFieldController "github.com/akashc777/OneCamp/controllers/TaskField"
 	taskStatusController "github.com/akashc777/OneCamp/controllers/TaskStatus"
 	timeEntryController "github.com/akashc777/OneCamp/controllers/TimeEntry"
@@ -26,13 +28,16 @@ import (
 type kind func(w http.ResponseWriter, r *http.Request, id uuid.UUID, owner softDelete.Owner)
 
 var kinds = map[softDelete.Kind]kind{
-	softDelete.Field:     taskFieldController.RestoreField,
-	softDelete.Status:    taskStatusController.Restore,
-	softDelete.Cycle:     cycleController.RestoreCycle,
-	softDelete.Milestone: milestoneController.RestoreMilestone,
-	softDelete.Form:      formController.RestoreForm,
-	softDelete.TimeEntry: timeEntryController.RestoreTime,
-	softDelete.Invoice:   invoiceController.RestoreInvoice,
+	softDelete.Field:         taskFieldController.RestoreField,
+	softDelete.Status:        taskStatusController.Restore,
+	softDelete.Cycle:         cycleController.RestoreCycle,
+	softDelete.Milestone:     milestoneController.RestoreMilestone,
+	softDelete.Form:          formController.RestoreForm,
+	softDelete.TimeEntry:     timeEntryController.RestoreTime,
+	softDelete.Invoice:       invoiceController.RestoreInvoice,
+	softDelete.Link:          projectLinkController.RestoreLink,
+	softDelete.ProjectStatus: projectPlanController.RestoreStatus,
+	softDelete.ProjectLabel:  projectPlanController.RestoreLabel,
 }
 
 // Restore is POST /restore/{kind}/{id}.

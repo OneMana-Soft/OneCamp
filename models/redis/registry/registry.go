@@ -823,6 +823,17 @@ var GuestNotifyOnce = withArity(Spec{
 	Description: "Per-target throttle for notifications of guests' words. At most one per five minutes per channel, thread or doc.",
 }, 2) // (what: channel|thread|doc, its uuid)
 
+// BoardTextDigest is the digest of what a board said when it was last written
+// to search and the AI (business/Board boardText.go), so a save that moved
+// things and changed no word writes nothing. Lost, the next save writes again.
+var BoardTextDigest = withArity(Spec{
+	Namespace:   "board:text-digest",
+	TTL:         7 * 24 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategoryCollab,
+	Description: "Per-board digest of the text last written to search and the AI; a save with the same text skips both writes.",
+}, 1) // (boardUUID)
+
 var ApiTokenTouch = withArity(Spec{
 	Namespace:   "apitoken:touch",
 	TTL:         1 * time.Minute,

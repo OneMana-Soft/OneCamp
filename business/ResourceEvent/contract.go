@@ -133,6 +133,7 @@ const (
 	// are until B10 moves their subscribers.
 	TableCreated      Kind = "table.created"
 	TableDeleted      Kind = "table.deleted" // to the trash
+	TablePurged       Kind = "table.purged"  // for good: from the trash, or past its retention
 	TableRestored     Kind = "table.restored"
 	TableRowsChanged  Kind = "table.rows.changed"
 	TableRowsDeleted  Kind = "table.rows.deleted" // to the table's trash

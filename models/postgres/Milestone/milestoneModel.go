@@ -137,6 +137,25 @@ func shownIn(ctx context.Context, project uuid.UUID) (int, error) {
 		WHERE mp.project_uuid = $1`, project)
 }
 
+// Bounds are the deleted milestone with id's restore's bounds: its own
+// project's most, and that of each project it is shared to. It comes back to
+// all of them, so it takes a place in each, counted under the lock each
+// project's creates and shares take (ErrFull past one).
+func Bounds(ctx context.Context, id uuid.UUID, most int) ([]softDelete.Bound, error) {
+	projects, err := pgexec.Query(ctx, `SELECT project_uuid FROM milestones WHERE id = $1
+		UNION SELECT project_uuid FROM milestone_projects WHERE milestone_id = $1`,
+		func(r pgexec.Row) (p uuid.UUID, err error) { err = r.Scan(&p); return p, err }, id)
+	if err != nil {
+		return nil, err
+	}
+	bounds := make([]softDelete.Bound, 0, len(projects))
+	for _, p := range projects {
+		bounds = append(bounds, softDelete.Bound{Lock: projectLock(p), Most: most, Full: ErrFull,
+			Count: func(ctx context.Context) (int, error) { return shownIn(ctx, p) }})
+	}
+	return bounds, nil
+}
+
 // show puts the milestone last in the project's order.
 func show(ctx context.Context, project, id uuid.UUID) error {
 	_, err := pgexec.Exec(ctx, `INSERT INTO milestone_projects (project_uuid, milestone_id, position)

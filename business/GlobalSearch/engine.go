@@ -362,6 +362,7 @@ func keepPage(ctx context.Context, reach Reach, hits []*openSearchStruct.GlobalS
 	before = hits
 	hits = keepReadableEventHits(ctx, reach.Who, hits)
 	repairDropped(repairEvent, before, hits, eventOfHit)
+	showNextInstances(ctx, hits)
 	projects := make([]*dgraphStruct.DgraphProject, 0, len(reach.Projects))
 	for _, p := range reach.Projects {
 		projects = append(projects, &dgraphStruct.DgraphProject{Uuid: p})
@@ -434,9 +435,10 @@ func sourceQuery(s source, reach Reach, p part) map[string]any {
 }
 
 // unreturned are the fields an entry is matched on and a hit never carries: a
-// doc's body, and an event's notes, the people it is theirs to see and its
-// guests' names (who is invited is the event's to show, as its guests may see).
-var unreturned = []string{"doc_body", "event_notes", "event_people", "event_guest_names"}
+// doc's body, a board's words (its highlight shows what matched), and an
+// event's notes, the people it is theirs to see and its guests' names (who is
+// invited is the event's to show, as its guests may see).
+var unreturned = []string{"doc_body", "board_text", "event_notes", "event_people", "event_guest_names"}
 
 // highlight marks what matched, as the search page shows it.
 var highlight = map[string]any{
@@ -448,6 +450,7 @@ var highlight = map[string]any{
 		"task_name": map[string]any{}, "task_desc": map[string]any{}, "project_name": map[string]any{},
 		"team_name": map[string]any{}, "ch_name": map[string]any{}, "user_name": map[string]any{},
 		"event_title": map[string]any{}, "event_notes": map[string]any{}, "event_location": map[string]any{},
+		"board_text": map[string]any{},
 	},
 }
 

@@ -297,6 +297,10 @@ func (s sources) mayRead(ctx context.Context, userUUID string, p Place) error {
 		// A form's picture is served only by its form's link (GET
 		// /public/form/{token}/cover and /logo), to anyone holding it.
 		return ErrRefused
+	case postgresStruct.ATTACHMENT_SRC_PROJECT_LINK:
+		// A project link's icon or picture is served only by its link
+		// (GET /project/{p}/links/{id}/{icon|image}, business/ProjectLink).
+		return ErrRefused
 	}
 	ask := map[string]func(ctx context.Context, userUUID, id string) (bool, error){
 		postgresStruct.ATTACHMENT_SRC_CHANNEL: s.readsChannel,
@@ -314,6 +318,10 @@ func (s sources) mayAdd(ctx context.Context, userUUID string, p Place) error {
 	switch p.Kind {
 	case postgresStruct.ATTACHMENT_SRC_PUBLIC:
 		return nil
+	case postgresStruct.ATTACHMENT_SRC_PROJECT_LINK:
+		// Only this server keeps a project link's pictures, read from the
+		// link's page (business/ProjectLink): no one uploads one.
+		return ErrRefused
 	case postgresStruct.ATTACHMENT_SRC_FORM:
 		// A picture for a form's cover or logo: anyone signed in may upload
 		// one, as a public file may be. It goes on a form only through that

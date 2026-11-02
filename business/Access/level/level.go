@@ -20,6 +20,15 @@ const (
 	Full
 )
 
+// What bringing a resource back from the trash or the archive, and deleting
+// it for good, take of the level someone had before it was deleted (Was).
+// Every kind with a trash asks these (accessBusiness.OpenDeleted), so a doc
+// and a table answer the same people.
+const (
+	RestoreNeeds = Edit
+	PurgeNeeds   = Full
+)
+
 // String is the level's name as the API and the web app spell it.
 func (l Level) String() string {
 	switch l {
