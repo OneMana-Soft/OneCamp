@@ -66,8 +66,9 @@ func TestARowIsDecidedByItsOwnTable(t *testing.T) {
 			secret: {Table: private}, open: {Table: shared}, binned: {Table: shared, Deleted: true}, orphan: {Table: uuid.New()},
 		},
 		tables: map[uuid.UUID]*model.DataTable{
-			private: {Id: private, CreatedBy: maker, Visibility: model.VisibilityPrivate},
-			shared:  {Id: shared, CreatedBy: maker, Visibility: model.VisibilityWorkspace},
+			// The database fills every table's general level; edit is today's.
+			private: {Id: private, CreatedBy: maker, Visibility: model.VisibilityPrivate, GeneralLevel: model.GeneralEdit},
+			shared:  {Id: shared, CreatedBy: maker, Visibility: model.VisibilityWorkspace, GeneralLevel: model.GeneralEdit},
 		},
 	}
 	w.install(t)

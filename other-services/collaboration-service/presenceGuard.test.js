@@ -7,19 +7,27 @@
 // tell every tab to drop its copy of the doc. Now the server decides:
 //   - who a tab is comes from its sign-in: a member's name as the API answers
 //     it (never an address), a guest's from their token, as "<name> (guest)";
-//   - a guest who may only look publishes nothing;
-//   - a call's guest who draws shows their pointer, nothing else (no presenter
-//     to follow);
+//   - a guest who may only look shows nothing of where they are, only who
+//     they are, under a name of their own (one link's guests are each their
+//     own person), and what every guest may say (miro-24 W3-B2): their last
+//     few reactions and their hand, in the shape tabs read them;
+//   - a call's guest who draws shows their pointer too, nothing else (no
+//     presenter to follow);
 //   - a member who may only read keeps their presence (a doc's "viewing" list),
-//     but only an editor presents, holds everyone or brings everyone: a
-//     reader's presenting and bring reach nobody;
+//     but only an editor presents, holds everyone, brings everyone or lowers
+//     a hand: a reader's presenting, bring and lower reach nobody, and a
+//     guest's are never passed on;
 //   - each member's user says whether they may edit (edit), as the server
 //     knows it, never as their tab claims; a guest's says nothing;
-//   - a tab speaks only for its own presence;
+//   - a tab speaks only for its own presence, and a tab that reconnects
+//     speaks for it at once: a member's or a call guest's as who they are, a
+//     share link visitor's by its tab's own key (V-337);
 //   - a client's broadcast reaches no other tab, and its socket stays open.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { randomBytes } from 'node:crypto'
 import { FakeBackend, FakeRedis, TestClient, startServer, until, sleep } from './testkit.js'
+import { personOf } from './presenceGuard.js'
 
 const BOARD_ID = '5b0f7a52-3c1e-4d8a-9f6b-2a7c4e1d9b30'
 const BOARD = `board:${BOARD_ID}`
@@ -50,14 +58,79 @@ async function room(name = BOARD) {
     return { backend, collab, open }
 }
 
-test('a guest who may only look publishes nothing, whatever it sends', async () => {
+test('a guest who may only look shows only who they are, under a name of their own, whatever else it sends', async () => {
     const { open } = await room()
     const sam = await open(SAM)
     const guest = await open(LINK_GUEST)
     assert.equal(guest.scope, 'readonly')
-    guest.presence({ user: { id: 'u-sam', name: 'Sam Rivera' }, pointer: { x: 1, y: 2 }, button: 'down', presenting: { userId: 'u-sam', name: 'Sam Rivera', view: VIEW } })
+    guest.presence({ pointer: { x: 1, y: 2 }, button: 'down', presenting: { userId: 'u-sam', name: 'Sam Rivera', view: VIEW } })
     await until(() => sam.others.has(guest.doc.clientID), 3000, "Sam hears the guest's client")
     assert.deepEqual(sam.others.get(guest.doc.clientID), {})
+
+    // Saying who they are, the tab claims Sam's name, an editor's stamp, his view and a follow: only the name is the
+    // server's, the link's own for this tab.
+    guest.presence({ user: { id: 'u-sam', name: 'Sam Rivera', edit: true, profileKey: 'k-sam' }, pointer: { x: 1, y: 2 }, button: 'down', bring: { id: 'b-g', view: VIEW }, following: sam.doc.clientID, view: VIEW })
+    await until(() => sam.others.get(guest.doc.clientID)?.user, 3000, 'Sam hears who the guest is')
+    const g = sam.others.get(guest.doc.clientID)
+    assert.deepEqual(Object.keys(g), ['user'])
+    assert.deepEqual(Object.keys(g.user).sort(), ['color', 'id', 'name'])
+    assert.deepEqual({ id: g.user.id, name: g.user.name }, { id: `g-link:${guest.doc.clientID}`, name: 'Guest' })
+    assert.match(g.user.color, COLOUR)
+})
+
+test("a guest reacts and raises a hand under their own name, a link's or a call's; their forged lower reaches nobody", async () => {
+    const { open } = await room()
+    const sam = await open(SAM)
+    const ann = await open(LINK_GUEST)
+    const bo = await open(LINK_GUEST)
+    const kai = await open(CALL_GUEST, 'edit')
+    const heart = [{ id: 'r-ann', emoji: '❤️' }]
+    // Ann's tab claims an editor's stamp, and a lower for Sam's tab.
+    ann.presence({ user: { id: 'u-sam', name: 'Sam Rivera', edit: true }, react: heart, hand: { id: 'h-ann', raisedAt: 1000 }, lower: [{ id: 'l-ann', client: sam.doc.clientID }] })
+    bo.presence({ user: {}, hand: { id: 'h-bo', raisedAt: 2000 } })
+    kai.presence({ user: { id: 'guest-kai' }, pointer: { x: 5, y: 6 }, button: 'up', react: [{ id: 'r-kai', emoji: '👍' }], hand: { id: 'h-kai', raisedAt: 3000 }, lower: [{ id: 'l-kai', client: sam.doc.clientID }] })
+    await until(() => [ann, bo, kai].every((t) => sam.others.get(t.doc.clientID)?.user), 3000, 'Sam hears all three guests')
+
+    const a = sam.others.get(ann.doc.clientID)
+    assert.deepEqual(Object.keys(a).sort(), ['hand', 'react', 'user'])
+    assert.deepEqual(Object.keys(a.user).sort(), ['color', 'id', 'name'])
+    assert.deepEqual({ name: a.user.name, react: a.react, hand: a.hand }, { name: 'Guest', react: heart, hand: { id: 'h-ann', raisedAt: 1000 } })
+    // Two guests on one link are two people, so each hand has its own place in the queue.
+    const b = sam.others.get(bo.doc.clientID)
+    assert.notEqual(a.user.id, b.user.id)
+    assert.deepEqual(b.hand, { id: 'h-bo', raisedAt: 2000 })
+    const k = sam.others.get(kai.doc.clientID)
+    assert.deepEqual(Object.keys(k).sort(), ['button', 'hand', 'pointer', 'react', 'user'])
+    assert.deepEqual({ id: k.user.id, name: k.user.name, react: k.react, hand: k.hand }, { id: 'guest-kai', name: 'Kai Lin (guest)', react: [{ id: 'r-kai', emoji: '👍' }], hand: { id: 'h-kai', raisedAt: 3000 } })
+
+    // A hand comes down as null.
+    ann.presence({ user: {}, react: heart, hand: null })
+    await until(() => sam.others.get(ann.doc.clientID)?.hand === null, 3000, "Ann's hand comes down")
+})
+
+test("a guest's reactions and hand pass only as tabs read them: their last few well-formed reactions, a hand with an id and a time", async () => {
+    const { open } = await room()
+    const sam = await open(SAM)
+    const ann = await open(LINK_GUEST)
+    const react = [
+        { id: 'r1', emoji: '👍' },
+        { id: 'x'.repeat(65), emoji: '👍' },
+        { id: 'r2', emoji: 'x'.repeat(17) },
+        'r3',
+        { id: 'r4', emoji: '😮' },
+        { id: 'r5', emoji: '👏', note: 'a word of their own' },
+        { id: 'r6', emoji: '😂' },
+    ]
+    ann.presence({ user: {}, react, hand: { id: 'h1', raisedAt: 'soon' } })
+    await until(() => sam.others.get(ann.doc.clientID)?.user, 3000, 'Sam hears the guest')
+    const a = sam.others.get(ann.doc.clientID)
+    assert.deepEqual(a.react, [{ id: 'r4', emoji: '😮' }, { id: 'r5', emoji: '👏' }, { id: 'r6', emoji: '😂' }])
+    assert.equal('hand' in a, false)
+
+    // Reactions that aren't a list, and a hand with no id, say nothing.
+    ann.presence({ user: {}, react: { id: 'r7', emoji: '👍' }, hand: { raisedAt: 5 } })
+    await until(() => !('react' in (sam.others.get(ann.doc.clientID) ?? { react: [] })), 3000, "the guest's reactions go")
+    assert.deepEqual(Object.keys(sam.others.get(ann.doc.clientID)), ['user'])
 })
 
 test("nobody wears another's name: a member is named by the API, a drawing guest by their token", async () => {
@@ -123,17 +196,18 @@ test("only an editor presents, holds or brings everyone: a reader's reach nobody
     const maya = await open(MAYA, 'view')
     assert.equal(maya.scope, 'readonly')
     // Maya may only read; her tab claims an editor's user, presenting, hold and bring.
-    maya.presence({ user: { id: 'u-maya', name: 'Maya Chen', edit: true }, pointer: { x: 1, y: 2 }, presenting: { userId: 'u-maya', name: 'Maya Chen', view: VIEW, hold: true }, bring: { id: 'b-maya', view: VIEW } })
+    maya.presence({ user: { id: 'u-maya', name: 'Maya Chen', edit: true }, pointer: { x: 1, y: 2 }, presenting: { userId: 'u-maya', name: 'Maya Chen', view: VIEW, hold: true }, bring: { id: 'b-maya', view: VIEW }, hand: { id: 'h-maya', raisedAt: 1000 }, lower: [{ id: 'l-maya', client: sam.doc.clientID }] })
     // Sam may edit; his tab says he may not.
-    sam.presence({ user: { id: 'u-sam', name: 'Sam Rivera', edit: false }, presenting: { userId: 'u-sam', name: 'Sam Rivera', view: VIEW, hold: true }, bring: { id: 'b-sam', view: VIEW } })
+    sam.presence({ user: { id: 'u-sam', name: 'Sam Rivera', edit: false }, presenting: { userId: 'u-sam', name: 'Sam Rivera', view: VIEW, hold: true }, bring: { id: 'b-sam', view: VIEW }, lower: [{ id: 'l-sam', client: maya.doc.clientID }] })
     await until(() => sam.others.get(maya.doc.clientID)?.user && maya.others.get(sam.doc.clientID)?.user, 3000, 'each hears the other')
 
-    // A reader keeps her pointer, but nobody is held by, follows or is brought to her view.
+    // A reader keeps her pointer and raises a hand, but nobody is held by, follows or is brought to her view, and her
+    // word lowers no hand.
     const m = sam.others.get(maya.doc.clientID)
-    assert.deepEqual({ edit: m.user.edit, presenting: m.presenting, bring: m.bring, pointer: m.pointer }, { edit: false, presenting: undefined, bring: undefined, pointer: { x: 1, y: 2 } })
-    // An editor's presenting, hold and bring reach the others, and his user says he may edit.
+    assert.deepEqual({ edit: m.user.edit, presenting: m.presenting, bring: m.bring, lower: m.lower, pointer: m.pointer, hand: m.hand }, { edit: false, presenting: undefined, bring: undefined, lower: undefined, pointer: { x: 1, y: 2 }, hand: { id: 'h-maya', raisedAt: 1000 } })
+    // An editor's presenting, hold, bring and lower reach the others, and his user says he may edit.
     const s = maya.others.get(sam.doc.clientID)
-    assert.deepEqual({ edit: s.user.edit, presenting: s.presenting, bring: s.bring }, { edit: true, presenting: { userId: 'u-sam', name: 'Sam Rivera', view: VIEW, hold: true }, bring: { id: 'b-sam', view: VIEW } })
+    assert.deepEqual({ edit: s.user.edit, presenting: s.presenting, bring: s.bring, lower: s.lower }, { edit: true, presenting: { userId: 'u-sam', name: 'Sam Rivera', view: VIEW, hold: true }, bring: { id: 'b-sam', view: VIEW }, lower: [{ id: 'l-sam', client: maya.doc.clientID }] })
 })
 
 test("a board member whose sign-in answer leaves canEdit out may only read: no writes, no presenting or bring, edit false (V-230)", async () => {
@@ -182,4 +256,237 @@ test("a client's broadcast reaches no other tab, and its socket stays open", asy
     await sleep(200)
     assert.deepEqual(sam.stateless.filter((m) => /epoch-changed|forged/.test(m)), [])
     assert.equal(guest.ws.readyState, 1, "the guest's socket is open")
+})
+
+// A tab that reconnects keeps its client id, and the server holds the socket
+// it left (a silent drop) until its ping check, 30-60 s later: an editor's
+// reactions and Lowers reached guests that late (miro-24, DESIGN-BUILD-86,
+// 2 Nov). The same person's new connection takes their client over at once
+// (main's rule: an identity-checked takeover); nobody else's may.
+test("a tab that reconnects speaks for its presence at once, on a board and on a doc, while the server still holds its silent old socket", async () => {
+    for (const name of [BOARD, DOC]) {
+        const { collab, open } = await room(name)
+        const sam = await open(SAM)
+        // Who hears Sam: a share link's guest on a board, Maya on a doc.
+        const hears = await open(name === BOARD ? LINK_GUEST : MAYA)
+        const id = sam.doc.clientID
+        const said = (n) => ({ user: { id: 'u-sam', name: 'Sam Rivera' }, react: [{ id: `r${n}`, emoji: '👍' }] })
+        const heard = (n) => !!hears.others.get(id)?.react?.some((r) => r.id === `r${n}`)
+        sam.presence(said(1))
+        await until(() => heard(1), 3000, `${name}: Sam's first reaction`)
+
+        // The same tab on a new socket: its doc (so its client id) and its
+        // awareness clock go on; the old socket stays open and says nothing.
+        const again = new TestClient({ url: collab.url, name, token: SAM, doc: sam.doc })
+        assert.equal(await again.connect(), 'synced')
+        again.presenceClock = sam.presenceClock
+        again.presence(said(2))
+        await until(() => heard(2), 1000, `${name}: the reconnected tab's reaction within 1 s, its old socket still open`)
+        assert.equal(sam.ws.readyState, 1, `${name}: the old socket is still open`)
+
+        // The old socket's end takes nothing of the tab's presence with it;
+        // the new socket's end takes it.
+        await sam.close()
+        await sleep(300)
+        assert.ok(heard(2), `${name}: Sam's presence outlives the old socket`)
+        await again.close()
+        await until(() => !hears.others.has(id), 3000, `${name}: Sam's presence goes with the tab's socket`)
+    }
+})
+
+test("nobody else's connection takes over a held presence: another member's, a call guest's, or another visitor's of the same link", async () => {
+    for (const name of [BOARD, DOC]) {
+        const { open } = await room(name)
+        const sam = await open(SAM)
+        const maya = await open(MAYA)
+        sam.presence({ user: { id: 'u-sam', name: 'Sam Rivera' }, pointer: { x: 1, y: 1 } })
+        await until(() => maya.others.get(sam.doc.clientID)?.pointer, 3000, `${name}: Maya hears Sam`)
+        const claim = { user: { id: 'u-sam', name: 'Sam Rivera' }, pointer: { x: 999, y: 999 } }
+        maya.presence(claim, { clientId: sam.doc.clientID, clock: 1000 })
+        if (name === BOARD) {
+            const kai = await open(CALL_GUEST, 'edit')
+            kai.presence(claim, { clientId: sam.doc.clientID, clock: 1001 })
+            kai.presence({ user: { name: 'Kai' }, pointer: { x: 3, y: 3 } })
+            await until(() => maya.others.get(kai.doc.clientID)?.pointer, 3000, "Maya hears the call guest's own")
+            // One link's visitors all sign in as the link: a link names no one
+            // person, so one visitor never takes over another's presence.
+            const first = await open(LINK_GUEST)
+            first.presence({ user: { name: 'Guest' }, react: [{ id: 'mine', emoji: '👍' }] })
+            await until(() => sam.others.get(first.doc.clientID)?.react, 3000, 'Sam hears the first visitor')
+            const second = await open(LINK_GUEST)
+            second.presence({ user: { name: 'Guest' }, react: [{ id: 'forged', emoji: '👎' }] }, { clientId: first.doc.clientID, clock: 1000 })
+            second.presence({ user: { name: 'Guest' } })
+            await until(() => sam.others.has(second.doc.clientID), 3000, "Sam hears the second visitor's own")
+            assert.deepEqual(sam.others.get(first.doc.clientID).react, [{ id: 'mine', emoji: '👍' }])
+        }
+        // Maya's own, after: her claim was handled once it is heard.
+        maya.presence({ user: { id: 'u-maya', name: 'Maya Chen' }, pointer: { x: 2, y: 2 } })
+        await until(() => sam.others.get(maya.doc.clientID)?.pointer, 3000, `${name}: Sam hears Maya's own`)
+        assert.deepEqual(maya.others.get(sam.doc.clientID).pointer, { x: 1, y: 1 }, name)
+    }
+})
+
+// A call's guest signs in as their own person (their token's sub; its call
+// claim says it is a call's), so their tab's reconnect takes their presence
+// over at once too, as a member's does (main's rule, 2 Nov). A share link's
+// visitors all sign in as the link: one visitor never takes another's over
+// (above), and a visitor's own tab does, by its key (below).
+test("a call's guest whose tab reconnects speaks for their presence at once, and the old socket's end takes nothing with it", async () => {
+    const { collab, open } = await room(BOARD)
+    const sam = await open(SAM)
+    const kai = await open(CALL_GUEST, 'edit')
+    const id = kai.doc.clientID
+    const said = (n) => ({ user: { name: 'Kai' }, pointer: { x: n, y: n }, react: [{ id: `k${n}`, emoji: '👋' }] })
+    const heard = (n) => !!sam.others.get(id)?.react?.some((r) => r.id === `k${n}`)
+    kai.presence(said(1))
+    await until(() => heard(1), 3000, "the call guest's first reaction")
+
+    const again = new TestClient({ url: collab.url, name: BOARD, token: CALL_GUEST, doc: kai.doc })
+    assert.equal(await again.connect(), 'synced')
+    again.presenceClock = kai.presenceClock
+    again.presence(said(2))
+    await until(() => heard(2), 1000, "the call guest's reconnected tab within 1 s, its old socket still open")
+    assert.deepEqual(sam.others.get(id).pointer, { x: 2, y: 2 }, 'their pointer rides along')
+    assert.equal(kai.ws.readyState, 1, 'the old socket is still open')
+
+    await kai.close()
+    await sleep(300)
+    assert.ok(heard(2), "the call guest's presence outlives the old socket")
+    await again.close()
+    await until(() => !sam.others.has(id), 3000, "the call guest's presence goes with the tab's socket")
+})
+
+// "Guests can draw" turned on or off closes the guest's socket (reauth). Their
+// tab asks for a new board token with the call token it joined with, and every
+// token issued from it names the same identity, so the guest stays the same
+// person: their tab takes its presence back at once, from the old socket or
+// after it has ended. A guest who joined by the same meeting link has an
+// identity of their own (guest-<grant>-<their own suffix>) and takes nothing.
+test("a call's guest whose board token is re-issued (the same identity) speaks for their presence at once; another guest of the same link takes nothing", async () => {
+    const { backend, collab, open } = await room(BOARD)
+    const sam = await open(SAM)
+    const kai = await open(CALL_GUEST, 'view')
+    const id = kai.doc.clientID
+    const said = (n) => ({ user: { name: 'Kai' }, react: [{ id: `k${n}`, emoji: '👋' }] })
+    const heard = (n) => !!sam.others.get(id)?.react?.some((r) => r.id === `k${n}`)
+    const reissued = (iat) => JSON.stringify({ ...JSON.parse(CALL_GUEST), iat })
+    kai.presence(said(1))
+    await until(() => heard(1), 3000, "Sam hears the call guest")
+
+    backend.levels.set('guest-kai', 'edit')
+    const again = new TestClient({ url: collab.url, name: BOARD, token: reissued(2), doc: kai.doc })
+    assert.equal(await again.connect(), 'synced')
+    again.presenceClock = kai.presenceClock
+    again.presence(said(2))
+    await until(() => heard(2), 1000, "the guest's tab on a re-issued token within 1 s, its old socket still open")
+    await kai.close()
+    await again.close()
+    await until(() => !sam.others.has(id), 3000, "the call guest's presence goes with the tab's socket")
+
+    const third = new TestClient({ url: collab.url, name: BOARD, token: reissued(3), doc: kai.doc })
+    assert.equal(await third.connect(), 'synced')
+    third.presenceClock = again.presenceClock
+    third.presence(said(3))
+    await until(() => heard(3), 1000, "the guest's tab on another re-issued token within 1 s, after its socket ended")
+
+    const zoe = await open('{"guest":true,"sub":"guest-zoe","name":"Guest: Zoe","call":"s-1"}', 'edit')
+    zoe.presence({ user: { name: 'Zoe' }, react: [{ id: 'forged', emoji: '👎' }] }, { clientId: id, clock: 1000 })
+    zoe.presence({ user: { name: 'Zoe' } })
+    await until(() => sam.others.has(zoe.doc.clientID), 3000, "Sam hears the other guest's own")
+    assert.deepEqual(sam.others.get(id).react, [{ id: 'k3', emoji: '👋' }], 'the other guest of the same link takes nothing')
+})
+
+// A share link's visitors all sign in as the link, so a visitor's tab names
+// itself with a key of its own on every socket it opens (random, made once per
+// tab: lib/collabSocket.ts). The same tab, by its key, takes its presence over
+// at once when it reconnects, as a member's does (V-337); a socket with
+// another key, or none, is another visitor's, whether the tab's presence is
+// held or its socket has just ended.
+test("a link visitor's tab that reconnects with its key speaks for its presence at once, on a board and on a doc; another key, or none, takes nothing", async () => {
+    const newKey = () => randomBytes(16).toString('hex')
+    for (const name of [BOARD, DOC]) {
+        const { collab, open } = await room(name)
+        const sam = await open(SAM)
+        const visitor = async (tab, doc) => {
+            const t = new TestClient({ url: collab.url, name, token: LINK_GUEST, tab, doc })
+            assert.equal(await t.connect(), 'synced')
+            return t
+        }
+        const key = newKey()
+        const first = await visitor(key)
+        const id = first.doc.clientID
+        const said = (n) => ({ user: { name: 'Guest' }, react: [{ id: `v${n}`, emoji: '👍' }] })
+        const heard = (n) => !!sam.others.get(id)?.react?.some((r) => r.id === `v${n}`)
+        first.presence(said(1))
+        await until(() => heard(1), 3000, `${name}: the visitor's first reaction`)
+
+        // Another visitor's socket says it is this tab (its client id, a newer
+        // entry): with a key of its own, or none, it takes nothing over.
+        const others = [await visitor(newKey()), await visitor()]
+        for (const [n, other] of others.entries()) {
+            other.presence(said(`x${n}`), { clientId: id, clock: 1000 + n })
+            other.presence({ user: { name: 'Guest' } })
+            await until(() => sam.others.has(other.doc.clientID), 3000, `${name}: Sam hears visitor ${n}'s own`)
+        }
+        assert.ok(heard(1) && !heard('x0') && !heard('x1'), `${name}: the held presence is the visitor's own`)
+
+        // The same tab on a new socket, with its key: its doc (so its client
+        // id) and its awareness clock go on; the old socket stays open.
+        const again = await visitor(key, first.doc)
+        again.presenceClock = first.presenceClock
+        again.presence(said(2))
+        await until(() => heard(2), 1000, `${name}: the visitor's reconnected tab within 1 s, its old socket still open`)
+        assert.equal(first.ws.readyState, 1, `${name}: the old socket is still open`)
+
+        // The old socket's end takes nothing with it; the new one's takes it.
+        await first.close()
+        await sleep(300)
+        assert.ok(heard(2), `${name}: the visitor's presence outlives the old socket`)
+        await again.close()
+        await until(() => !sam.others.has(id), 3000, `${name}: the visitor's presence goes with the tab's socket`)
+
+        // Its socket ended: another key, or none, binds nothing; the tab's key
+        // binds it back.
+        for (const [n, other] of others.entries()) {
+            other.presence(said(`y${n}`), { clientId: id, clock: 2000 + n })
+            other.presence({ user: { name: 'Guest' }, react: [{ id: `own${n}`, emoji: '👋' }] })
+            await until(() => sam.others.get(other.doc.clientID)?.react, 3000, `${name}: Sam hears visitor ${n}'s own again`)
+        }
+        assert.ok(!sam.others.has(id), `${name}: nobody else binds the visitor's ended presence`)
+        const back = await visitor(key, first.doc)
+        back.presenceClock = again.presenceClock
+        back.presence(said(3))
+        await until(() => heard(3), 1000, `${name}: the visitor's tab binds its presence back within 1 s`)
+    }
+})
+
+test('a sign-in names one person: a member by their id, a call\'s guest by their own sub; a share link names no one', () => {
+    assert.equal(personOf({ sub: 'u-sam' }), 'member:u-sam')
+    assert.equal(personOf({ guest: true, sub: 'guest-g1-x7', call: 's-1' }), 'call-guest:guest-g1-x7')
+    // Every visitor of one link signs in as guest-<grant>.
+    assert.equal(personOf({ guest: true, sub: 'guest-g1' }), '')
+    assert.equal(personOf({ guest: true, sub: 'guest-g1', call: '' }), '')
+    assert.equal(personOf({ guest: true, sub: 'guest-g1', call: 7 }), '')
+    // A token that names nobody names no person.
+    assert.equal(personOf({ sub: '' }), '')
+    assert.equal(personOf({}), '')
+    assert.equal(personOf(null), '')
+    // A member and a guest are never one person, whatever their subs.
+    assert.notEqual(personOf({ sub: 'x' }), personOf({ guest: true, sub: 'x', call: 's-1' }))
+})
+
+test("a link visitor's tab names one person by its key: 32 hex characters, its own, on its link", () => {
+    const key = randomBytes(16).toString('hex')
+    const link = { guest: true, sub: 'guest-g1' }
+    assert.equal(personOf(link, key), `link-guest:guest-g1:${key}`)
+    // Another key, another link: another person.
+    assert.notEqual(personOf(link, randomBytes(16).toString('hex')), personOf(link, key))
+    assert.notEqual(personOf({ guest: true, sub: 'guest-g2' }, key), personOf(link, key))
+    // Anything but 32 lowercase hex characters names no one.
+    for (const bad of [undefined, null, '', 7, key.slice(1), `${key}0`, key.toUpperCase(), `${key.slice(2)}zz`, [key]]) {
+        assert.equal(personOf(link, bad), '', `tab ${JSON.stringify(bad)}`)
+    }
+    // A member and a call's guest are who they are, whatever key their tab sends.
+    assert.equal(personOf({ sub: 'u-sam' }, key), 'member:u-sam')
+    assert.equal(personOf({ guest: true, sub: 'guest-g1-x7', call: 's-1' }, key), 'call-guest:guest-g1-x7')
 })

@@ -109,7 +109,7 @@ query ($id: String!, $cursor: String) {
 // and relations, for each list that has more.
 func (p *Provider) restOfIssue(ctx context.Context, tok string, iss *linearIssue, comments, files, relations pageInfo) error {
 	if comments.HasNextPage {
-		if err := p.issuePages(ctx, tok, iss.ID, issueCommentsQuery, "comments", comments.EndCursor, func(raw json.RawMessage) error {
+		if err := p.listPages(ctx, tok, "issue", iss.ID, issueCommentsQuery, "comments", comments.EndCursor, func(raw json.RawMessage) error {
 			var c rawComment
 			if err := json.Unmarshal(raw, &c); err != nil {
 				return err
@@ -121,7 +121,7 @@ func (p *Provider) restOfIssue(ctx context.Context, tok string, iss *linearIssue
 		}
 	}
 	if files.HasNextPage {
-		if err := p.issuePages(ctx, tok, iss.ID, issueAttachmentsQuery, "attachments", files.EndCursor, func(raw json.RawMessage) error {
+		if err := p.listPages(ctx, tok, "issue", iss.ID, issueAttachmentsQuery, "attachments", files.EndCursor, func(raw json.RawMessage) error {
 			var a rawAttachment
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return err
@@ -133,7 +133,7 @@ func (p *Provider) restOfIssue(ctx context.Context, tok string, iss *linearIssue
 		}
 	}
 	if relations.HasNextPage {
-		if err := p.issuePages(ctx, tok, iss.ID, issueRelationsQuery, "inverseRelations", relations.EndCursor, func(raw json.RawMessage) error {
+		if err := p.listPages(ctx, tok, "issue", iss.ID, issueRelationsQuery, "inverseRelations", relations.EndCursor, func(raw json.RawMessage) error {
 			var rel rawRelation
 			if err := json.Unmarshal(raw, &rel); err != nil {
 				return err
@@ -147,20 +147,20 @@ func (p *Provider) restOfIssue(ctx context.Context, tok string, iss *linearIssue
 	return nil
 }
 
-// issuePages hands each node of one of an issue's lists, after the cursor,
-// to each, a page at a time.
-func (p *Provider) issuePages(ctx context.Context, tok, issueID, query, list, after string, each func(json.RawMessage) error) error {
+// listPages hands each node of one of a node's lists, after the cursor, to
+// each, a page at a time, following Linear's cursor: an issue's comments,
+// files and relations, a project's labels. root is the node's field on the
+// query (issue, project), and id its id.
+func (p *Provider) listPages(ctx context.Context, tok, root, id, query, list, after string, each func(json.RawMessage) error) error {
 	for page := 0; page < maxPages && after != ""; page++ {
-		var resp struct {
-			Issue map[string]struct {
-				Nodes []json.RawMessage `json:"nodes"`
-				Page  pageInfo          `json:"pageInfo"`
-			} `json:"issue"`
+		var resp map[string]map[string]struct {
+			Nodes []json.RawMessage `json:"nodes"`
+			Page  pageInfo          `json:"pageInfo"`
 		}
-		if err := p.gql(ctx, tok, query, map[string]any{"id": issueID, "cursor": after}, &resp); err != nil {
+		if err := p.gql(ctx, tok, query, map[string]any{"id": id, "cursor": after}, &resp); err != nil {
 			return err
 		}
-		conn := resp.Issue[list]
+		conn := resp[root][list]
 		for _, n := range conn.Nodes {
 			if err := each(n); err != nil {
 				return err

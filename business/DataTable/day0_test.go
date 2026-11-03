@@ -61,40 +61,65 @@ func TestAWindowsCursorIsAPlaceAndARow(t *testing.T) {
 // deleted one is none for everyone.
 func TestTableDecisions(t *testing.T) {
 	owner, member, admin := uuid.New(), uuid.New(), uuid.New()
-	shared := &model.DataTable{Id: uuid.New(), CreatedBy: owner, Visibility: model.VisibilityWorkspace}
-	private := &model.DataTable{Id: uuid.New(), CreatedBy: owner, Visibility: model.VisibilityPrivate}
+	table := func(visibility, general string) *model.DataTable {
+		return &model.DataTable{Id: uuid.New(), CreatedBy: owner, Visibility: visibility, GeneralLevel: general}
+	}
+	shared := table(model.VisibilityWorkspace, model.GeneralEdit)
+	private := table(model.VisibilityPrivate, model.GeneralEdit)
+	commenting := table(model.VisibilityWorkspace, model.GeneralComment)
+	viewing := table(model.VisibilityWorkspace, model.GeneralView)
+	unfilled := table(model.VisibilityWorkspace, "")
+	privateComment := table(model.VisibilityPrivate, model.GeneralComment)
 	gone := time.Now()
-	deleted := &model.DataTable{Id: uuid.New(), CreatedBy: owner, Visibility: model.VisibilityWorkspace, DeletedAt: &gone}
+	deleted := &model.DataTable{Id: uuid.New(), CreatedBy: owner, Visibility: model.VisibilityWorkspace, GeneralLevel: model.GeneralEdit, DeletedAt: &gone}
 	cases := []struct {
-		name  string
-		t     *model.DataTable
-		a     Actor
-		level accessBusiness.Level
-		owner bool
+		name   string
+		t      *model.DataTable
+		a      Actor
+		chosen bool
+		level  accessBusiness.Level
+		owner  bool
+		reason string
 	}{
-		{"its creator", private, Actor{UserID: owner}, accessBusiness.LevelFull, true},
-		{"an admin", private, Actor{UserID: admin, IsAdmin: true}, accessBusiness.LevelFull, false},
-		{"a member, a workspace table", shared, Actor{UserID: member}, accessBusiness.LevelEdit, false},
-		{"a member, a private table", private, Actor{UserID: member}, accessBusiness.LevelNone, false},
-		{"nobody", shared, Actor{}, accessBusiness.LevelEdit, false},
+		{"its creator", private, Actor{UserID: owner}, false, accessBusiness.LevelFull, true, "owner"},
+		{"an admin", private, Actor{UserID: admin, IsAdmin: true}, false, accessBusiness.LevelFull, false, reasonAdmin},
+		{"a member, a workspace table", shared, Actor{UserID: member}, false, accessBusiness.LevelEdit, false, "workspace"},
+		{"a member, a private table", private, Actor{UserID: member}, false, accessBusiness.LevelNone, false, ""},
+		{"nobody", shared, Actor{}, false, accessBusiness.LevelEdit, false, "workspace"},
+		// V-170: who edits a workspace table's rows.
+		{"a member, a table only chosen people edit", commenting, Actor{UserID: member}, false, accessBusiness.LevelComment, false, "workspace"},
+		{"a chosen member, a table only chosen people edit", commenting, Actor{UserID: member}, true, accessBusiness.LevelEdit, false, reasonEditor},
+		{"a chosen member, a table everyone edits", shared, Actor{UserID: member}, true, accessBusiness.LevelEdit, false, "workspace"},
+		{"its creator, a table only chosen people edit", commenting, Actor{UserID: owner}, false, accessBusiness.LevelFull, true, "owner"},
+		{"an admin, a table only chosen people edit", commenting, Actor{UserID: admin, IsAdmin: true}, false, accessBusiness.LevelFull, false, reasonAdmin},
+		{"nobody, a table only chosen people edit", commenting, Actor{}, false, accessBusiness.LevelComment, false, "workspace"},
+		{"a member, a table its members view", viewing, Actor{UserID: member}, false, accessBusiness.LevelView, false, "workspace"},
+		{"a member, a level the database didn't fill", unfilled, Actor{UserID: member}, false, accessBusiness.LevelView, false, "workspace"},
+		{"a chosen member, a private table", privateComment, Actor{UserID: member}, true, accessBusiness.LevelNone, false, ""},
 	}
 	for _, c := range cases {
-		d := tableDecision(c.t, c.a)
+		d := tableDecision(c.t, c.a, c.chosen)
 		if d.Level != c.level || d.Owner != c.owner || d.Was != c.level || d.Deleted {
 			t.Errorf("%s: %+v", c.name, d)
 		}
 		if (d.Level == accessBusiness.LevelNone) != (len(d.Reasons) == 0) {
 			t.Errorf("%s: reasons %v for %v", c.name, d.Reasons, d.Level)
 		}
+		if c.reason != "" && (len(d.Reasons) != 1 || d.Reasons[0] != c.reason) {
+			t.Errorf("%s: reasons %v, want [%s]", c.name, d.Reasons, c.reason)
+		}
 		// The rule tables' own code applies agrees.
-		if view := canView(c.t, c.a); view != (d.Level >= accessBusiness.LevelEdit) {
+		if view := canView(c.t, c.a); view != (d.Level >= accessBusiness.LevelView) {
 			t.Errorf("%s: canView %v, the resolver %v", c.name, view, d.Level)
+		}
+		if edit := rowsEditable(c.t, c.a, c.chosen); edit != (d.Level >= accessBusiness.LevelEdit) {
+			t.Errorf("%s: rowsEditable %v, the resolver %v", c.name, edit, d.Level)
 		}
 		if manage := canManage(c.t, c.a); manage != (d.Level == accessBusiness.LevelFull) {
 			t.Errorf("%s: canManage %v, the resolver %v", c.name, manage, d.Level)
 		}
 	}
-	d := tableDecision(deleted, Actor{UserID: owner})
+	d := tableDecision(deleted, Actor{UserID: owner}, false)
 	if d.Level != accessBusiness.LevelNone || !d.Deleted || d.Was != accessBusiness.LevelFull || !d.Owner {
 		t.Errorf("a deleted table, for its creator: %+v", d)
 	}

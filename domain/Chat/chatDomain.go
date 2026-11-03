@@ -761,6 +761,36 @@ func GetDgraphDmBasicInfoFromDgraph(ctx context.Context, userId string, grouping
 	return
 }
 
+// GetDmCallOthers reads everyone in a DM's room but the caller, for the call
+// rule (business/Chat RefuseCallIn, V-126): each one's uuid and whether it is
+// a bot. Every member, unfiltered: it isn't a list anyone is shown, so
+// dmParticipantVisible, which leaves external people out of the list a DM
+// shows, doesn't apply, and an external guest is a person to call.
+func GetDmCallOthers(ctx context.Context, groupingId string, callerUUID string) (others []*dgraphStruct.DgraphUser, err error) {
+	query := `
+			query DmCallOthers($grpId: string){
+				dmInfo(func: eq(dm_grouping_id, $grpId)) {
+					dm_participants {
+						user_uuid
+						is_bot
+					}
+				}
+			}`
+
+	dm, err := dgraphModels.GetDgraphBasicDmsInfoByGrpId(ctx, query, map[string]string{"$grpId": groupingId})
+	if err != nil || dm == nil {
+		return nil, err
+	}
+
+	for _, p := range dm.Participants {
+		if p != nil && p.Uuid != callerUUID {
+			others = append(others, p)
+		}
+	}
+
+	return others, nil
+}
+
 func GetDgraphNewChatIncludingChatFromDgraph(ctx context.Context, groupingId string, lastChatTime time.Time) (dgraphChats []*dgraphStruct.DgraphChat, err error) {
 
 	variables := make(map[string]string)

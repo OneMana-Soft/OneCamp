@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 )
 
 // Origin says which side wrote a bridged message.
@@ -81,8 +83,9 @@ func GetBridge(ctx context.Context) (*Bridge, error) {
 }
 
 // SaveBridge connects a workspace, or replaces the credentials of the one
-// already connected. Connecting a DIFFERENT workspace drops the old links and
-// message map, which name channels the new token cannot reach.
+// already connected. Connecting a DIFFERENT workspace ends the old links,
+// which name channels the new token cannot reach: each is kept, marked taken
+// away by b.CreatedBy (takeLinks), and the message map goes.
 func SaveBridge(ctx context.Context, b Bridge) error {
 	c, cancel := dbCtx(ctx)
 	defer cancel()
@@ -100,7 +103,7 @@ func SaveBridge(ctx context.Context, b Bridge) error {
 		if _, err := tx.ExecContext(c, `DELETE FROM slack_bridge_messages`); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(c, `DELETE FROM slack_bridge_links`); err != nil {
+		if err := takeLinks(c, tx, b.CreatedBy); err != nil {
 			return err
 		}
 	}
@@ -117,9 +120,11 @@ func SaveBridge(ctx context.Context, b Bridge) error {
 	return tx.Commit()
 }
 
-// DeleteBridge disconnects Slack and forgets every link and bridged message.
-// The bridged posts themselves stay: they are the channel's history.
-func DeleteBridge(ctx context.Context) error {
+// DeleteBridge disconnects Slack, by whom (nil: no person): the bridge and
+// its message map go, and every live link is kept, marked taken away by them
+// (takeLinks). The bridged posts themselves stay: they are the channel's
+// history.
+func DeleteBridge(ctx context.Context, by *uuid.UUID) error {
 	c, cancel := dbCtx(ctx)
 	defer cancel()
 	tx, err := postgresInit.DBConn.SqlDB.BeginTx(c, nil)
@@ -127,16 +132,31 @@ func DeleteBridge(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, q := range []string{
-		`DELETE FROM slack_bridge_messages`,
-		`DELETE FROM slack_bridge_links`,
-		`DELETE FROM slack_bridge`,
-	} {
-		if _, err := tx.ExecContext(c, q); err != nil {
-			return err
-		}
+	if _, err := tx.ExecContext(c, `DELETE FROM slack_bridge_messages`); err != nil {
+		return err
+	}
+	if err := takeLinks(c, tx, by); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(c, `DELETE FROM slack_bridge`); err != nil {
+		return err
 	}
 	return tx.Commit()
+}
+
+// takeLinks marks every live link taken away, by whom (nil: no person), in
+// tx (V-273). A link outlives neither its bridge nor the Slack workspace it
+// names, but which channels were bridged, by whom and until when stays on
+// record, as DeleteLink keeps a single link. A link taken away before keeps
+// its own who and when.
+func takeLinks(c context.Context, tx *sql.Tx, by *uuid.UUID) error {
+	who := uuid.Nil
+	if by != nil {
+		who = *by
+	}
+	_, err := pgexec.Exec(pgexec.WithTx(c, tx),
+		`UPDATE slack_bridge_links SET deleted_at = NOW(), deleted_by = $1 WHERE `+softDelete.Live(""), softDelete.By(who))
+	return err
 }
 
 // RecordError stores the latest delivery failure; an empty msg clears it.
@@ -154,13 +174,14 @@ func RecordError(ctx context.Context, msg string) error {
 	return err
 }
 
-// ListLinks returns every link, oldest first.
+// ListLinks returns every live link, oldest first: a link taken away
+// (DeleteLink) is kept, marked, and bridges nothing.
 func ListLinks(ctx context.Context) ([]Link, error) {
 	c, cancel := dbCtx(ctx)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
 		SELECT id, slack_channel_id, slack_channel_name, channel_uuid, created_by, created_at
-		FROM slack_bridge_links ORDER BY created_at`)
+		FROM slack_bridge_links WHERE `+softDelete.Live("")+` ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +200,8 @@ func ListLinks(ctx context.Context) ([]Link, error) {
 // ErrLinkTaken is returned when either channel already belongs to a link.
 var ErrLinkTaken = errors.New("channel already linked")
 
-// CreateLink joins two channels.
+// CreateLink joins two channels. Each side is in one live link at a time; a
+// link taken away holds neither (the unique indexes count live links only).
 func CreateLink(ctx context.Context, l Link) error {
 	c, cancel := dbCtx(ctx)
 	defer cancel()
@@ -197,23 +219,27 @@ func CreateLink(ctx context.Context, l Link) error {
 	return nil
 }
 
-// DeleteLink removes a link and reports whether it existed. The bridged
-// messages of that pair are forgotten with it.
-func DeleteLink(ctx context.Context, id uuid.UUID) (bool, error) {
-	c, cancel := dbCtx(ctx)
-	defer cancel()
-	var slackChannel string
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c,
-		`DELETE FROM slack_bridge_links WHERE id = $1 RETURNING slack_channel_id`, id).Scan(&slackChannel)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+// DeleteLink takes a link away, by whom, and reports whether a live one
+// existed (V-184 head 4b): the link is kept, marked, so which channels were
+// bridged, by whom and until when stays on record, and ListLinks no longer
+// sees it. The bridged messages of the pair are forgotten with it, in the same
+// transaction: the id map is derived, and a link made again starts afresh.
+func DeleteLink(ctx context.Context, id, by uuid.UUID) (bool, error) {
+	found := false
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		slackChannel, ok, err := pgexec.QueryOne(ctx, `UPDATE slack_bridge_links SET deleted_at = NOW(), deleted_by = $2
+			WHERE id = $1 AND `+softDelete.Live("")+` RETURNING slack_channel_id`, pgexec.Text, id, softDelete.By(by))
+		if err != nil || !ok {
+			return err
+		}
+		found = true
+		_, err = pgexec.Exec(ctx, `DELETE FROM slack_bridge_messages WHERE slack_channel_id = $1`, slackChannel)
+		return err
+	})
 	if err != nil {
 		return false, err
 	}
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(c,
-		`DELETE FROM slack_bridge_messages WHERE slack_channel_id = $1`, slackChannel)
-	return true, err
+	return found, nil
 }
 
 // ClaimSlackMessage reserves a Slack message for bridging. False means another

@@ -68,7 +68,7 @@ func (s *service) Create(ctx context.Context, who accessBusiness.Subject, res ac
 	posted, err := r.Post(ctx, who, res, t.ID, body)
 	if err != nil {
 		// Nothing was said, so there is no thread.
-		if rerr := s.store.remove(context.WithoutCancel(ctx), t.ID); rerr != nil {
+		if rerr := s.store.takeBack(context.WithoutCancel(ctx), t.ID); rerr != nil {
 			helpers.LogErrorWithContext(ctx, "business/Thread Create: removing empty thread %s failed: %+v", t.ID, rerr)
 		}
 		return View{}, err

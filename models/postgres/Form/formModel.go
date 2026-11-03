@@ -230,15 +230,6 @@ func CountSince(ctx context.Context, form uuid.UUID, since time.Time) (int, erro
 	return pgexec.Scalar[int](ctx, `SELECT COUNT(*) FROM form_submissions WHERE form_id = $1 AND created_at > $2`, form, since)
 }
 
-// ProjectsOf is each form's project, by the form's id; a form that isn't
-// there, or is a table's own (no project), is left out.
-func ProjectsOf(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
-	if len(ids) == 0 {
-		return map[uuid.UUID]uuid.UUID{}, nil
-	}
-	return pgexec.Pairs[uuid.UUID, uuid.UUID](ctx, `SELECT id, project_uuid FROM project_forms WHERE id = ANY($1) AND project_uuid IS NOT NULL AND `+softDelete.Live(""), ids)
-}
-
 // ── A table's own forms (930): their home is the table they fill. ──
 
 // ListOfTable is a table's own forms, newest first.

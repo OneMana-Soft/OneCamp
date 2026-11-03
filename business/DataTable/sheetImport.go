@@ -409,29 +409,38 @@ func (s *SheetColumns) chosen(ch sheetChoice, into map[uuid.UUID]targetTable, ta
 	return nil
 }
 
+// errViewOnlyTarget is a sheet chosen into a table the person importing may
+// only view (V-170).
+var errViewOnlyTarget = contentIOBusiness.ReadError("You can view that table but not change it, so a sheet can't be brought into it.")
+
 // errNoTarget is a sheet chosen into a table that isn't there, or that the
 // person importing can't open: which, it doesn't say.
 var errNoTarget = contentIOBusiness.ReadError("The choices bring a sheet into a table that isn't there, or that you can't open.")
 
 // targets are the tables the choices bring sheets into, each with its fields,
-// as the person importing may open them; what they may write there, Batch
-// says as the rows come.
+// loaded at once (loadEditables) as the person importing may change them;
+// what they may write there, Batch says again as the rows come.
 func targets(ctx context.Context, actor Actor, chosen []sheetChoice) (map[uuid.UUID]targetTable, error) {
-	out := map[uuid.UUID]targetTable{}
+	var ids []uuid.UUID
+	seen := map[uuid.UUID]bool{}
 	for _, ch := range chosen {
-		if ch.Into == nil {
-			continue
+		if ch.Into != nil && !seen[*ch.Into] {
+			seen[*ch.Into] = true
+			ids = append(ids, *ch.Into)
 		}
-		if _, ok := out[*ch.Into]; ok {
-			continue
-		}
-		t, err := loadViewable(ctx, *ch.Into, actor)
-		if errors.Is(err, errNotFound) || errors.Is(err, errForbidden) {
-			return nil, errNoTarget
-		}
-		if err != nil {
-			return nil, err
-		}
+	}
+	tables, err := loadEditables(ctx, ids, actor)
+	if IsReadOnly(err) {
+		return nil, errViewOnlyTarget
+	}
+	if errors.Is(err, errNotFound) || errors.Is(err, errForbidden) {
+		return nil, errNoTarget
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]targetTable, len(tables))
+	for _, t := range tables {
 		fields, err := model.ListFields(ctx, t.Id)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read the fields of the table to bring a sheet into")

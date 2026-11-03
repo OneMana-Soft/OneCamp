@@ -38,6 +38,10 @@ func readerCtx(r *http.Request) context.Context {
 
 func writeErr(w http.ResponseWriter, err error) {
 	switch {
+	case business.IsReadOnly(err):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": business.ReadOnlyWords, "read_only": true})
+	case business.IsEditingUnrecorded(err):
+		helpers.WriteRetryLater(w, err.Error())
 	case business.IsForbidden(err):
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "you don't have access to this table"})
 	case business.IsNotFound(err):
@@ -139,6 +143,46 @@ func UpdateTable(w http.ResponseWriter, r *http.Request) {
 			map[string]interface{}{"table_id": t.Id.String(), "from": was, "to": t.Visibility})
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": t})
+}
+
+// GetTableEditing GET /tables/{id}/editing: who edits the table's rows (its
+// general level and the people chosen), for its managers.
+func GetTableEditing(w http.ResponseWriter, r *http.Request) {
+	ctx := readerCtx(r)
+	id, ok := idParam(r, "id")
+	if !ok {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
+		return
+	}
+	access, err := business.GetEditing(ctx, id, actorFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": access})
+}
+
+// SetTableEditing POST /tables/{id}/editing {general?: "edit"|"comment",
+// add?: [user id], remove?: [user id]}: a manager changes who edits the
+// table's rows. Each change that changes something is in the audit log.
+func SetTableEditing(w http.ResponseWriter, r *http.Request) {
+	ctx := readerCtx(r)
+	id, ok := idParam(r, "id")
+	if !ok {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
+		return
+	}
+	var in business.EditingChange
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
+		return
+	}
+	access, changed, err := business.SetEditing(ctx, id, in, actorFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": access, "changed": changed})
 }
 
 // DeleteTable DELETE /tables/{id}
@@ -312,7 +356,7 @@ func UpdateRow(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.RowAsRead(ctx, id, actorFrom(r), row)})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": row.AsRead(ctx, id, actorFrom(r))})
 }
 
 // PatchRow POST /tables/{id}/rows/{rowId}/patch {values: {fieldId: value|null}}
@@ -337,8 +381,9 @@ func PatchRow(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	// As a read answers it, so the grid puts it back with no fetch.
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.RowAsRead(ctx, id, actorFrom(r), row)})
+	// As a read answers it, so the grid puts it back with no fetch, and with
+	// the change set it stored, which an Undo pressed on its way names.
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": row.AsRead(ctx, id, actorFrom(r))})
 }
 
 // DeleteRow DELETE /tables/{id}/rows/{rowId}

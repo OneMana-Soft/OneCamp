@@ -418,12 +418,3 @@ func RestoreLabel(ctx context.Context, id uuid.UUID, mostLabels, most int) (bool
 	})
 	return restored, err
 }
-
-// Names is each of people's names as the workspace shows them (their display
-// name, else their username), in one read.
-func Names(ctx context.Context, people []uuid.UUID) (map[uuid.UUID]string, error) {
-	if len(people) == 0 {
-		return map[uuid.UUID]string{}, nil
-	}
-	return pgexec.Pairs[uuid.UUID, string](ctx, `SELECT id, COALESCE(NULLIF(display_name, ''), username, '') FROM users WHERE id = ANY($1)`, pq.Array(people))
-}

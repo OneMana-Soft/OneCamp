@@ -299,6 +299,13 @@ func goModulePath(t *testing.T, gomod string) string {
 // and is not itself the thing under test. It is not a place to park something that has no caller
 // yet.
 var exemptFromDeadExportedCheck = map[string]string{
+	// Shared with the AI edition (v1.63.0): main calls these only from code the AI-free line doesn't carry. They stay
+	// in their shared packages, identical to main's, so later ports apply as they are.
+	"URLForRecord": "business/AdminAudit's address for an audit row; main calls it from controllers/AI's admin audit, which the AI-free line doesn't carry.",
+	"Ops":          "business/PublicAPI's list of the API's operations; main publishes them as MCP tools (business/MCPServer), which the AI-free line doesn't carry.",
+	"CheckUndo":    "business/PublicAPI's check that every op that changes something can be undone; main runs it as the MCP tools are published, which the AI-free line doesn't carry.",
+	"Invoke":       "business/PublicAPI's op runner; main calls it from the MCP tools (business/MCPServer), which the AI-free line doesn't carry.",
+
 	"RegisterImportDigester": "an EDITION-CONDITIONAL registration slot, and the only kind of " +
 		"exported function that is legitimately uncalled in one build. business/SlackImport ships " +
 		"in both editions and declares the slot; business/AI fills it from an init and exists only " +
@@ -326,6 +333,7 @@ var exemptFromDeadExportedCheck = map[string]string{
 	"ClearForPersonInProject":         "called only by beta's demo seed (its showcase time entries); the release lines don't carry it.",
 	"MarkProjectArchivedInOpenSearch": "called only by beta's demo seed (a refresh takes every retired copy of a curated project out of search); the release lines don't carry it.",
 	"NoteColourByID":                  "business/Board/scene's is called only by beta's demo seed (business/DemoSeed/board.go colours its board's notes by id); the release lines don't carry the seed.",
+	"SaveAll":                         "business/TaskTemplate's is called only by beta's demo seed (business/DemoSeed/taskTemplates.go writes the demo's templates, each scope's set at once); the release lines don't carry the seed.",
 	"TakeOver":                        "business/TaskKeys' is called only by beta's demo seed (a refreshed project keeps its key); never offered to people; the release lines don't carry the seed.",
 	"UpdateDocPermissions":            "business/Doc's is called only by beta's demo seed (the docs home's shared and team docs); the share routes don't call it; the release lines don't carry the seed.",
 

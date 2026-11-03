@@ -124,3 +124,18 @@ func TestResolveAllAsksOneAtATimeWithoutBatches(t *testing.T) {
 		t.Error("the resolver decides in batches")
 	}
 }
+
+// I9: a deleted resource answers none, and Was keeps what it gave, so the
+// trash and a restore decide by it; a live one's Was is its level.
+func TestSettledAnswersADeletedResourceAsNoneWithWhatItWas(t *testing.T) {
+	live := Decision{Level: LevelEdit, Owner: true, Reasons: []string{"owner"}}
+	if d := live.Settled(false); d.Level != LevelEdit || d.Was != LevelEdit || d.Deleted || !d.Owner {
+		t.Errorf("live: %+v; want edit, Was edit, not deleted, still its owner's", d)
+	}
+	if d := live.Settled(true); d.Level != LevelNone || d.Was != LevelEdit || !d.Deleted || !d.Owner || len(d.Reasons) != 1 {
+		t.Errorf("deleted: %+v; want none, Was edit, deleted, still its owner's and why", d)
+	}
+	if d := (Decision{}).Settled(true); d.Level != LevelNone || d.Was != LevelNone || !d.Deleted {
+		t.Errorf("deleted, never theirs: %+v; want none, Was none, deleted", d)
+	}
+}

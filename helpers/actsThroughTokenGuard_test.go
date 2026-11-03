@@ -56,11 +56,49 @@ var tokenReachableRoots = []string{"../controllers/V1", "../business/Send", "../
 // edition has no MCP, so no function of the roots is named so.
 const reachFunc = "PrincipalCanReach"
 
+// opFiles are the files outside the roots that declare the public API's ops
+// (tables H1: business/DataTable apiOps.go). An op's Serve runs a token's
+// call, from /v1 or from MCP, whichever package holds it, so the actor it
+// builds is held to a member's like the rest. Found by what they declare, so
+// the next op file is read without a line here.
+func opFiles(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir("../business", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		for _, root := range tokenReachableRoots {
+			if strings.HasPrefix(path, root+string(filepath.Separator)) {
+				return nil
+			}
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(src), `"github.com/akashc777/OneCamp/business/PublicAPI"`) && opDecl.Match(src) {
+			out = append(out, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) == 0 {
+		t.Fatal("found no file declaring the public API's ops; this guard would read none of them")
+	}
+	return out
+}
+
+// opDecl is a list of the public API's ops, as a file declaring them writes it.
+var opDecl = regexp.MustCompile(`\[\]\w+\.Op\b`)
+
 func TestTokenReachableCodeActsAsAMember(t *testing.T) {
 	var findings []string
 	var funcs []*roleFunc
 	parsed := 0
-	for _, root := range tokenReachableRoots {
+	for _, root := range append(append([]string(nil), tokenReachableRoots...), opFiles(t)...) {
 		if _, err := os.Stat(root); err != nil {
 			t.Fatalf("%s is missing; this guard would pass by reading nothing: %v", root, err)
 		}

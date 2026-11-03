@@ -7,9 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	business "github.com/akashc777/OneCamp/business/DataTable"
 	query "github.com/akashc777/OneCamp/business/QuerySpec"
@@ -67,33 +64,16 @@ func WriteQueryErr(w http.ResponseWriter, r *http.Request, err error) {
 		// A formula or a rollup still being filled (airtable-03b): how far, by
 		// its code, so the view shows it and asks again; its words for the rest.
 		helpers.WriteJSON(w, http.StatusUnprocessableEntity, helpers.Envolope{
-			"msg":      refusal(working),
+			"msg":      rowQuery.Refusal(working),
 			"code":     "working_out",
 			"progress": map[string]int64{"done": working.Done, "total": working.Total},
 		})
 	case errors.Is(err, query.ErrBadSpec), errors.Is(err, rowQuery.ErrCantQuery), errors.Is(err, rowQuery.ErrBadCursor), errors.Is(err, rowQuery.ErrTooManyToWorkOut):
-		helpers.WriteJSON(w, http.StatusUnprocessableEntity, helpers.Envolope{"msg": refusal(err)})
+		helpers.WriteJSON(w, http.StatusUnprocessableEntity, helpers.Envolope{"msg": rowQuery.Refusal(err)})
 	case business.IsUnavailable(err):
 		helpers.WriteRetryLater(w, "Couldn't load the rows.")
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/DataTable rows by spec: %v", err)
 		helpers.WriteRetryLater(w, "Couldn't load the rows.")
 	}
-}
-
-// refusal is a query's refusal in its own words, for the person whose view
-// asked: "Grouped this way, the rows fall into more than 1,000 groups: …".
-// The kind it's of ("row query: that can't be asked of this table yet: ") is
-// for the logs; the view's notice showed it to its readers (CR-62).
-func refusal(err error) string {
-	msg := err.Error()
-	for _, kind := range []error{rowQuery.ErrCantQuery, query.ErrBadSpec} {
-		msg = strings.TrimPrefix(msg, kind.Error()+": ")
-	}
-	msg = strings.TrimPrefix(strings.TrimPrefix(msg, "row query: "), "query: ")
-	r, n := utf8.DecodeRuneInString(msg)
-	if n == 0 {
-		return msg
-	}
-	return string(unicode.ToUpper(r)) + msg[n:]
 }

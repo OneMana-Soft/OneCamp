@@ -1,14 +1,16 @@
 package models
 
-// Per-scope AI memory exclusions (migration 67). A scope present in this
-// table is opted OUT of the memory layer — never extracted, captured, or
-// surfaced. This is the trust/control knob for sensitive channels.
+// Per-scope AI memory exclusions (migration 67). A scope with a live row in
+// this table is opted OUT of the memory layer — never extracted, captured, or
+// surfaced. This is the trust/control knob for sensitive channels. A lifted
+// exclusion stays, marked by who lifted it and when (V-184 head 4a).
 
 import (
 	"context"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 )
 
@@ -32,7 +34,7 @@ func IsScopeExcluded(ctx context.Context, scopeType, scopeID string) (bool, erro
 
 	var exists bool
 	err := postgresInit.DBConn.SqlDB.QueryRowContext(cctx,
-		`SELECT EXISTS(SELECT 1 FROM ai_memory_exclusions WHERE scope_type = $1 AND scope_id = $2)`,
+		`SELECT EXISTS(SELECT 1 FROM ai_memory_exclusions WHERE scope_type = $1 AND scope_id = $2 AND `+softDelete.Live("")+`)`,
 		scopeType, scopeID).Scan(&exists)
 	if err != nil {
 		helpers.LogErrorWithContext(cctx, "models/WorkspaceMemory IsScopeExcluded failed: %+v", err)
@@ -41,7 +43,10 @@ func IsScopeExcluded(ctx context.Context, scopeType, scopeID string) (bool, erro
 	return exists, nil
 }
 
-// SetScopeExcluded adds or removes an exclusion row. Idempotent.
+// SetScopeExcluded excludes a scope, or lifts its exclusion, as who; both are
+// idempotent. Lifting keeps the row, marked by who lifted it (V-184 head 4a),
+// so who turned memory off and who turned it back on, and when, stay on
+// record; excluding the scope again brings the row back, live, by who.
 func SetScopeExcluded(ctx context.Context, scopeType, scopeID string, excludedByID *uuid.UUID, excluded bool) error {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -50,7 +55,8 @@ func SetScopeExcluded(ctx context.Context, scopeType, scopeID string, excludedBy
 		_, err := postgresInit.DBConn.SqlDB.ExecContext(cctx,
 			`INSERT INTO ai_memory_exclusions (scope_type, scope_id, excluded_by)
 			 VALUES ($1, $2, $3)
-			 ON CONFLICT (scope_type, scope_id) DO NOTHING`,
+			 ON CONFLICT (scope_type, scope_id) DO UPDATE SET excluded_by = EXCLUDED.excluded_by, created_at = NOW(), deleted_at = NULL, deleted_by = NULL
+			 WHERE ai_memory_exclusions.deleted_at IS NOT NULL`,
 			scopeType, scopeID, excludedByID)
 		if err != nil {
 			helpers.LogErrorWithContext(cctx, "models/WorkspaceMemory SetScopeExcluded(add) failed: %+v", err)
@@ -58,10 +64,19 @@ func SetScopeExcluded(ctx context.Context, scopeType, scopeID string, excludedBy
 		return err
 	}
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(cctx,
-		`DELETE FROM ai_memory_exclusions WHERE scope_type = $1 AND scope_id = $2`,
-		scopeType, scopeID)
+		`UPDATE ai_memory_exclusions SET deleted_at = NOW(), deleted_by = $3 WHERE scope_type = $1 AND scope_id = $2 AND `+softDelete.Live(""),
+		scopeType, scopeID, liftedBy(excludedByID))
 	if err != nil {
 		helpers.LogErrorWithContext(cctx, "models/WorkspaceMemory SetScopeExcluded(remove) failed: %+v", err)
 	}
 	return err
+}
+
+// liftedBy is the deleted_by a lift writes: who lifted the exclusion, or
+// NULL for nobody (softDelete.By).
+func liftedBy(who *uuid.UUID) any {
+	if who == nil {
+		return nil
+	}
+	return softDelete.By(*who)
 }

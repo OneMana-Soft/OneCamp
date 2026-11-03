@@ -8,9 +8,12 @@ package business
 //   - a project: its standing (OfMany, one read of the person's roles);
 //   - a task: its project's standing and its own facts; a deleted task
 //     answers none, with Was what it was;
-//   - a saved view (today's task_views): its owner's alone, in full;
+//   - a saved view (today's task_views): its owner's alone, in full; a
+//     deleted view answers none, with Was what it was;
 //   - a cycle and a form: their project's, read only below its admins, who
-//     change them.
+//     change them; a deleted one answers none, with Was what it was.
+//
+// Each ends on Decision.Settled, the one rule for a deleted resource (I9).
 
 import (
 	"context"
@@ -20,8 +23,7 @@ import (
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	cycleModel "github.com/akashc777/OneCamp/models/postgres/Cycle"
-	formModel "github.com/akashc777/OneCamp/models/postgres/Form"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	taskViewModel "github.com/akashc777/OneCamp/models/postgres/TaskView"
 	"github.com/google/uuid"
 )
@@ -45,12 +47,11 @@ func init() {
 
 // Seams for tests: the reads each kind decides by, one per kind.
 var (
-	readProjects  = projectDomain.GetProjectsReadAccessFor
-	readTasks     = taskDomain.GetTasksReadAccessFor
-	viewOwners    = taskViewModel.OwnersOf
-	cycleProjects = cycleModel.ProjectsOf
-	formProjects  = formModel.ProjectsOf
-	uidOf         = accessBusiness.UIDOf
+	readProjects = projectDomain.GetProjectsReadAccessFor
+	readTasks    = taskDomain.GetTasksReadAccessFor
+	viewOwners   = taskViewModel.OwnersOf
+	heldBy       = softDelete.OwnersOf
+	uidOf        = accessBusiness.UIDOf
 )
 
 // ------------------------------------------------------------------ projects
@@ -169,14 +170,10 @@ func (taskRules) DecideMany(ctx context.Context, who accessBusiness.Subject, ids
 // task: none while it is deleted, with Was what it was. Pure.
 func taskDecision(s Standing, f TaskFacts) accessBusiness.Decision {
 	d := accessBusiness.Decision{Level: s.TaskLevel(f), Archived: s.Archived}
-	d.Was = d.Level
 	if d.Level > accessBusiness.LevelNone {
 		d.Reasons = reasonsFor(s, &f)
 	}
-	if f.Deleted {
-		d.Deleted, d.Level = true, accessBusiness.LevelNone
-	}
-	return d
+	return d.Settled(f.Deleted)
 }
 
 // ---------------------------------------------------------------- saved views
@@ -195,18 +192,22 @@ func (viewRules) DecideMany(ctx context.Context, who accessBusiness.Subject, ids
 		if err != nil {
 			continue
 		}
-		owner, ok := owners[parsed]
-		if !ok {
-			continue
+		if v, ok := owners[parsed]; ok {
+			out[id] = viewDecision(me, v)
 		}
-		d := accessBusiness.Decision{}
-		if me != uuid.Nil && owner == me {
-			d = accessBusiness.Decision{Level: accessBusiness.LevelFull, Owner: true, Reasons: []string{ReasonOwner}}
-		}
-		d.Was = d.Level
-		out[id] = d
 	}
 	return out, nil
+}
+
+// viewDecision is the resolver's decision for the person me on a saved view:
+// its owner's alone, in full; none while it is deleted, with Was what it was,
+// as a deleted task's (I9). Pure.
+func viewDecision(me uuid.UUID, v taskViewModel.Owner) accessBusiness.Decision {
+	var d accessBusiness.Decision
+	if me != uuid.Nil && v.Person == me {
+		d = accessBusiness.Decision{Level: accessBusiness.LevelFull, Owner: true, Reasons: []string{ReasonOwner}}
+	}
+	return d.Settled(v.Deleted)
 }
 
 // ------------------------------------------------------------ cycles, forms
@@ -214,25 +215,30 @@ func (viewRules) DecideMany(ctx context.Context, who accessBusiness.Subject, ids
 type cycleRules struct{}
 
 func (cycleRules) DecideMany(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]accessBusiness.Decision, error) {
-	return byProject(ctx, who, ids, cycleProjects)
+	return byProject(ctx, who, ids, softDelete.Cycle)
 }
 
 type formRules struct{}
 
 func (formRules) DecideMany(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]accessBusiness.Decision, error) {
-	return byProject(ctx, who, ids, formProjects)
+	return byProject(ctx, who, ids, softDelete.Form)
 }
 
-// byProject decides things that belong to a project (a cycle, a form) by
-// their project: its admins change them, the rest of it reads them.
-func byProject(ctx context.Context, who accessBusiness.Subject, ids []string, projectsOf func(context.Context, []uuid.UUID) (map[uuid.UUID]uuid.UUID, error)) (map[string]accessBusiness.Decision, error) {
-	owners, err := projectsOf(ctx, parseIDs(ids))
+// byProject decides the things of kind that belong to a project (a cycle, a
+// form) by their project, from one read of them live or deleted: its admins
+// change them, the rest of it reads them, and a deleted one answers none
+// with Was what it was. One with no project (a table's own form) is left
+// out, as one that isn't there is.
+func byProject(ctx context.Context, who accessBusiness.Subject, ids []string, kind softDelete.Kind) (map[string]accessBusiness.Decision, error) {
+	held, err := heldBy(ctx, kind, parseIDs(ids))
 	if err != nil {
 		return nil, err
 	}
-	projectIDs := make([]string, 0, len(owners))
-	for _, p := range owners {
-		projectIDs = append(projectIDs, p.String())
+	projectIDs := make([]string, 0, len(held))
+	for _, h := range held {
+		if h.Project != uuid.Nil {
+			projectIDs = append(projectIDs, h.Project.String())
+		}
 	}
 	standings, err := projectStandings(ctx, who, projectIDs)
 	if err != nil {
@@ -244,22 +250,25 @@ func byProject(ctx context.Context, who accessBusiness.Subject, ids []string, pr
 		if err != nil {
 			continue
 		}
-		project, ok := owners[parsed]
-		if !ok {
-			continue
+		if h, ok := held[parsed]; ok && h.Project != uuid.Nil {
+			out[id] = projectThingDecision(standings[h.Project.String()], h.Deleted)
 		}
-		s := standings[project.String()]
-		d := accessBusiness.Decision{Archived: s.Archived}
-		switch {
-		case s.Can(NeedManage):
-			d.Level, d.Reasons = accessBusiness.LevelFull, []string{ReasonAdmin}
-		case s.Can(NeedView):
-			d.Level, d.Reasons = accessBusiness.LevelView, []string{ReasonMember}
-		}
-		d.Was = d.Level
-		out[id] = d
 	}
 	return out, nil
+}
+
+// projectThingDecision is the resolver's decision for standing s on a thing
+// of its project (a cycle, a form): full for its admins, view for the rest
+// of it; none while it is deleted, with Was what it was. Pure.
+func projectThingDecision(s Standing, deleted bool) accessBusiness.Decision {
+	d := accessBusiness.Decision{Archived: s.Archived}
+	switch {
+	case s.Can(NeedManage):
+		d.Level, d.Reasons = accessBusiness.LevelFull, []string{ReasonAdmin}
+	case s.Can(NeedView):
+		d.Level, d.Reasons = accessBusiness.LevelView, []string{ReasonMember}
+	}
+	return d.Settled(deleted)
 }
 
 // parseIDs is the ids that are uuids. Pure.

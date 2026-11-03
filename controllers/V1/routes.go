@@ -9,6 +9,7 @@ import (
 
 	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
 	appBusiness "github.com/akashc777/OneCamp/business/App"
+	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	policyBusiness "github.com/akashc777/OneCamp/business/Policy"
 	v1api "github.com/akashc777/OneCamp/business/PublicAPI"
 	"github.com/akashc777/OneCamp/helpers"
@@ -80,19 +81,22 @@ func init() {
 				AppsRefused: "Unread counts are a person's; an app has none.", Legacy: true, Handler: Unread},
 		},
 	})
-	v1api.Register(v1api.Resource{
+	// The tables' operations in the new shape (tables.rows.query,
+	// tables.row.update) are declared once in business/DataTable, beside their
+	// legacy routes; in the AI edition they are MCP tools too.
+	v1api.RegisterOps(v1api.Resource{
 		Name: "tables", Owner: "tables",
 		Scopes: []v1api.ScopeDecl{
 			{Name: apiTokenBusiness.ScopeTablesRead, Description: "Read the tables you can open"},
-			{Name: apiTokenBusiness.ScopeTablesWrite, Description: "Add rows to the tables you can edit"},
+			{Name: apiTokenBusiness.ScopeTablesWrite, Description: "Add and change rows in the tables you can edit"},
 		},
 		Routes: []v1api.Route{
 			{Method: http.MethodGet, Path: "/tables", Summary: "The tables you can open", Scope: apiTokenBusiness.ScopeTablesRead, AppsInside: true, Legacy: true, Handler: ListTables},
 			{Method: http.MethodGet, Path: "/tables/{id}", Summary: "A table: its fields and rows", Scope: apiTokenBusiness.ScopeTablesRead, Legacy: true, Reach: reaches("table"), Handler: GetTable},
 			{Method: http.MethodPost, Path: "/tables/{id}/aggregate", Summary: "Sums, counts and averages over a table", Scope: apiTokenBusiness.ScopeTablesRead, Legacy: true, Reach: reaches("table"), Handler: AggregateTable},
-			{Method: http.MethodPost, Path: "/tables/{id}/rows", Summary: "Add a row", Scope: apiTokenBusiness.ScopeTablesWrite, Write: true, Legacy: true, Reach: reaches("table"), Handler: CreateRow},
+			{Method: http.MethodPost, Path: "/tables/{id}/rows", Summary: "Add a row; the answer names the change set it stored", Scope: apiTokenBusiness.ScopeTablesWrite, Write: true, Legacy: true, Reach: reaches("table"), Handler: CreateRow},
 		},
-	})
+	}, dataTableBusiness.APIOps())
 	v1api.Register(v1api.Resource{
 		Name: "tasks", Owner: "projects",
 		Scopes: []v1api.ScopeDecl{

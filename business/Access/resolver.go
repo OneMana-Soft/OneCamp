@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/business/Access/level"
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	"github.com/akashc777/OneCamp/helpers"
@@ -309,14 +310,20 @@ func apply(ctx context.Context, who Subject, c Change, o applyOpts) (Explanation
 			return Explanation{}, err
 		}
 	}
-	if err := docBusiness.ApplySharing(ctx, ids, sc); err != nil {
+	// What it does, worked out before it's made: a change that takes anyone's
+	// access away, or lowers it, is made only once its audit row is written
+	// (no record, no action), so whom it was taken from, by whom and when, is
+	// kept; the doc's events, sent after it, are told at most once.
+	ex := docBusiness.Explain(before, after)
+	if err := auditBusiness.RecordedTaking(ctx, auditBusiness.ContextPrincipal(ctx, who.AgentUUID), "doc.access.remove",
+		"Took away or lowered people's access to a page", "doc", c.Resource.UUID, accessShifts(ex), takingMeta(who, ids),
+		func() error { return docBusiness.ApplySharing(ctx, ids, sc) }); err != nil {
 		if errors.Is(err, docBusiness.ErrNoSuchPrincipal) {
 			return Explanation{}, ErrNoSuchPrincipal
 		}
 		return Explanation{}, err
 	}
 	recordExpiry(ctx, who, ids, c)
-	ex := docBusiness.Explain(before, after)
 	actor := docBusiness.Actor{UserUUID: who.UserUUID, AgentUUID: who.AgentUUID}
 	data := map[string]string{}
 	for k, v := range o.tags {
@@ -332,6 +339,36 @@ func apply(ctx context.Context, who Subject, c Change, o applyOpts) (Explanation
 		docBusiness.AccessChanged(ctx, ids, actor, resourceEventBusiness.DocAccessChanged, ex, data)
 	}
 	return explanationOf(ex, len(ids)), nil
+}
+
+// accessShifts is what a change does to each person's level, named as the
+// audit log names levels ("" for none). Pure.
+func accessShifts(ex docBusiness.Explained) []auditBusiness.AccessShift {
+	name := func(l level.Level) string {
+		if l <= level.None {
+			return ""
+		}
+		return l.String()
+	}
+	out := make([]auditBusiness.AccessShift, 0, len(ex.People))
+	for _, s := range ex.People {
+		out = append(out, auditBusiness.AccessShift{UserUUID: s.UserUUID, From: name(s.From), To: name(s.To)})
+	}
+	return out
+}
+
+// takingMeta is what a change's audit row says beside whom it took access
+// from: the agent that made it, and how many pages under the doc it reached.
+// Pure.
+func takingMeta(who Subject, ids []string) map[string]interface{} {
+	meta := map[string]interface{}{}
+	if who.AgentUUID != "" {
+		meta["agent_uuid"] = who.AgentUUID
+	}
+	if len(ids) > 1 {
+		meta["subpages"] = len(ids) - 1
+	}
+	return meta
 }
 
 // recordExpiry records, for every page a change was made to, when each grant

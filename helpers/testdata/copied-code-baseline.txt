@@ -38,7 +38,7 @@ business/SlackImport/orchestrator.go 381
 business/SlackImport/user_resolver.go 107
 business/Task/taskBusiness.go 526
 business/Task/taskReactions.go 101
-controllers/Board/boardController.go 282
+controllers/Board/boardController.go 250
 controllers/Channel/channelController.go 550
 controllers/Chat/chatController.go 862
 controllers/DataTable/dataTableController.go 230

@@ -202,6 +202,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 		DueDate:         due,
 		CreatedAt:       createdAt,
 		UpdatedAt:       updatedAt,
+		StatusSince:     statusSince(st, createdAt),
 		Number:          sourceNumber(st),
 		TypeID:          builtinType(st.Type),
 		EstimateMinutes: st.EstimateMinutes,
@@ -476,6 +477,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 				DueDate:         due,
 				CreatedAt:       createdAt,
 				UpdatedAt:       ifZeroNow(st.Updated),
+				StatusSince:     statusSince(&st, createdAt),
 				Number:          sourceNumber(&st),
 				EstimateMinutes: st.EstimateMinutes,
 				EstimatePoints:  st.EstimatePoints,
@@ -618,6 +620,9 @@ type importTaskInput struct {
 	DueDate     *time.Time
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// StatusSince is when it entered its status (statusSince); zero is when
+	// it was made.
+	StatusSince time.Time
 	// Number is the task's number in the source (ENG-123's 123), kept when the
 	// project hasn't used it; 0 numbers it as it's made.
 	Number int
@@ -708,6 +713,10 @@ func writeTask(ctx context.Context, job *importModels.Job, made *madeTasks, in i
 	if updatedAt.IsZero() {
 		updatedAt = createdAt
 	}
+	since := in.StatusSince
+	if since.IsZero() {
+		since = createdAt
+	}
 
 	dgraphTask := &dgraphStruct.DgraphTask{
 		Uid:  "uid(task)",
@@ -726,6 +735,7 @@ func writeTask(ctx context.Context, job *importModels.Job, made *madeTasks, in i
 		Name:        in.Name,
 		Description: &in.Description,
 		Status:      in.Status,
+		StatusSince: &since,
 		Priority:    in.Priority,
 		Label:       &in.Label,
 		CreatedBy: &dgraphStruct.DgraphUser{

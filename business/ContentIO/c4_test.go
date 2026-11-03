@@ -281,7 +281,7 @@ func TestOnlyADocsOwnerLetsItIntoExports(t *testing.T) {
 	savedAllow, savedWithdraw := allowExport, withdrawExport
 	t.Cleanup(func() { allowExport, withdrawExport = savedAllow, savedWithdraw })
 	allowExport = func(_ context.Context, doc, _ uuid.UUID) error { allowed = append(allowed, doc); return nil }
-	withdrawExport = func(context.Context, uuid.UUID) error { return nil }
+	withdrawExport = func(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 	if err := SetExportConsent(context.Background(), tester, mine, true); err != nil {
 		t.Fatal(err)

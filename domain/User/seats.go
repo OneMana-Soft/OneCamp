@@ -4,11 +4,12 @@ package domain
 //
 // A free OneCamp licence covers a set number of people (helpers.SeatLimit,
 // stamped at build time); paid licences and builds from source have no limit.
-// The check sits here, at the two inserts that create a member, at adopting an
-// external row (AdoptExternalUser) and at reactivation, so every way in
-// (invitation, open sign-up, SSO, SCIM, the admin's Activate button) meets it.
-// Bots, external identities and guests are not people on the licence and
-// never count.
+// Every write that makes someone a member takes its seat through WithSeat:
+// the member insert (CreateUserWithMethod), adopting an external row
+// (AdoptExternalUser) and reactivation (UpdateDeletedTimeToNullByUUID), so
+// every way in (invitation, open sign-up, SSO, SCIM, the admin's Activate
+// button) meets it. Bots, external identities and guests are not people on
+// the licence and never count.
 
 import (
 	"context"
@@ -16,18 +17,24 @@ import (
 	"errors"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 )
 
 const activeMembersQuery = `SELECT count(*) FROM users
 	WHERE deleted_at IS NULL AND is_bot = false AND is_external = false`
 
+// seatsLock is the transaction lock every seat-taking write holds from its
+// count to its commit.
+const seatsLock = "workspace_seats"
+
 // Seams.
 var (
 	seatLimit           = helpers.MemberSeatLimit
 	countActiveMembers  = queryActiveMembers
 	isDeactivatedMember = queryIsDeactivatedMember
+	addCapped           = softDelete.Bound.Add
 )
 
 // SeatUsage is how many people the workspace has and how many its licence
@@ -39,7 +46,9 @@ func SeatUsage(ctx context.Context) (used, limit int, err error) {
 }
 
 // EnsureSeatAvailable refuses when one more member would exceed the licence.
-// A failed count is not a refusal: the limit must never lock people out
+// It is the early answer a screen gives before any work (the invitation
+// form); the seat itself is taken by WithSeat, which counts again under the
+// lock. A failed count is not a refusal: the limit must never lock people out
 // because a query timed out.
 func EnsureSeatAvailable(ctx context.Context) error {
 	limit := seatLimit()
@@ -57,35 +66,58 @@ func EnsureSeatAvailable(ctx context.Context) error {
 	return nil
 }
 
-// ensureSeatForReactivation applies the limit only when reactivating would
-// add a person: the user is deactivated and is a member, not a bot or an
-// external identity.
-func ensureSeatForReactivation(ctx context.Context, userUUID uuid.UUID) error {
-	if seatLimit() <= 0 {
-		return nil
+// WithSeat runs add, a write that makes one more person a member, while the
+// licence has a seat for them. The count and add run in one transaction
+// under seatsLock (a softDelete.Bound, as a capped kind's create takes its
+// rows), so two joins at the last seat can't both see it free: the second
+// counts once the first has committed. add's statements must go through
+// pgexec with the ctx they are given, so they join that transaction; inside
+// another transaction (pgexec.InTx) the lock is held until that one ends.
+// A full workspace answers SeatLimitError and add doesn't run. A failed
+// count is not a refusal, as in EnsureSeatAvailable: add then runs without
+// the cap (logged). Inside another transaction the failed count has already
+// ended that transaction, so add fails with it.
+func WithSeat(ctx context.Context, add func(context.Context) error) error {
+	limit := seatLimit()
+	if limit <= 0 {
+		return add(ctx)
 	}
-	adds, err := isDeactivatedMember(ctx, userUUID)
-	if err != nil || !adds {
-		return nil
+	countFailed := false
+	seats := softDelete.Bound{Lock: seatsLock, Most: limit, Full: &helpers.SeatLimitError{Limit: limit},
+		Count: func(ctx context.Context) (int, error) {
+			n, err := countActiveMembers(ctx)
+			countFailed = err != nil
+			return n, err
+		}}
+	err := addCapped(seats, ctx, add)
+	if countFailed {
+		helpers.LogErrorWithContext(ctx, "domain/WithSeat count failed, allowing: %+v", err)
+		return add(ctx)
 	}
-	return EnsureSeatAvailable(ctx)
+	return err
 }
 
+// withSeatForReactivation runs update, a reactivation, taking a seat only
+// when it adds a person: the user is deactivated and is a member, not a bot
+// or an external identity. A failed check is not a refusal.
+func withSeatForReactivation(ctx context.Context, userUUID uuid.UUID, update func(context.Context) error) error {
+	if seatLimit() > 0 {
+		if adds, err := isDeactivatedMember(ctx, userUUID); err == nil && adds {
+			return WithSeat(ctx, update)
+		}
+	}
+	return update(ctx)
+}
+
+// queryActiveMembers counts through pgexec, so inside WithSeat's transaction.
 func queryActiveMembers(ctx context.Context) (int, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var n int
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, activeMembersQuery).Scan(&n)
-	return n, err
+	return pgexec.Scalar[int](ctx, activeMembersQuery)
 }
 
 func queryIsDeactivatedMember(ctx context.Context, userUUID uuid.UUID) (bool, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var adds bool
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c,
+	adds, err := pgexec.Scalar[bool](ctx,
 		`SELECT deleted_at IS NOT NULL AND is_bot = false AND is_external = false FROM users WHERE id = $1`,
-		userUUID).Scan(&adds)
+		userUUID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

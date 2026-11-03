@@ -285,15 +285,16 @@ func TestAPreviewShowsTheTableASheetComesInto(t *testing.T) {
 		t.Fatal(err)
 	}
 	csv := []byte("Name,Amount,Extra\nAda,20,x\n")
-	preview := func(who Actor, into uuid.UUID) (sheetPreview, error) {
+	previewIn := func(ctx context.Context, who Actor, into uuid.UUID) (sheetPreview, error) {
 		in := contentIOBusiness.Input{Filename: "Deals.csv", Size: int64(len(csv)), File: bytes.NewReader(csv)}
 		var p sheetPreview
-		raw, err := sheetImporter{}.Preview(w.ctx, accessBusiness.Subject{UserUUID: who.UserID.String()}, in, json.RawMessage(fmt.Sprintf(`{"sheets":[{"index":0,"into":%q}]}`, into)))
+		raw, err := sheetImporter{}.Preview(ctx, accessBusiness.Subject{UserUUID: who.UserID.String()}, in, json.RawMessage(fmt.Sprintf(`{"sheets":[{"index":0,"into":%q}]}`, into)))
 		if err == nil {
 			err = json.Unmarshal(raw, &p)
 		}
 		return p, err
 	}
+	preview := func(who Actor, into uuid.UUID) (sheetPreview, error) { return previewIn(w.ctx, who, into) }
 	p, err := preview(w.member, tb.Id)
 	if err != nil || len(p.Sheets) != 1 {
 		t.Fatalf("the member's preview: %+v, %v", p, err)
@@ -309,6 +310,24 @@ func TestAPreviewShowsTheTableASheetComesInto(t *testing.T) {
 		if _, err := preview(w.member, into); !errors.Is(err, errNoTarget) {
 			t.Errorf("the member's preview into %s: %v, want %v", into, err, errNoTarget)
 		}
+	}
+	// Once its owner chooses who edits Deals, a member who may only view it
+	// can't bring a sheet into it, and is told so; its owner still can (V-170).
+	comment := model.GeneralComment
+	if _, _, err := SetEditing(w.ctx, tb.Id, EditingChange{General: &comment}, w.me); err != nil {
+		t.Fatalf("choosing who edits Deals: %v", err)
+	}
+	if _, err := preview(w.member, tb.Id); !errors.Is(err, errViewOnlyTarget) {
+		t.Errorf("the member's preview into a table they view: %v, want %v", err, errViewOnlyTarget)
+	}
+	if _, err := preview(w.me, tb.Id); err != nil {
+		t.Errorf("its owner's preview into Deals: %v", err)
+	}
+	if _, _, err := SetEditing(w.ctx, tb.Id, EditingChange{Add: []uuid.UUID{w.member.UserID}}, w.me); err != nil {
+		t.Fatalf("choosing the member to edit Deals: %v", err)
+	}
+	if _, err := preview(w.member, tb.Id); err != nil {
+		t.Errorf("a chosen member's preview into Deals: %v", err)
 	}
 }
 

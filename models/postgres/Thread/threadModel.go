@@ -54,6 +54,8 @@ const rowColumns = `id, resource_kind, resource_uuid, anchor_kind, anchor_start,
 
 // Insert writes a new thread. With ifAbsent, a thread that already has the id
 // is left as it is and inserted reports false; without it that is an error.
+// Like TakeBack it follows a transaction carried on ctx (pgexec), so a create
+// that fails inside one takes its thread back with the rest (V-281).
 func Insert(ctx context.Context, r *Row, ifAbsent bool) (inserted bool, err error) {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -62,16 +64,12 @@ func Insert(ctx context.Context, r *Row, ifAbsent bool) (inserted bool, err erro
 	if ifAbsent {
 		q += ` ON CONFLICT (id) DO NOTHING`
 	}
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(cctx, q,
+	n, err := pgexec.Exec(cctx, q,
 		r.ID, r.ResourceKind, r.ResourceUUID, r.AnchorKind, r.AnchorStart, r.AnchorEnd,
 		nullText(r.AnchorBlockID), nullText(r.AnchorLineage), nullText(r.AnchorQuote), nullJSON(r.AnchorMeta),
 		r.Status, r.ResolvedBy, r.ResolvedAt, r.TaskUUID, r.CreatedBy, r.CreatedAt, r.UpdatedAt)
 	if err != nil {
 		helpers.LogErrorWithContext(cctx, "models/Thread Insert failed: %+v", err)
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
 		return false, err
 	}
 	return n == 1, nil
@@ -181,13 +179,17 @@ func Touch(ctx context.Context, id uuid.UUID, at time.Time) error {
 	return err
 }
 
-// Delete removes a thread and who took part in it.
-func Delete(ctx context.Context, id uuid.UUID) error {
+// TakeBack takes back a thread whose first comment couldn't be written: the
+// create's own half-written row (a rollback; business/Thread's Create is its
+// only caller), so nothing was said in it and no one has joined it. Nothing
+// else deletes a thread; a resource purged for good forgets its threads
+// (ForgetResources).
+func TakeBack(ctx context.Context, id uuid.UUID) error {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(cctx, `DELETE FROM threads WHERE id = $1`, id)
+	_, err := pgexec.Exec(cctx, `DELETE FROM threads WHERE id = $1`, id)
 	if err != nil {
-		helpers.LogErrorWithContext(cctx, "models/Thread Delete failed: %+v", err)
+		helpers.LogErrorWithContext(cctx, "models/Thread TakeBack failed: %+v", err)
 	}
 	return err
 }

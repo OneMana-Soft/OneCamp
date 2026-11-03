@@ -8,7 +8,7 @@ package integration_test
 // removing an admin, switching someone's account off or back on, invitations,
 // and what the directory does through SCIM wrote no row: only an INFO line.
 //
-// Run: go test -tags=integration ./tests/integration/ -run 'TestEveryMembershipChangeIsAudited|TestWhatTheDirectoryDoesIsAudited' -v
+// Run: go test -tags=integration ./tests/integration/ -run 'TestEveryMembershipChangeIsAudited|TestWhatTheDirectoryDoesIsAudited|TestEveryTeamMembershipChangeIsAudited' -v
 
 import (
 	"bytes"
@@ -24,8 +24,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	teamBusiness "github.com/akashc777/OneCamp/business/Team"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	scimController "github.com/akashc777/OneCamp/controllers/Scim"
+	teamController "github.com/akashc777/OneCamp/controllers/Team"
 	userController "github.com/akashc777/OneCamp/controllers/User"
 	"github.com/akashc777/OneCamp/helpers"
 	customMiddleware "github.com/akashc777/OneCamp/middleware"
@@ -114,6 +116,58 @@ func TestEveryMembershipChangeIsAudited(t *testing.T) {
 		act(t, lr, userController.DeleteInvitation, http.MethodDelete, nil, "email", "kim@example.test")
 		audited(t, lr.env.PG, "invitation.deleted", 1)
 	})
+}
+
+// A team's people (V-243): adding someone, making them an admin and taking
+// either away each write one security row, before the change, naming who did
+// it, the team and the person. Taking someone off a team or its admin role
+// leaves no node behind, so the row is the only record of who did it and when.
+func TestEveryTeamMembershipChangeIsAudited(t *testing.T) {
+	t.Setenv("RESEND_API_KEY", "")
+	t.Setenv("APP_SECRET_KEK", "admin-audit-team-membership-kek")
+	lr := setupLandReady(t)
+	sam, _, err := userBusiness.CreateUserWithMethod(lr.ctx, "sam@example.test", "Sam", nil, userModels.AuthMethodEmail, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	team, err := teamBusiness.CreateTeam(lr.ctx, "Field crew", &lr.owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]string{"team_uuid": team.Uuid, "member_uuid": sam.String()}
+	for _, step := range []struct {
+		handler http.HandlerFunc
+		action  string
+	}{
+		{teamController.AddMemberToTeam, "team.member.add"},
+		{teamController.AddAdminMemberToTeam, "team.admin.add"},
+		{teamController.RemoveAdminMemberFromTeam, "team.admin.remove"},
+		{teamController.RemoveMemberFromTeam, "team.member.remove"},
+	} {
+		act(t, lr, step.handler, http.MethodPost, body)
+		if kinds := audited(t, lr.env.PG, step.action, 1); kinds[0] != "human" {
+			t.Errorf("%s is by a %q, want a human", step.action, kinds[0])
+		}
+		var actor, teamUUID, person string
+		if err := lr.env.PG.QueryRow(`SELECT COALESCE(actor_id::text, ''), COALESCE(metadata->>'team_uuid', ''),
+			COALESCE(metadata->>'user_uuid', '') FROM admin_audit_log WHERE action = $1`, step.action).Scan(&actor, &teamUUID, &person); err != nil {
+			t.Fatal(err)
+		}
+		if actor != lr.owner.UserPostgresInfo.Id.String() || teamUUID != team.Uuid || person != sam.String() {
+			t.Errorf("%s names actor %q, team %q, person %q; want %s, %s, %s",
+				step.action, actor, teamUUID, person, lr.owner.UserPostgresInfo.Id, team.Uuid, sam)
+		}
+	}
+	// Sam is off the team now. Taking an admin role nobody holds is a 404 and
+	// writes nothing (the route indexed an empty admin list before).
+	raw, _ := json.Marshal(body)
+	rec := httptest.NewRecorder()
+	teamController.RemoveAdminMemberFromTeam(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw)).
+		WithContext(context.WithValue(lr.ctx, helpers.UserInfoContextKey, lr.owner)))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("taking an admin role nobody holds: %d %s, want 404", rec.Code, rec.Body.String())
+	}
+	audited(t, lr.env.PG, "team.admin.remove", 1)
 }
 
 func TestWhatTheDirectoryDoesIsAudited(t *testing.T) {

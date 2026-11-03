@@ -551,13 +551,14 @@ type LinksChanged struct {
 
 // ChangeLinks links a row to rows add, and unlinks it from rows remove,
 // through a relation field linking to a table, or the field showing such
-// links from the other table. The actor needs view access to both tables;
-// rows deleted since are passed over, and anything else that isn't a row of
-// the other table is an error. It returns the row, as the actor reads it,
-// and how many links changed.
-func ChangeLinks(ctx context.Context, tableID, rowID, fieldID uuid.UUID, add, remove []uuid.UUID, actor Actor) (*model.Row, LinksChanged, error) {
+// links from the other table. The actor edits this table's rows and opens
+// the other table (the link rule, editAccess.go); rows deleted since are
+// passed over, and anything else that isn't a row of the other table is an
+// error. It returns the row, as the actor reads it, with the change set it
+// stored (Written), and how many links changed.
+func ChangeLinks(ctx context.Context, tableID, rowID, fieldID uuid.UUID, add, remove []uuid.UUID, actor Actor) (*Written, LinksChanged, error) {
 	ctx = asViewer(ctx, actor)
-	t, err := loadViewable(ctx, tableID, actor)
+	t, err := loadEditable(ctx, tableID, actor)
 	if err != nil {
 		return nil, LinksChanged{}, err
 	}
@@ -608,7 +609,7 @@ func ChangeLinks(ctx context.Context, tableID, rowID, fieldID uuid.UUID, add, re
 	tellTables(ctx, tableID, l.table)
 	announce(ctx, t, cs, hooksOnly)
 	withComputed(ctx, fields, []*model.Row{row})
-	return row, done, nil
+	return rowWritten(row, cs), done, nil
 }
 
 // linkFieldConfig checks a relation field's config as it's saved (self is

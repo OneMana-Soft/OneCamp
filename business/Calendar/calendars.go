@@ -24,6 +24,7 @@ import (
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	entityLinkBusiness "github.com/akashc777/OneCamp/business/EntityLink"
 	policyBusiness "github.com/akashc777/OneCamp/business/Policy"
+	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
@@ -683,7 +684,42 @@ func (s *service) Share(ctx context.Context, who *model.UserInfo, id, personUUID
 	if !people[person] {
 		return inputError("Pick someone in the workspace.")
 	}
-	return s.store.setShare(ctx, cal, person, personOf(who), level)
+	had, err := s.store.sharesFor(ctx, person, []uuid.UUID{cal})
+	if err != nil {
+		return err
+	}
+	if err := s.store.setShare(ctx, cal, person, personOf(who), level); err != nil {
+		return err
+	}
+	s.tellShare(ctx, who, cal, person, had[cal], level)
+	return nil
+}
+
+// tellShare tells a share's change once it's made, for the audit log's
+// "calendar": given, raised or lowered (calendar.shared, with the level it
+// had) or stopped (calendar.unshared). A share set to the level it has
+// changes nothing and tells nothing. A stopped share keeps its row, marked
+// by whom (V-184 head 3b), so unlike a doc's or a board's taking, which
+// leaves nothing behind, it isn't recorded before it's made.
+func (s *service) tellShare(ctx context.Context, who *model.UserInfo, cal, person uuid.UUID, from, to string) {
+	if from == to {
+		return
+	}
+	kind, data := resourceEventBusiness.CalendarShared, map[string]string{"level": to}
+	if to == "" {
+		kind, data = resourceEventBusiness.CalendarUnshared, map[string]string{}
+	}
+	if from != "" {
+		data["from"] = from
+	}
+	s.tellCalendar(ctx, who, kind, cal, []string{person.String()}, data)
+}
+
+// tellCalendar emits one Resource Event for a change to a calendar itself
+// (not to its events). data never carries the calendar's name or an address.
+func (s *service) tellCalendar(ctx context.Context, who *model.UserInfo, kind resourceEventBusiness.Kind, cal uuid.UUID, subjects []string, data map[string]string) {
+	s.emit(ctx, resourceEventBusiness.Event{Kind: kind, ResourceKind: KindCalendar, ResourceUUID: cal.String(),
+		Actor: resourceEventBusiness.Actor{UserUUID: personOf(who).String()}, At: s.now(), Subjects: subjects, Data: data})
 }
 
 // freeBusyPolicy is the workspace's calendar.freebusy.members policy (members
@@ -746,5 +782,18 @@ func (s *service) UpdateCalendar(ctx context.Context, who *model.UserInfo, id st
 		}
 		p.Name = &name
 	}
-	return s.store.updateCalendar(ctx, cal, p.Name, p.Hue)
+	if err := s.store.updateCalendar(ctx, cal, p.Name, p.Hue); err != nil {
+		return err
+	}
+	var changed []string
+	if p.Name != nil {
+		changed = append(changed, "name")
+	}
+	if p.Hue != nil {
+		changed = append(changed, "hue")
+	}
+	if len(changed) > 0 {
+		s.tellCalendar(ctx, who, resourceEventBusiness.CalendarUpdated, cal, nil, map[string]string{"changed": strings.Join(changed, ",")})
+	}
+	return nil
 }

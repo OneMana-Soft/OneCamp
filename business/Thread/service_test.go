@@ -137,7 +137,7 @@ func (m *memStore) touch(_ context.Context, id string, at time.Time) error {
 	}
 	return nil
 }
-func (m *memStore) remove(_ context.Context, id string) error {
+func (m *memStore) takeBack(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.threads, id)

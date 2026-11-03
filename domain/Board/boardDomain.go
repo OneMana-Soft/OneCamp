@@ -63,11 +63,8 @@ func GetDgraphBoardByUUID(ctx context.Context, boardUUID string, userUID string)
 			}`
 
 	dgraphBoard, err = dgraphModels.GetDgraphBoardInfoByUUID(ctx, query, variables)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphBoardByUUID Failed to get board from dgraph err: %+v", err)
-		return
-	}
+	// A uuid naming no board is the read's NotFound, an answer: not logged.
+	helpers.LogReadFailure(ctx, err, "domain/GetDgraphBoardByUUID failed to get board from dgraph")
 	return
 }
 
@@ -96,11 +93,8 @@ func GetBasicDgraphBoardByUUID(ctx context.Context, boardUUID string, userUID st
 			}`
 
 	dgraphBoard, err = dgraphModels.GetDgraphBoardInfoByUUID(ctx, query, variables)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetBasicDgraphBoardByUUID Failed to get board from dgraph err: %+v", err)
-		return
-	}
+	// A uuid naming no board is the read's NotFound, an answer: not logged.
+	helpers.LogReadFailure(ctx, err, "domain/GetBasicDgraphBoardByUUID failed to get board from dgraph")
 	return
 }
 
@@ -189,11 +183,8 @@ func GetSystemBoardByUUID(ctx context.Context, boardUUID string) (dgraphBoard *d
 			}`
 
 	dgraphBoard, err = dgraphModels.GetDgraphBoardInfoByUUID(ctx, query, variables)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetSystemBoardByUUID Failed to get board from dgraph err: %+v", err)
-		return
-	}
+	// A uuid naming no board is the read's NotFound, an answer: not logged.
+	helpers.LogReadFailure(ctx, err, "domain/GetSystemBoardByUUID failed to get board from dgraph")
 	return
 }
 
@@ -253,11 +244,8 @@ func GetBoardPermissions(ctx context.Context, boardUUID string) (dgraphBoard *dg
 			}`
 
 	dgraphBoard, err = dgraphModels.GetDgraphBoardInfoByUUID(ctx, query, variables)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetBoardPermissions Failed to get board from dgraph err: %+v", err)
-		return
-	}
+	// A uuid naming no board is the read's NotFound, an answer: not logged.
+	helpers.LogReadFailure(ctx, err, "domain/GetBoardPermissions failed to get board from dgraph")
 	return
 }
 

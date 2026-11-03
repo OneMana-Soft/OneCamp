@@ -8,6 +8,7 @@ import (
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Board"
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	resourceViewBusiness "github.com/akashc777/OneCamp/business/ResourceView"
 	domain "github.com/akashc777/OneCamp/domain/Board"
 	commentDomain "github.com/akashc777/OneCamp/domain/Comment"
@@ -105,10 +106,7 @@ func CreateBoard(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, in
 // GetBoardByBoardUUID returns the board with the caller's access for opening it.
 func GetBoardByBoardUUID(ctx context.Context, boardUUID string, userDgraphUID string) (dgraphBoard *dgraphStruct.DgraphBoard, err error) {
 	dgraphBoard, err = domain.GetDgraphBoardByUUID(ctx, boardUUID, userDgraphUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetBoardByBoardUUID Failed to get board in dgraph err: %+v", err)
-		return
-	}
+	helpers.LogReadFailure(ctx, err, "business/GetBoardByBoardUUID failed to get board in dgraph")
 	return
 }
 
@@ -331,9 +329,28 @@ func UpdateBoardPermissions(ctx context.Context, input adapter.InputUpdateBoardP
 	input.RemoveViewers = ensureUnique(input.RemoveViewers)
 	input.RemoveCommenters = ensureUnique(input.RemoveCommenters)
 
-	if err := domain.UpdateBoardPermissions(ctx, &input); err != nil {
+	// Who held which role before it, so that a change taking anyone's role
+	// away, or lowering it, is made only once its audit row is written (no
+	// record, no action): the edges it deletes say nothing of who held them.
+	held, err := domain.GetBoardPermissions(ctx, input.BoardId)
+	if err != nil {
 		return err
 	}
+	var holders map[string]string
+	if held != nil {
+		holders = dgraphStruct.RoleHolders(held.EditingUser, held.CommentingUser, held.ReadingUser)
+	}
+	shifts := auditBusiness.RoleShifts(holders,
+		map[string][]string{"edit": input.AddEditors, "comment": input.AddCommenters, "view": input.AddViewers},
+		map[string][]string{"edit": input.RemoveEditors, "comment": input.RemoveCommenters, "view": input.RemoveViewers})
+	if err := auditBusiness.RecordedTaking(ctx, auditBusiness.ContextPrincipal(ctx, ""), "board.access.remove",
+		"Took away or lowered people's roles on a board", "board", input.BoardId, shifts, nil,
+		func() error { return domain.UpdateBoardPermissions(ctx, &input) }); err != nil {
+		return err
+	}
+	// Whoever it gave a place, or a higher one, is told now it's made (the
+	// admin audit log's "boards"; a taking was recorded before it, above).
+	emitBoardShared(ctx, checkBoard, shifts)
 	// Whoever's place on it moved is authorised afresh on its live canvas:
 	// taken off it, refused; made a viewer, read-only; made an editor, editing.
 	var moved []string

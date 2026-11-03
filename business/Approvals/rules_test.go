@@ -36,7 +36,7 @@ func (s *ruleStore) use(t *testing.T) {
 		s.put = append(s.put, r)
 		return nil
 	}
-	dropRule = func(_ context.Context, _ uuid.UUID, status string) error {
+	dropRule = func(_ context.Context, _ uuid.UUID, status string, _ uuid.UUID) error {
 		s.dropped = append(s.dropped, status)
 		return nil
 	}

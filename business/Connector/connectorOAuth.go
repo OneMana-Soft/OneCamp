@@ -77,7 +77,7 @@ const ReturnPageCalendar = "calendar"
 func BuildAuthURL(ctx context.Context, userUUID uuid.UUID, providerID, returnPage string) (string, error) {
 	p, ok := providerRegistry[providerID]
 	if !ok {
-		return "", fmt.Errorf("unknown connector: %s", providerID)
+		return "", fmt.Errorf("%w: %s", ErrUnknownConnector, providerID)
 	}
 	clientID, _, err := clientCreds(p)
 	if err != nil {
@@ -159,7 +159,7 @@ func HandleCallback(ctx context.Context, state, code string) (CallbackResult, er
 	userUUID, providerID := res.UserUUID, res.ProviderID
 	p, ok := providerRegistry[providerID]
 	if !ok {
-		return res, fmt.Errorf("unknown connector: %s", providerID)
+		return res, fmt.Errorf("%w: %s", ErrUnknownConnector, providerID)
 	}
 	clientID, clientSecret, err := clientCreds(p)
 	if err != nil {

@@ -3155,6 +3155,98 @@
     "deprecated": false,
     "type": "DateTime"
    }
+  },
+  "ProjectLabel": {
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "children": {
+    "deprecated": false,
+    "type": "ProjectLabelConnection"
+   },
+   "color": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "creator": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "description": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "groupType": {
+    "deprecated": false,
+    "type": "LabelGroupType"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "inheritedFrom": {
+    "deprecated": false,
+    "type": "ProjectLabel"
+   },
+   "isGroup": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "lastAppliedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "name": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "organization": {
+    "deprecated": false,
+    "type": "Organization"
+   },
+   "parent": {
+    "deprecated": false,
+    "type": "ProjectLabel"
+   },
+   "projects": {
+    "deprecated": false,
+    "type": "ProjectConnection"
+   },
+   "retiredAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "retiredBy": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "team": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   }
+  },
+  "ProjectLabelConnection": {
+   "edges": {
+    "deprecated": false,
+    "type": "ProjectLabelEdge"
+   },
+   "nodes": {
+    "deprecated": false,
+    "type": "ProjectLabel"
+   },
+   "pageInfo": {
+    "deprecated": false,
+    "type": "PageInfo"
+   }
   }
  }
 }

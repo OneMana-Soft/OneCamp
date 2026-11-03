@@ -21,13 +21,14 @@ import (
 // one lower (1,166 on v2.75.0's main). without-ai leaves out the AI edition's
 // packages too, so its own count is 984 (v1.60.0; 981 once
 // UpdateAttachmentDeletedTimeByUUID went).
-const handExecutorBaseline = 946
+const handExecutorBaseline = 934
 
 // backgroundTimeoutBaseline is how many times models/ starts a statement's
 // timeout from context.Background() instead of the caller's ctx (206 at the
 // audit, 199 when this landed; 146 once V-184 head 3b moved the two admin
-// role writes onto the request's ctx through pgexec). It only goes down.
-const backgroundTimeoutBaseline = 146
+// role writes onto the request's ctx through pgexec; 145 once V-237 moved the
+// reactivation onto pgexec). It only goes down.
+const backgroundTimeoutBaseline = 145
 
 // executorCalls are the calls that run a statement or a query on a store
 // client, or open a graph transaction to run one in (an HTTP client's Do is

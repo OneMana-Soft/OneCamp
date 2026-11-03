@@ -216,6 +216,14 @@ const CategoryCalls = auditModel.CategoryCalls
 // CategoryCalendar is what happened to the calendar's events.
 const CategoryCalendar = auditModel.CategoryCalendar
 
+// CategoryTables is who may change a table: its general level and the
+// people granted edit on it.
+const CategoryTables = auditModel.CategoryTables
+
+// CategoryBoards is who a board was shared with, who lost a place on it,
+// and every export of it.
+const CategoryBoards = auditModel.CategoryBoards
+
 // Who acted, as opposed to who answers for it.
 //
 // The actor id names the accountable human, which for an agent is whoever's

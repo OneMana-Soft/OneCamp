@@ -144,3 +144,23 @@ func TestATypeChangeIsWrittenIntoTheTasksHistory(t *testing.T) {
 		t.Errorf("the second line: %+v", l)
 	}
 }
+
+// A type reads the same wherever the app gets it: a built-in one by its key, a project's own marked, and no types
+// an empty list rather than null (the template manager and the project's types both read these).
+func TestAnswersReadTypesAsTheAppDoes(t *testing.T) {
+	project := uuid.New()
+	got := Answers([]model.Type{
+		{ID: TypeBug, Builtin: "bug", Name: "Bug", Icon: "bug"},
+		{ID: project, Name: "Incident", Icon: "flag", ProjectID: &project},
+	})
+	want := []Answer{
+		{ID: TypeBug.String(), Builtin: "bug", Name: "Bug", Icon: "bug"},
+		{ID: project.String(), Name: "Incident", Icon: "flag", Own: true},
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("Answers = %+v, want %+v", got, want)
+	}
+	if none := Answers(nil); none == nil || len(none) != 0 {
+		t.Fatalf("no types read as %#v, want an empty list", none)
+	}
+}

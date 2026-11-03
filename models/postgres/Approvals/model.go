@@ -12,6 +12,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -52,7 +53,7 @@ const MaxRulesPerProject = 40
 
 // ListRules is a project's status rules.
 func ListRules(ctx context.Context, projectID uuid.UUID) ([]*StatusRule, error) {
-	out, err := pgexec.Query(ctx, `SELECT `+ruleColumns+` FROM status_rules WHERE project_id = $1 ORDER BY status LIMIT 100`, scanRule, projectID)
+	out, err := pgexec.Query(ctx, `SELECT `+ruleColumns+` FROM status_rules WHERE project_id = $1 AND `+softDelete.Live("")+` ORDER BY status LIMIT 100`, scanRule, projectID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Approvals ListRules: %+v", err)
 		return nil, err
@@ -66,22 +67,23 @@ func ListRules(ctx context.Context, projectID uuid.UUID) ([]*StatusRule, error) 
 // RulesFor is the rules of a project for any of the given statuses (a custom
 // status's id and the built-in key it counts as).
 func RulesFor(ctx context.Context, projectID uuid.UUID, statuses []string) ([]*StatusRule, error) {
-	return pgexec.Query(ctx, `SELECT `+ruleColumns+` FROM status_rules WHERE project_id = $1 AND status = ANY($2)`, scanRule, projectID, pq.Array(statuses))
+	return pgexec.Query(ctx, `SELECT `+ruleColumns+` FROM status_rules WHERE project_id = $1 AND status = ANY($2) AND `+softDelete.Live(""), scanRule, projectID, pq.Array(statuses))
 }
 
 // CountRules is how many rules a project has.
 func CountRules(ctx context.Context, projectID uuid.UUID) (int, error) {
-	return pgexec.Scalar[int](ctx, `SELECT count(*) FROM status_rules WHERE project_id = $1`, projectID)
+	return pgexec.Scalar[int](ctx, `SELECT count(*) FROM status_rules WHERE project_id = $1 AND `+softDelete.Live(""), projectID)
 }
 
-// PutRule saves a status's rule, replacing what it had.
+// PutRule saves a status's rule, replacing what it had; a rule taken away
+// (DeleteRule) comes back, live, with what it now says.
 func PutRule(ctx context.Context, r *StatusRule) error {
 	_, err := pgexec.Exec(ctx,
 		`INSERT INTO status_rules (project_id, status, who, people, required, approvers, approvals_needed, client, updated_by, updated_at)
 		 VALUES ($1, $2, $3, $4::uuid[], $5, $6::uuid[], $7, $8, $9, NOW())
 		 ON CONFLICT (project_id, status) DO UPDATE SET who = EXCLUDED.who, people = EXCLUDED.people, required = EXCLUDED.required,
 		   approvers = EXCLUDED.approvers, approvals_needed = EXCLUDED.approvals_needed, client = EXCLUDED.client,
-		   updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+		   updated_by = EXCLUDED.updated_by, updated_at = NOW(), deleted_at = NULL, deleted_by = NULL`,
 		r.ProjectID, r.Status, r.Who, pq.Array(r.People), pq.Array(r.Required), pq.Array(r.Approvers), r.ApprovalsNeeded, r.Client, r.UpdatedBy)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Approvals PutRule: %+v", err)
@@ -89,9 +91,12 @@ func PutRule(ctx context.Context, r *StatusRule) error {
 	return err
 }
 
-// DeleteRule removes a status's rule.
-func DeleteRule(ctx context.Context, projectID uuid.UUID, status string) error {
-	_, err := pgexec.Exec(ctx, `DELETE FROM status_rules WHERE project_id = $1 AND status = $2`, projectID, status)
+// DeleteRule takes a status's rule away, by whom (V-184 head 4a): the row
+// stays, marked, so who set the rule and who took it away stay on record, and
+// no read sees it; PutRule brings it back.
+func DeleteRule(ctx context.Context, projectID uuid.UUID, status string, by uuid.UUID) error {
+	_, err := pgexec.Exec(ctx, `UPDATE status_rules SET deleted_at = NOW(), deleted_by = $3 WHERE project_id = $1 AND status = $2 AND `+softDelete.Live(""),
+		projectID, status, softDelete.By(by))
 	return err
 }
 

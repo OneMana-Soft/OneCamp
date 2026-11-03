@@ -264,10 +264,14 @@ type Summaries map[string]map[string]json.RawMessage
 // Cursor is where a page starts: opaque, from the page before.
 type Cursor string
 
-// Page asks for one page: its size, after a cursor ("" for the first).
+// Page asks for one page: its size, after a cursor ("" for the first), or at
+// a place in the set's order (At, 0 for the first, with no cursor): a reader
+// that jumped there, as a scrollbar dragged far does, reads the rows there
+// and none before them. Its Next goes on from there, as any page's does.
 type Page struct {
 	Size  int    `json:"size"`
 	After Cursor `json:"after,omitempty"`
+	At    int    `json:"at,omitempty"`
 }
 
 // GroupCount is one group's key (a value per group level), how many it
@@ -473,6 +477,9 @@ func (g *registry) Run(ctx context.Context, who accessBusiness.Subject, spec Spe
 	}
 	if page.Size <= 0 || page.Size > MaxPage {
 		return Result{}, fmt.Errorf("%w: a page holds 1 to %d", ErrBadSpec, MaxPage)
+	}
+	if page.At < 0 || (page.At > 0 && page.After != "") {
+		return Result{}, fmt.Errorf("%w: a page starts after a cursor or at a place, not both", ErrBadSpec)
 	}
 	g.mu.RLock()
 	r, ok := g.runners[spec.Scope.Kind]

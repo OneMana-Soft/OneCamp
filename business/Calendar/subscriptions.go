@@ -34,6 +34,7 @@ import (
 	calendarSyncBusiness "github.com/akashc777/OneCamp/business/CalendarSync"
 	"github.com/akashc777/OneCamp/business/CalendarSync/icsurl"
 	ICS "github.com/akashc777/OneCamp/business/ICS"
+	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	"github.com/akashc777/OneCamp/helpers"
 	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
@@ -54,6 +55,9 @@ const (
 	subscriptionSweepFor  = 50 * time.Second
 	// subscriptionLimit bounds bringing one file's events in.
 	subscriptionLimit = 10 * time.Minute
+	// subscriptionForget bounds a read's check on its way out, which runs even
+	// when subscriptionLimit has cut the read short.
+	subscriptionForget = 30 * time.Second
 	// maxSubscriptions is the most calendars one person reads from
 	// addresses, and maxSubscribedEvents the most events (a series with its
 	// changed instances is one) one of them keeps.
@@ -179,14 +183,15 @@ func (s *service) Subscribe(ctx context.Context, who *model.UserInfo, address, n
 		PersonID: me, SourceSealed: sealed, ReadAt: &now}
 	added, err := s.ledger.addSubscription(ctx, sub)
 	if err != nil || !added {
-		if _, derr := s.store.deleteSubscribedCalendar(ctx, cal, me); derr != nil {
-			helpers.LogErrorWithContext(ctx, "business/Calendar: a calendar made for a subscription that wasn't added couldn't be deleted: %v", derr)
+		if _, derr := s.store.takeBackSubscribedCalendar(ctx, cal, me); derr != nil {
+			helpers.LogErrorWithContext(ctx, "business/Calendar: a calendar made for a subscription that wasn't added couldn't be taken back: %v", derr)
 		}
 		if err != nil {
 			return nil, err
 		}
 		return nil, inputError("You subscribe to that calendar already.")
 	}
+	s.tellCalendar(ctx, who, resourceEventBusiness.CalendarSubscribed, cal, nil, map[string]string{"host": hostOf(addr)})
 	changes := icsurl.ChangesOf(file)
 	events, _ := groupTags(changes)
 	bring := func() {
@@ -291,17 +296,24 @@ func (s *service) RefreshSubscription(ctx context.Context, who *model.UserInfo, 
 	return &v, nil
 }
 
-// Unsubscribe removes one of who's subscribed calendars and everything on
-// it. The calendar goes first, so nothing is left that its subscription
-// isn't reading; a ledger row left behind is never read again (its
-// calendar is gone) and is taken again by the same address.
+// Unsubscribe takes one of who's subscribed calendars away, and everything
+// on it. The calendar is kept, marked by them (V-184 head 5c), the
+// address's events on it are forgotten and its shares marked, so no read
+// sees it. It goes first, so nothing is left that its subscription isn't
+// reading; a ledger row left behind is never read again (its calendar is
+// not live) and is taken again by the same address.
 func (s *service) Unsubscribe(ctx context.Context, who *model.UserInfo, calendarID string) error {
 	sub, err := s.subscriptionOf(ctx, who, calendarID)
 	if err != nil {
 		return err
 	}
-	if _, err := s.store.deleteSubscribedCalendar(ctx, *sub.CalendarID, sub.PersonID); err != nil {
+	took, err := s.store.unsubscribeCalendar(ctx, *sub.CalendarID, sub.PersonID)
+	if err != nil {
 		return err
+	}
+	if took {
+		// Told once, when the calendar goes; its shares end with it.
+		s.tellCalendar(ctx, who, resourceEventBusiness.CalendarUnsubscribed, *sub.CalendarID, nil, map[string]string{"host": subscriptionView(*sub).Host})
 	}
 	return s.ledger.dropSubscription(ctx, sub.LinkID, sub.RemoteID)
 }
@@ -423,6 +435,17 @@ func (s *service) takeSubscribed(ctx context.Context, sub models.Subscription, c
 		return
 	}
 	calendar := *sub.CalendarID
+	// A read in flight as its person unsubscribes writes after the
+	// unsubscribe's own forgetting: on its way out, however it ends, it
+	// forgets what it wrote onto a calendar since unsubscribed (V-184 head
+	// 5c), with a context of its own, so a read cut short still does.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), subscriptionForget)
+		defer cancel()
+		if err := s.store.forgetIfUnsubscribed(ctx, calendar); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/Calendar: a read of calendar %v couldn't forget what it wrote after an unsubscribe: %v", calendar, err)
+		}
+	}()
 	who := &model.UserInfo{UserPostgresInfo: model.User{Id: sub.PersonID}}
 	who.UserDgraphInfo.Uuid = sub.PersonID.String()
 	order, groups := groupTags(changes)
@@ -447,6 +470,25 @@ func (s *service) takeSubscribed(ctx context.Context, sub models.Subscription, c
 			byUID[r.ExternalID] = r
 		} else {
 			gone = append(gone, r.EventID)
+		}
+	}
+	// A ref counts only for an event on this calendar: one a read in flight
+	// kept for a calendar since unsubscribed is never matched, and its event
+	// comes in again here.
+	if len(byUID) > 0 {
+		matched := make([]uuid.UUID, 0, len(byUID))
+		for _, r := range byUID {
+			matched = append(matched, r.EventID)
+		}
+		on, err := s.store.eventsOn(ctx, calendar, matched)
+		if err != nil {
+			fail("read where its events are", err)
+			return
+		}
+		for uid, r := range byUID {
+			if !on[r.EventID] {
+				delete(byUID, uid)
+			}
 		}
 	}
 	// What left the file goes (its refs with it).

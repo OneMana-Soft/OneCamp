@@ -179,7 +179,7 @@ func TestALongTextSavesAndSorts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a row holding %d and %d bytes didn't save: %v", len(fmt.Sprint(vals[n])), len(fmt.Sprint(vals[l])), err)
 		}
-		return r
+		return r.Row
 	}
 	made(map[string]interface{}{n: "Row 10", l: hex})
 	short := made(map[string]interface{}{n: "Row 2", l: "short"})

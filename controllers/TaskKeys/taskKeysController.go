@@ -104,15 +104,6 @@ func SetProjectKey(w http.ResponseWriter, r *http.Request) {
 	ProjectKey(w, r)
 }
 
-// typeAnswer is a type as the app gets it: built in, or the project's own.
-type typeAnswer struct {
-	ID      string `json:"id"`
-	Builtin string `json:"builtin,omitempty"`
-	Name    string `json:"name"`
-	Icon    string `json:"icon"`
-	Own     bool   `json:"own,omitempty"`
-}
-
 // ProjectTypes GET /project/{project_uuid}/types: the types a task in the
 // project can have, and the icons a type of its own may take.
 func ProjectTypes(w http.ResponseWriter, r *http.Request) {
@@ -126,11 +117,7 @@ func ProjectTypes(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteRetryLater(w, "Couldn't read the project's types.")
 		return
 	}
-	out := make([]typeAnswer, 0, len(types))
-	for _, t := range types {
-		out = append(out, typeAnswer{ID: t.ID.String(), Builtin: t.Builtin, Name: t.Name, Icon: t.Icon, Own: t.ProjectID != nil})
-	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": out, "icons": workTaxonomy.Icons})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": workTaxonomy.Answers(types), "icons": workTaxonomy.Icons})
 }
 
 type typeInput struct {
@@ -180,7 +167,7 @@ func CreateProjectType(w http.ResponseWriter, r *http.Request) {
 	}
 	auditBusiness.Record(r, "project.type.created", auditBusiness.CategorySettings, "Added the type "+t.Name+" to a project",
 		map[string]interface{}{"project_uuid": id.String(), "type_id": t.ID.String(), "name": t.Name})
-	helpers.WriteJSON(w, http.StatusCreated, helpers.Envolope{"data": typeAnswer{ID: t.ID.String(), Name: t.Name, Icon: t.Icon, Own: true}})
+	helpers.WriteJSON(w, http.StatusCreated, helpers.Envolope{"data": workTaxonomy.AnswerOf(t)})
 }
 
 // UpdateProjectType PUT /project/{project_uuid}/types/{type_id} {name, icon}.

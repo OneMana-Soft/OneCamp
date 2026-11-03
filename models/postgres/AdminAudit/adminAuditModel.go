@@ -54,6 +54,14 @@ const (
 	// Resource Events (business/Calendar's audit sink). Never an event's
 	// title or notes.
 	CategoryCalendar = "calendar"
+	// CategoryTables is who may change a table that an auditor asks about:
+	// its general level and the people granted edit on it, each change with
+	// what it was before and after (business/DataTable editAccess.go).
+	CategoryTables = "tables"
+	// CategoryBoards is who a board was shared with and who lost a place on
+	// it, and every export of it (business/Board's audit sink). A private
+	// board's title never goes into the log.
+	CategoryBoards = "boards"
 )
 
 // AllCategories is the canonical, ordered list of audit categories.
@@ -78,8 +86,10 @@ func AllCategories() []string {
 		CategorySecurity,
 		CategoryAgent,
 		CategoryDocs,
+		CategoryBoards,
 		CategoryCalls,
 		CategoryCalendar,
+		CategoryTables,
 	}
 }
 

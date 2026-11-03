@@ -102,7 +102,7 @@ func TestEveryQueryReadsLiveFieldsUnderTheCap(t *testing.T) {
 // sentQueries is every query the import sends, by its constant's name, read
 // from the package's code instead of a list kept by hand: the calls of gql,
 // and of each function that hands one of its own parameters to such a call
-// as the query (issuePages, rootList). A query sent any other way (a literal
+// as the query (listPages, rootList). A query sent any other way (a literal
 // at the call, a string made at run time) fails, since the guard couldn't
 // read it, and so does a *Query constant that nothing sends.
 func sentQueries(t *testing.T) map[string]string {

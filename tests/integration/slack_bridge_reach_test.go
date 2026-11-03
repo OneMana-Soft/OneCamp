@@ -133,7 +133,7 @@ func TestSlackBridgeCarriesOnlyWhatItsLinkerCanRead(t *testing.T) {
 	linked := func(channel string) bool {
 		t.Helper()
 		var n int
-		if err := env.PG.QueryRow(`SELECT count(*) FROM slack_bridge_links WHERE channel_uuid = $1`, channels[channel]).Scan(&n); err != nil {
+		if err := env.PG.QueryRow(`SELECT count(*) FROM slack_bridge_links WHERE channel_uuid = $1 AND deleted_at IS NULL`, channels[channel]).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		return n > 0

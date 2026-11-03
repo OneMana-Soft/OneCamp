@@ -3,7 +3,6 @@ package models
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -14,6 +13,12 @@ import (
 	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
+
+// ErrNotFound is a board the graph has no node for, as opposed to a graph
+// that didn't answer. It is also helpers.ErrNotFound, so every caller of the
+// read gets a NotFound: helpers.WriteReadFailure answers it as a 404 and every
+// other failed read as a 503.
+var ErrNotFound = helpers.NotFound("failed to get dgraph board")
 
 // CreateOrUpdateBoard upserts a Board node (create when Uid is empty, update
 // when Uid is "uid(board)" with the provided upsert query). Mirrors
@@ -104,9 +109,11 @@ func GetDgraphBoardInfoByUUID(ctx context.Context, query string, variables map[s
 		return
 	}
 
+	// No board by that id: it never existed, or went for good. It isn't
+	// logged here; its caller says whether it was expected
+	// (helpers.LogReadFailure, WriteReadFailure).
 	if len(boardsInfo.BoardInfo) == 0 {
-		err = errors.New("failed to get dgraph board")
-		helpers.LogErrorWithContext(ctx, "models/GetDgraphBoardInfoByUUID failed to get dgraph board")
+		err = ErrNotFound
 		return
 	}
 	dgraphBoard = boardsInfo.BoardInfo[0]

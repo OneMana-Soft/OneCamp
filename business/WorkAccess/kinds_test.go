@@ -7,6 +7,8 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
+	taskViewModel "github.com/akashc777/OneCamp/models/postgres/TaskView"
 	"github.com/google/uuid"
 )
 
@@ -16,9 +18,9 @@ import (
 type world struct {
 	projects []*dgraphStruct.DgraphProject
 	tasks    []*dgraphStruct.DgraphTask
-	views    map[uuid.UUID]uuid.UUID
-	cycles   map[uuid.UUID]uuid.UUID
-	forms    map[uuid.UUID]uuid.UUID
+	views    map[uuid.UUID]taskViewModel.Owner
+	cycles   map[uuid.UUID]softDelete.Held
+	forms    map[uuid.UUID]softDelete.Held
 	roles    map[uuid.UUID]string
 	policy   string
 }
@@ -30,14 +32,13 @@ func (w *world) use(t *testing.T) {
 		policy = EditMembers
 	}
 	fakeRoles(t, w.roles, policy)
-	old := []any{readProjects, readTasks, viewOwners, cycleProjects, formProjects, uidOf}
+	old := []any{readProjects, readTasks, viewOwners, heldBy, uidOf}
 	t.Cleanup(func() {
 		readProjects = old[0].(func(context.Context, []string, string) ([]*dgraphStruct.DgraphProject, error))
 		readTasks = old[1].(func(context.Context, []string, string) ([]*dgraphStruct.DgraphTask, error))
-		viewOwners = old[2].(func(context.Context, []uuid.UUID) (map[uuid.UUID]uuid.UUID, error))
-		cycleProjects = old[3].(func(context.Context, []uuid.UUID) (map[uuid.UUID]uuid.UUID, error))
-		formProjects = old[4].(func(context.Context, []uuid.UUID) (map[uuid.UUID]uuid.UUID, error))
-		uidOf = old[5].(func(context.Context, accessBusiness.Subject) (string, error))
+		viewOwners = old[2].(func(context.Context, []uuid.UUID) (map[uuid.UUID]taskViewModel.Owner, error))
+		heldBy = old[3].(func(context.Context, softDelete.Kind, []uuid.UUID) (map[uuid.UUID]softDelete.Held, error))
+		uidOf = old[4].(func(context.Context, accessBusiness.Subject) (string, error))
 	})
 	readProjects = func(_ context.Context, ids []string, _ string) ([]*dgraphStruct.DgraphProject, error) {
 		var out []*dgraphStruct.DgraphProject
@@ -51,9 +52,10 @@ func (w *world) use(t *testing.T) {
 		return out, nil
 	}
 	readTasks = func(_ context.Context, _ []string, _ string) ([]*dgraphStruct.DgraphTask, error) { return w.tasks, nil }
-	viewOwners = func(context.Context, []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) { return w.views, nil }
-	cycleProjects = func(context.Context, []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) { return w.cycles, nil }
-	formProjects = func(context.Context, []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) { return w.forms, nil }
+	viewOwners = func(context.Context, []uuid.UUID) (map[uuid.UUID]taskViewModel.Owner, error) { return w.views, nil }
+	heldBy = func(_ context.Context, kind softDelete.Kind, _ []uuid.UUID) (map[uuid.UUID]softDelete.Held, error) {
+		return map[softDelete.Kind]map[uuid.UUID]softDelete.Held{softDelete.Cycle: w.cycles, softDelete.Form: w.forms}[kind], nil
+	}
 	uidOf = func(_ context.Context, who accessBusiness.Subject) (string, error) { return who.UserUID, nil }
 }
 
@@ -125,23 +127,38 @@ func TestTheTaskKindAnswersByTheRule(t *testing.T) {
 	}
 }
 
-// A saved view is its owner's; a cycle and a form are their project's, read
-// by its members and changed by its admins.
+// A saved view is its owner's, and a deleted one none to everyone, its owner
+// with what it was (I9, as a deleted task); a cycle and a form are their
+// project's, read by its members and changed by its admins, and a deleted
+// one is none to everyone, with what it was (V-324).
 func TestViewsCyclesAndFormsAnswerByTheirOwners(t *testing.T) {
 	me := uuid.New()
 	who := accessBusiness.Subject{UserUID: "0x1", UserUUID: me.String()}
 	run, work, outside := uuid.New(), uuid.New(), uuid.New()
-	myView, theirView := uuid.New(), uuid.New()
+	myView, theirView, myDeleted, theirDeleted := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	adminCycle, memberForm, outsideCycle := uuid.New(), uuid.New(), uuid.New()
+	deletedCycle, deletedForm, outsideDeleted, tableForm := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	of := func(project uuid.UUID, deleted bool) softDelete.Held {
+		return softDelete.Held{Owner: softDelete.Owner{Project: project}, Deleted: deleted}
+	}
 	w := &world{
 		projects: []*dgraphStruct.DgraphProject{
 			{Uuid: run.String(), IsProjectAdmin: 1},
 			{Uuid: work.String(), IsProjectMember: 1},
 			{Uuid: outside.String()},
 		},
-		views:  map[uuid.UUID]uuid.UUID{myView: me, theirView: uuid.New()},
-		cycles: map[uuid.UUID]uuid.UUID{adminCycle: run, outsideCycle: outside},
-		forms:  map[uuid.UUID]uuid.UUID{memberForm: work},
+		views: map[uuid.UUID]taskViewModel.Owner{
+			myView: {Person: me}, theirView: {Person: uuid.New()},
+			myDeleted: {Person: me, Deleted: true}, theirDeleted: {Person: uuid.New(), Deleted: true},
+		},
+		cycles: map[uuid.UUID]softDelete.Held{
+			adminCycle: of(run, false), outsideCycle: of(outside, false),
+			deletedCycle: of(run, true), outsideDeleted: of(outside, true),
+		},
+		forms: map[uuid.UUID]softDelete.Held{
+			memberForm: of(work, false), deletedForm: of(work, true),
+			tableForm: {Owner: softDelete.Owner{Table: uuid.New()}},
+		},
 	}
 	w.use(t)
 	for _, c := range []struct {
@@ -155,11 +172,36 @@ func TestViewsCyclesAndFormsAnswerByTheirOwners(t *testing.T) {
 		{KindCycle, outsideCycle, accessBusiness.LevelNone},
 		{KindForm, memberForm, accessBusiness.LevelView},
 	} {
-		if d, ok := resolve(t, who, c.kind, c.id.String()); !ok || d.Level != c.level {
+		if d, ok := resolve(t, who, c.kind, c.id.String()); !ok || d.Level != c.level || d.Deleted {
 			t.Errorf("%s %s: %+v %v, want %s", c.kind, c.id, d, ok, c.level)
 		}
 	}
+	if d, ok := resolve(t, who, KindView, myDeleted.String()); !ok || !d.Deleted || d.Level != accessBusiness.LevelNone || d.Was != accessBusiness.LevelFull || !d.Owner {
+		t.Errorf("my deleted view: %+v %v; want none, deleted, with Was full and still mine", d, ok)
+	}
+	if d, ok := resolve(t, who, KindView, theirDeleted.String()); !ok || !d.Deleted || d.Level != accessBusiness.LevelNone || d.Was != accessBusiness.LevelNone || d.Owner {
+		t.Errorf("someone else's deleted view: %+v %v; want none, deleted, with Was none", d, ok)
+	}
+	if _, ok := resolve(t, who, KindView, uuid.NewString()); ok {
+		t.Error("a view that isn't there is left out")
+	}
 	if _, ok := resolve(t, who, KindCycle, uuid.NewString()); ok {
 		t.Error("a cycle that isn't there is left out")
+	}
+	for _, c := range []struct {
+		kind string
+		id   uuid.UUID
+		was  accessBusiness.Level
+	}{
+		{KindCycle, deletedCycle, accessBusiness.LevelFull},
+		{KindCycle, outsideDeleted, accessBusiness.LevelNone},
+		{KindForm, deletedForm, accessBusiness.LevelView},
+	} {
+		if d, ok := resolve(t, who, c.kind, c.id.String()); !ok || !d.Deleted || d.Level != accessBusiness.LevelNone || d.Was != c.was {
+			t.Errorf("a deleted %s: %+v %v; want none, deleted, with Was %s", c.kind, d, ok, c.was)
+		}
+	}
+	if _, ok := resolve(t, who, KindForm, tableForm.String()); ok {
+		t.Error("a table's own form (no project) is left out")
 	}
 }

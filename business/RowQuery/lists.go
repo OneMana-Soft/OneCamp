@@ -169,7 +169,7 @@ func runListed(ctx context.Context, l listing, after query.Cursor, size int) ([]
 // listFrom lists the order after the one query's cursor, as many as
 // listMax, and answers its first window.
 func (l listing) listFrom(ctx context.Context, after query.Cursor, view, fresh string, size int) ([]uuid.UUID, query.Cursor, error) {
-	found, err := oneQuery(ctx, l.table, l.cols, l.spec, l.where, l.a, after, listMax+1, l.who, l.unkeyed, false)
+	found, err := oneQuery(ctx, l.table, l.cols, l.spec, l.where, l.a, after, 0, listMax+1, l.who, l.unkeyed, false)
 	if err != nil {
 		return nil, "", err
 	}

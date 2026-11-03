@@ -50,9 +50,16 @@ type store interface {
 	// app, made the first time.
 	importedCalendar(ctx context.Context, owner uuid.UUID, name, tz string) (uuid.UUID, error)
 	// Calendars read from an address (subscriptions.go): one made, one
-	// deleted with everything on it, and events that left its file.
+	// unsubscribed (kept, marked by its owner, the address's events on it
+	// forgotten and its shares marked), one taken back when its subscribe
+	// failed, and events that left its file.
 	subscribedCalendar(ctx context.Context, id, owner uuid.UUID, name, hue, tz string) error
-	deleteSubscribedCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error)
+	unsubscribeCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error)
+	takeBackSubscribedCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error)
+	// A read's way out: the address's events on a calendar since
+	// unsubscribed forgotten; and which events are on a calendar.
+	forgetIfUnsubscribed(ctx context.Context, calendar uuid.UUID) error
+	eventsOn(ctx context.Context, calendar uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]bool, error)
 	deleteSubscribedEvents(ctx context.Context, calendar uuid.UUID, ids []uuid.UUID) error
 	// get is an event, in the trash or not; nil when there is none.
 	get(ctx context.Context, id uuid.UUID) (*models.Event, error)
@@ -275,8 +282,20 @@ func (postgresStore) subscribedCalendar(ctx context.Context, id, owner uuid.UUID
 	return models.SubscribedCalendar(ctx, id, owner, name, hue, tz)
 }
 
-func (postgresStore) deleteSubscribedCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error) {
-	return models.DeleteSubscribedCalendar(ctx, id, owner)
+func (postgresStore) unsubscribeCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error) {
+	return models.UnsubscribeCalendar(ctx, id, owner)
+}
+
+func (postgresStore) takeBackSubscribedCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error) {
+	return models.TakeBackSubscribedCalendar(ctx, id, owner)
+}
+
+func (postgresStore) forgetIfUnsubscribed(ctx context.Context, calendar uuid.UUID) error {
+	return models.ForgetIfUnsubscribed(ctx, calendar)
+}
+
+func (postgresStore) eventsOn(ctx context.Context, calendar uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	return models.EventsOn(ctx, calendar, ids)
 }
 
 func (postgresStore) deleteSubscribedEvents(ctx context.Context, calendar uuid.UUID, ids []uuid.UUID) error {

@@ -3,14 +3,21 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 )
 
 // TaskView is a saved set of task-list filters, sort and columns (migration 176).
+//
+// A view its person deletes is kept, marked by them and when (V-184 head 5a,
+// the owner's rule that every delete of a business record is soft). Every
+// read here sees live views only, and a name is unique among a person's live
+// views in a scope, so saving a deleted view's name again makes a new view.
 type TaskView struct {
 	Id        uuid.UUID       `json:"id"`
 	Scope     string          `json:"scope"`
@@ -23,83 +30,107 @@ func withTimeout() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 }
 
+const viewColumns = `id, scope, name, state, updated_at`
+
+func scanView(row pgexec.Row) (TaskView, error) {
+	var v TaskView
+	err := row.Scan(&v.Id, &v.Scope, &v.Name, &v.State, &v.UpdatedAt)
+	return v, err
+}
+
 // List returns the person's views for a scope, by name.
 func List(userID uuid.UUID, scope string) ([]TaskView, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `
-		SELECT id, scope, name, state, updated_at FROM task_views
-		 WHERE user_id = $1 AND scope = $2 ORDER BY lower(name)`, userID, scope)
+	out, err := pgexec.Query(ctx, `
+		SELECT `+viewColumns+` FROM task_views
+		 WHERE user_id = $1 AND scope = $2 AND `+softDelete.Live("")+` ORDER BY lower(name)`, scanView, userID, scope)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []TaskView{}
-	for rows.Next() {
-		var v TaskView
-		if err := rows.Scan(&v.Id, &v.Scope, &v.Name, &v.State, &v.UpdatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, v)
+	if out == nil {
+		out = []TaskView{}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // Count is how many views the person has in a scope.
 func Count(userID uuid.UUID, scope string) (int, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
-	var n int
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM task_views WHERE user_id = $1 AND scope = $2`, userID, scope).Scan(&n)
-	return n, err
+	return pgexec.Scalar[int](ctx,
+		`SELECT COUNT(*) FROM task_views WHERE user_id = $1 AND scope = $2 AND `+softDelete.Live(""), userID, scope)
 }
 
-// Save stores a view, replacing the person's view of the same name in the scope.
+// Save stores a view, replacing the person's live view of the same name in
+// the scope. The conflict names the unique among live views, so a deleted
+// view of that name stays as it was deleted.
 func Save(userID uuid.UUID, scope, name string, state json.RawMessage) (*TaskView, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
-	var v TaskView
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `
+	v, ok, err := pgexec.QueryOne(ctx, `
 		INSERT INTO task_views (user_id, scope, name, state) VALUES ($1, $2, $3, $4)
-		ON CONFLICT (user_id, scope, name) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
-		RETURNING id, scope, name, state, updated_at`, userID, scope, name, []byte(state)).
-		Scan(&v.Id, &v.Scope, &v.Name, &v.State, &v.UpdatedAt)
+		ON CONFLICT (user_id, scope, name) WHERE `+softDelete.Live("")+` DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
+		RETURNING `+viewColumns, scanView, userID, scope, name, []byte(state))
+	if err == nil && !ok {
+		err = errors.New("task view: the save returned no row")
+	}
 	if err != nil {
 		return nil, err
 	}
 	return &v, nil
 }
 
-// Exists says whether the person already has a view of this name in the scope.
+// Exists says whether the person already has a live view of this name in the scope.
 func Exists(userID uuid.UUID, scope, name string) (bool, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
-	var ok bool
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM task_views WHERE user_id = $1 AND scope = $2 AND name = $3)`,
-		userID, scope, name).Scan(&ok)
-	return ok, err
+	return pgexec.Scalar[bool](ctx,
+		`SELECT EXISTS (SELECT 1 FROM task_views WHERE user_id = $1 AND scope = $2 AND name = $3 AND `+softDelete.Live("")+`)`,
+		userID, scope, name)
 }
 
-// Delete removes one of the person's views; false when it wasn't theirs.
+// Delete takes one of the person's views away: it is kept, marked by them and
+// when. False when it wasn't theirs, or was taken away already.
 func Delete(userID, id uuid.UUID) (bool, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
-		`DELETE FROM task_views WHERE id = $1 AND user_id = $2`, id, userID)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	n, err := pgexec.Exec(ctx, `
+		UPDATE task_views SET deleted_at = NOW(), deleted_by = $3, updated_at = NOW()
+		 WHERE id = $1 AND user_id = $2 AND `+softDelete.Live(""), id, userID, softDelete.By(userID))
+	return n > 0, err
 }
 
-// OwnersOf is each saved view's owner, by the view's id; a view that isn't
-// there is left out.
-func OwnersOf(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
+// Owner is a saved view's person, and whether they deleted it.
+type Owner struct {
+	Person  uuid.UUID
+	Deleted bool
+}
+
+// OwnersOf is each saved view's owner, by the view's id, live or deleted: the
+// access rules answer a deleted view as none with what it was, as they do a
+// deleted doc or task (business/Access, I9). A view that isn't there is left
+// out.
+func OwnersOf(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]Owner, error) {
+	out := make(map[uuid.UUID]Owner, len(ids))
 	if len(ids) == 0 {
-		return map[uuid.UUID]uuid.UUID{}, nil
+		return out, nil
 	}
-	return pgexec.Pairs[uuid.UUID, uuid.UUID](ctx, `SELECT id, user_id FROM task_views WHERE id = ANY($1)`, ids)
+	type owned struct {
+		id    uuid.UUID
+		owner Owner
+	}
+	rows, err := pgexec.Query(ctx, `SELECT id, user_id, NOT (`+softDelete.Live("")+`) FROM task_views WHERE id = ANY($1)`,
+		func(r pgexec.Row) (owned, error) {
+			var o owned
+			err := r.Scan(&o.id, &o.owner.Person, &o.owner.Deleted)
+			return o, err
+		}, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range rows {
+		out[o.id] = o.owner
+	}
+	return out, nil
 }

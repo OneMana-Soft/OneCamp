@@ -186,7 +186,7 @@ func UnlinkGoogleCalendar(ctx context.Context, userInfo *model.UserInfo) error {
 	// revTokUrl := "https://oauth2.googleapis.com/revoke?token=" + integration.AccessToken
 	// http.Post(revTokUrl, "application/x-www-form-urlencoded", nil)
 
-	err := domain.DeleteIntegration(ctx, "user", userId, "google_calendar")
+	err := domain.DeleteIntegration(ctx, "user", userId, "google_calendar", userId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/UnlinkGoogleCalendar Failed to delete integration err: %+v", err)
 		return err

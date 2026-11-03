@@ -409,7 +409,8 @@ func UnlinkRepository(ctx context.Context, linkId uuid.UUID) error {
 }
 
 // DisconnectGitHub fully disconnects: delete all links, revoke token, batch-clear all task metadata.
-func DisconnectGitHub(ctx context.Context) error {
+// The org's integration is kept, marked by the admin who disconnected it (by), its tokens cleared.
+func DisconnectGitHub(ctx context.Context, by uuid.UUID) error {
 	allLinks, _ := GetAllLinkedRepos(ctx)
 
 	// 1. Fetch integration token BEFORE deleting it (for revocation)
@@ -441,8 +442,8 @@ func DisconnectGitHub(ctx context.Context) error {
 		}
 	}
 
-	// 5. Delete the integration record
-	err = integrationDomain.DeleteIntegration(ctx, "org", uuid.Nil, "github")
+	// 5. Disconnect the integration: kept, marked by the admin, its tokens cleared
+	err = integrationDomain.DeleteIntegration(ctx, "org", uuid.Nil, "github", by)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/DisconnectGitHub Failed to delete integration err: %+v", err)
 	}

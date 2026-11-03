@@ -19,16 +19,19 @@ import (
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
 
 // NewTask is one task CreateTasks makes: what a person would type, and
-// optionally the task it sits under, by its place in the same batch (Parent,
-// -1 for none, which must come before it).
+// optionally the task it sits under: one of the same batch, by its place
+// (Parent, -1 for none, which must come before it), or one made before
+// (Under, as read in the project: its uid, id and name), not both.
 type NewTask struct {
 	Input  adapter.CreateOrUpdateTaskInput
 	Parent int
+	Under  *dgraphStruct.DgraphTask
 }
 
 // CreateTasks makes many tasks in a project at once (the BE audit's #30: a
@@ -42,7 +45,10 @@ type NewTask struct {
 // refusal refuses the batch, and a status that wants approval has the batch
 // made one task at a time, as CreateTask makes one, so each held task opens
 // its own request. No caller passes such a status (the app's bulk create
-// takes names and priorities; a template's apply is a DataMove).
+// takes names and priorities; a template's apply is a DataMove). A task may
+// sit under one made before (NewTask.Under), as CreateSubTask hangs one: it is
+// kept to that one's people in the rows' transaction, before anyone is told
+// of it, and isn't told of as a new task of the project.
 func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInfo, project *dgraphStruct.DgraphProject, tasks []NewTask) ([]uuid.UUID, error) {
 	if len(tasks) == 0 {
 		return nil, nil
@@ -66,7 +72,23 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 	for i, n := range nodes {
 		ids[i], _ = uuid.Parse(n.Uuid)
 	}
-	numbers, err := domain.CreateTasks(ctx, ids, projectUUID, user.UserPostgresInfo.Id, now)
+	// The rows, and the restriction of each task below one made before (WA2),
+	// in one transaction. A batch with no task below one made before is its
+	// rows' one statement, as it always was, so it opens no transaction.
+	below, above, open := madeBefore(tasks, ids)
+	var numbers map[uuid.UUID]int
+	write := func(ctx context.Context) error {
+		var err error
+		if numbers, err = domain.CreateTasks(ctx, ids, projectUUID, user.UserPostgresInfo.Id, now); err != nil {
+			return err
+		}
+		return workAccess.SettleRestrictions(ctx, below, above, user.UserPostgresInfo.Id, now)
+	}
+	if len(below) > 0 {
+		err = pgexec.InTx(ctx, write)
+	} else {
+		err = write(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -101,28 +123,52 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 	/* AI call omitted in v1: each task's embedding */
 	var top []*dgraphStruct.DgraphTask
 	for i, t := range tasks {
-		if t.Parent < 0 {
+		if t.Parent < 0 && t.Under == nil {
 			top = append(top, nodes[i])
 		}
 	}
 	// The notice is the request's too (its id, its trace), sent after it answers.
 	tellCtx := context.WithoutCancel(ctx)
 	helpers.GoSafeNamed("Task.CreateTasks:tell", func() { tellOfNewTasks(tellCtx, project.Uuid, top, me) })
-	// Made outside any restricted task (a copy of one went one by one, above),
-	// so they are open: their entries read no restriction of theirs. Each
-	// task's entry, a sub-task's included, is its task.created too, through
-	// the Outbox (taskWebhooks.go).
-	eventCtx := helpers.WithOpenTasks(context.WithoutCancel(ctx), ids...)
+	// Those made outside any task made before (a copy of a restricted one went
+	// one by one, above) are open: their entries read no restriction of
+	// theirs, while one below a task made before reads its own. Each task's
+	// entry, a sub-task's included, is its task.created too, through the
+	// Outbox (taskWebhooks.go).
+	eventCtx := helpers.WithOpenTasks(context.WithoutCancel(ctx), open...)
 	made := make([]workFeed.TaskChange, 0, len(nodes))
 	for i, n := range nodes {
 		v := *n
 		if p := tasks[i].Parent; p >= 0 {
 			v.ParentTask = &dgraphStruct.DgraphTask{Uuid: nodes[p].Uuid, Name: nodes[p].Name}
+		} else if u := tasks[i].Under; u != nil {
+			v.ParentTask = &dgraphStruct.DgraphTask{Uuid: u.Uuid, Name: u.Name}
 		}
 		made = append(made, workFeed.TaskChange{Kind: workFeed.KindCreated, Project: project.Uuid, Task: &v, Fields: workFeed.TaskMade})
 	}
 	logChange(eventCtx, &me, made...)
 	return ids, nil
+}
+
+// madeBefore pairs each task of the batch that sits under a task made before
+// it, directly or through its parents in the batch, with that task (below[i]
+// under above[i]); open is every other one, which nothing restricts yet.
+func madeBefore(tasks []NewTask, ids []uuid.UUID) (below, above, open []uuid.UUID) {
+	root := make([]uuid.UUID, len(tasks))
+	for i, t := range tasks {
+		switch {
+		case t.Under != nil:
+			root[i], _ = uuid.Parse(t.Under.Uuid)
+		case t.Parent >= 0:
+			root[i] = root[t.Parent]
+		}
+		if root[i] == uuid.Nil {
+			open = append(open, ids[i])
+			continue
+		}
+		below, above = append(below, ids[i]), append(above, root[i])
+	}
+	return below, above, open
 }
 
 // newTaskNodes is the graph nodes and search documents of the batch, each
@@ -149,6 +195,11 @@ func newTaskNodes(ctx context.Context, projectUUID uuid.UUID, user *model.UserIn
 		in := t.Input
 		if t.Parent >= i {
 			return nil, nil, fmt.Errorf("business/CreateTasks: task %d sits under %d, which comes after it", i, t.Parent)
+		}
+		if u := t.Under; u != nil {
+			if _, err := uuid.Parse(u.Uuid); err != nil || u.Uid == "" || t.Parent >= 0 {
+				return nil, nil, fmt.Errorf("business/CreateTasks: task %d sits under a task made before with no uid or id, or under two", i)
+			}
 		}
 		key := strings.TrimSpace(in.Status)
 		st, ok := statuses[key]
@@ -210,10 +261,18 @@ func newTaskNodes(ctx context.Context, projectUUID uuid.UUID, user *model.UserIn
 		draft.Project = readFor(project, projectUUID)
 		draft.Status, draft.CustomStatus, draft.CustomStatusName = def.Category, nil, nil
 		drafts[i], asked[i] = &draft, st
-		if t.Parent >= 0 {
-			// A sub-task: under its parent, which says so in its history.
-			parent := nodes[t.Parent]
-			n.ParentTask = &dgraphStruct.DgraphTask{Uid: parent.Uid}
+		if t.Parent >= 0 || t.Under != nil {
+			// A sub-task: under its parent, of the batch or made before (its
+			// own node of it, as CreateSubTask writes one), which says so in
+			// its history.
+			var parent *dgraphStruct.DgraphTask
+			if t.Parent >= 0 {
+				parent = nodes[t.Parent]
+				n.ParentTask = &dgraphStruct.DgraphTask{Uid: parent.Uid}
+			} else {
+				parent = &dgraphStruct.DgraphTask{Uid: t.Under.Uid}
+				n.ParentTask = parent
+			}
 			parent.SubTasks = append(parent.SubTasks, &dgraphStruct.DgraphTask{Uid: n.Uid})
 			parent.Activity = append(parent.Activity, &dgraphStruct.DgraphTaskActivity{
 				DType: []string{"activity"}, Uuid: uuid.NewString(), Type: dgraphStruct.ACTIVITY_TYPE_ADD_SUB_TASK, CreatedBy: me, NextState: in.TaskName, LogTime: &at,
@@ -240,7 +299,7 @@ func newTaskNodes(ctx context.Context, projectUUID uuid.UUID, user *model.UserIn
 func createOneByOne(ctx context.Context, projectUUID uuid.UUID, user *model.UserInfo, project *dgraphStruct.DgraphProject, tasks []NewTask) ([]uuid.UUID, error) {
 	ids := make([]uuid.UUID, 0, len(tasks))
 	for _, t := range tasks {
-		if t.Parent >= 0 {
+		if t.Parent >= 0 || t.Under != nil {
 			return ids, fmt.Errorf("business/CreateTasks: a copy's sub-tasks are made with CreateSubTask")
 		}
 		id, err := CreateTask(ctx, projectUUID, user, project, nil, t.Input, nil)

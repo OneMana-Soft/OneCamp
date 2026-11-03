@@ -8,6 +8,7 @@ import (
 
 	adminAudit "github.com/akashc777/OneCamp/business/AdminAudit"
 	business "github.com/akashc777/OneCamp/business/SlackBridge"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -91,7 +92,7 @@ func Connect(w http.ResponseWriter, r *http.Request) {
 
 // Disconnect handles DELETE /admin/slack-bridge.
 func Disconnect(w http.ResponseWriter, r *http.Request) {
-	if err := business.Disconnect(r.Context()); err != nil {
+	if err := business.Disconnect(r.Context(), actor(r)); err != nil {
 		fail(w, r, err)
 		return
 	}
@@ -141,7 +142,11 @@ func DeleteLink(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"status": "failed", "msg": "invalid link id"})
 		return
 	}
-	ok, err := business.Unlink(r.Context(), id)
+	me, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	ok, err = business.Unlink(r.Context(), id, me.UserPostgresInfo.Id)
 	if err != nil {
 		fail(w, r, err)
 		return

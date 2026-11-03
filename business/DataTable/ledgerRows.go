@@ -57,12 +57,26 @@ func IsConflict(err error) bool {
 }
 
 // RowConflict is a write refused because a row changed since the version it
-// names: the row as it is now, for the writer to show.
+// names: the row as it is now, for the writer to show. A batch's conflict
+// also keeps every row the batch refused (Rows), the stale ones among them,
+// so a caller told why row by row (the API's details) is told of each.
 type RowConflict struct {
-	Row *model.Row
+	Row  *model.Row
+	Rows BatchErrors
 }
 
 func (e *RowConflict) Error() string { return errVersion.Error() }
+
+// oneRow is a single row's write refused as that row's: a batch of one that
+// stands for one row's write (PATCH /rows/{id} with If-Match) is refused for
+// its version (412), never as a batch with details.
+func oneRow(err error) error {
+	var conflict *RowConflict
+	if errors.As(err, &conflict) && len(conflict.Rows) > 0 {
+		return &RowConflict{Row: conflict.Row}
+	}
+	return err
+}
 
 // BatchError is one row's part of a refused batch: the create's place in the
 // list (Index) or the row (Row), the field, and why.
@@ -83,6 +97,19 @@ func (e BatchErrors) Error() string {
 	return fmt.Sprintf("%d rows can't be written", len(e))
 }
 
+// inputError is a refusal of what the caller sent, in words for them: a batch
+// with nothing in it or too much, a row named twice, a place that isn't one.
+// The app answers it as any refusal (400, its words); the API says it is the
+// caller's to fix (invalid_argument), never the server's.
+type inputError struct{ msg string }
+
+func (e *inputError) Error() string { return e.msg }
+
+// badInput is a refusal of what the caller sent (inputError).
+func badInput(format string, args ...any) error {
+	return &inputError{msg: fmt.Sprintf(format, args...)}
+}
+
 // PlaceInput is where rows go: after a row, or before one; with neither,
 // after the table's last row.
 type PlaceInput struct {
@@ -96,7 +123,7 @@ func (p *PlaceInput) place() (model.Place, error) {
 		return out, nil
 	}
 	if p.After != nil && p.Before != nil {
-		return out, fmt.Errorf("Put rows after one row or before one, not both")
+		return out, badInput("Put rows after one row or before one, not both")
 	}
 	if p.After != nil {
 		out.After = *p.After
@@ -132,10 +159,11 @@ type BatchInput struct {
 	Operation uuid.UUID `json:"-"`
 }
 
-// BatchResult is what a batch wrote: its change set, the rows made and
-// changed (each as the writer reads it), and the rows deleted.
+// BatchResult is what a batch wrote: its change set (null when it changed
+// nothing: storedSet), the rows made and changed (each as the writer reads
+// it), and the rows deleted.
 type BatchResult struct {
-	ChangeSet uuid.UUID    `json:"change_set,omitempty"`
+	ChangeSet *uuid.UUID   `json:"change_set"`
 	Created   []*model.Row `json:"created"`
 	Updated   []*model.Row `json:"updated"`
 	Deleted   []uuid.UUID  `json:"deleted"`
@@ -166,16 +194,16 @@ func batchKind(in BatchInput) rowLedger.ChangeKind {
 // row changed since the version its patch names refuses it too (RowConflict).
 func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (*BatchResult, error) {
 	ctx = asViewer(ctx, actor)
-	t, err := loadViewable(ctx, tableId, actor)
+	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}
 	size := len(in.Create) + len(in.Patch) + len(in.Delete)
 	if size == 0 {
-		return nil, fmt.Errorf("name the rows to make, change or delete")
+		return nil, badInput("name the rows to make, change or delete")
 	}
 	if size > maxBatch {
-		return nil, fmt.Errorf("A batch writes at most %d rows: this one names %d", maxBatch, size)
+		return nil, badInput("A batch writes at most %d rows: this one names %d", maxBatch, size)
 	}
 	at, err := in.At.place()
 	if err != nil {
@@ -184,13 +212,13 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 	named := map[uuid.UUID]bool{}
 	for _, p := range in.Patch {
 		if named[p.Row] {
-			return nil, fmt.Errorf("A batch names each row once: %s is named twice", p.Row)
+			return nil, badInput("A batch names each row once: %s is named twice", p.Row)
 		}
 		named[p.Row] = true
 	}
 	for _, id := range in.Delete {
 		if named[id] {
-			return nil, fmt.Errorf("A batch names each row once: %s is named twice", id)
+			return nil, badInput("A batch names each row once: %s is named twice", id)
 		}
 		named[id] = true
 	}
@@ -300,7 +328,7 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 	if err != nil {
 		return nil, batchErr(err)
 	}
-	out := &BatchResult{ChangeSet: cs.ID, Created: done.Created, Updated: done.Patched, Deleted: in.Delete}
+	out := &BatchResult{ChangeSet: storedSet(cs), Created: done.Created, Updated: done.Patched, Deleted: in.Delete}
 	if out.Deleted == nil {
 		out.Deleted = []uuid.UUID{}
 	}
@@ -336,17 +364,19 @@ func tellLinkedLater(ctx context.Context, tables ...uuid.UUID) {
 }
 
 // batchErr is what a refused write says: its rows' errors, a conflict with
-// the row as it is, or why.
+// the row as it is (the first stale row's) that keeps every row's error, or
+// why.
 func batchErr(err error) error {
 	var re model.RowErrors
 	switch {
 	case errors.As(err, &re):
 		var out BatchErrors
+		var current *model.Row
 		for _, e := range re {
 			switch {
 			case errors.Is(e.Err, model.ErrVersion):
-				if e.Current != nil {
-					return &RowConflict{Row: e.Current}
+				if current == nil {
+					current = e.Current
 				}
 				out = append(out, BatchError{Row: e.Row, Msg: errVersion.Error()})
 			case errors.Is(e.Err, model.ErrRowTooLarge):
@@ -355,11 +385,14 @@ func batchErr(err error) error {
 				out = append(out, BatchError{Row: e.Row, Msg: errRowNotFound.Error()})
 			}
 		}
+		if current != nil {
+			return &RowConflict{Row: current, Rows: out}
+		}
 		return out
 	case errors.Is(err, model.ErrTooManyLinks):
 		return errTooManyLinks
 	case errors.Is(err, model.ErrNoSuchPlace):
-		return fmt.Errorf("That row isn't in this table, so rows can't go next to it")
+		return badInput("That row isn't in this table, so rows can't go next to it")
 	case errors.Is(err, sql.ErrNoRows):
 		return errNotFound
 	}
@@ -367,35 +400,36 @@ func batchErr(err error) error {
 }
 
 // MoveRows moves rows of a table (actor may write its rows) to a place, in
-// the order given, in one change set: only their places change.
-func MoveRows(ctx context.Context, tableId uuid.UUID, rows []uuid.UUID, to PlaceInput, actor Actor) (uuid.UUID, error) {
-	t, err := loadViewable(ctx, tableId, actor)
+// the order given, in one change set: only their places change. It answers
+// the change set it stored (storedSet).
+func MoveRows(ctx context.Context, tableId uuid.UUID, rows []uuid.UUID, to PlaceInput, actor Actor) (*uuid.UUID, error) {
+	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 	if len(rows) == 0 || len(rows) > maxBatch {
-		return uuid.Nil, fmt.Errorf("Move between 1 and %d rows at a time", maxBatch)
+		return nil, fmt.Errorf("Move between 1 and %d rows at a time", maxBatch)
 	}
 	at, err := to.place()
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 	seen := map[uuid.UUID]bool{}
 	for _, id := range rows {
 		if seen[id] {
-			return uuid.Nil, fmt.Errorf("A move names each row once: %s is named twice", id)
+			return nil, fmt.Errorf("A move names each row once: %s is named twice", id)
 		}
 		seen[id] = true
 		if (at.After != uuid.Nil && at.After == id) || (at.Before != uuid.Nil && at.Before == id) {
-			return uuid.Nil, fmt.Errorf("A row can't go next to itself")
+			return nil, fmt.Errorf("A row can't go next to itself")
 		}
 	}
 	cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeMove)
 	if err := model.MoveRows(ctx, tableId, actor.UserID, rows, at, keys, cs, observe); err != nil {
-		return uuid.Nil, batchErr(err)
+		return nil, batchErr(err)
 	}
 	announce(ctx, t, cs, liveAndHooks)
-	return cs.ID, nil
+	return storedSet(cs), nil
 }
 
 // UndoResult is what an undo or a redo did: its change set, the change set it
@@ -416,7 +450,7 @@ type UndoResult struct {
 // is left, and counted. An undo is itself a change set, which Redo reverses;
 // naming an undo is a redo.
 func Undo(ctx context.Context, tableId uuid.UUID, changeSet *uuid.UUID, actor Actor) (*UndoResult, error) {
-	t, err := loadViewable(ctx, tableId, actor)
+	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -464,7 +498,7 @@ func Undo(ctx context.Context, tableId uuid.UUID, changeSet *uuid.UUID, actor Ac
 // on it since: the change it undid comes back where it still can. The rest
 // of an operation their last redo stopped short of comes first (unfinished).
 func Redo(ctx context.Context, tableId uuid.UUID, actor Actor) (*UndoResult, error) {
-	t, err := loadViewable(ctx, tableId, actor)
+	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -811,15 +845,15 @@ type RestoreResult struct {
 // row is live, in one change set; and fields (actor can change the table),
 // with their cells and links, which never left.
 func RestoreFromTrash(ctx context.Context, tableId uuid.UUID, in RestoreInput, actor Actor) (*RestoreResult, error) {
-	t, err := loadViewable(ctx, tableId, actor)
+	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}
 	if len(in.Rows) == 0 && len(in.Fields) == 0 {
-		return nil, fmt.Errorf("name the rows or fields to bring back")
+		return nil, badInput("name the rows or fields to bring back")
 	}
 	if len(in.Rows) > maxBatch {
-		return nil, fmt.Errorf("Bring back at most %d rows at a time", maxBatch)
+		return nil, badInput("Bring back at most %d rows at a time", maxBatch)
 	}
 	if len(in.Fields) > 0 && !canManage(t, actor) {
 		return nil, errForbidden

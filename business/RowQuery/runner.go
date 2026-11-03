@@ -198,6 +198,10 @@ func (Runner) Run(ctx context.Context, who accessBusiness.Subject, spec query.Sp
 	if size <= 0 || size > query.MaxPage {
 		size = 100
 	}
+	// A jump goes no further than a count does: past it, a reader knows no place.
+	if page.At > CountCap {
+		return query.Result{}, fmt.Errorf("%w: a page starts at most %d rows in", query.ErrBadSpec, CountCap)
+	}
 	// The index answers a table it is whole for, as far as its entries' version
 	// holds what the spec reads; a formula or a rollup, a table still being
 	// indexed, or a sort on a text or a choice before its entries hold their
@@ -216,9 +220,9 @@ func (Runner) Run(ctx context.Context, who accessBusiness.Subject, spec query.Sp
 		}
 	}
 	if !whole || readsComputed(spec, served) || (version < sortKeysSince && sortsByKey(spec, served)) {
-		return runWorked(ctx, table, fields, cols, spec, page.After, size, asked)
+		return runWorked(ctx, table, fields, cols, spec, page.After, page.At, size, asked)
 	}
-	return runSQL(ctx, table, fields, served, spec, page.After, size, asked)
+	return runSQL(ctx, table, fields, served, spec, page.After, page.At, size, asked)
 }
 
 // sortsByKey is whether a spec sorts or groups by a text or a choice: by the
@@ -321,7 +325,9 @@ func readCursor(c query.Cursor, kind string, n int) ([]interface{}, error) {
 	return m.V, nil
 }
 
-func runSQL(ctx context.Context, table uuid.UUID, fields []*model.Field, cols map[string]*column, spec query.Spec, after query.Cursor, size int, who asker) (query.Result, error) {
+// runSQL answers a window in SQL: after a cursor, or at a place (at, a
+// jump), which reads the one query from there and never counts.
+func runSQL(ctx context.Context, table uuid.UUID, fields []*model.Field, cols map[string]*column, spec query.Spec, after query.Cursor, at int, size int, who asker) (query.Result, error) {
 	a := &sqlArgs{base: 1}
 	where, err := whereOf(spec.Filter, cols, who, a)
 	if err != nil {
@@ -364,7 +370,8 @@ func runSQL(ctx context.Context, table uuid.UUID, fields []*model.Field, cols ma
 	var sums query.Summaries
 	var groups []query.GroupCount
 	var summed chan error
-	if after == "" && counting(ctx) && (len(spec.Summaries) > 0 || len(spec.Groups) > 0) {
+	first := after == "" && at == 0
+	if first && counting(ctx) && (len(spec.Summaries) > 0 || len(spec.Groups) > 0) {
 		if err := checkSummaries(spec.Summaries, cols, nil); err != nil {
 			return query.Result{}, err
 		}
@@ -384,7 +391,7 @@ func runSQL(ctx context.Context, table uuid.UUID, fields []*model.Field, cols ma
 	// a count of every window would read the whole set again each time.
 	total := NotCounted
 	var counted chan error
-	if after == "" && counting(ctx) {
+	if first && counting(ctx) {
 		counted = make(chan error, 1)
 		helpers.GoSafeNamed("RowQuery.count", func() {
 			// A panic is the count's error, so the window never waits for a
@@ -398,8 +405,9 @@ func runSQL(ctx context.Context, table uuid.UUID, fields []*model.Field, cols ma
 	var ids []uuid.UUID
 	var next query.Cursor
 	// A listing that began as the one query goes on as it, or as its list
-	// (its cursor says so).
-	if k := cursorKind(after); k == "sql" || k == "list" {
+	// (its cursor says so). A jump is the one query's, from its place: a walk
+	// or a list would read every row before it to get there.
+	if k := cursorKind(after); k == "sql" || k == "list" || at > 0 {
 		walks = nil
 	}
 	if walks != nil && !unkeyed {
@@ -433,7 +441,7 @@ func runSQL(ctx context.Context, table uuid.UUID, fields []*model.Field, cols ma
 		if after != "" && store.IsAvailable() {
 			ids, next, err = runListed(ctx, listing{table: table, fields: fields, cols: cols, spec: spec, where: shown, a: a, who: who, unkeyed: unkeyed}, after, size)
 		} else if after, err = oneQueryAfter(after); err == nil {
-			ids, next, err = runOneQuery(ctx, table, cols, spec, shown, a, after, size, who, unkeyed)
+			ids, next, err = runOneQuery(ctx, table, cols, spec, shown, a, after, at, size, who, unkeyed)
 		}
 	}
 	if counted != nil {
@@ -500,7 +508,7 @@ func oneQueryCursorAfter(ctx context.Context, table uuid.UUID, cols map[string]*
 		ids[i] = r.String()
 	}
 	where := "r.id = ANY(" + a.add(ids) + "::uuid[])"
-	found, err := model.QueryRowWindow(ctx, table, strings.Join(a.joins, " "), where, exprs, orderByLast(keys), a.vals, 1)
+	found, err := model.QueryRowWindow(ctx, table, strings.Join(a.joins, " "), where, exprs, orderByLast(keys), a.vals, 0, 1)
 	if err != nil || len(found) == 0 {
 		return "", false, err
 	}
@@ -508,9 +516,9 @@ func oneQueryCursorAfter(ctx context.Context, table uuid.UUID, cols map[string]*
 }
 
 // oneQuery is compile.go's one query: every sort in SQL, up to limit of the
-// rows that meet where, after the one query's cursor ("" from the first),
-// with each row's keys when keyed.
-func oneQuery(ctx context.Context, table uuid.UUID, cols map[string]*column, spec query.Spec, where string, a *sqlArgs, after query.Cursor, limit int, who asker, unkeyed, keyed bool) ([]model.KeyedRow, error) {
+// rows that meet where, after the one query's cursor ("" from the first) and
+// skip rows in (a jump's place), with each row's keys when keyed.
+func oneQuery(ctx context.Context, table uuid.UUID, cols map[string]*column, spec query.Spec, where string, a *sqlArgs, after query.Cursor, skip, limit int, who asker, unkeyed, keyed bool) ([]model.KeyedRow, error) {
 	keys, err := sortKeysOf(specOrder(spec), cols, who, a)
 	if err != nil {
 		return nil, err
@@ -529,12 +537,12 @@ func oneQuery(ctx context.Context, table uuid.UUID, cols map[string]*column, spe
 			exprs[i] = k.expr
 		}
 	}
-	return model.QueryRowWindow(ctx, table, strings.Join(a.joins, " "), where, exprs, orderBy(keys), a.vals, limit)
+	return model.QueryRowWindow(ctx, table, strings.Join(a.joins, " "), where, exprs, orderBy(keys), a.vals, skip, limit)
 }
 
-// runOneQuery is a window as the one query.
-func runOneQuery(ctx context.Context, table uuid.UUID, cols map[string]*column, spec query.Spec, where string, a *sqlArgs, after query.Cursor, size int, who asker, unkeyed bool) ([]uuid.UUID, query.Cursor, error) {
-	found, err := oneQuery(ctx, table, cols, spec, where, a, after, size+1, who, unkeyed, true)
+// runOneQuery is a window as the one query, skip rows in (a jump's place).
+func runOneQuery(ctx context.Context, table uuid.UUID, cols map[string]*column, spec query.Spec, where string, a *sqlArgs, after query.Cursor, skip, size int, who asker, unkeyed bool) ([]uuid.UUID, query.Cursor, error) {
+	found, err := oneQuery(ctx, table, cols, spec, where, a, after, skip, size+1, who, unkeyed, true)
 	if err != nil {
 		return nil, "", err
 	}
@@ -613,7 +621,9 @@ func searchMatches(search string, r *evalRow) bool {
 	return true
 }
 
-func runWorked(ctx context.Context, table uuid.UUID, fields []*model.Field, cols map[string]*column, spec query.Spec, after query.Cursor, size int, who asker) (query.Result, error) {
+// runWorked answers a window over what one read works out: after a cursor,
+// or at a place (at, a jump), which never counts.
+func runWorked(ctx context.Context, table uuid.UUID, fields []*model.Field, cols map[string]*column, spec query.Spec, after query.Cursor, at int, size int, who asker) (query.Result, error) {
 	if WorkedOut == nil {
 		return query.Result{}, cantQuery("formulas can't be read here")
 	}
@@ -638,11 +648,12 @@ func runWorked(ctx context.Context, table uuid.UUID, fields []*model.Field, cols
 	for i, r := range rows {
 		read[i] = evalRowOf(r)
 	}
-	ev, err := evaluate(spec, cols, kindsOf(results), read, who, after == "" && counting(ctx))
+	first := after == "" && at == 0
+	ev, err := evaluate(spec, cols, kindsOf(results), read, who, first && counting(ctx))
 	if err != nil {
 		return query.Result{}, err
 	}
-	from := 0
+	from := at
 	if after != "" {
 		at, err := readCursor(after, "worked", 1)
 		if err != nil {
@@ -652,7 +663,7 @@ func runWorked(ctx context.Context, table uuid.UUID, fields []*model.Field, cols
 		from = int(n)
 	}
 	res := query.Result{IDs: []string{}, Total: len(ev.kept), Summaries: ev.summaries, Groups: ev.groups}
-	if after != "" {
+	if !first {
 		res.Total = NotCounted
 	}
 	for i := from; i < len(ev.shown) && i < from+size; i++ {

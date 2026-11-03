@@ -91,9 +91,34 @@ func Clean(name, icon string) (string, string, error) {
 }
 
 // Types is the types a task in project can have: the built-in ones, then the
-// project's own.
+// project's own. uuid.Nil, no project, has the built-in ones alone.
 func Types(ctx context.Context, projectID uuid.UUID) ([]model.Type, error) {
 	return listTypes(ctx, projectID, false)
+}
+
+// Answer is a type as the app reads it: Builtin names a built-in one, Own
+// marks a project's own.
+type Answer struct {
+	ID      string `json:"id"`
+	Builtin string `json:"builtin,omitempty"`
+	Name    string `json:"name"`
+	Icon    string `json:"icon"`
+	Own     bool   `json:"own,omitempty"`
+}
+
+// AnswerOf is t as the app reads it.
+func AnswerOf(t model.Type) Answer {
+	return Answer{ID: t.ID.String(), Builtin: t.Builtin, Name: t.Name, Icon: t.Icon, Own: t.ProjectID != nil}
+}
+
+// Answers is types as the app reads them, in their order; none is an empty
+// list, never null.
+func Answers(types []model.Type) []Answer {
+	out := make([]Answer, 0, len(types))
+	for _, t := range types {
+		out = append(out, AnswerOf(t))
+	}
+	return out
 }
 
 // Create adds a type to a project.

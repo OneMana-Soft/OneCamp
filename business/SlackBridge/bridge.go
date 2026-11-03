@@ -324,10 +324,11 @@ func Connect(ctx context.Context, botToken, signingSecret string, by *uuid.UUID)
 	return GetStatus(ctx, by)
 }
 
-// Disconnect forgets the Slack workspace and every link. Bridged messages
-// stay in both apps.
-func Disconnect(ctx context.Context) error {
-	if err := model.DeleteBridge(ctx); err != nil {
+// Disconnect forgets the Slack workspace and ends every link, kept on record
+// as taken away by by (model.DeleteBridge). Bridged messages stay in both
+// apps.
+func Disconnect(ctx context.Context, by *uuid.UUID) error {
+	if err := model.DeleteBridge(ctx, by); err != nil {
 		return err
 	}
 	invalidate()
@@ -406,9 +407,10 @@ func Link(ctx context.Context, slackChannelID string, channelUUID uuid.UUID, by 
 	}, nil
 }
 
-// Unlink stops bridging a pair. Reports whether the link existed.
-func Unlink(ctx context.Context, id uuid.UUID) (bool, error) {
-	ok, err := model.DeleteLink(ctx, id)
+// Unlink stops bridging a pair, by whom: the link is kept, marked
+// (model.DeleteLink). Reports whether a live link existed.
+func Unlink(ctx context.Context, id, by uuid.UUID) (bool, error) {
+	ok, err := model.DeleteLink(ctx, id, by)
 	if err == nil {
 		invalidate()
 	}

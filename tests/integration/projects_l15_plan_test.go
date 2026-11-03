@@ -118,6 +118,27 @@ func l15Data(t *testing.T, what string, code int, out string, v any) {
 	}
 }
 
+// l15OverviewPlan is the plan the projects overview's row for s's project
+// carries, as who reads it; out is the answer, for a failure's words.
+func l15OverviewPlan(t *testing.T, s *wa2Scale, who string) (*l15Plan, string) {
+	t.Helper()
+	code, out := s.call(who, http.MethodGet, "/", projectUpdateController.ProjectsOverview, nil, nil)
+	var overview struct {
+		Projects []struct {
+			UUID string   `json:"project_uuid"`
+			Plan *l15Plan `json:"plan"`
+		} `json:"projects"`
+	}
+	l15Data(t, "the projects overview", code, out, &overview)
+	for _, p := range overview.Projects {
+		if p.UUID == s.project {
+			return p.Plan, out
+		}
+	}
+	t.Fatalf("the overview has no row for the project: %s", out)
+	return nil, out
+}
+
 func l15Names(labels []l15Label) string {
 	names := make([]string, 0, len(labels))
 	for _, l := range labels {
@@ -191,13 +212,28 @@ func TestLinear15APlansPostersChangeItAndItsAdminsChooseTheLead(t *testing.T) {
 		!strings.Contains(out, "sam can't be made the project's lead: their account is deactivated.") {
 		t.Fatalf("a deactivated member as the lead: %d %s, want a 409 in words", code, out)
 	}
+	// The lead is named as every member is, by the one rule over the graph's
+	// names (helpers.PersonDisplayName), never by their handle: most members
+	// set no display name, so the users row alone named Ben "ben-ito" (DB-93,
+	// 2 Nov), where the picker beside it said "Ben Ito".
+	s.exec(`UPDATE users SET username = 'ben-ito', display_name = '' WHERE id = $1`, s.people["ben"])
+	s.dg.Mutate(t, []map[string]any{{"uid": s.uids["ben"], "user_name": "Ben Ito"}})
 	code, plan, out = l15Set(s, "ana", `{"lead_uuid":"`+ben+`"}`)
-	if code != http.StatusOK || plan.Lead == nil || plan.Lead.UUID != ben || plan.Lead.Name != "ben" || plan.Priority != "high" || plan.Status.Category != "planned" {
+	if code != http.StatusOK || plan.Lead == nil || plan.Lead.UUID != ben || plan.Lead.Name != "Ben Ito" || plan.Priority != "high" || plan.Status.Category != "planned" {
 		t.Fatalf("an admin makes a member the lead: %d %s", code, out)
 	}
-	if _, read, out := l15Get(s, "vic"); read.Plan.Priority != "high" || read.Plan.Lead == nil || l15Names(read.Plan.Labels) != "Q1 launch" {
+	if _, read, out := l15Get(s, "vic"); read.Plan.Priority != "high" || read.Plan.Lead == nil || read.Plan.Lead.Name != "Ben Ito" || l15Names(read.Plan.Labels) != "Q1 launch" {
 		t.Fatalf("a viewer's read after the refused changes: %s", out)
 	}
+	if p, out := l15OverviewPlan(t, s, "ben"); p == nil || p.Lead == nil || p.Lead.Name != "Ben Ito" {
+		t.Fatalf("the overview's row names the lead by the one rule: %s", out)
+	}
+	// A lead who has since left is still named: the plan says who led it.
+	s.dg.Mutate(t, []map[string]any{{"uid": s.uids["ben"], "user_deleted_at": "2026-10-20T00:00:00Z"}})
+	if _, read, out := l15Get(s, "ana"); read.Plan.Lead == nil || read.Plan.Lead.Name != "Ben Ito" {
+		t.Fatalf("a lead who has left: %s", out)
+	}
+	s.dg.Mutate(t, []map[string]any{{"uid": s.uids["ben"], "user_deleted_at": "0001-01-01T00:00:00Z"}})
 
 	// Archived, the plan stays as it was, even for its admins.
 	s.dg.Mutate(t, []map[string]any{{"uid": s.uids["p"], "project_deleted_at": "2026-10-01T00:00:00Z"}})
@@ -243,23 +279,9 @@ func TestLinear15APlansDatesAreKeptAtTheirResolution(t *testing.T) {
 	}
 
 	// The projects overview carries each project's plan in its row.
-	code, out = s.call("ben", http.MethodGet, "/", projectUpdateController.ProjectsOverview, nil, nil)
-	var overview struct {
-		Projects []struct {
-			UUID string   `json:"project_uuid"`
-			Plan *l15Plan `json:"plan"`
-		} `json:"projects"`
+	if p, out := l15OverviewPlan(t, s, "ben"); p == nil || p.Target == nil || *p.Target != (l15When{"2027-12-31", "half"}) || p.Status.Category != "in_progress" {
+		t.Fatalf("the overview's row for the project: %s", out)
 	}
-	l15Data(t, "the projects overview", code, out, &overview)
-	for _, p := range overview.Projects {
-		if p.UUID == s.project {
-			if p.Plan == nil || p.Plan.Target == nil || *p.Plan.Target != (l15When{"2027-12-31", "half"}) || p.Plan.Status.Category != "in_progress" {
-				t.Fatalf("the overview's row for the project: %s", out)
-			}
-			return
-		}
-	}
-	t.Fatalf("the overview has no row for the project: %s", out)
 }
 
 func TestLinear15StatusesAndLabelsAreTheWorkspaceAdminsToChange(t *testing.T) {

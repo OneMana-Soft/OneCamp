@@ -88,7 +88,8 @@ func withStepSeams(t *testing.T, rows ...*model.Row) *stepFake {
 				return nil, err
 			}
 		}
-		return &BatchResult{ChangeSet: uuid.New()}, nil
+		set := uuid.New()
+		return &BatchResult{ChangeSet: &set}, nil
 	}
 	return f
 }

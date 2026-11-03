@@ -2,6 +2,8 @@ package boardController
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Board"
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	business "github.com/akashc777/OneCamp/business/Board"
 	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -52,8 +55,7 @@ func GetBoardInfo(w http.ResponseWriter, r *http.Request) {
 
 	dgraphBoard, err := business.GetBoardByBoardUUID(ctx, boardUUIDString, userInfo.UserDgraphInfo.Uid)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/GetBoardInfo Failed to get board err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get board info", "err": err})
+		helpers.WriteReadFailure(w, r, err, "board", "controllers/GetBoardInfo")
 		return
 	}
 
@@ -81,7 +83,7 @@ func UpdateBoard(w http.ResponseWriter, r *http.Request) {
 
 	boardDgraph, err := business.GetBasicBoardByUUID(ctx, input.BoardId, userInfo.UserDgraphInfo.Uid)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get board info", "err": err})
+		helpers.WriteReadFailure(w, r, err, "board", "controllers/UpdateBoard")
 		return
 	}
 	if boardDgraph.HasEditAccess == 0 && (boardDgraph.CreatedBy == nil || boardDgraph.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid) {
@@ -110,7 +112,7 @@ func DeleteBoard(w http.ResponseWriter, r *http.Request) {
 
 	boardDgraph, err := business.GetBasicBoardByUUID(ctx, input.BoardId, userInfo.UserDgraphInfo.Uid)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get board info", "err": err})
+		helpers.WriteReadFailure(w, r, err, "board", "controllers/DeleteBoard")
 		return
 	}
 	if boardDgraph.CreatedBy == nil || boardDgraph.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
@@ -165,9 +167,11 @@ func BoardCollabAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	boardDgraph, err := business.GetBasicBoardByUUID(ctx, input.BoardId, userInfo.UserDgraphInfo.Uid)
-	if err != nil || boardDgraph == nil {
-		helpers.LogErrorWithContext(ctx, "controllers/BoardCollabAuthorize Failed to get board info err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get board info", "err": err})
+	if err == nil && boardDgraph == nil {
+		err = helpers.ErrNotFound
+	}
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "board", "controllers/BoardCollabAuthorize")
 		return
 	}
 
@@ -220,8 +224,7 @@ func GetBoardForCollab(w http.ResponseWriter, r *http.Request) {
 
 	dgraphBoard, err := business.GetSystemBoardByUUID(ctx, boardUUIDString)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/GetBoardForCollab Failed to get board err: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Failed to get board info", "err": err})
+		helpers.WriteReadFailure(w, r, err, "board", "controllers/GetBoardForCollab")
 		return
 	}
 	if dgraphBoard == nil {
@@ -315,12 +318,47 @@ func UpdateBoardPermissions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := business.UpdateBoardPermissions(ctx, input, userInfo.UserDgraphInfo.Uid); err != nil {
+		// A role taken away is made only once it's recorded (no record, no action).
+		if auditBusiness.RefusedUnrecorded(w, r, err, "controllers/UpdateBoardPermissions") {
+			return
+		}
 		helpers.LogErrorWithContext(ctx, "controllers/UpdateBoardPermissions failed err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to update board permissions", "err": err.Error()})
 		return
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "updated board permissions successfully!"})
+}
+
+// RecordBoardExport POST /board/recordExport - tells the admin audit log that
+// the person made an export of the board in their browser, where the canvas
+// makes its files. A board they can't read answers 404, as if it weren't there.
+func RecordBoardExport(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	var input adapter.InputRecordBoardExport
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		helpers.WriteBadRequest(w, "Send the board's id and the export's format.")
+		return
+	}
+	if _, err := uuid.Parse(input.BoardId); err != nil {
+		helpers.WriteBadRequest(w, "Send the board's id and the export's format.")
+		return
+	}
+	switch err := business.RecordBoardExport(ctx, input.BoardId, input.Format, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid); {
+	case err == nil:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Recorded"})
+	case errors.Is(err, business.ErrBoardExportFormat):
+		helpers.WriteBadRequest(w, "A board exports as a PDF, a picture, a CSV of its notes or a board file.")
+	case errors.Is(err, business.ErrBoardNotFound):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Board not found"})
+	default:
+		helpers.LogErrorWithContext(ctx, "controllers/RecordBoardExport err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't record the export. Try again."})
+	}
 }
 
 // GetBoardPermissions GET /board/getBoardPermissions?board_uuid= - returns
@@ -337,8 +375,7 @@ func GetBoardPermissions(w http.ResponseWriter, r *http.Request) {
 
 	board, err := business.GetBoardPermissions(ctx, boardUUID, userInfo.UserDgraphInfo.Uid)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/GetBoardPermissions failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get board permissions", "err": err.Error()})
+		helpers.WriteReadFailure(w, r, err, "board", "controllers/GetBoardPermissions")
 		return
 	}
 

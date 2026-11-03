@@ -83,6 +83,10 @@ func DeleteStatusRule(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	me, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
 	var in struct {
 		Status string `json:"status"`
 	}
@@ -90,7 +94,7 @@ func DeleteStatusRule(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That didn't read."})
 		return
 	}
-	if err := approvalsBusiness.DeleteRule(r.Context(), projectID, in.Status); err != nil {
+	if err := approvalsBusiness.DeleteRule(r.Context(), me.UserPostgresInfo.Id, projectID, in.Status); err != nil {
 		writeErr(w, err)
 		return
 	}

@@ -38,6 +38,8 @@ func actor(r *http.Request) dataTableBusiness.Actor {
 
 func tableErr(w http.ResponseWriter, err error) {
 	switch {
+	case dataTableBusiness.IsReadOnly(err):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": dataTableBusiness.ReadOnlyWords, "read_only": true})
 	case dataTableBusiness.IsForbidden(err):
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "no access to this table"})
 	case dataTableBusiness.IsNotFound(err):

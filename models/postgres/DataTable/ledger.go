@@ -61,6 +61,12 @@ type ChangeSet struct {
 	Append bool
 }
 
+// Stored is whether a write through ledgerTx stored cs, once it's done: one
+// that changed nothing stores no change set, so it has none to name, announce
+// or undo. (An undo that put nothing back stores its empty one all the same:
+// recordEmpty.)
+func (cs *ChangeSet) Stored() bool { return cs != nil && len(cs.Changes) > 0 }
+
 // Change is one change a change set made: a cell's value before and after
 // (JSON as stored; nil for no cell), or a whole row's, a move's or a link
 // change's (Field is one of the constants below).
@@ -170,7 +176,7 @@ func ledgerTx(ctx context.Context, rows int, cs *ChangeSet, committing Committin
 		if err := write(ctx, tx); err != nil {
 			return err
 		}
-		if cs == nil || len(cs.Changes) == 0 {
+		if !cs.Stored() {
 			return nil
 		}
 		record := recordTx

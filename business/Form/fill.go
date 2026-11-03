@@ -16,18 +16,21 @@ import (
 
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
+	taskWriter "github.com/akashc777/OneCamp/business/TaskWriter"
 	tableModel "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	taskFieldModel "github.com/akashc777/OneCamp/models/postgres/TaskField"
 	"github.com/google/uuid"
 )
 
-// What an answer can fill besides the description (Field.MapsTo).
+// What an answer can fill besides the description (Field.MapsTo): the Task
+// Writer's property keys, the words a task template's required properties
+// use too, so a question and a template name a property the same way.
 const (
-	MapPriority = "priority"
-	MapDue      = "due"
-	MapTags     = "tags"
+	MapPriority = taskWriter.PropPriority
+	MapDue      = taskWriter.PropDue
+	MapTags     = taskWriter.PropTags
 	// MapField + a task field's id fills that field of the project.
-	MapField = "field:"
+	MapField = taskWriter.PropField
 )
 
 // fills is which questions fill a field of each kind: a project's task field

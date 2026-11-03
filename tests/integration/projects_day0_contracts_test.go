@@ -87,6 +87,52 @@ func TestProjectsDay0ContractsAnswerAsToday(t *testing.T) {
 		}
 	}
 
+	// V-324: a deleted cycle or form answers none, with what it was, as a
+	// deleted task or view does (I9, business/Access/contract.go), so the
+	// trash and a restore decide it by Was: Open says it is gone to those who
+	// could open it, and OpenDeleted lets its admins bring it back. Only one
+	// that isn't there at all is left out.
+	goneCycle, goneForm := uuid.New(), uuid.New()
+	w.exec(`INSERT INTO project_cycles (id, project_uuid, number, name, starts_at, ends_at, deleted_at, deleted_by) VALUES ($1, $2, 2, 'Last week', NOW(), NOW() + interval '7 days', NOW(), $3)`, goneCycle, w.project, w.people["ana"])
+	w.exec(`INSERT INTO project_forms (id, project_uuid, token, title, fields, created_by, deleted_at, deleted_by) VALUES ($1, $2, 'gone', 'Old requests', '[]', $3, NOW(), $3)`, goneForm, w.project, w.people["ana"])
+	for _, c := range []struct {
+		who  string
+		kind string
+		id   uuid.UUID
+		was  accessBusiness.Level
+	}{
+		{"ana", workAccess.KindCycle, goneCycle, accessBusiness.LevelFull},
+		{"ben", workAccess.KindCycle, goneCycle, accessBusiness.LevelView},
+		{"cy", workAccess.KindCycle, goneCycle, accessBusiness.LevelNone},
+		{"ana", workAccess.KindForm, goneForm, accessBusiness.LevelFull},
+		{"ben", workAccess.KindForm, goneForm, accessBusiness.LevelView},
+		{"cy", workAccess.KindForm, goneForm, accessBusiness.LevelNone},
+	} {
+		d, err := accessBusiness.Rules.Resolve(ctx, w.subject(c.who), accessBusiness.Resource{Kind: c.kind, UUID: c.id.String()})
+		if err != nil || !d.Deleted || d.Level != accessBusiness.LevelNone || d.Was != c.was {
+			t.Errorf("%s on the deleted %s: %+v %v; want none, deleted, with Was %s", c.who, c.kind, d, err, c.was)
+		}
+	}
+	for _, kind := range []string{workAccess.KindCycle, workAccess.KindForm} {
+		id := map[string]uuid.UUID{workAccess.KindCycle: goneCycle, workAccess.KindForm: goneForm}[kind]
+		res := accessBusiness.Resource{Kind: kind, UUID: id.String()}
+		if _, err := accessBusiness.Open(ctx, w.subject("ben"), res, accessBusiness.LevelView); !errors.Is(err, accessBusiness.ErrGone) {
+			t.Errorf("ben opening the deleted %s: %v; want it gone (he could read it)", kind, err)
+		}
+		if _, err := accessBusiness.Open(ctx, w.subject("cy"), res, accessBusiness.LevelView); !errors.Is(err, accessBusiness.ErrNotFound) {
+			t.Errorf("cy opening the deleted %s: %v; want not found (he never could)", kind, err)
+		}
+		if _, err := accessBusiness.OpenDeleted(ctx, w.subject("ana"), res, accessBusiness.LevelFull); err != nil {
+			t.Errorf("ana, its admin, bringing the deleted %s back: %v; want allowed by Was", kind, err)
+		}
+		if _, err := accessBusiness.OpenDeleted(ctx, w.subject("ben"), res, accessBusiness.LevelFull); err == nil || errors.Is(err, accessBusiness.ErrNotFound) {
+			t.Errorf("ben, a member, bringing the deleted %s back: %v; want refused by Was, not hidden", kind, err)
+		}
+	}
+	if _, err := accessBusiness.Rules.Resolve(ctx, w.subject("ana"), accessBusiness.Resource{Kind: workAccess.KindCycle, UUID: uuid.NewString()}); !errors.Is(err, accessBusiness.ErrNotFound) {
+		t.Errorf("a cycle that isn't there: %v; want not found", err)
+	}
+
 	// The Task Writer: someone outside the project changes nothing, and
 	// nothing is made for them; a member's change is made, as every task
 	// route makes it since A1; so is an admin's.

@@ -669,8 +669,8 @@ func (im *importer) makeRows(t *ImportTable) error {
 			if err != nil {
 				return fmt.Errorf("rows of %q: %w", t.Name, err)
 			}
-			if _, ok := im.wrote[t.Key]; !ok && t.Into != uuid.Nil {
-				im.wrote[t.Key] = res.ChangeSet
+			if _, ok := im.wrote[t.Key]; !ok && t.Into != uuid.Nil && res.ChangeSet != nil {
+				im.wrote[t.Key] = *res.ChangeSet
 			}
 			for i, r := range res.Created {
 				if i < len(made) {

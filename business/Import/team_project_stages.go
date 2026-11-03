@@ -296,6 +296,7 @@ func resolveOneProject(ctx context.Context, job *importModels.Job,
 	newProjectFields(job, nil, sp.SourceID, projectUUID, importingUser.UserPostgresInfo.Id).ensure(ctx, sp.Fields)
 	keepEstimateScale(ctx, job, sp, projectUUID, importingUser.UserPostgresInfo.Id)
 	makeCycles(ctx, job, sp, projectUUID, importingUser.UserPostgresInfo.Id)
+	keepPlan(ctx, job, sp, projectUUID, importingUser)
 	return scheduleProjectTaskChunk(ctx, job.Id, sp.SourceID)
 }
 

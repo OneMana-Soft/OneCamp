@@ -101,7 +101,7 @@ func (m *memStore) Save(_ context.Context, r *models.Row) error {
 	return nil
 }
 
-func (m *memStore) Delete(_ context.Context, id uuid.UUID) error {
+func (m *memStore) TakeBack(_ context.Context, id uuid.UUID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.rows, id)

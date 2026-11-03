@@ -110,6 +110,18 @@ type Decision struct {
 	NodeKind string `json:"node_kind,omitempty"`
 }
 
+// Settled is d, decided as if the resource were live, for one that may be
+// deleted (I9): Was is the level it gives, and a deleted one answers none,
+// so the trash and a restore decide it by Was. A kind's rules end on it.
+// Pure.
+func (d Decision) Settled(deleted bool) Decision {
+	d.Was = d.Level
+	if deleted {
+		d.Deleted, d.Level = true, LevelNone
+	}
+	return d
+}
+
 // PrincipalKind is who a grant is to.
 type PrincipalKind string
 

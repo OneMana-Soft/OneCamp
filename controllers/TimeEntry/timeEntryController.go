@@ -487,7 +487,7 @@ func ClearProjectRates(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := rateModel.Clear(projectID); err != nil {
+	if err := rateModel.Clear(projectID, me(r).UserPostgresInfo.Id); err != nil {
 		fail(w, r, "ClearProjectRates", err)
 		return
 	}

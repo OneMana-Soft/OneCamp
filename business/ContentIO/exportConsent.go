@@ -74,7 +74,7 @@ func SetExportConsent(ctx context.Context, who accessBusiness.Subject, docUUID s
 	if allow {
 		return allowExport(ctx, doc, owner)
 	}
-	return withdrawExport(ctx, doc)
+	return withdrawExport(ctx, doc, owner)
 }
 
 // consentDecision is who's decision on a live doc they can open; ErrNotFound

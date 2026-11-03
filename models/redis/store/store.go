@@ -480,6 +480,35 @@ func IncrByWithTTL(ctx context.Context, spec registry.Spec, args []string, delta
 	return incr.Val(), nil
 }
 
+// AllowFixedWindowN is AllowFixedWindow for a call that spends n at once (a
+// batch of a thousand rows spends a thousand of a row budget): the counter
+// rises by n and starts its window in one transaction, and the call is refused
+// once it passes limit. When Redis can't be asked, the call goes through, as
+// AllowFixedWindow lets one through.
+func AllowFixedWindowN(ctx context.Context, spec registry.Spec, args []string, n, limit int) RateLimitResult {
+	if !IsAvailable() {
+		return RateLimitResult{Allowed: true, Limit: limit, Unchecked: true}
+	}
+	limit, n = max(limit, 1), max(n, 1)
+	key := spec.Build(args...)
+	pipe := redisInit.RedisClient.TxPipeline()
+	incr := pipe.IncrBy(ctx, key, int64(n))
+	pipe.ExpireNX(ctx, key, spec.TTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		helpers.LogErrorWithContext(ctx, "redis store: AllowFixedWindowN failed key=%s err=%+v", key, err)
+		return RateLimitResult{Allowed: true, Limit: limit, Unchecked: true}
+	}
+	count := incr.Val()
+	if count <= int64(limit) {
+		return RateLimitResult{Allowed: true, Count: count, Limit: limit}
+	}
+	retry, _ := redisInit.RedisClient.TTL(ctx, key).Result()
+	if retry <= 0 {
+		retry = spec.TTL
+	}
+	return RateLimitResult{Allowed: false, Count: count, Limit: limit, RetryAfter: retry}
+}
+
 func AllowFixedWindow(ctx context.Context, spec registry.Spec, args []string, limit int) RateLimitResult {
 	if !IsAvailable() {
 		return RateLimitResult{Allowed: true, Limit: limit, Unchecked: true}

@@ -1855,6 +1855,23 @@ func MakeVideoCallForGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Never a call with only agents (V-126), asked before any room or token as
+	// /dm/getCallToken asks it: a pair's id asked for here is the same room. A
+	// failed read refuses too.
+	if refusal := business.RefuseCallIn(ctx, userInfo.UserDgraphInfo.Uuid, makeVideoCallInfo.GrpUuid); refusal != nil {
+		if !helpers.WriteCallRefusal(w, refusal) {
+			helpers.LogErrorWithContext(ctx,
+				"controllers/MakeVideoCallForGroup Failed to read who is in the call err: %+v",
+				refusal)
+
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+				"msg": "Failed to get group info",
+				"err": refusal,
+			})
+		}
+		return
+	}
+
 	var uerToken adapter.UserTokenOutput
 
 	uerToken.TokenString, uerToken.AlreadyExisted, err = business.MakeVideoCall(ctx, makeVideoCallInfo.GrpUuid, &userInfo.UserDgraphInfo, false, makeVideoCallInfo.Language, true)
@@ -2073,6 +2090,11 @@ func MakeVideoCallForChat(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Failed user does not exist",
 		})
+		return
+	}
+
+	// Never a call with an agent (V-126): asked before any room or token.
+	if helpers.WriteCallRefusal(w, business.RefuseCallWith(dgraphUser)) {
 		return
 	}
 

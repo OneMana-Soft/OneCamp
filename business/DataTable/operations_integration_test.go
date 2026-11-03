@@ -47,7 +47,7 @@ func TestAnOperationIsUndoneAndRedoneWhole(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sets = append(sets, res.ChangeSet)
+		sets = append(sets, *res.ChangeSet)
 	}
 	if n := rows(); n != 301 {
 		t.Fatalf("%d rows before the undo, want 301", n)
@@ -85,7 +85,7 @@ func TestAnOperationIsUndoneAndRedoneWhole(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sets = append(sets, res.ChangeSet)
+		sets = append(sets, *res.ChangeSet)
 	}
 	if _, err := Undo(w.ctx, tb.Id, &sets[0], w.me); err != nil {
 		t.Fatal(err)
@@ -119,7 +119,7 @@ func TestAnUndoStoppedMidwayIsFinishedByTheNext(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sets = append(sets, res.ChangeSet)
+		sets = append(sets, *res.ChangeSet)
 	}
 	// A field's change set can't be undone from the table, so the 55th
 	// reversal, newest first, fails.

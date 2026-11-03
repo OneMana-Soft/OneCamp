@@ -52,7 +52,7 @@ func (ledgerWriter) Create(ctx context.Context, by rowLedger.By, table uuid.UUID
 		if err != nil {
 			return nil, err
 		}
-		return []*model.Row{r}, nil
+		return []*model.Row{r.Row}, nil
 	}
 	in := BatchInput{Create: make([]RowInput, len(rows)), At: &PlaceInput{After: at.After, Before: at.Before}}
 	for i, r := range rows {
@@ -65,23 +65,35 @@ func (ledgerWriter) Create(ctx context.Context, by rowLedger.By, table uuid.UUID
 	return done.Created, nil
 }
 
-func (ledgerWriter) Patch(ctx context.Context, by rowLedger.By, table uuid.UUID, patches []rowLedger.RowPatch) ([]*model.Row, error) {
+func (w ledgerWriter) Patch(ctx context.Context, by rowLedger.By, table uuid.UUID, patches []rowLedger.RowPatch) ([]*model.Row, error) {
+	rows, _, err := w.patch(ctx, by, table, patches)
+	return rows, err
+}
+
+// patch is Patch, with the change set it stored (storedSet), which the API's
+// tables.row.update answers.
+func (ledgerWriter) patch(ctx context.Context, by rowLedger.By, table uuid.UUID, patches []rowLedger.RowPatch) ([]*model.Row, *uuid.UUID, error) {
 	if len(patches) == 1 && patches[0].Version == 0 {
 		r, err := PatchRow(ctx, table, patches[0].Row, patches[0].Cells, actorBy(by))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return []*model.Row{r}, nil
+		return []*model.Row{r.Row}, r.ChangeSet, nil
 	}
 	in := BatchInput{Patch: make([]PatchInput, len(patches))}
 	for i, p := range patches {
 		in.Patch[i] = PatchInput{Row: p.Row, Values: p.Cells, Version: p.Version}
 	}
 	done, err := Batch(ctx, table, in, actorBy(by))
-	if err != nil {
-		return nil, err
+	if err != nil && len(patches) == 1 {
+		// One patch is one row's write (PATCH /rows/{id} with If-Match):
+		// refused for its version, not as a batch.
+		return nil, nil, oneRow(err)
 	}
-	return done.Updated, nil
+	if err != nil {
+		return nil, nil, err
+	}
+	return done.Updated, done.ChangeSet, nil
 }
 
 func (ledgerWriter) Delete(ctx context.Context, by rowLedger.By, table uuid.UUID, rows []uuid.UUID) error {
@@ -248,7 +260,9 @@ func (readTime) Read(ctx context.Context, who tableAccess.Who, fields []*model.F
 }
 
 // todaysRule is canView, canManage and the agent asker rule (opens): who may
-// read a table writes its rows; an admin or its creator changes it.
+// read a table writes its rows when they edit it (editsRows: its managers, and
+// its members when its general level is edit or they are chosen); an admin or
+// its creator changes it.
 type todaysRule struct{}
 
 func (todaysRule) Resolve(ctx context.Context, who tableAccess.Who, table uuid.UUID) (tableAccess.Decision, error) {
@@ -261,7 +275,13 @@ func (todaysRule) Resolve(ctx context.Context, who tableAccess.Who, table uuid.U
 	}
 	a := actorOf(who)
 	view := opens(ctx, t, a)
-	return tableAccess.Decision{View: view, Edit: view, Manage: view && canManage(t, a)}, nil
+	edit := false
+	if view {
+		if edit, err = editsRows(ctx, t, a); err != nil {
+			return tableAccess.Decision{}, fmt.Errorf("failed to load table")
+		}
+	}
+	return tableAccess.Decision{View: view, Edit: edit, Manage: view && canManage(t, a)}, nil
 }
 
 // reasonAdmin is a table an admin opens because they're an admin, which
@@ -269,9 +289,10 @@ func (todaysRule) Resolve(ctx context.Context, who tableAccess.Who, table uuid.U
 const reasonAdmin = "admin"
 
 // tableKind is the Access Resolver's "table": full for an admin or the
-// table's creator, edit (its rows) for anyone in the workspace on a table
-// shown to the workspace, none otherwise; a deleted table is none, with Was
-// saying what they had.
+// table's creator; on a table shown to the workspace, edit (its rows) for
+// anyone in the workspace while its general level is edit, and for the people
+// chosen to edit it, comment for the rest; none otherwise. A deleted table is
+// none, with Was saying what they had.
 type tableKind struct{}
 
 func (tableKind) DecideMany(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]accessBusiness.Decision, error) {
@@ -286,25 +307,47 @@ func (tableKind) DecideMany(ctx context.Context, who accessBusiness.Subject, ids
 		return nil, err
 	}
 	user, _ := uuid.Parse(who.UserUUID)
-	a := Actor{UserID: user, IsAdmin: who.Admin}
-	out := make(map[string]accessBusiness.Decision, len(tables))
-	for _, t := range tables {
-		out[t.Id.String()] = tableDecision(t, a)
+	decided, err := decideTables(ctx, tables, Actor{UserID: user, IsAdmin: who.Admin})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]accessBusiness.Decision, len(decided))
+	for id, d := range decided {
+		out[id.String()] = d
 	}
 	return out, nil
 }
 
+// reasonEditor is a member who edits a table's rows because they were chosen
+// to (V-170).
+const reasonEditor = "editor"
+
+// memberLevel is what a member who opens a workspace table does with its rows
+// by its general level: edit, comment (they read, export and comment) or view.
+// A level the database didn't fill, or one it doesn't know, is view.
+func memberLevel(general string) accessBusiness.Level {
+	switch general {
+	case model.GeneralEdit:
+		return accessBusiness.LevelEdit
+	case model.GeneralComment:
+		return accessBusiness.LevelComment
+	}
+	return accessBusiness.LevelView
+}
+
 // tableDecision is today's rule for one table, as the Access Resolver says
-// it. Pure.
-func tableDecision(t *model.DataTable, a Actor) accessBusiness.Decision {
+// it; chosen is whether a holds an edit grant on it. Pure.
+func tableDecision(t *model.DataTable, a Actor, chosen bool) accessBusiness.Decision {
 	var d accessBusiness.Decision
 	switch {
 	case a.UserID != uuid.Nil && t.CreatedBy == a.UserID:
 		d.Level, d.Owner, d.Reasons = accessBusiness.LevelFull, true, []string{"owner"}
 	case a.IsAdmin:
 		d.Level, d.Reasons = accessBusiness.LevelFull, []string{reasonAdmin}
+	case t.Visibility == model.VisibilityWorkspace && chosen && memberLevel(t.GeneralLevel) != accessBusiness.LevelEdit:
+		d.Level, d.Reasons = accessBusiness.LevelEdit, []string{reasonEditor}
 	case t.Visibility == model.VisibilityWorkspace:
-		d.Level, d.Reasons = accessBusiness.LevelEdit, []string{"workspace"}
+		d.Level, d.Reasons = memberLevel(t.GeneralLevel), []string{"workspace"}
 	}
 	d.Was = d.Level
 	if t.DeletedAt != nil {

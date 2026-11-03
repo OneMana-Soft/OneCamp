@@ -42,13 +42,15 @@ const maxBatch = 1000
 const rowsTold = 500
 
 // newChangeSet starts a change set of kind for actor's write to table: who
-// (the person; the agent bound to their API token, if any) and how.
+// (the person; the agent bound to their API token, if any) and how. The first
+// one an API call makes takes the change id the call's audit row names
+// (helpers.TakeCallChange); any other gets its own when it is stored.
 func newChangeSet(ctx context.Context, table uuid.UUID, actor Actor, kind rowLedger.ChangeKind) *model.ChangeSet {
 	how := actor.Kind
 	if how == "" {
 		how = rowLedger.ActorPerson
 	}
-	cs := &model.ChangeSet{TableID: table, Actor: actor.UserID, ActorKind: string(how), Kind: string(kind)}
+	cs := &model.ChangeSet{ID: helpers.TakeCallChange(ctx), TableID: table, Actor: actor.UserID, ActorKind: string(how), Kind: string(kind)}
 	if agent, err := uuid.Parse(helpers.GetApiAgentID(ctx)); err == nil {
 		cs.Agent = agent
 	}
@@ -115,7 +117,7 @@ const (
 // webhook naming every row and what happened to it (unless it's an AI fill),
 // in place of one event a row. Nothing for a change set that changed nothing.
 func announce(ctx context.Context, t *model.DataTable, cs *model.ChangeSet, how telling) {
-	if cs == nil || len(cs.Changes) == 0 {
+	if !cs.Stored() {
 		return
 	}
 	ctx = context.WithoutCancel(ctx)

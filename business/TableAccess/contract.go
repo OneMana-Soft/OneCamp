@@ -63,6 +63,15 @@ var (
 	ErrNotRegistered = errors.New("table access: no rule is registered")
 )
 
+// What a member is told when a decision refuses them, in the same words on
+// every surface: the public API's answer and MCP's refusal read these. A table
+// they can't open reads as one that isn't there, so no answer tells which
+// tables exist; one they can open but not change says that.
+const (
+	AnswerUnseen    = "there is no such table, or you can't open it"
+	AnswerForbidden = "you can't change this table"
+)
+
 // Tables is the rule everything asks. business/DataTable registers today's
 // at init.
 var Tables Rules = noRule{}

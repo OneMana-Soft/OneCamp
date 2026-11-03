@@ -27,7 +27,7 @@ import { SCHEMA_HASH, SCHEMA_OUTDATED_MESSAGE, schemaVerdict } from './schemaGat
 import { authorizeDoc, sessionMessage } from './session.js'
 import { persistBoard } from './storeBoard.js'
 import { persistDoc } from './storeDoc.js'
-import { guardIncoming } from './presenceGuard.js'
+import { guardIncoming, personOf } from './presenceGuard.js'
 import { createBlockIdsTransform } from './transforms/blockIds.js'
 import { createLegacyContentTransform } from './transforms/legacyContent.js' // B2
 import { closeWhenLinkEnds } from './live/ops/reauth.js'
@@ -380,6 +380,10 @@ export function createCollabServer({
                     return {
                         user: { id: decoded.sub || 'guest', name: decoded.name || 'Guest' },
                         guest: true,
+                        // A call's guest is their own person; a share link's
+                        // visitors all sign in as the link, so a visitor is
+                        // the link and their tab's own key (presenceGuard.js).
+                        person: personOf(decoded, data.requestParameters?.get?.('tab')),
                         schemaOutdated: outdated,
                         access: { level: canEdit ? 'edit' : 'view', canEdit, locked: false },
                         ...(Number.isFinite(linkEndsAt) ? { linkEndsAt } : {}),
@@ -393,7 +397,7 @@ export function createCollabServer({
                     if (!access.canEdit) readOnly()
                     log.log(`[Collab] ${id}: user ${decoded?.sub} joined as ${access.level}${access.canEdit && !outdated ? '' : ' (read-only)'}`)
                     // Named as the API answers (a session token carries no name): presence wears it (presenceGuard.js).
-                    return { user: { id: decoded?.sub || 'unknown', name: access.name || decoded?.name || 'Anonymous' }, schemaOutdated: outdated, access }
+                    return { user: { id: decoded?.sub || 'unknown', name: access.name || decoded?.name || 'Anonymous' }, person: personOf(decoded), schemaOutdated: outdated, access }
                 }
 
                 log.log(`[Collab] Authorizing user ${decoded?.sub} for ${kind} ${id}...`)
@@ -414,7 +418,7 @@ export function createCollabServer({
                 }
                 if (outdated) log.log(`[Collab] ${id}: a tab with an older editor schema joined read-only (user ${decoded?.sub})`)
                 const named = typeof response.data?.name === 'string' && response.data.name ? response.data.name : null
-                return { user: { id: decoded?.sub || 'unknown', name: named || decoded?.name || 'Anonymous' }, schemaOutdated: outdated }
+                return { user: { id: decoded?.sub || 'unknown', name: named || decoded?.name || 'Anonymous' }, person: personOf(decoded), schemaOutdated: outdated }
             } catch (error) {
                 log.error('[Collab] Auth failed:', error.message)
                 // The tab is told why (session.js REFUSED), so it can fetch a

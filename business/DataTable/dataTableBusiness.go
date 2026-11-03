@@ -97,7 +97,7 @@ var (
 
 // IsForbidden / IsNotFound / IsRowNotFound / IsUnavailable let controllers map
 // to HTTP codes.
-func IsForbidden(err error) bool   { return err == errForbidden }
+func IsForbidden(err error) bool   { return errors.Is(err, errForbidden) }
 func IsNotFound(err error) bool    { return err == errNotFound }
 func IsRowNotFound(err error) bool { return err == errRowNotFound }
 func IsUnavailable(err error) bool { return err == errRowsUnavailable }
@@ -257,7 +257,13 @@ type TableBundle struct {
 	Views     []*model.View    `json:"views"`
 	Rows      []*model.Row     `json:"rows"`
 	CanManage bool             `json:"can_manage"`
-	MqttTopic string           `json:"mqtt_topic"`
+	// CanEdit is whether the reader edits the table's rows (V-170): its
+	// managers, and its members when its general level is edit or they are
+	// chosen. A reader who can't sees it View only.
+	CanEdit bool `json:"can_edit"`
+	// Editing is who edits the table's rows, for its managers only.
+	Editing   *model.EditAccess `json:"editing,omitempty"`
+	MqttTopic string            `json:"mqtt_topic"`
 	// PresenceTopic is who is on the table and where (tables A7), for a member's page.
 	PresenceTopic string `json:"presence_topic,omitempty"`
 	// RowsTruncated is true when the table has more rows than the bundle's
@@ -716,10 +722,14 @@ func GetBundle(ctx context.Context, id uuid.UUID, actor Actor) (*TableBundle, er
 	}
 
 	b, err := loadBundle(ctx, t, actor.UserID, canManage(t, actor), helpers.GetMqttTopicForTable(t.Id.String()), true)
-	if b != nil {
-		b.PresenceTopic = helpers.GetMqttTopicForTablePresence(t.Id.String())
+	if err != nil {
+		return nil, err
 	}
-	return b, err
+	b.PresenceTopic = helpers.GetMqttTopicForTablePresence(t.Id.String())
+	if err := withEditing(ctx, b, actor); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // bundleRowPage is how many rows a bundle carries; more are paged with the
@@ -816,6 +826,8 @@ func GetGuestBundle(ctx context.Context, id uuid.UUID) (*TableBundle, error) {
 // guest's view doesn't read (guestConfig).
 func forGuests(b *TableBundle) {
 	b.Table.CreatedBy = uuid.Nil
+	// Who edits the table is its members' business: a guest only reads.
+	b.Table.GeneralLevel, b.CanEdit, b.Editing = "", false, nil
 	b.Views = []*model.View{}
 	for _, r := range b.Rows {
 		// Who made and changed a row is the workspace's to know.
@@ -1191,13 +1203,43 @@ func defaultFor(f *model.Field, raw json.RawMessage) (json.RawMessage, error) {
 
 // ───────────────────────── rows ─────────────────────────
 
+// Written is a row as a write of it answers: the row, and the change set the
+// write stored, which an undo names to take back that write and no other,
+// whatever lands after it (V-360: the ledger's own latest is the change that
+// landed last). ChangeSet is null when the write changed nothing.
+type Written struct {
+	*model.Row
+	ChangeSet *uuid.UUID `json:"change_set"`
+}
+
+// rowWritten is row as the write that made cs answers it.
+func rowWritten(row *model.Row, cs *model.ChangeSet) *Written {
+	return &Written{Row: row, ChangeSet: storedSet(cs)}
+}
+
+// AsRead is w with its row as a read of it answers (RowAsRead).
+func (w *Written) AsRead(ctx context.Context, table uuid.UUID, actor Actor) *Written {
+	return &Written{Row: RowAsRead(ctx, table, actor, w.Row), ChangeSet: w.ChangeSet}
+}
+
+// storedSet is the change set a write stored, for its answer to name: nil
+// when the write changed nothing, so it stored none (model ChangeSet.Stored),
+// even when an API call had named an id for it.
+func storedSet(cs *model.ChangeSet) *uuid.UUID {
+	if !cs.Stored() {
+		return nil
+	}
+	id := cs.ID
+	return &id
+}
+
 // CreateRow inserts a row (view/edit access) and broadcasts it. A row with no
 // position goes after the table's last row, wherever that is; the web put a
 // new row after the last one it held, which on a table past one page sorted it
 // outside every page it held, and it never appeared.
-func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor) (*model.Row, error) {
+func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor) (*Written, error) {
 	ctx = asViewer(ctx, actor)
-	t, err := loadViewable(ctx, tableId, actor)
+	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -1249,15 +1291,15 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 			"row_id":     created.Id.String(),
 		})
 	})
-	return created, nil
+	return rowWritten(created, cs), nil
 }
 
 // UpdateRow replaces a row's values (view/edit access) and broadcasts it. A
 // row given no position stays where it is; a row that's gone is
 // errRowNotFound.
-func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor Actor) (*model.Row, error) {
+func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor Actor) (*Written, error) {
 	ctx = asViewer(ctx, actor)
-	t, err := loadViewable(ctx, tableId, actor)
+	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -1297,7 +1339,7 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 	if uerr != nil {
 		return nil, fmt.Errorf("failed to update row")
 	}
-	return rowUpdated(ctx, t, fields, r, cs, actor), nil
+	return rowWritten(rowUpdated(ctx, t, fields, r, cs, actor), cs), nil
 }
 
 // PatchRow changes only the cells it is given, leaving the row's other cells
@@ -1307,9 +1349,9 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 // used to move the row to the top too. A nil value clears its cell; a row
 // that's gone is errRowNotFound; a patch naming no cell the row stores
 // (computed cells and links aren't) is errNoCells.
-func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]interface{}, actor Actor) (*model.Row, error) {
+func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]interface{}, actor Actor) (*Written, error) {
 	ctx = asViewer(ctx, actor)
-	t, err := loadViewable(ctx, tableId, actor)
+	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -1334,7 +1376,7 @@ func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]i
 	if uerr != nil {
 		return nil, singleRowErr(uerr, "failed to update row")
 	}
-	return rowUpdated(ctx, t, fields, done.Patched[0], cs, actor), nil
+	return rowWritten(rowUpdated(ctx, t, fields, done.Patched[0], cs, actor), cs), nil
 }
 
 // singleRowErr is what a write of one row says when it's refused: the row is
@@ -1380,7 +1422,7 @@ func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, 
 // to the table's trash, with its cells and place, and its links kept in its
 // change set for a restore. A row that's gone is errRowNotFound.
 func DeleteRow(ctx context.Context, tableId, rowId uuid.UUID, actor Actor) error {
-	t, err := loadViewable(ctx, tableId, actor)
+	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
 		return err
 	}

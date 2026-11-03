@@ -87,7 +87,7 @@ type store interface {
 	Claim(ctx context.Context, id uuid.UUID, pending json.RawMessage) (*models.Row, error)
 	Release(ctx context.Context, id uuid.UUID) error
 	Save(ctx context.Context, r *models.Row) error
-	Delete(ctx context.Context, id uuid.UUID) error
+	TakeBack(ctx context.Context, id uuid.UUID) error
 	Sweep(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
@@ -316,7 +316,7 @@ func (s *service) createPrepared(ctx context.Context, k Kind, who accessBusiness
 	}
 	pid := r.ID
 	if err := k.Run(ctx, who, p); err != nil {
-		_ = s.store.Delete(context.WithoutCancel(ctx), pid)
+		_ = s.store.TakeBack(context.WithoutCancel(ctx), pid)
 		return Proposal{}, err
 	}
 	got, err := s.store.Get(ctx, pid)
@@ -324,7 +324,7 @@ func (s *service) createPrepared(ctx context.Context, k Kind, who accessBusiness
 		return Proposal{}, err
 	}
 	if got == nil || got.Status != string(StatusOpen) {
-		_ = s.store.Delete(context.WithoutCancel(ctx), pid)
+		_ = s.store.TakeBack(context.WithoutCancel(ctx), pid)
 		return Proposal{}, ErrUnavailable
 	}
 	out, err := fromRow(got)

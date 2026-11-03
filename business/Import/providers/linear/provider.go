@@ -356,6 +356,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 				Cycles:        projectCycles(issues, snap.cycleByID),
 				CycleSchedule: snap.schedules[pr.TeamID],
 				EstimateScale: snap.scales[pr.TeamID],
+				Plan:          pr.Plan,
 			}:
 			}
 		}
@@ -637,7 +638,13 @@ func (p *Provider) buildSnapshot(ctx context.Context, j *importModels.Job) (*wor
 	if err != nil {
 		return nil, err
 	}
+	return p.snapshotWith(ctx, j, tok)
+}
 
+// snapshotWith reads j's workspace with tok and caches it: buildSnapshot
+// once it has its token, so a test can read a whole workspace from a canned
+// transport (projectPlan_test.go).
+func (p *Provider) snapshotWith(ctx context.Context, j *importModels.Job, tok string) (*workspaceSnapshot, error) {
 	users, err := p.fetchUsers(ctx, tok)
 	if err != nil {
 		return nil, fmt.Errorf("linear users: %w", err)
@@ -858,7 +865,10 @@ query ($cursor: String) {
   projects(first: 50, after: $cursor) {
     nodes {
       id name description url
-      status { type }
+      status { type name color }
+      lead { id }
+      startDate startDateResolution targetDate targetDateResolution priority
+      labels(first: 20) { nodes { name color } pageInfo { hasNextPage endCursor } }
       teams(first: 20) { nodes { id } }
       members(first: 50) { nodes { id } }
     }
@@ -871,11 +881,9 @@ func (p *Provider) fetchProjects(ctx context.Context, tok string) ([]linearProje
 		ID          string `json:"id"`
 		Name        string `json:"name"`
 		Description string `json:"description"`
-		// status is the project's ProjectStatus; Project.state is deprecated
-		// (schema_test.go keeps the import off deprecated fields).
-		Status struct {
-			Type string `json:"type"`
-		} `json:"status"`
+		// linearPlan carries the status, lead, dates, priority and labels
+		// (projectPlan.go).
+		linearPlan
 		URL   string `json:"url"`
 		Teams struct {
 			Nodes []struct {
@@ -894,9 +902,10 @@ func (p *Provider) fetchProjects(ctx context.Context, tok string) ([]linearProje
 	}
 	out := make([]linearProject, 0, len(raw))
 	for _, pr := range raw {
+		p.allLabels(ctx, tok, pr.ID, &pr.linearPlan)
 		lp := linearProject{
 			ID: pr.ID, Name: pr.Name, Description: pr.Description,
-			State: pr.Status.Type, URL: pr.URL,
+			State: pr.Status.Type, URL: pr.URL, Plan: pr.source(),
 		}
 		// A Linear project can span multiple teams (rare). We pin
 		// it to the first team for the OneCamp shape; secondary
@@ -1286,6 +1295,7 @@ func (p *Provider) issueToSourceTask(iss linearIssue, projectID string) importPr
 		Created:         iss.CreatedAt,
 		Updated:         iss.UpdatedAt,
 		Completed:       iss.CompletedAt != nil,
+		StatusSince:     issueStatusSince(iss),
 		EstimatePoints:  iss.Estimate,
 		AttachmentRefs:  atts,
 		CommentCount:    len(iss.Comments),
@@ -1399,6 +1409,7 @@ type linearProject struct {
 	URL         string
 	TeamID      string
 	MemberIDs   []string
+	Plan        *importProvider.SourcePlan
 }
 
 type linearIssue struct {

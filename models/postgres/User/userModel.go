@@ -9,6 +9,7 @@ import (
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/pgexec"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/google/uuid"
@@ -47,6 +48,28 @@ type User struct {
 // ever signs in. Read it from a row whose query selected is_external and is_bot.
 func (u *User) IsMember() bool {
 	return u != nil && !u.IsExternal && !u.IsBot
+}
+
+// MembersAmong is which of ids are members (IsMember) whose accounts are
+// live: one read for all of them. An id that is no one's is simply absent.
+func MembersAmong(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	out := make(map[uuid.UUID]bool, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	members, err := pgexec.Query(ctx, `SELECT id FROM users
+		WHERE id = ANY($1) AND deleted_at IS NULL AND NOT is_external AND NOT is_bot`, func(r pgexec.Row) (uuid.UUID, error) {
+		var id uuid.UUID
+		err := r.Scan(&id)
+		return id, err
+	}, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range members {
+		out[id] = true
+	}
+	return out, nil
 }
 
 // Auth method constants. Used in signup_method and last_login_method columns.
@@ -290,26 +313,6 @@ func UpdateDeletedTimeByUUID(query string, deleteTime *time.Time, updateTime *ti
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/UpdateDeletedTimeByUUID Failed to update user's delete time err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
-func UpdateDeletedTimeToNullByUUID(query string, updateTime *time.Time, userUUID uuid.UUID) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		updateTime,
-		userUUID,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/UpdateDeletedTimeToNullByUUID Failed to update user's delete time to null err: %+v",
 			err)
 		return
 	}
