@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/models/pgexec"
@@ -255,11 +256,31 @@ func (t table) touch() string {
 	return ""
 }
 
-// Owner is whom a deleted row belongs to, for its restore's check: its
-// project, a table's form's table, a time entry's person and task (uuid.Nil:
-// none).
+// Owner is whom a row belongs to, for its access check: its project, a
+// table's form's table, a time entry's person and task (uuid.Nil: none).
 type Owner struct {
 	Project, Table, Person, Task uuid.UUID
+}
+
+// owners is the columns that say whom a row of t belongs to, in Owner's
+// order, NULL where t has none. Pure.
+func (t table) owners() string {
+	cols := []string{t.project, t.owner, t.person, t.task}
+	for i, c := range cols {
+		if c == "" {
+			cols[i] = "NULL::uuid"
+		}
+	}
+	return strings.Join(cols, ", ")
+}
+
+// ownerRead holds the owners columns as a row reads them.
+type ownerRead struct{ project, table, person, task uuid.NullUUID }
+
+func (o *ownerRead) dest() []any { return []any{&o.project, &o.table, &o.person, &o.task} }
+
+func (o ownerRead) owner() Owner {
+	return Owner{Project: o.project.UUID, Table: o.table.UUID, Person: o.person.UUID, Task: o.task.UUID}
 }
 
 // DeletedOwner reads whom the row of kind with id that a restore would take
@@ -269,16 +290,50 @@ func DeletedOwner(ctx context.Context, kind Kind, id uuid.UUID) (Owner, bool, er
 	if !ok {
 		return Owner{}, false, ErrNoSuchKind
 	}
-	col := func(c string) string {
-		if c == "" {
-			return "NULL::uuid"
-		}
-		return c
-	}
-	q := fmt.Sprintf(`SELECT %s, %s, %s, %s FROM %s WHERE id = $1 AND %s`, col(t.project), col(t.owner), col(t.person), col(t.task), t.name, t.restorable())
+	q := fmt.Sprintf(`SELECT %s FROM %s WHERE id = $1 AND %s`, t.owners(), t.name, t.restorable())
 	return pgexec.QueryOne(ctx, q, func(r pgexec.Row) (Owner, error) {
-		var p, tb, ps, tk uuid.NullUUID
-		err := r.Scan(&p, &tb, &ps, &tk)
-		return Owner{Project: p.UUID, Table: tb.UUID, Person: ps.UUID, Task: tk.UUID}, err
+		var o ownerRead
+		err := r.Scan(o.dest()...)
+		return o.owner(), err
 	}, id)
+}
+
+// Held is whom a row belongs to, and whether it is deleted.
+type Held struct {
+	Owner
+	Deleted bool
+}
+
+// OwnersOf is whom each row of kind among ids belongs to, by the row's id,
+// live or deleted, in one read: the access rules answer a deleted row as
+// none with what it was, as they do a deleted doc or task (business/Access,
+// I9). A row that isn't there is left out.
+func OwnersOf(ctx context.Context, kind Kind, ids []uuid.UUID) (map[uuid.UUID]Held, error) {
+	t, ok := tables[kind]
+	if !ok {
+		return nil, ErrNoSuchKind
+	}
+	out := make(map[uuid.UUID]Held, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	type row struct {
+		id   uuid.UUID
+		held Held
+	}
+	q := fmt.Sprintf(`SELECT id, %s, NOT (%s) FROM %s WHERE id = ANY($1)`, t.owners(), Live(""), t.name)
+	rows, err := pgexec.Query(ctx, q, func(r pgexec.Row) (row, error) {
+		var x row
+		var o ownerRead
+		err := r.Scan(append(append([]any{&x.id}, o.dest()...), &x.held.Deleted)...)
+		x.held.Owner = o.owner()
+		return x, err
+	}, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	for _, x := range rows {
+		out[x.id] = x.held
+	}
+	return out, nil
 }

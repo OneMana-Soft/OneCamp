@@ -289,11 +289,14 @@ class Reader {
 }
 
 export class TestClient {
-    constructor({ url, name, token = '{"sub":"user-1"}', schema, doc = new Y.Doc() }) {
+    // `schema` and `tab` go on the socket's URL, as a tab's do: the editor
+    // schema it was built with and its own key (lib/collabSocket.ts).
+    constructor({ url, name, token = '{"sub":"user-1"}', schema, tab, doc = new Y.Doc() }) {
         this.url = url
         this.name = name
         this.token = token
         this.schema = schema
+        this.tab = tab
         this.doc = doc
         this.events = []
         this.stateless = []
@@ -328,8 +331,11 @@ export class TestClient {
         this.denied = null
         this.synced = false
         this.error = null
-        const url = this.schema ? `${this.url}/?schema=${this.schema}` : this.url
-        const ws = new WebSocket(url)
+        const params = new URLSearchParams()
+        if (this.schema) params.set('schema', this.schema)
+        if (this.tab) params.set('tab', this.tab)
+        const query = params.toString()
+        const ws = new WebSocket(query ? `${this.url}/?${query}` : this.url)
         this.ws = ws
         ws.binaryType = 'nodebuffer'
         // Closed when the test ends, unless it closes the tab first.

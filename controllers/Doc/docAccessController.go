@@ -25,6 +25,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Doc"
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	"github.com/akashc777/OneCamp/business/Access/level"
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	business "github.com/akashc777/OneCamp/business/Doc"
@@ -46,6 +47,11 @@ const maxGrantsPerChange = 200
 
 // accessFailed answers an error from the Access Resolver.
 func accessFailed(ctx context.Context, w http.ResponseWriter, where string, err error) {
+	// A change taking access away is made only once it's recorded (no record,
+	// no action): 503, so the client tries again.
+	if auditBusiness.RefusedUnrecordedIn(ctx, w, err, "controllers/"+where) {
+		return
+	}
 	switch {
 	case errors.Is(err, business.ErrDocDeleted):
 		docGone(w, true)

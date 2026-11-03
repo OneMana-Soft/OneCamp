@@ -64,10 +64,9 @@ func (rowKind) DecideMany(ctx context.Context, who accessBusiness.Subject, ids [
 		return nil, err
 	}
 	user, _ := uuid.Parse(who.UserUUID)
-	a := Actor{UserID: user, IsAdmin: who.Admin}
-	byTable := make(map[uuid.UUID]accessBusiness.Decision, len(tables))
-	for _, t := range tables {
-		byTable[t.Id] = tableDecision(t, a)
+	byTable, err := decideTables(ctx, tables, Actor{UserID: user, IsAdmin: who.Admin})
+	if err != nil {
+		return nil, err
 	}
 	out := make(map[string]accessBusiness.Decision, len(homes))
 	for id, h := range homes {

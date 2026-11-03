@@ -50,6 +50,7 @@ import (
 	entityLinkBusiness "github.com/akashc777/OneCamp/business/EntityLink"
 	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	tableAccess "github.com/akashc777/OneCamp/business/TableAccess"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
@@ -434,6 +435,31 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 			return ReachDecision{Reason: "no access to this table"}
 		}
 		return ReachDecision{Allow: true, Reason: "table access granted", PrincipalDgraphUID: uid}
+
+	case ResourceTableRows:
+		tableID, terr := uuid.Parse(strings.TrimSpace(ref.ID))
+		if terr != nil {
+			return ReachDecision{Reason: "table id is not a uuid"}
+		}
+		// The rows' own rule, asked of the one place that decides it
+		// (business/TableAccess, which DataTable fills): the grid, the app's row
+		// writes and the public API's row ops ask it too, so a published op or a
+		// bridged row tool is refused here exactly where REST would refuse it,
+		// in REST's words. The actor is ResourceTable's: Postgres's admin flag,
+		// never through a token.
+		actor, aerr := tableActorFor(ctx, principal)
+		if aerr != nil {
+			return ReachDecision{Reason: "the originating person could not be resolved"}
+		}
+		d, derr := tableAccess.Tables.Resolve(ctx, tableAccess.Who{User: actor.UserID, Admin: actor.IsAdmin}, tableID)
+		if derr != nil || !d.View {
+			// Collapsed as ResourceTable's are: no probe for which tables exist.
+			return ReachDecision{Reason: tableAccess.AnswerUnseen}
+		}
+		if !ref.Access.IsRead() && !d.Edit {
+			return ReachDecision{Reason: tableAccess.AnswerForbidden}
+		}
+		return ReachDecision{Allow: true, Reason: "table rows access granted", PrincipalDgraphUID: uid}
 
 	case ResourceProject:
 		// The SAME lookup executeReadProject uses, checked the same way. A second

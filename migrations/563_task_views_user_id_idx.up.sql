@@ -1,0 +1,11 @@
+-- no-transaction
+-- V-184 head 5a: a person's saved views keep an index that leads with their
+-- id. task_views.user_id references users ON DELETE CASCADE, and the only
+-- index leading with it was the full unique on (user_id, scope, name), which
+-- 564 drops; 562's unique is partial (live views only), so it holds none of
+-- the views deleted, and removing a person would scan the table for theirs.
+-- Built before 564's drop, so the key is never without an index.
+-- CONCURRENTLY: built without blocking writes; one statement per file,
+-- outside a transaction (sqlx reads the first line). A build that fails
+-- leaves an INVALID index: drop it and run the migration again.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_views_user_id ON task_views (user_id);

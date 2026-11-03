@@ -115,6 +115,6 @@ func SetNudges(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set nudges enabled=%v", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.nudges.set", "Turned AI nudges on or off", aiMeta{"enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "nudges toggled"})
 }

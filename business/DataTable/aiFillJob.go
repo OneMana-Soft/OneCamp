@@ -167,7 +167,7 @@ func runAIFill(ctx context.Context, ev outboxBusiness.Event) error {
 	}
 	j.by.IsAdmin = fillIsAdmin(ctx, &j.by.UserID)
 	ctx = asViewer(ctx, j.by)
-	t, err := loadViewable(ctx, j.table, j.by)
+	t, err := loadEditable(ctx, j.table, j.by)
 	if errors.Is(err, errNotFound) || errors.Is(err, errForbidden) {
 		return j.stop(ctx) // gone, or no longer theirs to read
 	}

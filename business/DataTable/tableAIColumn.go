@@ -235,7 +235,7 @@ type FillInput struct {
 // skipped, never failing the fill.
 func FillAIColumnWith(ctx context.Context, tableId, fieldId uuid.UUID, in FillInput, actor Actor) (*FillResult, error) {
 	ctx = asViewer(ctx, actor)
-	t, err := loadViewable(ctx, tableId, actor)
+	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -430,7 +430,7 @@ func broadcastFill(tableID string, f *model.AIFill) {
 // it now is; nil when none runs.
 func StopAIFill(ctx context.Context, tableId, fieldId uuid.UUID, actor Actor) (*model.AIFill, error) {
 	ctx = asViewer(ctx, actor)
-	t, err := loadViewable(ctx, tableId, actor)
+	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}

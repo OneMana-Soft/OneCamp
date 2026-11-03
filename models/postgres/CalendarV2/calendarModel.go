@@ -471,9 +471,10 @@ func SharedWith(ctx context.Context, person uuid.UUID) ([]Calendar, error) {
 		FROM calendars c JOIN calendar_shares s ON s.calendar_id = c.id WHERE s.person_id = $1 AND `+softDelete.Live("s")+` AND c.deleted_at IS NULL ORDER BY s.created_at, c.id`, person)
 }
 
-// UpdateCalendar changes a calendar's name and colour (nil leaves one).
+// UpdateCalendar changes a live calendar's name and colour (nil leaves one):
+// a kept one stays as it was taken away.
 func UpdateCalendar(ctx context.Context, id uuid.UUID, name, hue *string) error {
-	_, err := pgexec.Exec(ctx, `UPDATE calendars SET name = COALESCE($2, name), hue = COALESCE($3, hue), updated_at = NOW() WHERE id = $1`, id, name, hue)
+	_, err := pgexec.Exec(ctx, `UPDATE calendars SET name = COALESCE($2, name), hue = COALESCE($3, hue), updated_at = NOW() WHERE id = $1 AND `+softDelete.Live(""), id, name, hue)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.UpdateCalendar err: %+v", err)
 	}
@@ -490,16 +491,97 @@ func SubscribedCalendar(ctx context.Context, id, owner uuid.UUID, name, hue, tz 
 	return err
 }
 
-// DeleteSubscribedCalendar deletes owner's calendar read from an address,
-// and with it everything on it: its events are the address's, never anyone's
-// own. It says whether there was one.
-func DeleteSubscribedCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error) {
+// UnsubscribeCalendar takes owner's calendar read from an address away. The
+// calendar is kept, marked by owner (the one person who may unsubscribe it)
+// and when (V-184 head 5c, migration 568), so it is out of every read: the
+// lookup by id says it is gone. In the same transaction the address's events
+// on it are forgotten (they are the address's, mirrored from its file, never
+// anyone's own) and its live shares are marked by owner, as stopping a share
+// marks one. It says whether a live one was taken away.
+func UnsubscribeCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error) {
+	var marked bool
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		n, err := pgexec.Exec(ctx, `UPDATE calendars SET deleted_at = NOW(), deleted_by = $2, updated_at = NOW()
+			WHERE id = $1 AND owner_id = $2 AND kind = 'subscribed' AND `+softDelete.Live(""), id, owner)
+		if err != nil || n == 0 {
+			return err
+		}
+		marked = true
+		if _, err := pgexec.Exec(ctx, `DELETE FROM events WHERE calendar_id = $1 AND source = 'subscribed'`, id); err != nil {
+			return err
+		}
+		_, err = pgexec.Exec(ctx, `UPDATE calendar_shares SET deleted_at = NOW(), deleted_by = $2, updated_at = NOW()
+			WHERE calendar_id = $1 AND `+softDelete.Live(""), id, softDelete.By(owner))
+		return err
+	})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CalendarV2.UnsubscribeCalendar err: %+v", err)
+		return false, err
+	}
+	return marked, nil
+}
+
+// TakeBackSubscribedCalendar deletes, for good, the calendar just made for a
+// subscription whose ledger row wasn't added: a failed subscribe's own row,
+// with nothing on it yet. It says whether there was one.
+func TakeBackSubscribedCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error) {
 	n, err := pgexec.Exec(ctx, `DELETE FROM calendars WHERE id = $1 AND owner_id = $2 AND kind = 'subscribed'`, id, owner)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/CalendarV2.DeleteSubscribedCalendar err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "models/CalendarV2.TakeBackSubscribedCalendar err: %+v", err)
 		return false, err
 	}
 	return n == 1, nil
+}
+
+// ForgetIfUnsubscribed forgets the address's events on calendar if it has
+// been unsubscribed. A read of the address in flight as its person
+// unsubscribes writes after UnsubscribeCalendar's own forgetting, onto the
+// kept calendar (whose row still takes the events' foreign key), so every
+// read calls this on its way out. FOR SHARE waits on an unsubscribe's row
+// lock: either the unsubscribe's DELETE sees the read's writes, or this sees
+// its mark. The refs of the events forgotten go with them (ON DELETE CASCADE).
+// A calendar no longer there took its events with it.
+func ForgetIfUnsubscribed(ctx context.Context, calendar uuid.UUID) error {
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		kept, found, err := pgexec.QueryOne(ctx, `SELECT deleted_at IS NOT NULL FROM calendars WHERE id = $1 FOR SHARE`,
+			func(r pgexec.Row) (bool, error) {
+				var b bool
+				err := r.Scan(&b)
+				return b, err
+			}, calendar)
+		if err != nil || !found || !kept {
+			return err
+		}
+		_, err = pgexec.Exec(ctx, `DELETE FROM events WHERE calendar_id = $1 AND source = 'subscribed'`, calendar)
+		return err
+	})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CalendarV2.ForgetIfUnsubscribed err: %+v", err)
+	}
+	return err
+}
+
+// EventsOn says which of these events are on calendar, in the trash or not: a
+// subscription's read matches a ref only to an event on its own calendar.
+func EventsOn(ctx context.Context, calendar uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	out := map[uuid.UUID]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	on, err := pgexec.Query(ctx, `SELECT id FROM events WHERE calendar_id = $1 AND id = ANY($2::uuid[])`,
+		func(r pgexec.Row) (uuid.UUID, error) {
+			var id uuid.UUID
+			err := r.Scan(&id)
+			return id, err
+		}, calendar, uuidArray(ids))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CalendarV2.EventsOn err: %+v", err)
+		return nil, err
+	}
+	for _, id := range on {
+		out[id] = true
+	}
+	return out, nil
 }
 
 // DeleteSubscribedEvents deletes events that left the file a subscribed

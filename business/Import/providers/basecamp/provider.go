@@ -167,6 +167,11 @@ type bcRecording struct {
 	UpdatedAt              time.Time   `json:"updated_at"`
 	AppURL                 string      `json:"app_url"`
 	DescriptionAttachments []bcFileRef `json:"description_attachments"`
+	// Completion is when it was completed, which Basecamp gives with a
+	// completed to-do (toTask's StatusSince).
+	Completion *struct {
+		CreatedAt time.Time `json:"created_at"`
+	} `json:"completion"`
 }
 
 type bcColumn struct {
@@ -721,6 +726,12 @@ func toTask(r bcRecording, projectID, status string, done bool, labels []string)
 	}
 	if r.Creator != nil {
 		st.CreatedBy = id(r.Creator.ID)
+	}
+	// A done to-do counts from when it was completed; a card done by its
+	// column has no completion, and counts from its last change
+	// (business/Import statusSince).
+	if done && r.Completion != nil {
+		st.StatusSince = importProvider.GivenTime(r.Completion.CreatedAt)
 	}
 	return st
 }

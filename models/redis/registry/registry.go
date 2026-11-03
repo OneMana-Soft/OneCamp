@@ -764,6 +764,26 @@ var ApiRouteRate = withArity(Spec{
 	Description: "Per-token, per-route public-API request counter. Fixed window; resets every minute.",
 }, 2) // (tokenID, route)
 
+// ApiRowReads and ApiRowWrites are a public-API token's row budget (tables
+// H1; business/PublicAPI ChargeRows): what its calls read and write, a row at
+// a time, on one counter per token that REST and MCP both spend, so a batch
+// of a thousand rows spends a thousand, and there is no cap per table.
+var ApiRowReads = withArity(Spec{
+	Namespace:   "apirows:read",
+	TTL:         1 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Per-token count of the rows public-API calls read. Fixed window; resets every minute.",
+}, 1) // (tokenID)
+
+var ApiRowWrites = withArity(Spec{
+	Namespace:   "apirows:write",
+	TTL:         1 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Per-token count of the rows public-API calls write. Fixed window; resets every minute.",
+}, 1) // (tokenID)
+
 // ApiIdempotency is a write's answer kept under the Idempotency-Key it was
 // sent with (platform P-API, §3.2): the same key again with the same body is
 // answered from here, never run twice; with another body it is refused.

@@ -550,8 +550,10 @@ func UpdateProvider(ctx context.Context, id uuid.UUID, req adapter.UpdateProvide
 	return &v, nil
 }
 
-// DeleteCustomProvider removes a custom provider unless it's active.
-func DeleteCustomProvider(ctx context.Context, id uuid.UUID) error {
+// DeleteCustomProvider takes a custom provider away, by whom, unless it's
+// active: it is kept, marked, with its key cleared, and its models go with it
+// (aiModels.DeleteCustomProvider).
+func DeleteCustomProvider(ctx context.Context, id, by uuid.UUID) error {
 	settings, err := aiModels.GetSettings(ctx)
 	if err != nil {
 		return err
@@ -560,7 +562,7 @@ func DeleteCustomProvider(ctx context.Context, id uuid.UUID) error {
 		(settings.EmbeddingProviderID != nil && *settings.EmbeddingProviderID == id) {
 		return fmt.Errorf("cannot delete a provider that is currently in use; switch the active model first")
 	}
-	if err := aiModels.DeleteCustomProvider(ctx, id); err != nil {
+	if err := aiModels.DeleteCustomProvider(ctx, id, by); err != nil {
 		return err
 	}
 	invalidateModelCache(ctx, id)

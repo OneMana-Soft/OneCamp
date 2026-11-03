@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 )
 
@@ -278,14 +280,16 @@ type AISettings struct {
 // ─── Providers ────────────────────────────────────────────────────────
 
 // ListProviders returns all configured providers ordered builtin-first
-// then by label. API keys are decrypted into APIKey.
+// then by label. API keys are decrypted into APIKey. A provider taken away
+// (DeleteCustomProvider) is not among them.
 func ListProviders(ctx context.Context) ([]*AIProvider, error) {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	const q = `
+	q := `
 		SELECT id, kind, label, base_url, api_key_enc, enabled, is_builtin, insecure_tls, updated_at
 		FROM ai_providers
+		WHERE ` + softDelete.Live("") + `
 		ORDER BY is_builtin DESC, lower(label) ASC`
 
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(cctx, q)
@@ -305,14 +309,16 @@ func ListProviders(ctx context.Context) ([]*AIProvider, error) {
 	return out, rows.Err()
 }
 
-// GetProvider returns a single provider by id (decrypted).
+// GetProvider returns a single provider by id (decrypted): ErrProviderNotFound
+// for one taken away, as for one never made, so every path that follows a
+// provider id (the settings' endpoints, a route, a pull) treats it as gone.
 func GetProvider(ctx context.Context, id uuid.UUID) (*AIProvider, error) {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	const q = `
+	q := `
 		SELECT id, kind, label, base_url, api_key_enc, enabled, is_builtin, insecure_tls, updated_at
-		FROM ai_providers WHERE id = $1`
+		FROM ai_providers WHERE id = $1 AND ` + softDelete.Live("")
 
 	row := postgresInit.DBConn.SqlDB.QueryRowContext(cctx, q, id)
 	p, err := scanProvider(row)
@@ -363,7 +369,7 @@ type UpdateProviderInput struct {
 }
 
 // UpdateProvider applies a partial update to a provider row. The kind
-// and is_builtin flag are immutable.
+// and is_builtin flag are immutable. A provider taken away is not found.
 func UpdateProvider(ctx context.Context, id uuid.UUID, in UpdateProviderInput) (*AIProvider, error) {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -411,7 +417,7 @@ func UpdateProvider(ctx context.Context, id uuid.UUID, in UpdateProviderInput) (
 		clause += ", " + s
 	}
 	args = append(args, id)
-	q := fmt.Sprintf("UPDATE ai_providers SET %s, updated_at = NOW() WHERE id = $%d", clause, n)
+	q := fmt.Sprintf("UPDATE ai_providers SET %s, updated_at = NOW() WHERE id = $%d AND %s", clause, n, softDelete.Live(""))
 
 	res, err := postgresInit.DBConn.SqlDB.ExecContext(cctx, q, args...)
 	if err != nil {
@@ -423,23 +429,46 @@ func UpdateProvider(ctx context.Context, id uuid.UUID, in UpdateProviderInput) (
 	return GetProvider(ctx, id)
 }
 
-// DeleteCustomProvider removes a custom (non-builtin) provider. Built-in
-// providers cannot be deleted — only disabled. Refuses to delete a
-// provider that is currently the active chat or embedding selection.
-func DeleteCustomProvider(ctx context.Context, id uuid.UUID) error {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
+// DeleteCustomProvider takes a custom (non-builtin) provider away, by whom
+// (V-184 head 4b). Built-in providers cannot be taken away, only disabled;
+// the business layer refuses the active chat or embedding selection.
+//
+// The row is kept, marked, with its key cleared, so which endpoint the
+// workspace used stays on record and no secret outlives it. Its live models
+// are marked with it, by the same hand and in the same transaction, as the
+// foreign key's ON DELETE CASCADE took them before; the provider is marked
+// first, so an authorization holding it (CreateAuthorizedModel) has committed
+// by then and its entry is marked too. The settings that named the provider
+// keep its id and read it as none (liveProviderColumn), as their ON DELETE
+// SET NULL left them. updated_at moves on the provider and its models: the AI
+// setup's reload on every replica (business/AI aiConfigReconcile) watches
+// each table's count and newest updated_at, and a mark changes no count.
+func DeleteCustomProvider(ctx context.Context, id, by uuid.UUID) error {
+	return pgexec.InTx(ctx, func(ctx context.Context) error {
+		n, err := pgexec.Exec(ctx, `UPDATE ai_providers SET deleted_at = NOW(), deleted_by = $2, api_key_enc = NULL, updated_at = NOW()
+			WHERE id = $1 AND is_builtin = false AND `+softDelete.Live(""), id, softDelete.By(by))
+		if err != nil {
+			return fmt.Errorf("delete ai provider: %w", err)
+		}
+		if n == 0 {
+			// Not found, taken away already, or a built-in (protected).
+			return ErrProviderNotFound
+		}
+		if _, err := pgexec.Exec(ctx, `UPDATE ai_authorized_models SET deleted_at = NOW(), deleted_by = $2, updated_at = NOW()
+			WHERE provider_id = $1 AND `+softDelete.Live(""), id, softDelete.By(by)); err != nil {
+			return fmt.Errorf("delete ai provider's models: %w", err)
+		}
+		return nil
+	})
+}
 
-	const q = `DELETE FROM ai_providers WHERE id = $1 AND is_builtin = false`
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(cctx, q, id)
-	if err != nil {
-		return fmt.Errorf("delete ai provider: %w", err)
-	}
-	if affected, _ := res.RowsAffected(); affected == 0 {
-		// Either not found or it was a built-in (protected).
-		return ErrProviderNotFound
-	}
-	return nil
+// liveProviderColumn reads one of ai_settings' provider columns as that
+// provider while it is live, and as NULL once it is taken away (V-184 head
+// 4b): the chat, embedding and code-run columns' ON DELETE SET NULL did that
+// when a delete removed the row, and a soft delete keeps it. Vision's column
+// never had a foreign key; it reads a provider that is gone as none too.
+func liveProviderColumn(col string) string {
+	return "(SELECT p.id FROM ai_providers p WHERE p.id = ai_settings." + col + " AND " + softDelete.Live("p") + ")"
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────
@@ -449,10 +478,10 @@ func GetSettings(ctx context.Context) (*AISettings, error) {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	const q = `
-		SELECT enabled, chat_provider_id, chat_model,
-		       embedding_provider_id, embedding_model, embedding_dimension,
-		       vision_provider_id, vision_model,
+	q := `
+		SELECT enabled, ` + liveProviderColumn("chat_provider_id") + `, chat_model,
+		       ` + liveProviderColumn("embedding_provider_id") + `, embedding_model, embedding_dimension,
+		       ` + liveProviderColumn("vision_provider_id") + `, vision_model,
 		       rate_limit_per_min, context_window_tokens, reasoning_enabled,
 		       meeting_recap_enabled, meeting_notes_doc_enabled, meeting_recap_instructions, memory_layer_enabled, team_report_enabled,
 		       nudges_enabled, coworker_enabled, code_analysis_max_files, issue_triage_enabled,
@@ -467,7 +496,7 @@ func GetSettings(ctx context.Context) (*AISettings, error) {
 		       code_pr_workspace_daily_minutes, code_pr_workspace_daily_runs,
 		       code_pr_channel_daily_minutes, code_pr_channel_daily_runs,
 		       code_pr_allow_unlinked, code_pr_wall_minutes,
-		       code_pr_chat_provider_id, code_pr_chat_model,
+		       ` + liveProviderColumn("code_pr_chat_provider_id") + `, code_pr_chat_model,
 		       agent_delegation_enabled, agent_delegation_max_hops, agent_delegation_surfaces,
 		       mcp_enabled, mcp_tool_groups,
 		       updated_at

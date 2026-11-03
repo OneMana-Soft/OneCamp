@@ -54,6 +54,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": conflict.Error(), "row": conflict.Row})
 	case business.IsConflict(err):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": err.Error()})
+	case business.IsReadOnly(err):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": business.ReadOnlyWords, "read_only": true})
 	case business.IsForbidden(err):
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "you don't have access to this table"})
 	case business.IsNotFound(err):

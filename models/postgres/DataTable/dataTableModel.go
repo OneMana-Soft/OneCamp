@@ -25,6 +25,17 @@ const (
 	VisibilityWorkspace = "workspace"
 )
 
+// A table's general level: what its members do with its rows beyond its
+// managers and the people granted edit (the data_table_edit_access
+// migration's CHECK; business/DataTable editAccess.go). Edit is every table's
+// level until its owner chooses who edits; comment reads, exports and
+// comments; view is kept for the plain viewer the sharing head adds.
+const (
+	GeneralView    = "view"
+	GeneralComment = "comment"
+	GeneralEdit    = "edit"
+)
+
 // Field type constants (aligned with the migration CHECK).
 const (
 	FieldText        = "text"
@@ -104,15 +115,19 @@ func ValidViewType(t string) bool {
 
 // DataTable mirrors a row of data_tables.
 type DataTable struct {
-	Id          uuid.UUID  `json:"id"`
-	Name        string     `json:"name"`
-	Description *string    `json:"description,omitempty"`
-	Icon        *string    `json:"icon,omitempty"`
-	Visibility  string     `json:"visibility"`
-	CreatedBy   uuid.UUID  `json:"created_by,omitzero"` // zero for a guest (GetGuestBundle)
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
+	Id          uuid.UUID `json:"id"`
+	Name        string    `json:"name"`
+	Description *string   `json:"description,omitempty"`
+	Icon        *string   `json:"icon,omitempty"`
+	Visibility  string    `json:"visibility"`
+	// GeneralLevel is what the table's members do with its rows
+	// (GeneralEdit, GeneralComment, GeneralView). Empty only on a struct the
+	// database didn't fill, which the rule reads as unable to edit.
+	GeneralLevel string     `json:"general_level,omitempty"`
+	CreatedBy    uuid.UUID  `json:"created_by,omitzero"` // zero for a guest (GetGuestBundle)
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	DeletedAt    *time.Time `json:"deleted_at,omitempty"`
 }
 
 // Field mirrors a row of data_table_fields.
@@ -218,14 +233,14 @@ type scanner interface {
 
 // ───────────────────────── data_tables ─────────────────────────
 
-const tableColumns = `id, name, description, icon, visibility, created_by, created_at, updated_at, deleted_at`
+const tableColumns = `id, name, description, icon, visibility, created_by, created_at, updated_at, deleted_at, general_level`
 
 func scanTable(s scanner) (*DataTable, error) {
 	var t DataTable
 	var description, icon sql.NullString
 	var deletedAt sql.NullTime
 	if err := s.Scan(&t.Id, &t.Name, &description, &icon, &t.Visibility, &t.CreatedBy,
-		&t.CreatedAt, &t.UpdatedAt, &deletedAt); err != nil {
+		&t.CreatedAt, &t.UpdatedAt, &deletedAt, &t.GeneralLevel); err != nil {
 		return nil, err
 	}
 	if description.Valid {
@@ -245,9 +260,12 @@ func CreateTable(ctx context.Context, t *DataTable) (uuid.UUID, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	id := uuid.New()
-	const q = `INSERT INTO data_tables (id, name, description, icon, visibility, created_by)
-		VALUES ($1,$2,$3,$4,$5,$6)`
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, t.Name, t.Description, t.Icon, t.Visibility, t.CreatedBy)
+	if t.GeneralLevel == "" {
+		t.GeneralLevel = GeneralEdit
+	}
+	const q = `INSERT INTO data_tables (id, name, description, icon, visibility, created_by, general_level)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, t.Name, t.Description, t.Icon, t.Visibility, t.CreatedBy, t.GeneralLevel)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateTable err: %+v", err)
 		return uuid.Nil, err
@@ -276,7 +294,7 @@ func UpdateTable(ctx context.Context, id uuid.UUID, c TableChange) (*DataTable, 
 			icon = CASE WHEN $5 THEN $6 ELSE t.icon END,
 			visibility = COALESCE($7, t.visibility), updated_at = NOW()
 		FROM was WHERE t.id = was.id
-		RETURNING t.id, t.name, t.description, t.icon, t.visibility, t.created_by, t.created_at, t.updated_at, t.deleted_at, was.visibility`
+		RETURNING t.id, t.name, t.description, t.icon, t.visibility, t.created_by, t.created_at, t.updated_at, t.deleted_at, t.general_level, was.visibility`
 	var before string
 	out, err := scanTable(thenScan{postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id, c.Name, c.SetDescription, c.Description, c.SetIcon, c.Icon, c.Visibility), []any{&before}})
 	if errors.Is(err, sql.ErrNoRows) {

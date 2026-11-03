@@ -882,6 +882,13 @@ func main() {
 		helpers.LogErrorWithContext(ctx, "governed MCP tools failed to register: %v", err)
 		os.Exit(1)
 	}
+	// The public API's operations, published as governed tools beside them: one
+	// declaration is a /v1 route and a tool (business/MCPServer PublishOps), and
+	// an op that can't be published stops startup for the same reason.
+	if err := mcpServerBusiness.PublishOps(); err != nil {
+		helpers.LogErrorWithContext(ctx, "the API's operations failed to publish as MCP tools: %v", err)
+		os.Exit(1)
+	}
 
 	// Housekeeping for ai_pending_actions, which nothing was running.
 	//

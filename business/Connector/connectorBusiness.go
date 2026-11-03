@@ -35,7 +35,6 @@ import (
 
 	integrationDomain "github.com/akashc777/OneCamp/domain/Integration"
 	"github.com/akashc777/OneCamp/helpers"
-	integrationModel "github.com/akashc777/OneCamp/models/postgres/Integration"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/google/uuid"
@@ -58,6 +57,11 @@ const entityTypeUser = "user"
 // connected the relevant provider. Executors map this to a friendly "connect
 // your account first" message.
 var ErrNotConnected = fmt.Errorf("connector not connected")
+
+// ErrUnknownConnector is a provider the connectors page doesn't list, such as
+// "github" (a person's GitHub identity, not "github_connector"). Controllers
+// answer it as not found.
+var ErrUnknownConnector = fmt.Errorf("unknown connector")
 
 // Capability classifies what a connector tool does, so the UI/consent screen
 // and the confirmation gate can treat reads and writes differently.
@@ -196,15 +200,24 @@ func ConnectedProviderNames(ctx context.Context, userUUIDStr string) []string {
 	return names
 }
 
-// Disconnect revokes (best-effort) and deletes a user's connector token.
+// Disconnect revokes a person's connector token (best-effort) and disconnects
+// the integration through the domain: its row is kept, marked by them, its
+// tokens cleared (V-184 head 5b). For Google Calendar that row is the
+// calendar's own, the one its unlink keeps the same way. Only a provider the
+// registry lists is disconnected; any other name is ErrUnknownConnector and
+// changes nothing (V-281: "github" would have marked the person's GitHub
+// identity, which githubSync reads to credit their work).
 func Disconnect(ctx context.Context, userUUID uuid.UUID, provider string) error {
-	if p, ok := providerRegistry[provider]; ok && p.RevokeURL != "" {
+	p, ok := providerRegistry[provider]
+	if !ok {
+		return ErrUnknownConnector
+	}
+	if p.RevokeURL != "" {
 		if tok, _ := loadUserToken(ctx, userUUID, provider); tok != nil {
 			revokeToken(ctx, p, tok.AccessToken)
 		}
 	}
-	const delQ = `DELETE FROM integrations WHERE entity_type = $1 AND entity_id = $2 AND provider = $3`
-	err := integrationModel.DeleteIntegration(delQ, entityTypeUser, userUUID, provider)
+	err := integrationDomain.DeleteIntegration(ctx, entityTypeUser, userUUID, provider, userUUID)
 	// Bust the briefing "Your day" cache so the removed account disappears
 	// from the briefing immediately.
 	invalidateBriefingDayCache(ctx, userUUID)

@@ -203,7 +203,7 @@ func TestAgentScopeDoesNotConfineOtherKinds(t *testing.T) {
 	actor := scopedActor([]string{"chan-a"}, []string{"proj-a"})
 
 	for _, kind := range []ResourceKind{
-		ResourceDoc, ResourceTask, ResourceTable, ResourceChat,
+		ResourceDoc, ResourceTask, ResourceTable, ResourceTableRows, ResourceChat,
 		ResourceDirectMessage, ResourceWorkspace,
 	} {
 		if ok, reason := CheckAgentResourceScope(actor, ResourceRef{Kind: kind, ID: "x"}); !ok {

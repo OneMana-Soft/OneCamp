@@ -83,6 +83,9 @@ type SourceProject struct {
 	// EstimateScale is the scale its team estimates on in the source; nil,
 	// hours (or no estimates).
 	EstimateScale *SourceEstimateScale
+	// Plan is the project's plan in the source (projectPlan.go); nil when
+	// the source keeps none.
+	Plan *SourcePlan
 }
 
 // SourceEstimateScale is a source's estimate scale, which the project keeps
@@ -146,6 +149,10 @@ type SourceTask struct {
 	Created         time.Time
 	Updated         time.Time
 	Completed       bool
+	// StatusSince is when the task entered the status it comes in, when the
+	// source says (Linear's completedAt): a project's pace and its reports
+	// count work done when it was done (business/Import statusSince).
+	StatusSince     *time.Time
 	EstimateMinutes int                // how long the source says it takes; 0 is none
 	EstimatePoints  *float64           // how big it is on its project's scale; nil is none
 	AttachmentRefs  []SourceAttachment // queued lazily by worker

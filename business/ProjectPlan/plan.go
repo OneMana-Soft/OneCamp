@@ -24,6 +24,7 @@ import (
 
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	model "github.com/akashc777/OneCamp/models/postgres/ProjectPlan"
 	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
@@ -55,6 +56,8 @@ const (
 	MostLabels = 300
 	// MostStatuses is how many statuses of its own the workspace holds.
 	MostStatuses = 50
+	// MostNameRunes is how many characters a status's or label's name takes.
+	MostNameRunes = 40
 )
 
 // Refusal is a request refused in words its maker reads (a 400).
@@ -86,7 +89,9 @@ type When struct {
 	Resolution string `json:"resolution"`
 }
 
-// Lead is the person who leads a project.
+// Lead is the person who leads a project, named as every member is: by the
+// one rule (helpers.PersonDisplayName) over the graph's names, as mentions,
+// assignees and a project update's author are, never by their handle.
 type Lead struct {
 	UUID string `json:"user_uuid"`
 	Name string `json:"name"`
@@ -120,7 +125,7 @@ func whenOf(d *time.Time, r string) *When {
 }
 
 // Views is each of projects' plans as its readers see it, in four reads
-// however many projects there are.
+// however many projects there are (the leads' names are one graph read).
 func Views(ctx context.Context, projects []uuid.UUID) (map[uuid.UUID]View, error) {
 	plans, err := model.Plans(ctx, projects)
 	if err != nil {
@@ -134,15 +139,24 @@ func Views(ctx context.Context, projects []uuid.UUID) (map[uuid.UUID]View, error
 	if err != nil {
 		return nil, err
 	}
-	leads := make([]uuid.UUID, 0)
+	leads := make([]string, 0)
 	for _, p := range plans {
 		if p.LeadID != nil {
-			leads = append(leads, *p.LeadID)
+			leads = append(leads, p.LeadID.String())
 		}
 	}
-	names, err := model.Names(ctx, leads)
+	// Read as an inbox item reads its people (one graph read, those who have
+	// since left too: a plan still says who led it). A person's own node comes
+	// first; an import's later copies may hold no name.
+	people, err := userDomain.GetPeopleByUUIDs(ctx, leads)
 	if err != nil {
 		return nil, err
+	}
+	names := make(map[string]string, len(people))
+	for _, u := range people {
+		if u != nil && names[u.Uuid] == "" {
+			names[u.Uuid] = u.DisplayName()
+		}
 	}
 	byStatus := make(map[uuid.UUID]model.Status, len(statuses))
 	for _, s := range statuses {
@@ -168,7 +182,7 @@ func Views(ctx context.Context, projects []uuid.UUID) (map[uuid.UUID]View, error
 			}
 		}
 		if p.LeadID != nil {
-			v.Lead = &Lead{UUID: p.LeadID.String(), Name: names[*p.LeadID]}
+			v.Lead = &Lead{UUID: p.LeadID.String(), Name: names[p.LeadID.String()]}
 		}
 		for _, l := range p.Labels {
 			if x, ok := byLabel[l]; ok {
@@ -236,8 +250,8 @@ func parseWhen(raw json.RawMessage, target bool) (*time.Time, string, error) {
 // name is a status's or label's name as kept: trimmed, 1 to 40 characters.
 func name(s string) (string, error) {
 	s = strings.Join(strings.Fields(s), " ")
-	if s == "" || utf8.RuneCountInString(s) > 40 {
-		return "", Refusal("A name takes 1 to 40 characters.")
+	if s == "" || utf8.RuneCountInString(s) > MostNameRunes {
+		return "", Refusal(fmt.Sprintf("A name takes 1 to %d characters.", MostNameRunes))
 	}
 	return s, nil
 }

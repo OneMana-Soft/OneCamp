@@ -13,6 +13,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	integrationModel "github.com/akashc777/OneCamp/models/postgres/Integration"
 	slashModel "github.com/akashc777/OneCamp/models/postgres/SlashCommand"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/google/uuid"
@@ -125,10 +126,10 @@ func HandleOAuthCallback(ctx context.Context, state, code, redirectURI string) (
 	// updated_at). The query must reference $1..$9 in that order; a shorter
 	// query silently fails, which is why OAuth app "Connect" never persisted a
 	// token and the app stayed "not connected".
-	const upsert = `
+	upsert := `
 		INSERT INTO integrations (entity_type, entity_id, provider, access_token, refresh_token, webhook_url, metadata, expires_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (entity_type, entity_id, provider)
+		ON CONFLICT (entity_type, entity_id, provider) WHERE ` + softDelete.Live("") + `
 		DO UPDATE SET access_token = EXCLUDED.access_token, refresh_token = EXCLUDED.refresh_token,
 		    expires_at = EXCLUDED.expires_at, updated_at = EXCLUDED.updated_at`
 	if err := integrationModel.UpsertIntegration(upsert, "app", appID, appOAuthProviderPrefix+"token",

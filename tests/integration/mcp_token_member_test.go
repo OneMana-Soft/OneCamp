@@ -123,9 +123,19 @@ func TestATokenActsAsAMemberOverMCP(t *testing.T) {
 		refused(t, "read_table on Bo's private table", call("read_table", map[string]any{"table_uuid": salaries.Id.String()}))
 		refused(t, "query_table on Bo's private table", call("query_table", map[string]any{"table_uuid": salaries.Id.String()}))
 	})
-	t.Run("a workspace admin's token is refused changing a table it may only see", func(t *testing.T) {
-		refused(t, "update_table_row on Bo's workspace table", call("update_table_row",
-			map[string]any{"table_uuid": roadmap.Id.String(), "row_uuid": uuid.NewString(), "values": map[string]any{}}))
+	// A table's rows are any member's to change where the table is open to them,
+	// in the app and over REST, so through a token too: the rows' rule, not
+	// CanManage (V-331). A table only the admin override reaches stays shut.
+	t.Run("a workspace admin's token changes rows as a member does, and no rows only the admin override reaches", func(t *testing.T) {
+		for _, tool := range []string{"create_table_row", "update_table_row", "link_table_rows"} {
+			args := map[string]any{"table_uuid": roadmap.Id.String(), "row_uuid": uuid.NewString(), "field_uuid": uuid.NewString(),
+				"values": map[string]any{}, "add": []string{uuid.NewString()}}
+			if d := call(tool, args); !d.Allow {
+				t.Errorf("%s on Bo's workspace table: refused (%s), want allowed: its rows are any member's", tool, d.Reason)
+			}
+			args["table_uuid"] = salaries.Id.String()
+			refused(t, tool+" on Bo's private table", call(tool, args))
+		}
 	})
 	t.Run("a workspace admin's token still reads a table open to the workspace, as any member does", func(t *testing.T) {
 		if d := call("read_table", map[string]any{"table_uuid": roadmap.Id.String()}); !d.Allow {

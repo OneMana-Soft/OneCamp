@@ -8,6 +8,7 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Doc"
 	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	businessComment "github.com/akashc777/OneCamp/business/Comment"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	domain "github.com/akashc777/OneCamp/domain/Doc"
@@ -345,7 +346,7 @@ func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermi
 	// Who could open it before, so the change is told as what it did
 	// (docEvents.go): the people it's now shared with, and those whose access
 	// changed. input as the owner sent it, before the single-role rule below.
-	sharedBefore, _ := domain.GetDocPermissions(ctx, input.DocId)
+	sharedBefore, beforeErr := domain.GetDocPermissions(ctx, input.DocId)
 	asked := input
 
 	// 2. Enforce Single Role Policy (Auto-remove from other roles)
@@ -380,7 +381,22 @@ func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermi
 	input.RemoveViewers = ensureUnique(input.RemoveViewers)
 	input.RemoveCommenters = ensureUnique(input.RemoveCommenters)
 
-	err = domain.UpdateDocPermissions(ctx, &input)
+	// A change taking anyone's role away, or lowering it, is made only once its
+	// audit row is written (no record, no action), so it needs who held which
+	// role before it: unread, it isn't made.
+	if beforeErr != nil {
+		return beforeErr
+	}
+	var holders map[string]string
+	if sharedBefore != nil {
+		holders = dgraphStruct.RoleHolders(sharedBefore.EditingUser, sharedBefore.CommentingUser, sharedBefore.ReadingUser)
+	}
+	shifts := auditBusiness.RoleShifts(holders,
+		map[string][]string{"edit": input.AddEditors, "comment": input.AddCommenters, "view": input.AddViewers},
+		map[string][]string{"edit": input.RemoveEditors, "comment": input.RemoveCommenters, "view": input.RemoveViewers})
+	err = auditBusiness.RecordedTaking(ctx, auditBusiness.ContextPrincipal(ctx, ""), "doc.access.remove",
+		"Took away or lowered people's access to a page", "doc", input.DocId, shifts, nil,
+		func() error { return domain.UpdateDocPermissions(ctx, &input) })
 	if err != nil {
 		return err
 	}

@@ -13,6 +13,7 @@ import (
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	business "github.com/akashc777/OneCamp/business/GitHub"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	githubWebhookDeliveryDomain "github.com/akashc777/OneCamp/domain/GitHubWebhookDelivery"
 	"github.com/akashc777/OneCamp/helpers"
 	userModel "github.com/akashc777/OneCamp/models/postgres/User"
@@ -141,17 +142,24 @@ func HandleGetStatus(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": status})
 }
 
-// HandleDisconnect fully disconnects GitHub integration.
+// HandleDisconnect fully disconnects GitHub integration. The integration is
+// kept, marked by the admin who disconnected it, its tokens cleared, and the
+// admin audit log records the disconnect.
 func HandleDisconnect(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-
-	err := business.DisconnectGitHub(ctx)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
+	err := business.DisconnectGitHub(ctx, userInfo.UserPostgresInfo.Id)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/HandleDisconnect Failed err: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
 		return
 	}
 
+	auditBusiness.Record(r, "integration.github_disconnect", auditBusiness.CategoryIntegration,
+		"Disconnected GitHub", nil)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "GitHub disconnected successfully"})
 }
 

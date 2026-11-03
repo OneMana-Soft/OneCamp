@@ -127,7 +127,7 @@ func TestCalendarContainers(t *testing.T) {
 		}
 	}
 	var n int
-	must(db.QueryRow(`SELECT count(*) FROM calendars WHERE container_kind = 'project' AND container_id = $1`, busy).Scan(&n))
+	must(db.QueryRow(`SELECT count(*) FROM calendars WHERE container_kind = 'project' AND container_id = $1 AND deleted_at IS NULL`, busy).Scan(&n))
 	if n != 1 {
 		t.Fatalf("calendars made at once: %d", n)
 	}

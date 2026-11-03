@@ -41,6 +41,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	dataTableModel "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/router"
 	"github.com/akashc777/OneCamp/services/collab"
@@ -131,6 +132,12 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("make a table: %v", err)
 	}
+	// The Name column every new table starts with: the rows API's cells.
+	cols, err := dataTableModel.ListFields(ctx, table.Id)
+	if err != nil || len(cols) == 0 {
+		t.Fatalf("the table's Name column: %v", err)
+	}
+	nameCol := cols[0].Id.String()
 	made, err := apiTokenBusiness.CreateToken(ctx, "ci", apiTokenBusiness.AllScopes, 30, owner.UserPostgresInfo.Id, nil, true)
 	if err != nil {
 		t.Fatalf("make a token: %v", err)
@@ -155,7 +162,7 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	}
 
 	// One case per route, in an order where each has what it needs.
-	var taskID, docID string
+	var taskID, docID, rowID, spareID string
 	type step struct {
 		route string // "METHOD /pattern" as the router has it
 		run   func() (int, map[string]any)
@@ -173,6 +180,42 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 		}},
 		{"POST /v1/tables/{id}/rows", func() (int, map[string]any) {
 			return call("POST", "/v1/tables/"+table.Id.String()+"/rows", map[string]any{"values": map[string]any{}})
+		}},
+		// The rows API: a batch makes two rows; the first is read, changed and
+		// traced, the second goes to the trash and is brought back.
+		{"POST /v1/tables/{id}/rows/batch", func() (int, map[string]any) {
+			code, out := call("POST", "/v1/tables/"+table.Id.String()+"/rows/batch", map[string]any{"create": []any{
+				map[string]any{"values": map[string]any{nameCol: "Release notes"}},
+				map[string]any{"values": map[string]any{nameCol: "Launch post"}}}})
+			if made, ok := out["created"].([]any); ok && len(made) == 2 {
+				first, _ := made[0].(map[string]any)
+				second, _ := made[1].(map[string]any)
+				rowID, _ = first["id"].(string)
+				spareID, _ = second["id"].(string)
+			}
+			return code, out
+		}},
+		{"POST /v1/tables/{id}/rows/query", func() (int, map[string]any) {
+			return call("POST", "/v1/tables/"+table.Id.String()+"/rows/query", map[string]any{"limit": 10})
+		}},
+		{"POST /v1/tables/{id}/rows/get", func() (int, map[string]any) {
+			return call("POST", "/v1/tables/"+table.Id.String()+"/rows/get", map[string]any{"ids": []any{rowID}})
+		}},
+		{"GET /v1/tables/{id}/rows/{row}", func() (int, map[string]any) {
+			return call("GET", "/v1/tables/"+table.Id.String()+"/rows/"+rowID, nil)
+		}},
+		{"PATCH /v1/tables/{id}/rows/{row}", func() (int, map[string]any) {
+			return call("PATCH", "/v1/tables/"+table.Id.String()+"/rows/"+rowID, map[string]any{"values": map[string]any{nameCol: "Release notes, out"}})
+		}},
+		{"GET /v1/tables/{id}/rows/{row}/history", func() (int, map[string]any) {
+			return call("GET", "/v1/tables/"+table.Id.String()+"/rows/"+rowID+"/history", nil)
+		}},
+		{"DELETE /v1/tables/{id}/rows/{row}", func() (int, map[string]any) {
+			return call("DELETE", "/v1/tables/"+table.Id.String()+"/rows/"+spareID, nil)
+		}},
+		{"GET /v1/tables/{id}/trash", func() (int, map[string]any) { return call("GET", "/v1/tables/"+table.Id.String()+"/trash", nil) }},
+		{"POST /v1/tables/{id}/trash/restore", func() (int, map[string]any) {
+			return call("POST", "/v1/tables/"+table.Id.String()+"/trash/restore", map[string]any{"rows": []any{spareID}})
 		}},
 		{"POST /v1/tasks", func() (int, map[string]any) {
 			code, out := call("POST", "/v1/tasks", map[string]any{"task_name": "Ship the release notes", "project_uuid": project.String(), "priority": "high"})
@@ -257,5 +300,8 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	}
 	if docID == "" {
 		t.Error("POST /v1/docs named no uuid")
+	}
+	if rowID == "" || spareID == "" {
+		t.Error("POST /v1/tables/{id}/rows/batch named no rows")
 	}
 }

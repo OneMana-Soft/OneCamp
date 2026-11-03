@@ -430,15 +430,21 @@ func EnsureSyncLink(ctx context.Context, newID, person uuid.UUID, provider strin
 	return SyncLinkOf(ctx, person, provider)
 }
 
+// liveSubscribed is the predicate for a ledger row (alias c) whose calendar
+// is live. A calendar deleted sets calendar_id NULL, and one unsubscribed is
+// kept, marked (V-184 head 5c), so a row either leaves behind is never read
+// again and is taken again by the same address.
+const liveSubscribed = `EXISTS (SELECT 1 FROM calendars k WHERE k.id = c.calendar_id AND k.deleted_at IS NULL)`
+
 // AddSubscription records a calendar read from an address, and says whether
-// it is new: the same address already read into a calendar of the link's
-// isn't added twice (a row whose calendar was deleted is taken again).
+// it is new: the same address already read into a live calendar of the
+// link's isn't added twice (a row whose calendar went is taken again).
 func AddSubscription(ctx context.Context, s Subscription) (bool, error) {
-	n, err := pgexec.Exec(ctx, `INSERT INTO calendar_sync_calendars (link_id, remote_id, name, is_primary, calendar_id, cursor, source_sealed, read_at, error, updated_at)
+	n, err := pgexec.Exec(ctx, `INSERT INTO calendar_sync_calendars AS c (link_id, remote_id, name, is_primary, calendar_id, cursor, source_sealed, read_at, error, updated_at)
 		VALUES ($1, $2, $3, false, $4, $5, $6, $7, '', NOW())
 		ON CONFLICT (link_id, remote_id) DO UPDATE SET name = EXCLUDED.name, calendar_id = EXCLUDED.calendar_id, cursor = EXCLUDED.cursor,
 			source_sealed = EXCLUDED.source_sealed, read_at = EXCLUDED.read_at, error = '', updated_at = NOW()
-		WHERE calendar_sync_calendars.calendar_id IS NULL`,
+		WHERE NOT `+liveSubscribed,
 		s.LinkID, s.RemoteID, s.Name, nullUUID(s.CalendarID), s.Cursor, s.SourceSealed, s.ReadAt)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.AddSubscription err: %+v", err)
@@ -451,7 +457,7 @@ func AddSubscription(ctx context.Context, s Subscription) (bool, error) {
 func SubscriptionsOf(ctx context.Context, person uuid.UUID) ([]Subscription, error) {
 	return querySubscriptions(ctx, `SELECT `+subscriptionColumns+` FROM calendar_sync_calendars c
 		JOIN calendar_sync_links l ON l.id = c.link_id
-		WHERE l.person_id = $1 AND l.provider = 'ics' AND c.source_sealed <> '' AND c.calendar_id IS NOT NULL
+		WHERE l.person_id = $1 AND l.provider = 'ics' AND c.source_sealed <> '' AND `+liveSubscribed+`
 		ORDER BY c.name, c.remote_id`, person)
 }
 
@@ -460,7 +466,7 @@ func SubscriptionsOf(ctx context.Context, person uuid.UUID) ([]Subscription, err
 func DueSubscriptions(ctx context.Context, before time.Time, limit int) ([]Subscription, error) {
 	return querySubscriptions(ctx, `SELECT `+subscriptionColumns+` FROM calendar_sync_calendars c
 		JOIN calendar_sync_links l ON l.id = c.link_id
-		WHERE c.source_sealed <> '' AND c.calendar_id IS NOT NULL AND (c.read_at IS NULL OR c.read_at < $1) AND l.provider = 'ics'
+		WHERE c.source_sealed <> '' AND `+liveSubscribed+` AND (c.read_at IS NULL OR c.read_at < $1) AND l.provider = 'ics'
 		ORDER BY c.read_at NULLS FIRST LIMIT $2`, before, limit)
 }
 

@@ -155,7 +155,7 @@ func Create(ctx context.Context, user *userModels.UserInfo, in NewPoll) (*View, 
 		HTMLText: body, ChannelUuid: in.ChannelUUID, ChannelUUID: channelID,
 	}, user, nil, ch)
 	if err != nil {
-		_ = pollModel.Delete(ctx, p.ID)
+		_ = pollModel.TakeBack(ctx, p.ID)
 		return nil, fmt.Errorf("post poll: %w", err)
 	}
 	if postID, perr := uuid.Parse(post.Uuid); perr == nil {

@@ -25,15 +25,15 @@ type auditRow_ struct {
 func TestEveryAuditedDocEventWritesOneRow(t *testing.T) {
 	var mu sync.Mutex
 	var rows []auditRow_
-	oldR, oldE, oldP := auditRecord, actorEmail, docPeople
-	t.Cleanup(func() { auditRecord, actorEmail, docPeople = oldR, oldE, oldP })
-	auditRecord = func(_ context.Context, actor *uuid.UUID, _ string, kind, action, category, summary string, meta map[string]interface{}) error {
+	oldR, oldE, oldP := auditBusiness.RecordEventRow, auditBusiness.EventActorEmail, docPeople
+	t.Cleanup(func() { auditBusiness.RecordEventRow, auditBusiness.EventActorEmail, docPeople = oldR, oldE, oldP })
+	auditBusiness.RecordEventRow = func(_ context.Context, actor *uuid.UUID, _ string, kind, action, category, summary string, meta map[string]interface{}) error {
 		mu.Lock()
 		defer mu.Unlock()
 		rows = append(rows, auditRow_{actor, kind, action, category, summary, meta})
 		return nil
 	}
-	actorEmail = func(context.Context, uuid.UUID) string { return "akash@example.test" }
+	auditBusiness.EventActorEmail = func(context.Context, uuid.UUID) string { return "akash@example.test" }
 	docPeople = func(context.Context, string) (*dgraphStruct.DgraphDoc, error) { return privateDoc(), nil }
 
 	ctx := context.Background()
@@ -42,7 +42,7 @@ func TestEveryAuditedDocEventWritesOneRow(t *testing.T) {
 		if !isAudited(e) {
 			t.Errorf("%s isn't audited", kind)
 		}
-		record(ctx, e)
+		docsAudit.Run(ctx, e)
 	}
 	if len(rows) != len(AuditedKinds) {
 		t.Fatalf("%d events wrote %d rows", len(AuditedKinds), len(rows))
@@ -59,9 +59,9 @@ func TestEveryAuditedDocEventWritesOneRow(t *testing.T) {
 	// An agent's change says so, beside the person who asked it; the server's
 	// own is the system's.
 	rows = nil
-	record(ctx, resourceEventBusiness.Event{Kind: resourceEventBusiness.DocDeleted, ResourceKind: "doc", ResourceUUID: docID,
+	docsAudit.Run(ctx, resourceEventBusiness.Event{Kind: resourceEventBusiness.DocDeleted, ResourceKind: "doc", ResourceUUID: docID,
 		Actor: resourceEventBusiness.Actor{UserUUID: ownerID, AgentUUID: "00000000-0000-4000-8000-0000000000b7"}, At: noon})
-	record(ctx, resourceEventBusiness.Event{Kind: resourceEventBusiness.DocPurged, ResourceKind: "doc", ResourceUUID: docID,
+	docsAudit.Run(ctx, resourceEventBusiness.Event{Kind: resourceEventBusiness.DocPurged, ResourceKind: "doc", ResourceUUID: docID,
 		Actor: resourceEventBusiness.Actor{System: true}, At: noon})
 	if rows[0].kind != auditBusiness.ActorAgent || rows[0].action != "agent.doc.deleted" || rows[0].meta["agent_uuid"] == nil ||
 		rows[1].kind != auditBusiness.ActorSystem || rows[1].actor != nil || rows[1].action != "doc.purged" {

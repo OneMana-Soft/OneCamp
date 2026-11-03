@@ -28,6 +28,7 @@ package controllers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -182,7 +183,22 @@ func handleGovernedToolCall(w http.ResponseWriter, r *http.Request, req jsonRPCR
 	}
 
 	if err != nil {
-		// The handler's own message is not forwarded. It is written for an operator
+		// A refusal written for the caller (a published op's: a filter that isn't
+		// one, a version moved on, a spent row budget) is theirs to act on, so its
+		// words go back as the tool's error, with Retry-After when waiting fixes it.
+		var refusal *mcpBusiness.ToolRefusal
+		if errors.As(err, &refusal) {
+			if refusal.RetryAfter > 0 {
+				w.Header().Set("Retry-After", itoaSmall(refusal.RetryAfter))
+			}
+			writeRPCResult(w, req.ID, map[string]interface{}{
+				"content":           []map[string]interface{}{{"type": "text", "text": refusal.Text()}},
+				"structuredContent": map[string]any{"error": refusal},
+				"isError":           true,
+			})
+			return
+		}
+		// Any other handler's own message is not forwarded. It is written for an operator
 		// and can name internals the caller was authorised to act on but not to be
 		// told about. The audit row already carries the attribution.
 		helpers.LogErrorWithContext(ctx, "controllers/MCP governed tool %s failed: %+v", name, err)
@@ -244,12 +260,7 @@ func writeGovernedRefusal(w http.ResponseWriter, req jsonRPCRequest, d mcpBusine
 // is what a client should actually read. Both come from the same value, so they
 // cannot describe different results.
 func governedToolResult(out any) map[string]interface{} {
-	text := ""
-	if m, ok := out.(map[string]any); ok {
-		if s, ok := m["text"].(string); ok {
-			text = s
-		}
-	}
+	text := mcpBusiness.ResultText(out)
 	// A view (MCP Apps) reads the decoded rows as structuredContent.data; the
 	// existing text and meta stay where clients already find them.
 	if m, ok := out.(map[string]any); ok {

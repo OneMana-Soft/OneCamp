@@ -74,7 +74,8 @@ func fakeBasecamp(t *testing.T) (*httptest.Server, *int32) {
 		},
 		"/999/todolists/110/todos.json": func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("completed") == "true" {
-				fmt.Fprintf(w, `[{"id":112,"title":"Pick a domain","completed":true,"description":"","creator":%s,"assignees":[],"comments_count":0,"subtasks_count":0,"created_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-03T00:00:00Z"}]`, person(10, "Ana"))
+				fmt.Fprintf(w, `[{"id":112,"title":"Pick a domain","completed":true,"description":"","creator":%s,"assignees":[],"comments_count":0,"subtasks_count":0,"created_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-03T00:00:00Z",
+					"completion":{"created_at":"2026-01-02T16:30:00.000Z","creator":{"id":10}}}]`, person(10, "Ana"))
 				return
 			}
 			fmt.Fprintf(w, `[{"id":111,"title":"Build the page","completed":false,

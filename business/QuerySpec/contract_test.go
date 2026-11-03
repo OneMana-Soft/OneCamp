@@ -66,6 +66,19 @@ func TestRunAnswersThroughTheScopesRunner(t *testing.T) {
 	if _, err := Queries.Run(ctx, who, Spec{}, Page{Size: 50}); !errors.Is(err, ErrBadSpec) {
 		t.Errorf("a bad spec: %v", err)
 	}
+	// A page starts after a cursor or at a place (a jump), never both, and
+	// never before the first row.
+	for name, page := range map[string]Page{
+		"a place before the first": {Size: 50, At: -1},
+		"a place and a cursor":     {Size: 50, At: 500, After: "c"},
+	} {
+		if _, err := Queries.Run(ctx, who, Spec{Scope: Scope{Kind: ScopeTable, ID: "t"}}, page); !errors.Is(err, ErrBadSpec) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := Queries.Run(ctx, who, Spec{Scope: Scope{Kind: ScopeTable, ID: "t"}}, Page{Size: 50, At: 500}); !errors.Is(err, ErrNotBuilt) {
+		t.Errorf("a page at a place goes to the runner: %v", err)
+	}
 
 	saved := Queries
 	t.Cleanup(func() { Queries = saved })

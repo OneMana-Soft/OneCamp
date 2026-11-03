@@ -121,7 +121,7 @@ func SaveRule(ctx context.Context, by uuid.UUID, projectID uuid.UUID, in RuleInp
 		return nil, fmt.Errorf("approvals needed is 1 to %d", len(rule.Approvers))
 	}
 	if rule.Who == "anyone" && len(rule.Required) == 0 && !rule.WantsApproval() {
-		return nil, dropRule(ctx, projectID, rule.Status)
+		return nil, dropRule(ctx, projectID, rule.Status, by)
 	}
 	existing, err := listRules(ctx, projectID)
 	if err != nil {
@@ -145,10 +145,11 @@ func ListRules(ctx context.Context, projectID uuid.UUID) ([]*model.StatusRule, e
 	return listRules(ctx, projectID)
 }
 
-// DeleteRule removes a status's rule.
-func DeleteRule(ctx context.Context, projectID uuid.UUID, status string) error {
+// DeleteRule takes a status's rule away, by whom; its row is kept, marked
+// (V-184 head 4a).
+func DeleteRule(ctx context.Context, by uuid.UUID, projectID uuid.UUID, status string) error {
 	if helpers.ActsThroughToken(ctx) {
 		return errors.New("status rules are set in the app, not through a token")
 	}
-	return dropRule(ctx, projectID, strings.TrimSpace(status))
+	return dropRule(ctx, projectID, strings.TrimSpace(status), by)
 }

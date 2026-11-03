@@ -1103,7 +1103,7 @@ func TestBatchPatchSetsLinks(t *testing.T) {
 	if _, err := Undo(ctx, vendors.Id, nil, w.me); err != nil {
 		t.Fatalf("undo the other side: %v", err)
 	}
-	if _, err := Undo(ctx, budget.Id, &res.ChangeSet, w.me); err != nil {
+	if _, err := Undo(ctx, budget.Id, res.ChangeSet, w.me); err != nil {
 		t.Fatalf("undo the batch: %v", err)
 	}
 	cells = w.cells(budget, &w.me)

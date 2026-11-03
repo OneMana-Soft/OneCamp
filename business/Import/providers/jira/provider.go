@@ -361,7 +361,8 @@ func (p *Provider) sendProjects(ctx context.Context, j *importModels.Job, tok, s
 }
 
 // sourceProject is a Jira project as the import takes it, with the sprints
-// that hold its issues as its cycles (sprints.go).
+// that hold its issues as its cycles (sprints.go) and its lead leading its
+// plan (projectPlan.go).
 func (p *Provider) sourceProject(ctx context.Context, j *importModels.Job, tok, site string, pr jiraProject, team, sprintField string) (importProvider.SourceProject, error) {
 	cycles, err := p.projectSprints(ctx, j, tok, site, pr.Key, sprintField)
 	if err != nil {
@@ -376,6 +377,7 @@ func (p *Provider) sourceProject(ctx context.Context, j *importModels.Job, tok, 
 		SourceKey:    pr.Key,
 		Cycles:       cycles,
 		Metadata:     map[string]any{"jira_key": pr.Key, "jira_url": site + "/browse/" + pr.Key},
+		Plan:         projectPlan(pr),
 	}, nil
 }
 
@@ -733,6 +735,10 @@ type jiraIssueFields struct {
 	// Security is the issue's security level, set when Jira lets only some
 	// people see the issue (restrictedBy).
 	Security *jiraNamed `json:"security"`
+	// ResolutionDate and StatusCategoryChanged are when it was resolved and
+	// when its status's category last changed (issueStatusSince).
+	ResolutionDate        string `json:"resolutiondate"`
+	StatusCategoryChanged string `json:"statuscategorychangedate"`
 	// Comment is the comments a search carries with an issue (the first page
 	// of them); only their authors are read (usersInScope), of those that
 	// come across.
@@ -1280,7 +1286,7 @@ func commentTotal(iss *jiraIssue) int {
 
 // buildSourceTask converts a Jira issue to the generic SourceTask.
 // issueFields are the fields a search asks for, besides custom ones.
-const issueFields = "summary,description,status,priority,assignee,reporter,creator,issuetype,labels,duedate,created,updated,parent,subtasks,attachment,comment,issuelinks,timeoriginalestimate,security"
+const issueFields = "summary,description,status,priority,assignee,reporter,creator,issuetype,labels,duedate,created,updated,parent,subtasks,attachment,comment,issuelinks,timeoriginalestimate,security,resolutiondate,statuscategorychangedate"
 
 func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields) importProvider.SourceTask {
 	created := parseJiraTime(iss.Fields.Created)
@@ -1344,6 +1350,7 @@ func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields)
 		Updated:         updated,
 		DueDay:          due,
 		Completed:       iss.done(),
+		StatusSince:     issueStatusSince(iss),
 		AttachmentRefs:  atts,
 		CommentCount:    commentTotal(iss),
 		EstimateMinutes: iss.Fields.Estimate / 60,

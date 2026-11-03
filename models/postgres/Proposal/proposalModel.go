@@ -197,8 +197,10 @@ func (Store) Save(ctx context.Context, r *Row) error {
 	return err
 }
 
-// Delete removes a proposal (one whose preparing failed).
-func (Store) Delete(ctx context.Context, id uuid.UUID) error {
+// TakeBack takes back a proposal whose preparing failed: the create's own
+// half-written row (a rollback; createPrepared is its only caller). A
+// proposal a person settles stays, with its status.
+func (Store) TakeBack(ctx context.Context, id uuid.UUID) error {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `DELETE FROM edit_proposals WHERE id = $1`, id)

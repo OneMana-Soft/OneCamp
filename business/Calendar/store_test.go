@@ -44,8 +44,12 @@ type memStore struct {
 	ooo map[uuid.UUID]models.OOORule
 	// feeds are secret feeds, in the order made; revoked ones stay, marked.
 	feeds []memFeed
-	// subscribed are calendars read from addresses, by id.
-	subscribed map[uuid.UUID]models.Calendar
+	// subscribed are calendars read from addresses, by id; unsubscribed are
+	// those taken away, kept and marked deleted (head 5c).
+	subscribed, unsubscribed map[uuid.UUID]models.Calendar
+	// forgetHeld holds forgetIfUnsubscribed back, as a read in flight that
+	// hasn't reached its own forget yet (holdForget).
+	forgetHeld bool
 	// reads counts the reads a test pins, by the store's method.
 	readMu sync.Mutex
 	reads  map[string]int
@@ -146,6 +150,9 @@ func (m *memStore) calendarsByID(_ context.Context, ids []uuid.UUID) ([]models.C
 			}
 		}
 		if c, ok := m.subscribed[id]; ok {
+			out = append(out, c)
+		}
+		if c, ok := m.unsubscribed[id]; ok {
 			out = append(out, c)
 		}
 	}
@@ -329,8 +336,70 @@ func (m *memStore) subscribedCalendar(_ context.Context, id, owner uuid.UUID, na
 	return nil
 }
 
-// deleteSubscribedCalendar deletes it and, as Postgres cascades, every event on it.
-func (m *memStore) deleteSubscribedCalendar(_ context.Context, id, owner uuid.UUID) (bool, error) {
+// unsubscribeCalendar keeps it, marked deleted, forgets the address's events
+// on it and stops its shares, as Postgres does in one transaction.
+func (m *memStore) unsubscribeCalendar(_ context.Context, id, owner uuid.UUID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.subscribed[id]
+	if !ok || *c.OwnerID != owner {
+		return false, nil
+	}
+	delete(m.subscribed, id)
+	if m.unsubscribed == nil {
+		m.unsubscribed = map[uuid.UUID]models.Calendar{}
+	}
+	c.Deleted = true
+	m.unsubscribed[id] = c
+	for eid, e := range m.events {
+		if e.CalendarID == id && e.Source == sourceSubscribed {
+			delete(m.events, eid)
+		}
+	}
+	m.shares = slices.DeleteFunc(m.shares, func(sh models.CalendarShare) bool { return sh.CalendarID == id })
+	return true, nil
+}
+
+// forgetIfUnsubscribed forgets the address's events on calendar when it was
+// unsubscribed, as Postgres does under the calendar's row lock.
+func (m *memStore) forgetIfUnsubscribed(_ context.Context, calendar uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.unsubscribed[calendar]; !ok || m.forgetHeld {
+		return nil
+	}
+	for id, e := range m.events {
+		if e.CalendarID == calendar && e.Source == sourceSubscribed {
+			delete(m.events, id)
+		}
+	}
+	return nil
+}
+
+// holdForget holds every forgetIfUnsubscribed back while on, so a test can
+// read a subscription between a late read's writes and its own forget.
+func (m *memStore) holdForget(on bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.forgetHeld = on
+}
+
+// eventsOn says which of these events are on calendar, in the trash or not.
+func (m *memStore) eventsOn(_ context.Context, calendar uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[uuid.UUID]bool{}
+	for _, id := range ids {
+		if e := m.events[id]; e != nil && e.CalendarID == calendar {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+
+// takeBackSubscribedCalendar deletes it and, as Postgres cascades, every
+// event on it.
+func (m *memStore) takeBackSubscribedCalendar(_ context.Context, id, owner uuid.UUID) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c, ok := m.subscribed[id]

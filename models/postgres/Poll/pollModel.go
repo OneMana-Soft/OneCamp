@@ -81,8 +81,10 @@ func SetPost(ctx context.Context, pollID, postID uuid.UUID) error {
 	return err
 }
 
-// Delete removes a poll whose message could not be posted.
-func Delete(ctx context.Context, pollID uuid.UUID) error {
+// TakeBack takes back a poll whose message could not be posted: the create's
+// own half-written row (a rollback). Nothing else removes a poll; there is no
+// route to delete one, and a poll closes instead.
+func TakeBack(ctx context.Context, pollID uuid.UUID) error {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	_, err := db().ExecContext(ctx, `DELETE FROM polls WHERE id = $1`, pollID)

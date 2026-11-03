@@ -56,7 +56,7 @@ business/Task/taskReactions.go 101
 business/Workflow/workflowDraft.go 161
 controllers/AI/aiController.go 442
 controllers/AIAgent/agentController.go 212
-controllers/Board/boardController.go 1764
+controllers/Board/boardController.go 1244
 controllers/Channel/channelAgentController.go 230
 controllers/Channel/channelController.go 550
 controllers/Chat/chatController.go 862

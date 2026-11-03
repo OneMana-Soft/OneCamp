@@ -113,6 +113,8 @@ func all() []Spec {
 		WebhookRateLimit,
 		ApiTokenRate,
 		ApiRouteRate,
+		ApiRowReads,
+		ApiRowWrites,
 		ApiIdempotency,
 		InviterDailyInvites,
 		MCPToolReadRate,

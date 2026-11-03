@@ -19,6 +19,7 @@ import (
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	workTaxonomy "github.com/akashc777/OneCamp/business/WorkTaxonomy"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -47,6 +48,11 @@ type NewTask struct {
 	Label  string
 	// Due is when it is due; nil for no due date.
 	Due *time.Time
+	// Start is when work on it starts; nil for no start date.
+	Start *time.Time
+	// Type is its type (business/WorkTaxonomy): a built-in one or the
+	// project's own; nil for a Task.
+	Type *uuid.UUID
 	// Assignee gets the task when they are in the project; someone who isn't
 	// (any more) leaves it unassigned rather than failing whoever sent it.
 	Assignee *dgraphStruct.DgraphUser
@@ -71,10 +77,12 @@ var (
 	}
 	createTask    = taskBusiness.CreateTask
 	createSubTask = taskBusiness.CreateSubTask
+	createTasks   = taskBusiness.CreateTasks
 	createComment = taskBusiness.CreateTaskComment
 	inProject     = projectBusiness.HasMember
 	isAgent       = userDomain.IsAgentPrincipal
 	setNewFields  = taskFieldModel.SetNew
+	setTaskType   = workTaxonomy.SetTaskType
 )
 
 // Assignable says whether someone may be given a project's task: one of its
@@ -141,6 +149,9 @@ func MakeTask(ctx context.Context, who *userModels.UserInfo, projectID uuid.UUID
 	if in.Due != nil {
 		input.DueDate = in.Due.Format(time.RFC3339)
 	}
+	if in.Start != nil {
+		input.StartDate = in.Start.Format(time.RFC3339)
+	}
 	assignee := in.Assignee
 	if assignee != nil {
 		ok, err := Assignable(ctx, assignee.Uuid, projectID.String())
@@ -154,13 +165,22 @@ func MakeTask(ctx context.Context, who *userModels.UserInfo, projectID uuid.UUID
 		}
 	}
 	taskID, err := createTask(ctx, projectID, who, p, assignee, input, nil)
-	if err != nil || len(in.Fields) == 0 {
+	if err != nil {
 		return taskID, err
 	}
-	// The task is made; a field value that didn't stick is logged, not turned
-	// into a failure that would make the task twice on a retry.
-	if err := setNewFields(ctx, taskID, in.Fields, who.UserPostgresInfo.Id); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/TaskWriter MakeTask fields err: %+v", err)
+	// The task is made; a field value or a type that didn't stick is logged,
+	// not turned into a failure that would make the task twice on a retry.
+	if len(in.Fields) > 0 {
+		if err := setNewFields(ctx, taskID, in.Fields, who.UserPostgresInfo.Id); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/TaskWriter MakeTask fields err: %+v", err)
+		}
+	}
+	// A Task is what a task is with no type: nothing to set (choosing it
+	// meets a template's required type).
+	if in.Type != nil && *in.Type != workTaxonomy.TypeTask {
+		if _, err := setTaskType(ctx, &dgraphStruct.DgraphTask{Uuid: taskID.String()}, in.Type, &who.UserDgraphInfo); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/TaskWriter MakeTask type err: %+v", err)
+		}
 	}
 	return taskID, nil
 }
@@ -191,6 +211,47 @@ func MakeSubTask(ctx context.Context, who *userModels.UserInfo, parent *dgraphSt
 	return createSubTask(ctx, projectID, who, p, nil, adapter.CreateOrUpdateTaskInput{
 		Uuid: parent.Uuid, ProjectUuid: p.Uuid, TaskName: name,
 	})
+}
+
+// MakeSubTasks makes sub-tasks under a task as who, one per name, as
+// MakeSubTask makes one but together: the project, with the task, and who's
+// standing there read once, then every one made in one batch under the task
+// (business/Task CreateTasks: the rows and the task's restriction in one
+// transaction, the graph in one write, their first statuses asked once). A
+// name with no words refuses before anything is read. It answers their ids
+// in order. A template's sub-tasks are made this way, and imports may be.
+func MakeSubTasks(ctx context.Context, who *userModels.UserInfo, parent *dgraphStruct.DgraphTask, names []string) ([]uuid.UUID, error) {
+	if who == nil || parent == nil || parent.Project == nil {
+		return nil, taskBusiness.ErrTaskNotVisible
+	}
+	clean := make([]string, len(names))
+	for i, name := range names {
+		if clean[i] = cleanName(name); clean[i] == "" {
+			return nil, fmt.Errorf("%w: a subtask needs a name", ErrBadValue)
+		}
+	}
+	if len(clean) == 0 {
+		return nil, nil
+	}
+	p, err := projectWithTask(ctx, parent.Project.Uuid, parent.Uuid, who)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil || len(p.Tasks) == 0 || p.Tasks[0] == nil {
+		return nil, taskBusiness.ErrTaskNotVisible
+	}
+	if err := mayIn(ctx, who, p, workAccess.NeedCreateTask); err != nil {
+		return nil, err
+	}
+	projectID, err := uuid.Parse(p.Uuid)
+	if err != nil {
+		return nil, err
+	}
+	batch := make([]taskBusiness.NewTask, len(clean))
+	for i, name := range clean {
+		batch[i] = taskBusiness.NewTask{Input: adapter.CreateOrUpdateTaskInput{ProjectUuid: p.Uuid, TaskName: name}, Parent: -1, Under: p.Tasks[0]}
+	}
+	return createTasks(ctx, projectID, who, p, batch)
 }
 
 // ErrEmptyComment is a comment with nothing in it.

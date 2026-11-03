@@ -81,10 +81,11 @@ func DiscoverAuthorizedModelLimits(ctx context.Context, id uuid.UUID) (ai.Discov
 	return ai.DiscoverModelLimits(ctx, ep, cfg), nil
 }
 
-// RevokeAuthorizedModel removes a model from the allowlist; affected users
-// silently revert to the workspace default (FK ON DELETE SET NULL).
-func RevokeAuthorizedModel(ctx context.Context, id uuid.UUID) error {
-	return aiModels.DeleteAuthorizedModel(ctx, id)
+// RevokeAuthorizedModel takes a model off the allowlist, by whom; it is kept,
+// marked, and members who had picked it silently revert to the workspace
+// default (aiModels.DeleteAuthorizedModel).
+func RevokeAuthorizedModel(ctx context.Context, id, by uuid.UUID) error {
+	return aiModels.DeleteAuthorizedModel(ctx, id, by)
 }
 
 // UserModelsResponse is the user-facing picker payload: the models a member

@@ -297,6 +297,7 @@ var exemptFromDeadExportedCheck = map[string]string{
 	"ClearForPersonInProject":         "called only by beta's demo seed (its showcase time entries); the release lines don't carry it.",
 	"MarkProjectArchivedInOpenSearch": "called only by beta's demo seed (a refresh takes every retired copy of a curated project out of search); the release lines don't carry it.",
 	"NoteColourByID":                  "business/Board/scene's is called only by beta's demo seed (business/DemoSeed/board.go colours its board's notes by id); the release lines don't carry the seed.",
+	"SaveAll":                         "business/TaskTemplate's is called only by beta's demo seed (business/DemoSeed/taskTemplates.go writes the demo's templates, each scope's set at once); the release lines don't carry the seed.",
 	"TakeOver":                        "business/TaskKeys' is called only by beta's demo seed (a refreshed project keeps its key); never offered to people; the release lines don't carry the seed.",
 	"UpdateDocPermissions":            "business/Doc's is called only by beta's demo seed (the docs home's shared and team docs); the share routes don't call it; the release lines don't carry the seed.",
 

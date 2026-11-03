@@ -432,7 +432,6 @@ business/DataTable/relations.go :: linkCellsOf :: readLinkCells
 business/DataTable/relations.go :: tellTables :: publishLinks
 business/DataTable/rowAccess.go :: RowTitles :: rowNames
 business/DataTable/rowQueryWorked.go :: workedOut :: model.ListRowsAfter
-business/DataTable/sheetImport.go :: targets :: loadViewable
 business/DataTable/sheetImport.go :: targets :: model.ListFields
 business/DataTable/tableAIColumn.go :: fillCells :: .mayGoOn
 business/DataTable/tableAIColumn.go :: fillCells :: fillOneCell
@@ -593,11 +592,12 @@ business/Import/providers/clickup/provider.go :: buildSnapshot :: .fetchTaskComm
 business/Import/providers/clickup/provider.go :: fetchListTasks :: .getJSON
 business/Import/providers/clickup/provider.go :: fetchTaskComments :: .getJSON
 business/Import/providers/jira/provider.go :: sendProjects :: .sourceProject
-business/Import/providers/linear/pages.go :: issuePages :: .gql
-business/Import/providers/linear/provider.go :: buildSnapshot :: .fetchTeamIssues
+business/Import/providers/linear/pages.go :: listPages :: .gql
+business/Import/providers/linear/provider.go :: fetchProjects :: .allLabels
 business/Import/providers/linear/provider.go :: fetchTeamIssues :: .gql
 business/Import/providers/linear/provider.go :: fetchTeamIssues :: .restOfIssue
 business/Import/providers/linear/provider.go :: rootList :: .gql
+business/Import/providers/linear/provider.go :: snapshotWith :: .fetchTeamIssues
 business/Import/providers/miro/provider.go :: BoardOf :: .get
 business/Import/providers/miro/provider.go :: Plan :: .get
 business/Import/providers/miro/provider.go :: boards :: .get

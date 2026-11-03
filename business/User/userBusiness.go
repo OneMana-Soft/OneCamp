@@ -799,6 +799,11 @@ func ActivateUser(ctx context.Context, userUUID uuid.UUID) (err error) {
 	zeroUnixTime := time.Time{}.UTC()
 	currentTime := time.Now()
 	err = domain.UpdateDeletedTimeToNullByUUID(ctx, &currentTime, userUUID)
+	if helpers.IsSeatLimit(err) {
+		// A full free plan says why: the admin's Activate answers the limit's
+		// 403, and SCIM its policy refusal, not a retryable failure.
+		return err
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/ActivateUser Failed to delete user err: %+v",

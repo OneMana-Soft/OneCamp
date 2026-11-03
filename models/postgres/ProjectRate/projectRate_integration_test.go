@@ -41,7 +41,7 @@ func TestProjectRates(t *testing.T) {
 	if _, err := Set(project, "usd", 5000, nil, b.UpdatedAt, admin); err == nil {
 		t.Fatal("a lowercase currency got past the check constraint")
 	}
-	if err := Clear(project); err != nil {
+	if err := Clear(project, admin); err != nil {
 		t.Fatal(err)
 	}
 	if b, err := Get(project); err != nil || b != nil {
@@ -78,7 +78,7 @@ func TestARatesSaveFromAStaleReadChangesNothing(t *testing.T) {
 	if err != nil || b == nil || b.Currency != "INR" || b.DefaultRateCents != 160000 || len(b.People) != 2 || b.People[maya] != 210000 || !b.UpdatedAt.Equal(theirs) {
 		t.Fatalf("a refused save changed the rates: %+v %v", b, err)
 	}
-	if err := Clear(project); err != nil {
+	if err := Clear(project, admin); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Set(project, "INR", 160000, nil, theirs, admin); !errors.Is(err, ErrChanged) {

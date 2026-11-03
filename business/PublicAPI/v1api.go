@@ -105,6 +105,10 @@ type Route struct {
 	// Serve answers in the new shape: its value is written as JSON (200, or
 	// 201 for a write), its error as the one error body.
 	Serve func(ctx context.Context, req Request) (any, error)
+
+	// op is the Op this route publishes (RegisterOps), in place of Handler or
+	// Serve: its arguments are built once and checked before Reach reads them.
+	op *Op
 }
 
 // Resource is what one package brings to the API.
@@ -131,6 +135,12 @@ type Error struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 	Hint    string `json:"hint,omitempty"`
+	// Details, when a refusal has parts the caller fixes one by one (the rows
+	// a batch refused), go in the one error body as "details". A plain value,
+	// never an error: WriteJSON redacts those.
+	Details any `json:"details,omitempty"`
+	// RetryAfter, in seconds, is sent as Retry-After (a spent budget).
+	RetryAfter int `json:"-"`
 }
 
 func (e *Error) Error() string { return e.Code + ": " + e.Message }
@@ -171,7 +181,7 @@ func Register(r Resource) {
 		if !oneOf(rt.Reach != nil, rt.AppsInside, rt.AppsRefused != "") {
 			panic(fmt.Sprintf("v1api: %s %s (%s) needs exactly one of Reach, AppsInside or AppsRefused", rt.Method, rt.Path, r.Name))
 		}
-		if (rt.Handler == nil) == (rt.Serve == nil) {
+		if !oneOf(rt.Handler != nil, rt.Serve != nil, rt.op != nil) {
 			panic(fmt.Sprintf("v1api: %s %s (%s) needs one of Handler or Serve", rt.Method, rt.Path, r.Name))
 		}
 		for _, other := range resources {
@@ -247,12 +257,16 @@ func Mount(r Router, mw Middleware) {
 }
 
 // chain is a route's handler with everything Mount gives it, outermost first:
-// the version and request id, the scope, the route's limit, its own gates,
+// the version and request id, the scope, the route's limit, an op's arguments
+// (built once, checked against its Input), the app's reach, its own gates,
 // then Idempotency-Key for a write.
 func chain(res Resource, rt Route, mw Middleware) http.Handler {
 	var h http.Handler = rt.Handler
-	if rt.Serve != nil {
+	switch {
+	case rt.Serve != nil:
 		h = serve(rt)
+	case rt.op != nil:
+		h = serveOp(rt)
 	}
 	if rt.Write {
 		h = idempotency.Middleware(routeKey(rt), refuseKey)(h)
@@ -261,6 +275,9 @@ func chain(res Resource, rt Route, mw Middleware) http.Handler {
 		h = rt.Use[i](h)
 	}
 	h = reached(rt, h)
+	if rt.op != nil {
+		h = argued(rt, h)
+	}
 	h = limited(rt, h)
 	if rt.Scope != "" && mw.RequireScope != nil {
 		h = mw.RequireScope(rt.Scope)(h)
@@ -365,9 +382,10 @@ func limited(rt Route, next http.Handler) http.Handler {
 			if after <= 0 {
 				after = int(registry.ApiRouteRate.TTL.Seconds())
 			}
-			w.Header().Set("Retry-After", strconv.Itoa(after))
-			writeError(w, Errorf(http.StatusTooManyRequests, "rate_limited", "wait for Retry-After seconds, then send it again",
-				"this token has made %d calls to %s in the last minute, its limit", max, key))
+			e := Errorf(http.StatusTooManyRequests, "rate_limited", "wait for Retry-After seconds, then send it again",
+				"this token has made %d calls to %s in the last minute, its limit", max, key)
+			e.RetryAfter = after
+			writeError(w, e)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -406,21 +424,34 @@ func serve(rt Route) http.Handler {
 			body = b
 		}
 		v, err := rt.Serve(r.Context(), Request{HTTP: r, Body: body})
-		if err != nil {
-			writeError(w, asError(err))
-			return
-		}
-		if rt.Versioned {
-			if ver, ok := v.(Versioned); ok {
-				w.Header().Set("ETag", fmt.Sprintf(`W/"%d"`, ver.APIVersion()))
-			}
-		}
-		status := http.StatusOK
-		if rt.Write && r.Method == http.MethodPost {
-			status = http.StatusCreated
-		}
-		helpers.WriteJSON(w, status, v)
+		answer(w, r, rt, v, err)
 	})
+}
+
+// answer writes what a route in the new shape served: its value as JSON (200,
+// or 201 for a write's POST), with a versioned value's ETag, or its error as
+// the one error body.
+func answer(w http.ResponseWriter, r *http.Request, rt Route, v any, err error) {
+	if err != nil {
+		e := asError(err)
+		if e.Status == http.StatusInternalServerError {
+			// The answer says what to do; what broke stays in the log, under
+			// the request's id.
+			helpers.LogErrorWithContext(r.Context(), "business/PublicAPI %s %s: %+v", rt.Method, rt.Path, err)
+		}
+		writeError(w, e)
+		return
+	}
+	if rt.Versioned {
+		if ver, ok := v.(Versioned); ok {
+			w.Header().Set("ETag", fmt.Sprintf(`W/"%d"`, ver.APIVersion()))
+		}
+	}
+	status := http.StatusOK
+	if rt.Write && r.Method == http.MethodPost {
+		status = http.StatusCreated
+	}
+	helpers.WriteJSON(w, status, v)
 }
 
 // asError is err as the API says it: an *Error as it is, anything else a 500
@@ -440,13 +471,18 @@ type errorBody struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 	Hint    string `json:"hint,omitempty"`
+	Details any    `json:"details,omitempty"`
 }
 
-// writeError writes the one error body.
+// writeError writes the one error body, with Retry-After when it says when to
+// try again.
 func writeError(w http.ResponseWriter, e *Error) {
 	status := e.Status
 	if status == 0 {
 		status = http.StatusBadRequest
 	}
-	helpers.WriteJSON(w, status, map[string]any{"error": errorBody{Code: e.Code, Message: e.Message, Hint: e.Hint}})
+	if e.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(e.RetryAfter))
+	}
+	helpers.WriteJSON(w, status, map[string]any{"error": errorBody{Code: e.Code, Message: e.Message, Hint: e.Hint, Details: e.Details}})
 }

@@ -157,6 +157,28 @@ func TestBridgedWritesNameAKindThatCanExpressThem(t *testing.T) {
 	}
 }
 
+// The row tools ask the rows' rule (V-331): whoever may write a table's rows in
+// the app or over REST may write them through MCP, and no one else. Asked as
+// ResourceTable, a write answers CanManage, so a member who edits the table's
+// rows everywhere else would be refused here alone.
+func TestTheRowToolsAskTheRowsRule(t *testing.T) {
+	byTool := map[string]binding{}
+	for _, b := range bridgedTools {
+		byTool[b.Tool] = b
+	}
+	for _, tool := range []string{"create_table_row", "update_table_row", "link_table_rows"} {
+		b, ok := byTool[tool]
+		if !ok {
+			t.Errorf("%s is not governed", tool)
+			continue
+		}
+		if b.Kind != ResourceTableRows || b.IDArg != "table_uuid" {
+			t.Errorf("%s is checked as %s on %q; a row write is the rows' rule (%s) on the table it names",
+				tool, b.Kind, b.IDArg, ResourceTableRows)
+		}
+	}
+}
+
 // An object-scoped tool whose target is missing must REFUSE, never widen to
 // workspace scope. Widening is how a tool that reads one document becomes a tool
 // that reads whatever the handler defaults to.

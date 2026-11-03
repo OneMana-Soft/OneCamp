@@ -197,8 +197,9 @@ var bridgedTools = []binding{
 	//
 	// Their authority rules were already written and tested, so these are wiring
 	// rather than new policy: task writes require project ADMIN (the same rule the
-	// shipped task controllers apply to a mutation) and table writes go through
-	// dataTableBusiness.CanManage.
+	// shipped task controllers apply to a mutation) and row writes go through the
+	// rows' rule (ResourceTableRows: business/TableAccess's Edit), the one the app
+	// and the public API's row ops ask.
 	//
 	// STILL TO COME for assign_task: the ASSIGNEE is a second person this call
 	// affects, and nothing here verifies they are someone who can hold work — the
@@ -209,13 +210,16 @@ var bridgedTools = []binding{
 		Behaviour: ToolBehaviour{ReadOnly: false, Destructive: false, Idempotent: true}},
 	{Tool: "set_task_due_date", Kind: ResourceTask, IDArg: "task_uuid",
 		Behaviour: ToolBehaviour{ReadOnly: false, Destructive: false, Idempotent: true}},
-	// The table is the object under authority, not the row: CanManage is granted over
-	// a table, and a row cannot be reached except through it.
-	{Tool: "update_table_row", Kind: ResourceTable, IDArg: "table_uuid",
+	// The table's rows are the object under authority, and a row cannot be reached
+	// except through its table: whoever may write a table's rows in the app or over
+	// REST may write them here (TableAccess's Edit), and no one else. CanManage is
+	// for changing the table itself, which no row tool does.
+	{Tool: "update_table_row", Kind: ResourceTableRows, IDArg: "table_uuid",
 		Behaviour: ToolBehaviour{ReadOnly: false, Destructive: false, Idempotent: true}},
 	// Linking a row twice, or unlinking it twice, leaves it as once: a link is
-	// there or it isn't. Unlinking is undone by linking again.
-	{Tool: "link_table_rows", Kind: ResourceTable, IDArg: "table_uuid",
+	// there or it isn't. Unlinking is undone by linking again. The table named is
+	// the one whose links change (the tools change only its own relations' links).
+	{Tool: "link_table_rows", Kind: ResourceTableRows, IDArg: "table_uuid",
 		Behaviour: ToolBehaviour{ReadOnly: false, Destructive: false, Idempotent: true}},
 
 	// THE FIRST WRITES THAT ARE NOT SAFE TO REPEAT. Calling either twice produces two
@@ -228,7 +232,7 @@ var bridgedTools = []binding{
 	// not ask a human first. Prompting for approval on every message an agent sends
 	// would train people to click Approve without reading, which is worse than not
 	// asking; the audit row and the channel itself are the review.
-	{Tool: "create_table_row", Kind: ResourceTable, IDArg: "table_uuid",
+	{Tool: "create_table_row", Kind: ResourceTableRows, IDArg: "table_uuid",
 		Behaviour: ToolBehaviour{ReadOnly: false, Destructive: false, Idempotent: false}},
 	// Posting is governed by the channel's own rule, which already separates reading
 	// from posting: any member may read, and an admins-only channel refuses a write

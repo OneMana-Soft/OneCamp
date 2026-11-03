@@ -15,16 +15,11 @@ package business
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
-	userDomain "github.com/akashc777/OneCamp/domain/User"
-	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	accessModels "github.com/akashc777/OneCamp/models/postgres/Access"
-	"github.com/google/uuid"
 )
 
 // AuditedKinds are the doc events the log records, each with how its summary
@@ -56,28 +51,17 @@ var AuditedKinds = map[resourceEventBusiness.Kind]string{
 	resourceEventBusiness.DocAccessAnswered:  "%s a request to %s %s",
 }
 
-// Seams for tests: where the row goes, and the actor's email.
-var (
-	auditRecord = auditBusiness.RecordForPrincipal
-	actorEmail  = func(ctx context.Context, id uuid.UUID) string {
-		if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
-			return ""
-		}
-		u, err := userDomain.GetUserByUUID(ctx, id)
-		if err != nil || u == nil {
-			return ""
-		}
-		return u.EmailID
-	}
-)
-
 func isAudited(e resourceEventBusiness.Event) bool {
 	_, ok := AuditedKinds[e.Kind]
 	return ok && e.ResourceKind == "doc"
 }
 
-// record writes the event's row.
-func record(ctx context.Context, e resourceEventBusiness.Event) {
+// docsAudit is the docs' events in the admin audit log, under "docs". It runs
+// for a bulk import's events too.
+var docsAudit = auditBusiness.EventSink{Name: "audit", Category: auditBusiness.CategoryDocs, Wants: isAudited, Row: docRow, InBulk: true}
+
+// docRow is the event's row, with the doc as read now.
+func docRow(ctx context.Context, e resourceEventBusiness.Event) (string, map[string]interface{}) {
 	var doc *dgraphStruct.DgraphDoc
 	if e.Kind != resourceEventBusiness.DocPurged {
 		// A purged doc is gone: its row names it by id alone.
@@ -86,29 +70,7 @@ func record(ctx context.Context, e resourceEventBusiness.Event) {
 			doc = d
 		}
 	}
-	summary, meta := auditRow(e, doc)
-	kind := auditBusiness.ActorHuman
-	switch {
-	case e.Actor.AgentUUID != "":
-		kind = auditBusiness.ActorAgent
-	case e.Actor.System || e.Actor.UserUUID == "":
-		kind = auditBusiness.ActorSystem
-	}
-	var actorID *uuid.UUID
-	email := ""
-	if id, err := uuid.Parse(e.Actor.UserUUID); err == nil {
-		actorID = &id
-		email = actorEmail(ctx, id)
-	}
-	// An agent's change is recorded as agent.<kind>, so the AI activity feed,
-	// which lists agent.* actions, shows it beside the agent's other work.
-	action := string(e.Kind)
-	if e.Actor.AgentUUID != "" {
-		action = "agent." + action
-	}
-	if err := auditRecord(ctx, actorID, email, kind, action, auditBusiness.CategoryDocs, summary, meta); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Follow audit: %s on doc %s wasn't recorded: %+v", e.Kind, e.ResourceUUID, err)
-	}
+	return auditRow(e, doc)
 }
 
 // auditRow is an event's summary and metadata. doc is the doc as read now, nil
@@ -151,38 +113,7 @@ func auditRow(e resourceEventBusiness.Event, doc *dgraphStruct.DgraphDoc) (strin
 		}
 	}
 	if e.Kind == resourceEventBusiness.DocShared && len(e.Subjects) > 0 {
-		summary += " with " + peopleWho(len(e.Subjects), e.Data["level"])
+		summary += " with " + auditBusiness.PeopleWho(len(e.Subjects), e.Data["level"])
 	}
-	meta := map[string]interface{}{
-		"resource_kind": e.ResourceKind,
-		"resource_uuid": e.ResourceUUID,
-		"at":            e.At.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
-	}
-	if e.Actor.AgentUUID != "" {
-		meta["agent_uuid"] = e.Actor.AgentUUID
-	}
-	if len(e.Subjects) > 0 {
-		meta["people"] = strings.Join(e.Subjects, ",")
-	}
-	for k, v := range e.Data {
-		// A title stays out of the log for a private page, as in the summary.
-		if k == "title" && private {
-			continue
-		}
-		meta[k] = v
-	}
-	return summary, meta
-}
-
-// peopleWho is the people a share reached and what they can do now: "1 person
-// who can edit", "2 people who have full access".
-func peopleWho(n int, level string) string {
-	people, have := "1 person", "has"
-	if n > 1 {
-		people, have = fmt.Sprintf("%d people", n), "have"
-	}
-	if level == "full" {
-		return people + " who " + have + " full access"
-	}
-	return people + " who can " + level
+	return summary, auditBusiness.EventMeta(e, private)
 }

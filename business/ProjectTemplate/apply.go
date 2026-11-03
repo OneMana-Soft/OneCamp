@@ -68,6 +68,13 @@ const (
 	dueHour   = 17
 )
 
+// StartHour and DueHour are those hours for every kind of template: a task
+// template's days count the same way (business/TaskTemplate).
+const (
+	StartHour = startHour
+	DueHour   = dueHour
+)
+
 // Applied is what starting a project from a template made.
 type Applied struct {
 	Statuses int `json:"statuses"`

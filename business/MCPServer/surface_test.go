@@ -26,7 +26,7 @@ const principal = "11111111-1111-1111-1111-111111111111"
 // or the column silently stops meaning what its own contract says.
 func TestEveryResourceKindMapsToADeclaredSurface(t *testing.T) {
 	kinds := []ResourceKind{
-		ResourceChannel, ResourceTask, ResourceDoc, ResourceChat, ResourceTable,
+		ResourceChannel, ResourceTask, ResourceDoc, ResourceChat, ResourceTable, ResourceTableRows,
 		ResourceProject, ResourceTeam, ResourceDataSource, ResourceDirectMessage,
 		ResourceSelfOwned, ResourceWorkspace,
 	}
@@ -104,7 +104,7 @@ func TestChatWritesLandInTheConversationTheyAreAbout(t *testing.T) {
 // Kinds with no thread must say so, rather than pointing at something that renders nowhere.
 func TestThreadlessWritesGoToTheAssistantSurface(t *testing.T) {
 	for _, kind := range []ResourceKind{
-		ResourceTask, ResourceDoc, ResourceTable, ResourceProject,
+		ResourceTask, ResourceDoc, ResourceTable, ResourceTableRows, ResourceProject,
 		ResourceTeam, ResourceDataSource, ResourceSelfOwned, ResourceWorkspace,
 	} {
 		surface, id := SurfaceForResource(ResourceRef{Kind: kind, ID: "obj-1"}, principal)

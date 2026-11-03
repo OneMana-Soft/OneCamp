@@ -452,25 +452,22 @@ func GetUserByUUID(ctx context.Context, uuid uuid.UUID) (userInfo *models.User, 
 	return
 }
 
+// UpdateDeletedTimeToNullByUUID reactivates a user. Bringing back a member
+// takes a seat (withSeatForReactivation): a full free plan refuses with
+// SeatLimitError. Not cancelled with the request, as before.
 func UpdateDeletedTimeToNullByUUID(ctx context.Context, updateTime *time.Time, userUUID uuid.UUID) (err error) {
-	if err = ensureSeatForReactivation(ctx, userUUID); err != nil {
+	err = withSeatForReactivation(context.WithoutCancel(ctx), userUUID, func(ctx context.Context) error {
+		_, err := pgexec.Exec(ctx, `
+			UPDATE users
+			SET deleted_at = null, updated_at = $1
+			WHERE id = $2`, updateTime, userUUID)
 		return err
-	}
-	query := `
-        UPDATE users
-        SET deleted_at = null, updated_at = $1
-		WHERE id = $2
-    `
-
-	err = models.UpdateDeletedTimeToNullByUUID(query, updateTime, userUUID)
-
-	if err != nil {
+	})
+	if err != nil && !helpers.IsSeatLimit(err) {
 		helpers.LogErrorWithContext(ctx,
 			"domain/UpdateDeletedTimeToNullByUUID Failed to update user's delete time name err: %+v",
 			err)
-		return
 	}
-
 	return
 }
 
@@ -2191,23 +2188,22 @@ func CreateUserWithMethod(
 	signupMethod string,
 	isSSOManaged bool,
 ) (err error) {
-	if err = EnsureSeatAvailable(ctx); err != nil {
-		return err
-	}
 	query := `
 		INSERT INTO users (id, email_id, username, password_hash, signup_method, is_sso_managed)
 		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6)
 	`
 	// The request's values (its id, for the logs), not its cancellation: a
 	// sign-up the client walked away from still writes both stores, or the
-	// graph node and the row disagree.
-	_, err = pgexec.Exec(context.WithoutCancel(ctx), query, userUUID, emailID, username, passwordHash, signupMethod, isSSOManaged)
-	if err != nil {
+	// graph node and the row disagree. The insert takes a seat (WithSeat): a
+	// full free plan refuses with SeatLimitError.
+	err = WithSeat(context.WithoutCancel(ctx), func(ctx context.Context) error {
+		_, err := pgexec.Exec(ctx, query, userUUID, emailID, username, passwordHash, signupMethod, isSSOManaged)
+		return err
+	})
+	if err != nil && !helpers.IsSeatLimit(err) {
 		helpers.LogErrorWithContext(ctx,
 			"domain/CreateUserWithMethod Failed to create user err: %+v", err)
-		return
 	}
-
 	return
 }
 
@@ -2236,21 +2232,22 @@ func AdoptExternalUser(ctx context.Context, emailID string, passwordHash *string
 		if err != nil || !found {
 			return err
 		}
-		if err := EnsureSeatAvailable(ctx); err != nil {
-			return err
-		}
-		if _, err := pgexec.Exec(tx, `
-			UPDATE users
-			SET is_external = false, password_hash = $2, signup_method = NULLIF($3, ''),
-				is_sso_managed = $4, updated_at = NOW()
-			WHERE id = $1`, id, passwordHash, signupMethod, isSSOManaged); err != nil {
-			return err
-		}
-		if err := setDgraphExternal(tx, id.String(), false); err != nil {
-			return err
-		}
-		graphMarked, userID = true, id
-		return nil
+		// The seat is taken in this transaction, under the lock every join
+		// holds until it commits.
+		return WithSeat(tx, func(tx context.Context) error {
+			if _, err := pgexec.Exec(tx, `
+				UPDATE users
+				SET is_external = false, password_hash = $2, signup_method = NULLIF($3, ''),
+					is_sso_managed = $4, updated_at = NOW()
+				WHERE id = $1`, id, passwordHash, signupMethod, isSSOManaged); err != nil {
+				return err
+			}
+			if err := setDgraphExternal(tx, id.String(), false); err != nil {
+				return err
+			}
+			graphMarked, userID = true, id
+			return nil
+		})
 	})
 	if err != nil {
 		// Only the commit fails after the graph node is marked a member's.

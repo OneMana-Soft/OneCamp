@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 )
 
@@ -62,12 +64,18 @@ func (m *AuthorizedModel) Usable() bool {
 	return m != nil && m.Enabled && m.ProviderEnabled
 }
 
-const authorizedModelSelect = `
+// authorizedModelSelect reads allowlist entries with their provider, live ones
+// only (V-184 head 4b): an entry revoked, or one whose provider was taken
+// away, is kept, marked, and no read sees it, as the delete and the provider's
+// ON DELETE CASCADE left none before. Both marks sit in the join, so every
+// statement built on it, a lookup, the list or a member's pick, reads live
+// entries without saying so again.
+var authorizedModelSelect = `
 	SELECT m.id, m.provider_id, p.kind, p.label, m.model, m.label,
 	       m.enabled, p.enabled, m.context_window_tokens, m.max_output_tokens,
 	       m.updated_at
 	FROM ai_authorized_models m
-	JOIN ai_providers p ON p.id = m.provider_id`
+	JOIN ai_providers p ON p.id = m.provider_id AND ` + softDelete.Live("p") + ` AND ` + softDelete.Live("m")
 
 func scanAuthorizedModel(s scannable) (*AuthorizedModel, error) {
 	var m AuthorizedModel
@@ -147,7 +155,7 @@ func SetAuthorizedModelLimits(ctx context.Context, id uuid.UUID, contextWindowTo
 	res, err := postgresInit.DBConn.SqlDB.ExecContext(cctx,
 		`UPDATE ai_authorized_models
 		    SET context_window_tokens = $1, max_output_tokens = $2, updated_at = NOW()
-		  WHERE id = $3`, contextWindowTokens, maxOutputTokens, id)
+		  WHERE id = $3 AND `+softDelete.Live(""), contextWindowTokens, maxOutputTokens, id)
 	if err != nil {
 		return fmt.Errorf("set authorized model limits: %w", err)
 	}
@@ -194,22 +202,36 @@ func GetAuthorizedModel(ctx context.Context, id uuid.UUID) (*AuthorizedModel, er
 	return m, err
 }
 
-// CreateAuthorizedModel adds a model to the allowlist. The provider must
-// exist (FK). Re-authorizing an existing (provider, model) is idempotent: it
-// re-enables it and refreshes the label rather than erroring.
+// CreateAuthorizedModel adds a model to the allowlist. Re-authorizing a live
+// (provider, model) is idempotent: it re-enables it and refreshes the label
+// rather than erroring. A model revoked earlier comes back as a new entry
+// (V-184 head 4b): the revoked one stays as it was, and the unique index holds
+// live entries only, which ON CONFLICT names.
+//
+// The provider must be live: ErrProviderNotFound otherwise. Its foreign key
+// refused a provider deleted for good, and doesn't refuse one taken away,
+// whose row stays. FOR SHARE holds the provider until this insert commits, so
+// a take-away running at once waits for it and then marks this entry with the
+// provider's others (DeleteCustomProvider marks the provider first).
 func CreateAuthorizedModel(ctx context.Context, providerID uuid.UUID, model, label string) (*AuthorizedModel, error) {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	const q = `
+	q := `
 		INSERT INTO ai_authorized_models (provider_id, model, label, enabled)
-		VALUES ($1, $2, $3, true)
-		ON CONFLICT (provider_id, model)
+		SELECT p.id, $2, $3, true FROM ai_providers p
+		WHERE p.id = $1 AND ` + softDelete.Live("p") + `
+		FOR SHARE OF p
+		ON CONFLICT (provider_id, model) WHERE ` + softDelete.Live("") + `
 		DO UPDATE SET label = EXCLUDED.label, enabled = true, updated_at = NOW()
 		RETURNING id`
 
 	var id uuid.UUID
-	if err := postgresInit.DBConn.SqlDB.QueryRowContext(cctx, q, providerID, model, label).Scan(&id); err != nil {
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(cctx, q, providerID, model, label).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrProviderNotFound
+	}
+	if err != nil {
 		return nil, fmt.Errorf("create authorized model: %w", err)
 	}
 	return GetAuthorizedModel(ctx, id)
@@ -222,7 +244,7 @@ func SetAuthorizedModelEnabled(ctx context.Context, id uuid.UUID, enabled bool) 
 	defer cancel()
 
 	res, err := postgresInit.DBConn.SqlDB.ExecContext(cctx,
-		`UPDATE ai_authorized_models SET enabled = $1, updated_at = NOW() WHERE id = $2`, enabled, id)
+		`UPDATE ai_authorized_models SET enabled = $1, updated_at = NOW() WHERE id = $2 AND `+softDelete.Live(""), enabled, id)
 	if err != nil {
 		return fmt.Errorf("set authorized model enabled: %w", err)
 	}
@@ -232,19 +254,21 @@ func SetAuthorizedModelEnabled(ctx context.Context, id uuid.UUID, enabled bool) 
 	return nil
 }
 
-// DeleteAuthorizedModel removes a model from the allowlist. Any user
-// preference pointing at it is reset to NULL by the FK (ON DELETE SET NULL),
-// so those members silently fall back to the workspace default.
-func DeleteAuthorizedModel(ctx context.Context, id uuid.UUID) error {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(cctx,
-		`DELETE FROM ai_authorized_models WHERE id = $1`, id)
+// DeleteAuthorizedModel takes a model off the allowlist, by whom (V-184 head
+// 4b): the entry is kept, marked, so who allowed which model until when stays
+// on record. No read sees it (authorizedModelSelect), so it is gone from the
+// admin's list and every member's picker, and a member who had picked it falls
+// back to the workspace default, as the preference's ON DELETE SET NULL left
+// them: their preference still names it, and GetUserModelPreference reads it
+// as none. updated_at moves for the AI setup's reload on every replica, which
+// watches count and newest updated_at (a mark changes no count).
+func DeleteAuthorizedModel(ctx context.Context, id, by uuid.UUID) error {
+	n, err := pgexec.Exec(ctx, `UPDATE ai_authorized_models SET deleted_at = NOW(), deleted_by = $2, updated_at = NOW()
+		WHERE id = $1 AND `+softDelete.Live(""), id, softDelete.By(by))
 	if err != nil {
 		return fmt.Errorf("delete authorized model: %w", err)
 	}
-	if affected, _ := res.RowsAffected(); affected == 0 {
+	if n == 0 {
 		return ErrAuthorizedModelNotFound
 	}
 	return nil

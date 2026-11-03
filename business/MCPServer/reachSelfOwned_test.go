@@ -86,7 +86,7 @@ func TestSelfOwnedNamesNoIdArgument(t *testing.T) {
 	// Every other kind DOES name an object; a false positive here would let a tool skip
 	// naming what it acts on.
 	for _, k := range []ResourceKind{
-		ResourceChannel, ResourceTask, ResourceDoc, ResourceChat, ResourceTable,
+		ResourceChannel, ResourceTask, ResourceDoc, ResourceChat, ResourceTable, ResourceTableRows,
 		ResourceProject, ResourceTeam, ResourceDataSource, ResourceDirectMessage,
 	} {
 		if k.IdentifiesNoObject() {

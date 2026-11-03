@@ -21,6 +21,10 @@ type RowsWindow struct {
 	Rows []*model.Row `json:"rows"`
 	// Next is the next window's cursor; none past the last.
 	Next query.Cursor `json:"next,omitempty"`
+	// At is the place its first row holds in the spec's order, for a window
+	// read at a place (query.Page At): a reader puts its rows there only when
+	// the answer says so, never a first window a server without jumps sent.
+	At int `json:"at,omitempty"`
 	// Total is how many rows meet the spec, on the first window alone (the
 	// reader keeps it); TotalCapped says it counted only so far
 	// (rowQuery.CountCap) and there are more.
@@ -67,7 +71,7 @@ func QueryRows(ctx context.Context, table uuid.UUID, actor Actor, spec query.Spe
 	if rows, err = readWithComputed(asViewer(ctx, actor), table, rows); err != nil {
 		return nil, err
 	}
-	w := &RowsWindow{Rows: rows, Next: res.Next, Summaries: res.Summaries, Groups: res.Groups}
+	w := &RowsWindow{Rows: rows, Next: res.Next, At: page.At, Summaries: res.Summaries, Groups: res.Groups}
 	if res.Total != rowQuery.NotCounted {
 		total := res.Total
 		if total > rowQuery.CountCap {

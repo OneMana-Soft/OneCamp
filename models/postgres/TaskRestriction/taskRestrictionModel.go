@@ -275,14 +275,33 @@ const revivedWith = `ON CONFLICT (task_id) DO UPDATE SET project_id = EXCLUDED.p
 // parent) with it: with the task from is restricted with, or with from
 // itself. Nothing when from isn't restricted, or the task already is.
 func Inherit(ctx context.Context, taskID, from, by uuid.UUID, now time.Time) error {
+	return InheritAll(ctx, []uuid.UUID{taskID}, []uuid.UUID{from}, by, now)
+}
+
+// InheritAll restricts tasks just made below others with them, as Inherit
+// restricts one, in one statement: tasks[i] below under[i], with the task
+// that one is restricted with, or with it. Nothing below an open task, or for
+// a task restricted already; the two lists pair up.
+func InheritAll(ctx context.Context, tasks, under []uuid.UUID, by uuid.UUID, now time.Time) error {
+	if len(tasks) != len(under) {
+		return errors.New("task restrictions: every task made below another needs that one")
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
 	if !connected() {
 		return ErrNoDatabase
 	}
+	below, above := make([]string, len(tasks)), make([]string, len(tasks))
+	for i := range tasks {
+		below[i], above[i] = tasks[i].String(), under[i].String()
+	}
 	_, err := pgexec.Exec(ctx, `
 		INSERT INTO task_restrictions (task_id, project_id, restricted_by, restricted_at, via_task_id)
-		SELECT $1::uuid, r.project_id, $3::uuid, $4::timestamptz, COALESCE(r.via_task_id, r.task_id)
-		FROM task_restrictions r WHERE r.task_id = $2::uuid AND `+softDelete.Live("r")+` AND COALESCE(r.via_task_id, r.task_id) <> $1::uuid
-		`+revivedWith, taskID, from, nullable(by), now)
+		SELECT n.task_id, r.project_id, $3::uuid, $4::timestamptz, COALESCE(r.via_task_id, r.task_id)
+		FROM unnest($1::uuid[], $2::uuid[]) AS n(task_id, from_id)
+		JOIN task_restrictions r ON r.task_id = n.from_id AND `+softDelete.Live("r")+` AND COALESCE(r.via_task_id, r.task_id) <> n.task_id
+		`+revivedWith, pq.Array(below), pq.Array(above), nullable(by), now)
 	return err
 }
 

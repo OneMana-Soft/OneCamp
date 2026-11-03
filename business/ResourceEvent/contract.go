@@ -116,13 +116,22 @@ const (
 	CalendarEventRestored  Kind = "event.restored"
 	CalendarEventRSVP      Kind = "event.rsvp"
 	CalendarEventReminder  Kind = "event.reminder"
-	CalendarShared         Kind = "calendar.shared"
-	CalendarUnshared       Kind = "calendar.unshared"
-	BookingCreated         Kind = "booking.created"
-	BookingCancelled       Kind = "booking.cancelled"
-	BookingRescheduled     Kind = "booking.rescheduled"
-	BookingRequested       Kind = "booking.requested"
-	CalendarSyncFailed     Kind = "sync.failed"
+	// A calendar's own changes, told once each is made (the admin audit log's
+	// "calendar"): a share given, raised or lowered (Data "level", and "from"
+	// when it had one) or stopped ("from"), with the person in Subjects; a
+	// rename or a new colour ("changed": "name", "hue"); an address subscribed
+	// to or dropped ("host" only: an address can carry a private key). Never
+	// the calendar's name.
+	CalendarShared       Kind = "calendar.shared"
+	CalendarUnshared     Kind = "calendar.unshared"
+	CalendarUpdated      Kind = "calendar.updated"
+	CalendarSubscribed   Kind = "calendar.subscribed"
+	CalendarUnsubscribed Kind = "calendar.unsubscribed"
+	BookingCreated       Kind = "booking.created"
+	BookingCancelled     Kind = "booking.cancelled"
+	BookingRescheduled   Kind = "booking.rescheduled"
+	BookingRequested     Kind = "booking.requested"
+	CalendarSyncFailed   Kind = "sync.failed"
 
 	// Tables (design/tables-vs-airtable/PROGRAM.md §5), declared at its day 0
 	// and emitted by the packages that build them (A2 rows, trash and fields,
@@ -178,6 +187,16 @@ const (
 	CallLocked             Kind = "call.locked"
 	CallUnlocked           Kind = "call.unlocked"
 	CallRoleChanged        Kind = "call.role_changed"
+
+	// A board's sharing and exports (business/Board), for the admin audit log.
+	// ResourceKind is "board" and ResourceUUID its id; Data carries the board's
+	// title and whether it is private ("true"/"false"), so a row never names a
+	// private board, and: for a share, the level given ("edit", "comment",
+	// "view") with the people in Subjects; for an export, its format and "via"
+	// ("browser": the canvas made the file in the person's browser).
+	// Taking a place away is recorded before it happens (RecordedTaking).
+	BoardShared   Kind = "board.shared"
+	BoardExported Kind = "board.exported"
 )
 
 // Actor is who made the change, from server context (I11): for an agent, the

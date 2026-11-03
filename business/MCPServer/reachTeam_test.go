@@ -118,7 +118,7 @@ func TestCreationsAreBoundToTheirContainer(t *testing.T) {
 	}{
 		{"create_task", ResourceProject, "project_uuid"},
 		{"create_project", ResourceTeam, "team_uuid"},
-		{"create_table_row", ResourceTable, "table_uuid"},
+		{"create_table_row", ResourceTableRows, "table_uuid"},
 	} {
 		b, ok := byTool[tc.tool]
 		if !ok {

@@ -136,7 +136,7 @@ func TestCalendarImportOfAGoogleExportOverAJob(t *testing.T) {
 	var calendarKind, notes string
 	var exdates int
 	if err := env.PG.QueryRow(`SELECT c.kind, e.notes, cardinality(e.exdates) FROM events e JOIN calendars c ON c.id = e.calendar_id
-		WHERE e.ical_uid = 'review@google.com' AND e.series_id IS NULL`).Scan(&calendarKind, &notes, &exdates); err != nil {
+		WHERE e.ical_uid = 'review@google.com' AND e.series_id IS NULL AND c.deleted_at IS NULL`).Scan(&calendarKind, &notes, &exdates); err != nil {
 		t.Fatal(err)
 	}
 	if calendarKind != "personal" || !strings.HasPrefix(notes, "Join: https://meet.google.com/abc-defg-hij") || exdates != 1 {
@@ -153,7 +153,7 @@ func TestCalendarImportOfAGoogleExportOverAJob(t *testing.T) {
 	must(env.PG.QueryRow(`SELECT count(*) FROM event_attendees a JOIN events e ON e.id = a.event_id
 		WHERE e.ical_uid = 'review@google.com' AND a.invite_state = 'imported' AND a.user_id IS NULL`).Scan(&guests))
 	must(env.PG.QueryRow(`SELECT count(*) FROM events e JOIN calendars c ON c.id = e.calendar_id
-		WHERE e.ical_uid = 'offsite@google.com' AND c.kind = 'external' AND c.name = 'Team offsites'`).Scan(&offsiteCalendars))
+		WHERE e.ical_uid = 'offsite@google.com' AND c.kind = 'external' AND c.name = 'Team offsites' AND c.deleted_at IS NULL`).Scan(&offsiteCalendars))
 	if overrides != 1 || guests != 2 || offsiteCalendars != 1 {
 		t.Fatalf("overrides %d, imported guests %d (Jonas and Maya, never Sam), offsite calendars %d", overrides, guests, offsiteCalendars)
 	}

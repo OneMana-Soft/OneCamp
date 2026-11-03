@@ -21,15 +21,22 @@ import (
 // went; 1,134 once the tables' vacuums ran through pgexec.ExecAlone; 1,130
 // once V-184 head 2 counted and inserted fields and statuses through pgexec
 // under their create lock; 1,128 once head 3b took and gave admin roles
-// through pgexec). It only goes down: move a
-// function onto the generics, then lower this to the count the test reports.
-const handExecutorBaseline = 1127
+// through pgexec; 1,127 once head 4a cleared a project's billing through
+// pgexec; 1,124 once head 4b took AI providers, authorized models and Slack
+// links away through pgexec; 1,121 once V-237 counted seats and reactivated
+// people through pgexec under the seat lock; 1,116 once head 5a read and
+// kept saved task views through pgexec; 1,115 once head 5b took a thread
+// back through pgexec; 1,114 once V-281 wrote a thread through pgexec). It
+// only goes down: move a function onto the generics, then lower this to the
+// count the test reports.
+const handExecutorBaseline = 1113
 
 // backgroundTimeoutBaseline is how many times models/ starts a statement's
 // timeout from context.Background() instead of the caller's ctx (206 at the
 // audit, 199 when this landed; 146 once V-184 head 3b moved the two admin
-// role writes onto the request's ctx through pgexec). It only goes down.
-const backgroundTimeoutBaseline = 146
+// role writes onto the request's ctx through pgexec; 145 once V-237 moved the
+// reactivation onto pgexec). It only goes down.
+const backgroundTimeoutBaseline = 145
 
 // executorCalls are the calls that run a statement or a query on a store
 // client, or open a graph transaction to run one in (an HTTP client's Do is

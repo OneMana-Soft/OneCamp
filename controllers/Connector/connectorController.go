@@ -5,6 +5,7 @@
 package controllers
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -72,7 +73,8 @@ func StartConnect(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]string{"url": url}})
 }
 
-// Disconnect handles POST /connectors/{provider}/disconnect.
+// Disconnect handles POST /connectors/{provider}/disconnect. A provider the
+// connectors page doesn't list is not found, and nothing changes (V-281).
 func Disconnect(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -82,6 +84,10 @@ func Disconnect(w http.ResponseWriter, r *http.Request) {
 	}
 	provider := chi.URLParam(r, "provider")
 	if err := connectorBusiness.Disconnect(ctx, userInfo.UserPostgresInfo.Id, provider); err != nil {
+		if errors.Is(err, connectorBusiness.ErrUnknownConnector) {
+			helpers.WriteNotFound(w, "Unknown connector")
+			return
+		}
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to disconnect"})
 		return
 	}

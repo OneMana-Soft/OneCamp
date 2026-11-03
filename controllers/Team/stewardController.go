@@ -51,15 +51,14 @@ func MakeMeTeamAdmin(w http.ResponseWriter, r *http.Request) {
 	// No record, no action: a workspace admin taking a team's stewardship is
 	// written down before it happens.
 	meta := map[string]interface{}{"team_uuid": team.Uuid, "team_name": team.Name}
-	if err := auditBusiness.RecordWritten(r, "team.admin.self", auditBusiness.CategorySecurity,
-		"Made themselves an admin of a team", meta); err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/MakeMeTeamAdmin audit err: %+v", err)
-		helpers.WriteRetryLater(w, "That couldn't be recorded in the audit log, so it wasn't done.")
+	err = auditBusiness.Recorded(r, "team.admin.self", auditBusiness.CategorySecurity,
+		"Made themselves an admin of a team", meta, func() error {
+			return business.BecomeAdmin(ctx, teamID, me.UserDgraphInfo.Uid, me.UserDgraphInfo.Uuid)
+		})
+	if auditBusiness.RefusedUnrecorded(w, r, err, "controllers/MakeMeTeamAdmin") {
 		return
 	}
-	if err := business.BecomeAdmin(ctx, teamID, me.UserDgraphInfo.Uid, me.UserDgraphInfo.Uuid); err != nil {
-		auditBusiness.Record(r, "team.admin.self_failed", auditBusiness.CategorySecurity,
-			"Making themselves an admin of a team didn't take", meta)
+	if err != nil {
 		helpers.WriteRetryLater(w, "Couldn't make you one of its admins.")
 		return
 	}

@@ -15,6 +15,7 @@ import (
 	tokenModel "github.com/akashc777/OneCamp/models/postgres/ApiToken"
 	integrationModel "github.com/akashc777/OneCamp/models/postgres/Integration"
 	slashModel "github.com/akashc777/OneCamp/models/postgres/SlashCommand"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 )
 
@@ -322,18 +323,18 @@ func saveAppSecrets(ctx context.Context, appID uuid.UUID, oauth *commandAdapter.
 	// MUST therefore reference $1..$9 in that exact order — a shorter query
 	// (e.g. $1..$5) silently fails at the DB, which is why a saved Giphy key
 	// never persisted and the app stayed "needs setup".
-	const upsert = `
+	upsert := `
 		INSERT INTO integrations (entity_type, entity_id, provider, access_token, refresh_token, webhook_url, metadata, expires_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (entity_type, entity_id, provider)
+		ON CONFLICT (entity_type, entity_id, provider) WHERE ` + softDelete.Live("") + `
 		DO UPDATE SET access_token = EXCLUDED.access_token, updated_at = EXCLUDED.updated_at`
 	return integrationModel.UpsertIntegration(upsert, "app", appID, appConfigProvider, &enc, nil, nil, nil, nil, time.Now())
 }
 
 func loadAppSecrets(ctx context.Context, appID uuid.UUID) (*appSecretBag, error) {
-	const q = `SELECT id, entity_type, entity_id, provider, access_token, refresh_token, sync_token,
+	q := `SELECT id, entity_type, entity_id, provider, access_token, refresh_token, sync_token,
 		webhook_url, metadata, expires_at, task_sync_enabled, created_at, updated_at
-		FROM integrations WHERE entity_type = $1 AND entity_id = $2 AND provider = $3`
+		FROM integrations WHERE entity_type = $1 AND entity_id = $2 AND provider = $3 AND ` + softDelete.Live("")
 	rec, err := integrationModel.GetIntegration(q, "app", appID, appConfigProvider)
 	if err != nil || rec == nil || rec.AccessToken == nil {
 		return nil, err
@@ -494,9 +495,9 @@ func buildAppViewFrom(ctx context.Context, app *slashModel.App) (*commandAdapter
 }
 
 func appOAuthConnected(ctx context.Context, appID uuid.UUID) bool {
-	const q = `SELECT id, entity_type, entity_id, provider, access_token, refresh_token, sync_token,
+	q := `SELECT id, entity_type, entity_id, provider, access_token, refresh_token, sync_token,
 		webhook_url, metadata, expires_at, task_sync_enabled, created_at, updated_at
-		FROM integrations WHERE entity_type = $1 AND entity_id = $2 AND provider = $3`
+		FROM integrations WHERE entity_type = $1 AND entity_id = $2 AND provider = $3 AND ` + softDelete.Live("")
 	rec, err := integrationModel.GetIntegration(q, "app", appID, appOAuthProviderPrefix+"token")
 	return err == nil && rec != nil && rec.AccessToken != nil && *rec.AccessToken != ""
 }

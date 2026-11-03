@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	query "github.com/akashc777/OneCamp/business/QuerySpec"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -137,7 +138,9 @@ func columnOf(f *model.Field) *column {
 	return c
 }
 
-// errNoField is a spec naming a field the table hasn't got.
+// errNoField is a spec naming a field the table hasn't got: a bad spec, as
+// an operator that isn't one is, so the app's view says why (422) and the API
+// answers it as the caller's (400), never as rows that couldn't be loaded.
 func errNoField(ref string) error {
-	return fmt.Errorf("there's no field %q in this table", strings.TrimPrefix(ref, "field:"))
+	return fmt.Errorf("%w: there's no field %q in this table", query.ErrBadSpec, strings.TrimPrefix(ref, "field:"))
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	readStateBusiness "github.com/akashc777/OneCamp/business/ReadState"
 	"github.com/akashc777/OneCamp/controllers/httpx"
@@ -806,10 +807,8 @@ func UpdateChannelInfo(w http.ResponseWriter, r *http.Request) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/UpdateChannelInfo Failed to update channel name since user is not a channel moderator")
 
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to update channel name",
-			"err": err,
-		})
+		// Refused for want of a role: 403, as every manager-only change here.
+		helpers.WriteForbidden(w, "Only the channel's managers can change it.")
 		return
 	}
 
@@ -967,10 +966,7 @@ func RemoveChannelModerator(w http.ResponseWriter, r *http.Request) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/RemovePostByModerators Failed to remnove channel moderator since user is not channel moderator")
 
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to delete the moderator since user is not a channel moderator",
-			"err": err,
-		})
+		helpers.WriteForbidden(w, "Only the channel's managers can take a manager's role away.")
 		return
 	}
 
@@ -980,7 +976,19 @@ func RemoveChannelModerator(w http.ResponseWriter, r *http.Request) {
 
 	memberDgraphUID := channelInfo.Moderators[0].Uid
 
-	err = business.DeleteChannelModeratorEdge(ctx, channelInfo.Uid, memberDgraphUID, channelInfo.Uuid)
+	// A manager's role is only its edge: this row, written first, keeps who
+	// took it away, or that they stepped down, and when.
+	action, summary := "channel.manager.remove", "Took away someone's manager role in a channel"
+	if userInfo.UserDgraphInfo.Uuid == removeModeratorInfo.UserUuid {
+		action, summary = "channel.manager.step_down", "Stepped down as a channel manager"
+	}
+	err = auditBusiness.Recorded(r, action, auditBusiness.CategorySecurity, summary,
+		auditBusiness.MembershipMeta("channel", channelInfo.Uuid, channelInfo.Name, removeModeratorInfo.UserUuid), func() error {
+			return business.DeleteChannelModeratorEdge(ctx, channelInfo.Uid, memberDgraphUID, channelInfo.Uuid)
+		})
+	if auditBusiness.RefusedUnrecorded(w, r, err, "controllers/RemoveChannelModerator") {
+		return
+	}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1064,10 +1072,7 @@ func RemoveChannelMember(w http.ResponseWriter, r *http.Request) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/RemoveChannelMembers Failed to remove channel member since user is not channel moderator")
 
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to remove channel member since user is not channel moderator",
-			"err": err,
-		})
+		helpers.WriteForbidden(w, "Only the channel's managers can take someone out.")
 		return
 	}
 
@@ -1098,7 +1103,20 @@ func RemoveChannelMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.DeleteChannelMemberEdge(ctx, channelInfo.Uid, memberDgraphUID, removeMemberInfo.UserUuid, channelInfo.Uuid)
+	// Membership leaves no edge behind, and a rejoin clears the index's
+	// left_at: this row is what keeps who took them out, or that they left,
+	// and when. It's written first: no record, no action.
+	action, summary := "channel.member.remove", "Took someone out of a channel"
+	if userInfo.UserDgraphInfo.Uuid == removeMemberInfo.UserUuid {
+		action, summary = "channel.member.leave", "Left a channel"
+	}
+	err = auditBusiness.Recorded(r, action, auditBusiness.CategorySecurity, summary,
+		auditBusiness.MembershipMeta("channel", channelInfo.Uuid, channelInfo.Name, removeMemberInfo.UserUuid), func() error {
+			return business.DeleteChannelMemberEdge(ctx, channelInfo.Uid, memberDgraphUID, removeMemberInfo.UserUuid, channelInfo.Uuid)
+		})
+	if auditBusiness.RefusedUnrecorded(w, r, err, "controllers/RemoveChannelMember") {
+		return
+	}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1165,10 +1183,7 @@ func AddChannelModerators(w http.ResponseWriter, r *http.Request) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/AddChannelModerators Failed to add channel moderator since user is not channel moderator")
 
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to add the moderator since user is not a channel moderator",
-			"err": err,
-		})
+		helpers.WriteForbidden(w, "Only the channel's managers can make someone a manager.")
 		return
 	}
 

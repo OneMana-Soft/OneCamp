@@ -269,6 +269,7 @@ func GetDgraphChannelInfoByUUIDAndModeratorInfo(ctx context.Context, channelUUID
 				channelInfo(func: eq(ch_uuid, $id)) {
 					uid
 					ch_uuid
+					ch_name
 					ch_is_member: count(ch_members @filter(uid($userId)))
 					ch_is_admin: count(ch_moderators @filter(uid($userId)))
 					ch_moderators @filter(eq(user_uuid, $moderatorId)){
@@ -312,6 +313,7 @@ func GetDgraphChannelInfoByUUIDAndMemberInfo(ctx context.Context, channelUUID st
 				channelInfo(func: eq(ch_uuid, $id)) {
 					uid
 					ch_uuid
+					ch_name
 					ch_deleted_at
 					ch_post_policy
 					ch_is_member: count(ch_members @filter(uid($userId)))

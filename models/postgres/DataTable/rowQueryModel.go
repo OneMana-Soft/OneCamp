@@ -28,9 +28,10 @@ type KeyedRow struct {
 }
 
 // QueryRowWindow is up to limit of table's live rows that meet where, in
-// order, with each row's keys (none asked, none read: a list of ids).
-func QueryRowWindow(ctx context.Context, table uuid.UUID, joins, where string, keys []string, order string, args []interface{}, limit int) ([]KeyedRow, error) {
-	return keyedRows(ctx, table, joins, where, keys, order, args, limit)
+// order, offset rows in, with each row's keys (none asked, none read: a list
+// of ids).
+func QueryRowWindow(ctx context.Context, table uuid.UUID, joins, where string, keys []string, order string, args []interface{}, offset, limit int) ([]KeyedRow, error) {
+	return keyedRows(ctx, table, joins, where, keys, order, args, offset, limit)
 }
 
 // walkSettings make a walk follow its index (business/RowQuery walks.go).
@@ -84,7 +85,7 @@ func inBudget(ctx context.Context, settings []string, budget time.Duration, fn f
 func QueryRowWalk(ctx context.Context, table uuid.UUID, joins, where string, keys []string, order string, args []interface{}, limit int, budget time.Duration) ([]KeyedRow, error) {
 	var out []KeyedRow
 	stopped, err := inBudget(ctx, walkSettings, budget, func(ctx context.Context) (err error) {
-		out, err = keyedRows(ctx, table, joins, where, keys, order, args, limit)
+		out, err = keyedRows(ctx, table, joins, where, keys, order, args, 0, limit)
 		return err
 	})
 	if stopped {
@@ -93,14 +94,15 @@ func QueryRowWalk(ctx context.Context, table uuid.UUID, joins, where string, key
 	return out, err
 }
 
-// keyedRows runs a window's query, in the transaction ctx carries if any.
-func keyedRows(ctx context.Context, table uuid.UUID, joins, where string, keys []string, order string, args []interface{}, limit int) ([]KeyedRow, error) {
+// keyedRows runs a window's query, offset rows in, in the transaction ctx
+// carries if any.
+func keyedRows(ctx context.Context, table uuid.UUID, joins, where string, keys []string, order string, args []interface{}, offset, limit int) ([]KeyedRow, error) {
 	sel := []string{"r.id"}
 	for _, k := range keys {
 		sel = append(sel, "("+k+")")
 	}
 	q := fmt.Sprintf(`SELECT %s FROM data_table_rows r %s
-		WHERE r.table_id = $1 AND r.deleted_at IS NULL AND (%s) %s LIMIT %d`, strings.Join(sel, ", "), joins, where, order, limit)
+		WHERE r.table_id = $1 AND r.deleted_at IS NULL AND (%s) %s LIMIT %d OFFSET %d`, strings.Join(sel, ", "), joins, where, order, limit, max(offset, 0))
 	out, err := pgexec.Query(ctx, q, func(r pgexec.Row) (KeyedRow, error) {
 		kr := KeyedRow{Keys: make([]interface{}, len(keys))}
 		dest := make([]interface{}, len(keys)+1)

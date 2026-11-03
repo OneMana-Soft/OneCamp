@@ -294,44 +294,53 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 			errCh <- err
 			return
 		}
-		projects, err := p.listProjects(ctx, tok, wid)
-		if err != nil {
+		if err := p.sendProjects(ctx, tok, wid, out); err != nil {
 			errCh <- err
-			return
-		}
-		for _, pr := range projects {
-			members, _ := p.listProjectMembers(ctx, tok, pr.GID)
-			// Custom fields need a paid Asana plan: none, or none readable,
-			// is a project without them; tasks still bring their values.
-			fields, _ := p.listProjectFields(ctx, tok, pr.GID)
-			memberIds := make([]string, 0, len(members))
-			for _, m := range members {
-				memberIds = append(memberIds, m.GID)
-			}
-			created, _ := time.Parse(time.RFC3339, pr.CreatedAt)
-			teamSrc := ""
-			if pr.Team != nil {
-				teamSrc = pr.Team.GID
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case out <- importProvider.SourceProject{
-				SourceID:     pr.GID,
-				Name:         pr.Name,
-				Description:  pr.Notes,
-				TeamSourceID: teamSrc,
-				MemberIds:    memberIds,
-				CreatedBy:    safeGID(pr.CreatedBy),
-				Created:      created,
-				Archived:     pr.Archived,
-				Fields:       fields,
-				Metadata:     map[string]any{"asana_url": "https://app.asana.com/0/" + pr.GID},
-			}:
-			}
 		}
 	}()
 	return out, errCh
+}
+
+// sendProjects sends the workspace's projects, each with its people, its
+// fields and its plan, in the order Asana lists them, until the context ends.
+func (p *Provider) sendProjects(ctx context.Context, tok, wid string, out chan<- importProvider.SourceProject) error {
+	projects, err := p.listProjects(ctx, tok, wid)
+	if err != nil {
+		return err
+	}
+	for _, pr := range projects {
+		members, _ := p.listProjectMembers(ctx, tok, pr.GID)
+		// Custom fields need a paid Asana plan: none, or none readable,
+		// is a project without them; tasks still bring their values.
+		fields, _ := p.listProjectFields(ctx, tok, pr.GID)
+		memberIds := make([]string, 0, len(members))
+		for _, m := range members {
+			memberIds = append(memberIds, m.GID)
+		}
+		created, _ := time.Parse(time.RFC3339, pr.CreatedAt)
+		teamSrc := ""
+		if pr.Team != nil {
+			teamSrc = pr.Team.GID
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case out <- importProvider.SourceProject{
+			SourceID:     pr.GID,
+			Name:         pr.Name,
+			Description:  pr.Notes,
+			TeamSourceID: teamSrc,
+			MemberIds:    memberIds,
+			CreatedBy:    safeGID(pr.CreatedBy),
+			Created:      created,
+			Archived:     pr.Archived,
+			Fields:       fields,
+			Metadata:     map[string]any{"asana_url": "https://app.asana.com/0/" + pr.GID},
+			Plan:         pr.plan(),
+		}:
+		}
+	}
+	return nil
 }
 
 // IterTasksOfProject streams top-level tasks for one project.
@@ -552,6 +561,15 @@ type asanaProject struct {
 	CreatedBy *asanaRefShort `json:"created_by"`
 	Team      *asanaRefShort `json:"team"`
 	Workspace *asanaRefShort `json:"workspace"`
+	// Owner, StartOn, DueOn, Completed and StatusUpdate are its plan
+	// (projectPlan.go).
+	Owner        *asanaRefShort `json:"owner"`
+	StartOn      string         `json:"start_on"`
+	DueOn        string         `json:"due_on"`
+	Completed    bool           `json:"completed"`
+	StatusUpdate *struct {
+		StatusType string `json:"status_type"`
+	} `json:"current_status_update"`
 }
 
 type asanaSection struct {
@@ -759,7 +777,7 @@ func (p *Provider) listTeamMembers(ctx context.Context, tok, teamGID string) ([]
 
 func (p *Provider) listProjects(ctx context.Context, tok, wid string) ([]asanaProject, error) {
 	out := []asanaProject{}
-	path := fmt.Sprintf("/workspaces/%s/projects?limit=100&archived=false&opt_fields=gid,name,notes,archived,created_at,created_by.gid,team.gid,workspace.gid", wid)
+	path := fmt.Sprintf("/workspaces/%s/projects?limit=100&archived=false&opt_fields=gid,name,notes,archived,created_at,created_by.gid,team.gid,workspace.gid,owner.gid,start_on,due_on,completed,current_status_update.status_type", wid)
 	page := 0
 	for path != "" && page < maxPages {
 		page++
@@ -1011,6 +1029,7 @@ func buildSourceTask(t *asanaTask, projectGID string, sectionName map[string]str
 		Created:         created,
 		Updated:         modified,
 		Completed:       t.Completed,
+		StatusSince:     taskStatusSince(t),
 		CommentCount:    importProvider.CommentsUnknown, // a task carries no count; the comments stage asks
 		Dependencies:    waitsOn(t),
 		Fields:          fieldValues(t.CustomFields),

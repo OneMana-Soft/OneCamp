@@ -5,9 +5,9 @@ package integration_test
 
 // Calendars read from an address (calendar B8) against real Postgres 12: the
 // migration up, down and up; a subscription added once per address, due,
-// read by one reader at a time, and dropped; its calendar deleted with
-// everything on it, and only an address's own events deleted when they
-// leave its file.
+// read by one reader at a time, and dropped; its calendar unsubscribed (kept,
+// marked by its owner, the address's events on it forgotten), and only an
+// address's own events deleted when they leave its file.
 //
 // Run: go test -tags=integration ./tests/integration/ -run '^(TestCalendarSubscriptionsMigrationUpDownUp|TestCalendarSubscriptions)$' -v
 
@@ -155,15 +155,40 @@ func TestCalendarSubscriptions(t *testing.T) {
 		t.Fatalf("a deleted event's ref stayed: %+v %v", refs, err)
 	}
 
-	// Someone else can't delete it; Sam can, with everything on it.
-	if ok, err := models.DeleteSubscribedCalendar(ctx, cal, maya); err != nil || ok {
-		t.Fatalf("Maya deleted it: %v %v", ok, err)
+	// Someone else can't unsubscribe it; Sam can, and it is kept, marked by him,
+	// with the address's events on it forgotten. Twice takes nothing more.
+	if ok, err := models.UnsubscribeCalendar(ctx, cal, maya); err != nil || ok {
+		t.Fatalf("Maya unsubscribed it: %v %v", ok, err)
 	}
-	if ok, err := models.DeleteSubscribedCalendar(ctx, personal, sam); err != nil || ok {
-		t.Fatalf("a personal calendar deleted as a subscription: %v %v", ok, err)
+	if ok, err := models.UnsubscribeCalendar(ctx, personal, sam); err != nil || ok {
+		t.Fatalf("a personal calendar unsubscribed: %v %v", ok, err)
 	}
-	if ok, err := models.DeleteSubscribedCalendar(ctx, cal, sam); err != nil || !ok {
-		t.Fatalf("delete %v %v", ok, err)
+	if ok, err := models.UnsubscribeCalendar(ctx, cal, sam); err != nil || !ok {
+		t.Fatalf("unsubscribe %v %v", ok, err)
+	}
+	if ok, err := models.UnsubscribeCalendar(ctx, cal, sam); err != nil || ok {
+		t.Fatalf("unsubscribed twice: %v %v", ok, err)
+	}
+	var by uuid.NullUUID
+	if err := db.QueryRow(`SELECT deleted_by FROM calendars WHERE id = $1 AND deleted_at IS NOT NULL`, cal).Scan(&by); err != nil || by.UUID != sam {
+		t.Fatalf("the unsubscribed calendar isn't kept, marked by Sam: %v %v", by, err)
+	}
+	// A read in flight writes after the unsubscribe: what it wrote, and where,
+	// go when it checks on its way out; a live calendar's events stay.
+	late := event(cal, "subscribed")
+	must(models.KeepSyncRefs(ctx, []models.SyncRef{{LinkID: link.ID, RemoteID: "digest-1", ExternalID: "late", EventID: late, ETag: "v1"}}))
+	// A ref counts only for an event on the calendar being read.
+	if on, err := models.EventsOn(ctx, cal, []uuid.UUID{late, own}); err != nil || len(on) != 1 || !on[late] {
+		t.Fatalf("EventsOn(cal, [late, own]) = %v %v; want only late", on, err)
+	}
+	must(models.ForgetIfUnsubscribed(ctx, cal))
+	must(models.ForgetIfUnsubscribed(ctx, personal))
+	if refs, err := models.SyncRefsOf(ctx, link.ID); err != nil || len(refs) != 0 {
+		t.Fatalf("a late event's ref stayed: %+v %v", refs, err)
+	}
+	must(db.QueryRow(`SELECT count(*) FROM events WHERE id = $1`, own).Scan(&left))
+	if left != 1 {
+		t.Fatalf("checking a live calendar took its event: %d left", left)
 	}
 	must(db.QueryRow(`SELECT count(*) FROM events WHERE calendar_id = $1`, cal).Scan(&left))
 	if left != 0 {

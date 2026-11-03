@@ -418,6 +418,7 @@ GET	/board/getBoardList	session	none	member	TODO(board)	-
 GET	/board/getBoardPermissions	session	none	member	TODO(board)	-	
 GET	/board/getBoardSnapshots	session	none	member	TODO(board)	-	
 GET	/board/getViewers	session	none	member	TODO(board)	-	
+POST	/board/recordExport	session	none	member	object:board	TestRecordBoardExportTellsOnlyAReadableBoardsExport	An export the canvas made in the browser, told to the admin audit log (miro-44); a board the caller cannot read answers 404
 POST	/board/recordView	session	none	member	TODO(board)	-	
 POST	/board/restoreBoardSnapshot	session	none	member	TODO(board)	-	
 POST	/board/searchUsers	session	none	member	TODO(board)	-	
@@ -917,6 +918,12 @@ POST	/project/removeAdminRole	session	none	member	object:project	TestEveryProjec
 POST	/project/removeAttachment	session	none	member	object:project	TestAProjectsFilesAreAddedListedAndRemovedThroughTheHandlers	the project's admins (NeedManage): a member is refused (403)
 POST	/project/removeMember	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins and its team's admins (NeedManagePeople, memberChangeRefusal): a member is refused (403), someone outside finds nothing (404); anyone may leave; the creator is never taken off
 GET	/project/report	session	none	member	self	gate	the caller's own projects; ?projects= only narrows them; tasks through taskread
+GET	/project/task-templates	session	none	member	member	gate	the workspace's task templates, by design: every member makes tasks from them (business/TaskTemplate)
+POST	/project/task-templates	session	none	member	admin	TestTaskTemplatesOverHTTP	workspace admins (MayManage): a member is refused (403)
+GET	/project/task-templates/{template_id}	session	none	member	member	gate	one of the workspace's task templates, by design; a project's isn't there (404)
+POST	/project/task-templates/{template_id}	session	none	member	admin	TestTaskTemplatesOverHTTP	workspace admins (MayManage): a member is refused (403); a project's template isn't there (404)
+POST	/project/task-templates/{template_id}/delete	session	none	member	admin	TestTaskTemplatesOverHTTP	workspace admins (MayManage): a member is refused (403); deleting is soft
+POST	/project/task-templates/{template_id}/restore	session	none	member	admin	TestTaskTemplatesOverHTTP	workspace admins (MayManage): a member is refused (403); refused (400) while a live one has its name or default
 GET	/project/taskList/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"; ?format=csv exports only what the reader may read (TestATaskListsCSV)
 GET	/project/taskListForKanban/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"
 GET	/project/templates	session	none	member	member	gate	the workspace's templates, by design; a snapshot reads tasks as nobody
@@ -1002,6 +1009,13 @@ POST	/project/{project_uuid}/statuses/reorder	session	none	member	object:project
 POST	/project/{project_uuid}/statuses/{status_id}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins: a member, or someone outside it, is refused (403); a status of this project only
 POST	/project/{project_uuid}/statuses/{status_id}/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins: a member, or someone outside it, is refused (403); a status of this project only
 GET	/project/{project_uuid}/tags	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/task-templates	session	none	member	object:project	TestTaskTemplatesOverHTTP	those who may add the project's tasks (Work Access NeedCreateTask, MayApply; never archived): a viewer is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/task-templates	session	none	member	object:project	TestTaskTemplatesOverHTTP	the project's admins (Work Access NeedManage, MayManage; never archived): a member is refused (403); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/task-templates/{template_id}	session	none	member	object:project	TestTaskTemplatesOverHTTP	those who may add the project's tasks (Work Access NeedCreateTask, MayApply; never archived): a viewer is refused (403); someone outside it finds nothing (404); another project's template isn't there (404)
+POST	/project/{project_uuid}/task-templates/{template_id}	session	none	member	object:project	TestTaskTemplatesOverHTTP	the project's admins (Work Access NeedManage, MayManage; never archived): a member is refused (403); someone outside it finds nothing (404); another project's template isn't there (404)
+POST	/project/{project_uuid}/task-templates/{template_id}/delete	session	none	member	object:project	TestTaskTemplatesOverHTTP	the project's admins (Work Access NeedManage, MayManage; never archived): a member is refused (403); someone outside it finds nothing (404); another project's template isn't there (404); deleting is soft
+POST	/project/{project_uuid}/task-templates/{template_id}/make	session	none	member	object:project	TestTaskTemplatesOverHTTP	those who may add the project's tasks (Work Access NeedCreateTask, MayApply; never archived): a viewer is refused (403); someone outside it finds nothing (404); another project's template isn't there (404); the task is made through the Task Writer as the caller
+POST	/project/{project_uuid}/task-templates/{template_id}/restore	session	none	member	object:project	TestTaskTemplatesOverHTTP	the project's admins (Work Access NeedManage, MayManage; never archived): a member is refused (403); someone outside it finds nothing (404); another project's template isn't there (404)
 GET	/project/{project_uuid}/time	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404); rates only for its admins (ratesFor)
 GET	/project/{project_uuid}/timeline	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
 GET	/project/{project_uuid}/types	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
@@ -1074,6 +1088,8 @@ GET	/tables/{id}	session	none	member	TODO(tables)	-
 POST	/tables/{id}/aggregate	session	none	member	TODO(tables)	-	
 GET	/tables/{id}/ai-fills	session	none	member	object:table	TestATablesFillsAreReadOnlyByWhoeverMayOpenIt	whoever may open the table
 POST	/tables/{id}/delete	session	none	member	TODO(tables)	-	
+GET	/tables/{id}/editing	session	none	member	object:table	TestTableEditAccess	who edits the table's rows (its general level and the people chosen), for a manager of the table (its maker or an admin); a member is refused 403, a table they can't open is 404
+POST	/tables/{id}/editing	session	none	member	object:table	TestTableEditAccess	changes who edits the table's rows, by a manager of the table, in one transaction with its audit entry (table.editing.changed); a member is refused 403, a private table or a non-member chosen is refused in words (400)
 POST	/tables/{id}/export	session	none	member	object:table	TestAnExportOfATableTheReaderCantOpenIsNotFound	a table the reader can open (loadViewable; else not found), its rows as the reader reads them
 GET	/tables/{id}/fields	session	none	member	TODO(tables)	-	
 POST	/tables/{id}/fields	session	none	member	TODO(tables)	-	
@@ -1270,6 +1286,15 @@ GET	/v1/tables	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossThe
 GET	/v1/tables/{id}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/tables/{id}/aggregate	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/tables/{id}/rows	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/tables/{id}/rows/batch	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/tables/{id}/rows/get	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/tables/{id}/rows/query	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+DELETE	/v1/tables/{id}/rows/{row}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/tables/{id}/rows/{row}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+PATCH	/v1/tables/{id}/rows/{row}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/tables/{id}/rows/{row}/history	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/tables/{id}/trash	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/tables/{id}/trash/restore	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
 GET	/v1/tasks	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/tasks	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/tasks/{id}/status	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	

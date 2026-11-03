@@ -57,7 +57,7 @@ func createInConversation(ctx context.Context, user *userModels.UserInfo, in New
 	}
 	messageID, err := postInConversation(ctx, user, grp, body)
 	if err != nil {
-		_ = pollModel.Delete(ctx, p.ID)
+		_ = pollModel.TakeBack(ctx, p.ID)
 		return nil, err
 	}
 	if id, perr := uuid.Parse(messageID); perr == nil {

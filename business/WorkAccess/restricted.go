@@ -34,6 +34,7 @@ var (
 	tasksBelow            = taskDomain.GetTasksBelow
 	restrict              = restrictionModel.Restrict
 	inherit               = restrictionModel.Inherit
+	inheritAll            = restrictionModel.InheritAll
 	unrestrict            = restrictionModel.Unrestrict
 )
 
@@ -274,4 +275,14 @@ func SettleRestriction(ctx context.Context, taskID, from, by uuid.UUID, now time
 		return nil
 	}
 	return restrict(ctx, taskID, r.ProjectID, by, r.Grants, nil, now)
+}
+
+// SettleRestrictions keeps tasks just made below others (tasks[i] below
+// from[i]) to the same people as those, as SettleRestriction keeps one
+// sub-task, in one statement: nothing below an open one.
+func SettleRestrictions(ctx context.Context, tasks, from []uuid.UUID, by uuid.UUID, now time.Time) error {
+	if len(tasks) == 0 && len(from) == 0 {
+		return nil
+	}
+	return inheritAll(ctx, tasks, from, by, now)
 }

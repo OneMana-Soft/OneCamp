@@ -63,7 +63,10 @@ func TestARowWrittenComesBackAsARead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("patch: %v", err)
 	}
-	read := RowAsRead(ctx, table.Id, actor, written)
+	read := written.AsRead(ctx, table.Id, actor)
+	if written.ChangeSet == nil || read.ChangeSet != written.ChangeSet {
+		t.Errorf("the patch answers change set %v as read, want the one it stored, %v", read.ChangeSet, written.ChangeSet)
+	}
 	values := parseRowValues(read.Values)
 	if values[total.Id.String()] != 36.0 {
 		t.Errorf("the total, worked out with the new price: %v", values[total.Id.String()])

@@ -96,6 +96,9 @@ func TestEveryResourceBranchChecksLiveness(t *testing.T) {
 		"ResourceTable": "delegates to dataTableBusiness.CanView, whose GetTableByID " +
 			"filters `deleted_at IS NULL` — a soft-deleted table is indistinguishable " +
 			"from one that never existed, so the refusal happens at the lookup",
+		"ResourceTableRows": "delegates to business/TableAccess (DataTable's todaysRule), " +
+			"whose GetTableByID filters `deleted_at IS NULL` as ResourceTable's does: a " +
+			"soft-deleted table answers not found, so the refusal happens at the lookup",
 		"ResourceChat": "a grouping is not soft-deleted as a unit — DgraphDm carries no " +
 			"deleted_at, because individual chats are deleted rather than the conversation. " +
 			"There is no timestamp on this object to check; a grouping with no participants " +

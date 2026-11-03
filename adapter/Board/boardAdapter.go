@@ -147,3 +147,9 @@ type InputRestoreBoardSnapshot struct {
 type InputRecordBoardView struct {
 	BoardId string `json:"board_uuid"`
 }
+
+// InputRecordBoardExport is an export the canvas made in the browser.
+type InputRecordBoardExport struct {
+	BoardId string `json:"board_uuid"`
+	Format  string `json:"format"`
+}

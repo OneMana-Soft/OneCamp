@@ -63,6 +63,13 @@ const (
 	// are a Postgres entity and their rule tests an admin flag that Dgraph's copy
 	// of does not authoritatively hold.
 	ResourceTable ResourceKind = "table"
+	// ResourceTableRows — a table as its ROWS are reached: reading them is the
+	// table's View, changing them its Edit, as business/TableAccess decides
+	// them for the app's grid and the public API's row ops (today whoever opens
+	// a table writes its rows; changing the table itself is CanManage, above).
+	// A published API op on a table is checked as this kind (PublishOps), so
+	// MCP refuses what REST would, and no more.
+	ResourceTableRows ResourceKind = "table_rows"
 	// ResourceProject — authority is project membership. The same rule the in-app
 	// read_project executor applies, via the same lookup, so the two cannot drift.
 	//
@@ -302,6 +309,11 @@ type ToolBehaviour struct {
 	// Idempotent means applying it twice with the same arguments has the same
 	// effect as applying it once, by nature rather than by bookkeeping.
 	Idempotent bool
+	// Recoverable means the server itself takes the change back, through tools
+	// published beside it (a published op's v1api Recoverable: a delete's rows
+	// come back from the trash). A Destructive tool that is Recoverable is
+	// still advertised as destructive, and needs no person's approval.
+	Recoverable bool
 }
 
 // needsIdempotencyKey reports whether this behaviour requires server-side

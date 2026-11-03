@@ -371,8 +371,7 @@ func SetChannelMemoryExclusion(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, memoryActionStatus(err), helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: user=%s set channel %s memory excluded=%v",
-		userInfo.UserPostgresInfo.Id.String(), req.ChannelUUID, req.Excluded)
+	recordAIChange(r, "ai.memory.channel_excluded", "Changed whether AI memory covers a channel", aiMeta{"channel_uuid": req.ChannelUUID, "excluded": req.Excluded})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "updated"})
 }
 
@@ -388,7 +387,7 @@ func SetMemoryLayer(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set memory_layer enabled=%v", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.memory_layer.set", "Turned the AI memory layer on or off", aiMeta{"enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "memory layer toggled"})
 }
 
@@ -404,7 +403,7 @@ func SetTeamReport(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set team_report enabled=%v", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.team_report.set", "Turned the AI team report on or off", aiMeta{"enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "team report toggled"})
 }
 
@@ -427,7 +426,7 @@ func RebuildMemory(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, status, helpers.Envolope{"msg": reason})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s triggered memory backfill", aiAdminUserUUID(r))
+	recordAIChange(r, "ai.memory_backfill.started", "Started rebuilding AI memory", nil)
 	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"status": "success", "msg": "memory rebuild started"})
 }
 
@@ -452,7 +451,7 @@ func RunTeamReportNow(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s ran team report now (posted=%d processed=%d)", aiAdminUserUUID(r), posted, processed)
+	recordAIChange(r, "ai.team_report.ran", "Ran the AI team report now", aiMeta{"posted": posted, "processed": processed})
 	var msg string
 	switch {
 	case posted > 0:
@@ -487,7 +486,7 @@ func SendTestDigest(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s sent test memory digest", uid)
+	recordAIChange(r, "ai.memory_digest.tested", "Sent a test AI memory digest", nil)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status": "success",
 		// No longer hedged. The business layer dispatches synchronously and

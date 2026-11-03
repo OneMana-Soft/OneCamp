@@ -327,6 +327,35 @@ func TestMakeVerifyVetsEveryIntegrationTaggedFile(t *testing.T) {
 	}
 }
 
+// TestEveryHarnessFileBuildsOnlyWithTheIntegrationTag: a build of the harness
+// without the integration tag sees main.go alone, which carries none by design
+// (its comment says why); every other file starts with //go:build integration.
+//
+// WHY THIS EXISTS. On 2 Nov 2026 airtable-04's table_query_jump_test.go reached
+// a batch without the tag (V-357). Untagged, it named helpers only the tagged
+// build has (newTableWorld), so `go vet ./tests/integration/` failed to compile,
+// and a unit run counted its test as one that never passed. The lanes vet the
+// harness with the tag only, so only the integrator's untagged gate saw it.
+func TestEveryHarnessFileBuildsOnlyWithTheIntegrationTag(t *testing.T) {
+	ctxt := integrationBuild()
+	tagged, err := ctxt.ImportDir(harnessDir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(tagged.GoFiles) + len(tagged.TestGoFiles) + len(tagged.XTestGoFiles); n < 100 {
+		t.Fatalf("the tagged build of %s has %d files: this check stopped looking", harnessDir, n)
+	}
+	untagged, err := build.Default.ImportDir(harnessDir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range slices.Concat(untagged.GoFiles, untagged.TestGoFiles, untagged.XTestGoFiles) {
+		if f != "main.go" {
+			t.Errorf("%s/%s builds without the integration tag: start it with //go:build integration, as the harness's other files do", harnessDir, f)
+		}
+	}
+}
+
 // TestEveryIntegrationBinaryStopsItsServers: every package whose tests run on
 // the harness's servers, the harness's own included, has a TestMain that calls
 // integration.Main, which runs the tests and then stops every server the

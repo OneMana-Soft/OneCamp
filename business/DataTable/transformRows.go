@@ -132,7 +132,7 @@ var (
 // Transform runs in's step over table's view for actor (see the file's
 // comment for who may).
 func Transform(ctx context.Context, table uuid.UUID, in TransformInput, actor Actor) (*TransformResult, error) {
-	t, err := loadViewable(ctx, table, actor)
+	t, err := loadEditable(ctx, table, actor)
 	if err != nil {
 		return nil, unseen(err)
 	}
@@ -389,7 +389,9 @@ func (w *stepWrite) patches(ctx context.Context, ids []uuid.UUID) error {
 	for len(patch) > 0 {
 		out, err := transformBatch(ctx, w.table, BatchInput{Kind: w.kind(), Patch: patch, Operation: w.op}, w.actor)
 		if err == nil {
-			w.res.ChangeSets = append(w.res.ChangeSets, out.ChangeSet)
+			if out.ChangeSet != nil {
+				w.res.ChangeSets = append(w.res.ChangeSets, *out.ChangeSet)
+			}
 			w.res.Rows += len(patch)
 			for _, p := range patch {
 				w.res.Cells += len(p.Values)
@@ -452,7 +454,9 @@ func (w *stepWrite) deletes(ctx context.Context, dups []duplicate) error {
 	for len(del) > 0 {
 		out, err := transformBatch(ctx, w.table, BatchInput{Kind: w.kind(), Delete: del, Operation: w.op}, w.actor)
 		if err == nil {
-			w.res.ChangeSets = append(w.res.ChangeSets, out.ChangeSet)
+			if out.ChangeSet != nil {
+				w.res.ChangeSets = append(w.res.ChangeSets, *out.ChangeSet)
+			}
 			w.res.Deleted += len(del)
 			return nil
 		}

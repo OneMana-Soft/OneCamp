@@ -28,8 +28,9 @@ type store interface {
 	setAnchor(ctx context.Context, id string, a Anchor, at time.Time) (*Thread, error)
 	// touch marks a thread changed at a time (a reply).
 	touch(ctx context.Context, id string, at time.Time) error
-	// remove deletes a thread (one whose first comment could not be written).
-	remove(ctx context.Context, id string) error
+	// takeBack takes back a thread whose first comment could not be written
+	// (Create's rollback of its own row).
+	takeBack(ctx context.Context, id string) error
 	// setTask ties a thread to a task; nil when there is no such thread or
 	// it is tied to another task (docs C5-2).
 	setTask(ctx context.Context, id, task string, at time.Time) (*Thread, error)
@@ -133,12 +134,12 @@ func (postgresStore) touch(ctx context.Context, id string, at time.Time) error {
 	return models.Touch(ctx, uid, at)
 }
 
-func (postgresStore) remove(ctx context.Context, id string) error {
+func (postgresStore) takeBack(ctx context.Context, id string) error {
 	uid, err := uuid.Parse(id)
 	if err != nil {
 		return err
 	}
-	return models.Delete(ctx, uid)
+	return models.TakeBack(ctx, uid)
 }
 
 func (postgresStore) join(ctx context.Context, threadID, userUUID string, r Role, readAt *time.Time) error {

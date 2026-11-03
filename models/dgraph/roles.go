@@ -38,6 +38,24 @@ func ChangeRoles(ctx context.Context, nodePred, nodeUUID string, changes []RoleC
 	return err
 }
 
+// RoleHolders is who holds a role on a node, by user uuid in lower case: the
+// highest each holds of edit, comment and view, as a doc's and a board's
+// editing, commenting and reading users say. Pure.
+func RoleHolders(editing, commenting, reading []*DgraphUser) map[string]string {
+	out := map[string]string{}
+	for _, r := range []struct {
+		level string
+		users []*DgraphUser
+	}{{"view", reading}, {"comment", commenting}, {"edit", editing}} {
+		for _, u := range r.users {
+			if u != nil && u.Uuid != "" {
+				out[strings.ToLower(u.Uuid)] = r.level
+			}
+		}
+	}
+	return out
+}
+
 // roleUpsert is ChangeRoles' request: a query naming the node (node) and each
 // person (p0, p1, ...) by variables, and one mutation per person, which sets
 // and deletes that person's edges.

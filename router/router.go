@@ -950,6 +950,9 @@ func routes() *chi.Mux {
 		r.Get("/{id}", dataTableController.GetTable)
 		r.Post("/{id}/update", dataTableController.UpdateTable)
 		r.Post("/{id}/delete", dataTableController.DeleteTable)
+		// Who edits a table's rows, for its managers (V-170).
+		r.Get("/{id}/editing", dataTableController.GetTableEditing)
+		r.Post("/{id}/editing", dataTableController.SetTableEditing)
 		r.Get("/{id}/rows", dataTableController.ListRows)
 		r.Get("/{id}/rows/pick", dataTableController.PickRows)
 		r.Get("/{id}/fields", dataTableController.ListFields)
@@ -1504,6 +1507,8 @@ func routes() *chi.Mux {
 		r.Post("/{project_uuid}/fields/reorder", taskFieldController.ReorderFields)
 		r.Post("/{project_uuid}/fields/{field_id}", taskFieldController.UpdateField)
 		r.Post("/{project_uuid}/fields/{field_id}/delete", taskFieldController.DeleteField)
+		// Task templates, the workspace's and each project's: router/taskTemplates.go.
+		taskTemplateRoutes(r)
 	})
 
 	channelRouter.Group(func(r chi.Router) {
@@ -1758,6 +1763,8 @@ func routes() *chi.Mux {
 		r.Get("/getBoardSnapshots", boardController.GetBoardSnapshots)
 		r.Post("/restoreBoardSnapshot", boardController.RestoreBoardSnapshot)
 		r.Post("/recordView", boardController.RecordBoardView)
+		// An export the canvas made in the browser, for the admin audit log (miro-44).
+		r.With(customMiddleware.IPRateLimit("board-export", 60, "Too many exports from here. Wait a few minutes and try again.")).Post("/recordExport", boardController.RecordBoardExport)
 		r.Get("/getViewers", boardController.GetBoardViewers)
 		r.Get("/getBoardAttachment/{board_uuid}/{obj_uuid}", userController.GetBoardAttachment)
 	})

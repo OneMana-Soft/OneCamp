@@ -189,6 +189,24 @@ func listToolsForScopes(r *http.Request) []mcpTool {
 		}
 		out = append(out, entry)
 	}
+	// THE API'S OPERATIONS, published as governed tools (business/MCPServer
+	// PublishOps), are in no ai.ToolRegistry: listed here under the same three
+	// rules, with the hints their declared behaviour gives, and the Input schema
+	// the call is checked against.
+	for _, spec := range mcpBusiness.PublishedTools() {
+		if !apiTokenBusiness.HasScope(granted, spec.RequiredScope) || !mcpBusiness.CheckAdmissionForScope(admission, spec.RequiredScope).Allow {
+			continue
+		}
+		if allowed, _ := mcpBusiness.CheckAgentToolScope(actor, spec.Name); !allowed {
+			continue
+		}
+		var schema map[string]interface{}
+		if err := json.Unmarshal(spec.InputSchema, &schema); err != nil {
+			continue
+		}
+		annotations := mcpBusiness.AnnotationsFor(spec)
+		out = append(out, mcpTool{Name: spec.Name, Description: spec.Description, InputSchema: schema, Annotations: &annotations})
+	}
 	return out
 }
 

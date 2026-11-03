@@ -126,9 +126,11 @@ func DeriveIdempotencyKey(spec *ToolSpec, call ToolCallContext) (string, error) 
 // Destructive only. A destructive tool mutates or removes durable state and is not
 // made safe by calling it again, which is exactly the class where an agent's mistake
 // is not self-correcting. Additive writes are recoverable and reviewable after the
-// fact, and gating them too would devalue the prompt.
+// fact, and gating them too would devalue the prompt. So is a Recoverable one: a
+// destructive change the server itself takes back, through tools published beside
+// it (rows deleted to the trash and restored from it).
 func RequiresApproval(spec *ToolSpec) bool {
-	return spec != nil && spec.Behaviour.Destructive && !spec.Behaviour.ReadOnly
+	return spec != nil && spec.Behaviour.Destructive && !spec.Behaviour.ReadOnly && !spec.Behaviour.Recoverable
 }
 
 // ApprovalDescription is the sentence a human sees on the Approve/Deny card.

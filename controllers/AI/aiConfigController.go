@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	"io"
 	"net/http"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/AI"
 	business "github.com/akashc777/OneCamp/business/AI"
 	mcpServerBusiness "github.com/akashc777/OneCamp/business/MCPServer"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 	aiModels "github.com/akashc777/OneCamp/models/postgres/AI"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -180,8 +182,7 @@ func CreateProvider(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s created custom provider id=%s label=%q base_url=%q",
-		aiAdminUserUUID(r), v.ID, v.Label, v.BaseURL)
+	recordAIChange(r, "ai.provider.created", "Added a custom AI provider", aiMeta{"provider_id": v.ID, "label": v.Label, "base_url": auditBusiness.URLForRecord(v.BaseURL)})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": v})
 }
 
@@ -203,6 +204,7 @@ func UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteSecretAwareBadRequest(w, err)
 		return
 	}
+	recordAIChange(r, "ai.provider.updated", "Changed an AI provider", providerUpdateMeta(id, req))
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": v})
 }
 
@@ -214,11 +216,15 @@ func DeleteProvider(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid provider id"})
 		return
 	}
-	if err := business.DeleteCustomProvider(ctx, id); err != nil {
+	me, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	if err := business.DeleteCustomProvider(ctx, id, me.UserPostgresInfo.Id); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s deleted provider id=%s", aiAdminUserUUID(r), id)
+	recordAIChange(r, "ai.provider.deleted", "Removed an AI provider", aiMeta{"provider_id": id})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "provider deleted"})
 }
 
@@ -234,8 +240,7 @@ func SetChatModel(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set chat model provider=%s model=%q",
-		aiAdminUserUUID(r), req.ProviderID, req.Model)
+	recordAIChange(r, "ai.chat_model.set", "Set the AI chat model", aiMeta{"provider_id": req.ProviderID, "model": req.Model})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "chat model updated"})
 }
 
@@ -252,8 +257,7 @@ func SetVisionModel(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set vision model provider=%s model=%q",
-		aiAdminUserUUID(r), req.ProviderID, req.Model)
+	recordAIChange(r, "ai.vision_model.set", "Set the AI vision model", aiMeta{"provider_id": req.ProviderID, "model": req.Model})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "vision model updated"})
 }
 
@@ -275,8 +279,7 @@ func SetEmbeddingModel(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, status, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set embedding model provider=%s model=%q dim=%d reindex=%v",
-		aiAdminUserUUID(r), req.ProviderID, req.Model, req.Dimension, req.Reindex)
+	recordAIChange(r, "ai.embedding_model.set", "Set the AI embedding model", aiMeta{"provider_id": req.ProviderID, "model": req.Model, "dimension": req.Dimension, "reindex": req.Reindex})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "embedding model updated"})
 }
 
@@ -292,7 +295,7 @@ func SetEnabled(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set ai enabled=%v", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.enabled.set", "Turned the workspace's AI on or off", aiMeta{"enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "AI toggled"})
 }
 
@@ -308,7 +311,7 @@ func SetMeetingRecap(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set meeting_recap enabled=%v", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.meeting_recap.set", "Turned AI meeting recaps on or off", aiMeta{"enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "meeting recap toggled"})
 }
 
@@ -324,7 +327,7 @@ func SetMeetingNotesDoc(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set meeting_notes_doc enabled=%v", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.meeting_notes_doc.set", "Turned AI meeting notes docs on or off", aiMeta{"enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "meeting notes document toggled"})
 }
 
@@ -340,7 +343,7 @@ func SetMeetingRecapInstructions(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set meeting_recap instructions (len=%d)", aiAdminUserUUID(r), len(strings.TrimSpace(req.Instructions)))
+	recordAIChange(r, "ai.meeting_recap_instructions.set", "Changed the AI meeting recap instructions", aiMeta{"length": len(strings.TrimSpace(req.Instructions))})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "meeting recap instructions saved"})
 }
 
@@ -356,7 +359,7 @@ func SetCoworker(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set coworker enabled=%v", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.coworker.set", "Turned the AI coworker on or off", aiMeta{"enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "coworker toggled"})
 }
 
@@ -372,6 +375,7 @@ func SetRateLimit(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
+	recordAIChange(r, "ai.rate_limit.set", "Set the AI rate limit", aiMeta{"per_minute": req.RateLimitPerMin})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "rate limit updated"})
 }
 
@@ -388,6 +392,7 @@ func SetContextWindow(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
+	recordAIChange(r, "ai.context_window.set", "Set the AI context window", aiMeta{"tokens": req.ContextWindowTokens})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "context window updated"})
 }
 
@@ -404,6 +409,7 @@ func SetWorkspaceTokenBudget(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
+	recordAIChange(r, "ai.workspace_token_budget.set", "Set the workspace's daily AI token budget", aiMeta{"tokens": req.Tokens})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "workspace token budget updated"})
 }
 
@@ -420,6 +426,7 @@ func SetUserTokenBudget(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
+	recordAIChange(r, "ai.user_token_budget.set", "Set each person's daily AI token budget", aiMeta{"tokens": req.Tokens})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "user token budget updated"})
 }
 
@@ -436,7 +443,7 @@ func SetReasoning(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set reasoning enabled=%v", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.reasoning.set", "Turned AI reasoning on or off", aiMeta{"enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "reasoning updated"})
 }
 
@@ -454,7 +461,7 @@ func SetLocalOnly(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set local-only enabled=%v", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.local_only.set", "Turned local-only AI on or off", aiMeta{"enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "local-only mode updated"})
 }
 
@@ -471,7 +478,7 @@ func SetPIIRedaction(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set pii-redaction enabled=%v", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.pii_redaction.set", "Turned AI PII redaction on or off", aiMeta{"enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "PII redaction updated"})
 }
 
@@ -488,7 +495,7 @@ func SetPIIPatterns(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s updated pii custom patterns", aiAdminUserUUID(r))
+	recordAIChange(r, "ai.pii_patterns.set", "Changed the AI PII redaction patterns", nil)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "PII patterns updated"})
 }
 
@@ -513,8 +520,7 @@ func DeleteModel(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s deleted model provider=%s model=%q",
-		aiAdminUserUUID(r), id, req.Model)
+	recordAIChange(r, "ai.model.deleted", "Deleted a model from an AI provider", aiMeta{"provider_id": id, "model": req.Model})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "model deleted"})
 }
 
@@ -597,8 +603,9 @@ func PullModelStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s pulling model provider=%s model=%q",
-		aiAdminUserUUID(r), id, req.Model)
+	// The pull has started; it streams from here and may still fail, so the
+	// row says it started, never that the model arrived.
+	recordAIChange(r, "ai.model.pull_started", "Started pulling a model onto an AI provider", aiMeta{"provider_id": id, "model": req.Model})
 
 	for p := range progress {
 		b, _ := json.Marshal(p)
@@ -652,7 +659,7 @@ func AuthorizeModel(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s authorized model %s/%s", aiAdminUserUUID(r), req.ProviderID, req.Model)
+	recordAIChange(r, "ai.model.authorized", "Authorized an AI model", aiMeta{"provider_id": req.ProviderID, "model": req.Model})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": m})
 }
 
@@ -673,7 +680,7 @@ func SetAuthorizedModelEnabled(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set authorized model %s enabled=%v", aiAdminUserUUID(r), id, req.Enabled)
+	recordAIChange(r, "ai.model.enabled", "Turned an authorized AI model on or off", aiMeta{"model_id": id, "enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "authorized model updated"})
 }
 
@@ -745,8 +752,7 @@ func SetAuthorizedModelLimits(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set authorized model %s limits window=%d output=%d",
-		aiAdminUserUUID(r), id, window, output)
+	recordAIChange(r, "ai.model.limits", "Set an authorized AI model's limits", aiMeta{"model_id": id, "context_window": window, "max_output": output})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "model limits updated"})
 }
 
@@ -758,11 +764,15 @@ func RevokeAuthorizedModel(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid model id"})
 		return
 	}
-	if err := business.RevokeAuthorizedModel(ctx, id); err != nil {
+	me, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	if err := business.RevokeAuthorizedModel(ctx, id, me.UserPostgresInfo.Id); err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s revoked authorized model %s", aiAdminUserUUID(r), id)
+	recordAIChange(r, "ai.model.revoked", "Revoked an authorized AI model", aiMeta{"model_id": id})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "authorized model revoked"})
 }
 
@@ -799,7 +809,7 @@ func RunSelfTest(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, code, helpers.Envolope{"msg": reason})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s started AI self-test (model_id=%q)", aiAdminUserUUID(r), req.ModelID)
+	recordAIChange(r, "ai.self_test.started", "Started the AI self-test", aiMeta{"model_id": req.ModelID})
 	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"status": "success", "msg": "self-test started"})
 }
 
@@ -826,7 +836,7 @@ func SetCodeAnalysisMaxFiles(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set code_analysis_max_files=%d", aiAdminUserUUID(r), req.MaxFiles)
+	recordAIChange(r, "ai.code_analysis_max_files.set", "Set how many files AI code analysis reads", aiMeta{"max_files": req.MaxFiles})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "code analysis budget updated"})
 }
 
@@ -842,7 +852,7 @@ func SetIssueTriage(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set issue_triage enabled=%v", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.issue_triage.set", "Turned AI issue triage on or off", aiMeta{"enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "issue triage toggled"})
 }
 
@@ -859,7 +869,7 @@ func SetWebSearch(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteSecretAwareBadRequest(w, err)
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set web_search provider=%q enabled=%v", aiAdminUserUUID(r), req.Provider, req.Enabled)
+	recordAIChange(r, "ai.web_search.set", "Set AI web search", aiMeta{"provider": req.Provider, "enabled": req.Enabled})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "web search updated"})
 }
 
@@ -876,7 +886,7 @@ func SetSandboxConfig(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteSecretAwareBadRequest(w, err)
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set sandbox enabled=%v runner=%q", aiAdminUserUUID(r), req.Enabled, req.RunnerURL)
+	recordAIChange(r, "ai.sandbox.set", "Set the AI code sandbox", runnerMeta(req.Enabled, req.RunnerURL, req.RunnerToken, req.ClearToken))
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "sandbox updated"})
 }
 
@@ -893,7 +903,7 @@ func SetSandboxEnabled(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set sandbox enabled=%v (kill switch)", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.sandbox.enabled", "Turned the AI code sandbox on or off", aiMeta{"enabled": req.Enabled, "kill_switch": true})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "sandbox toggled"})
 }
 
@@ -911,7 +921,7 @@ func SetCodePRConfig(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteSecretAwareBadRequest(w, err)
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set code-pr enabled=%v runner=%q", aiAdminUserUUID(r), req.Enabled, req.RunnerURL)
+	recordAIChange(r, "ai.code_pr.set", "Set AI code pull requests", runnerMeta(req.Enabled, req.RunnerURL, req.RunnerToken, req.ClearToken))
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "code PR settings updated"})
 }
 
@@ -928,7 +938,7 @@ func SetCodePREnabled(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set code-pr enabled=%v (kill switch)", aiAdminUserUUID(r), req.Enabled)
+	recordAIChange(r, "ai.code_pr.enabled", "Turned AI code pull requests on or off", aiMeta{"enabled": req.Enabled, "kill_switch": true})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "code PR toggled"})
 }
 
@@ -946,8 +956,7 @@ func SetCodePRModel(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set code-pr model provider=%s model=%q",
-		aiAdminUserUUID(r), req.ProviderID, req.Model)
+	recordAIChange(r, "ai.code_pr_model.set", "Set the AI code pull request model", aiMeta{"provider_id": req.ProviderID, "model": req.Model})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "code-run model updated"})
 }
 
@@ -1012,7 +1021,7 @@ func CodePRLLMProxy(w http.ResponseWriter, r *http.Request) {
 func TestCodePRRunner(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	result := business.TestCodePRRunner(ctx)
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s tested code-pr runner ok=%v status=%s", aiAdminUserUUID(r), result.Ok, result.Status)
+	recordAIChange(r, "ai.code_pr_runner.tested", "Tested the AI code pull request runner", aiMeta{"ok": result.Ok, "status": result.Status})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "result": result})
 }
 
@@ -1035,7 +1044,7 @@ func ListCodePRRuns(w http.ResponseWriter, r *http.Request) {
 func TestSandbox(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	result := business.TestSandbox(ctx)
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s ran sandbox self-test ok=%v status=%s", aiAdminUserUUID(r), result.Ok, result.Status)
+	recordAIChange(r, "ai.sandbox.tested", "Ran the AI code sandbox self-test", aiMeta{"ok": result.Ok, "status": result.Status})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "result": result})
 }
 
@@ -1063,8 +1072,7 @@ func SetAgentDelegation(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set agent delegation enabled=%v max_hops=%d surfaces=%q",
-		aiAdminUserUUID(r), req.Enabled, req.MaxHops, req.Surfaces)
+	recordAIChange(r, "ai.agent_delegation.set", "Set AI agent delegation", aiMeta{"enabled": req.Enabled, "max_hops": req.MaxHops, "surfaces": req.Surfaces})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "agent delegation updated"})
 }
 
@@ -1095,7 +1103,7 @@ func SetModelRouting(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set model routing %v", aiAdminUserUUID(r), req.Routes)
+	recordAIChange(r, "ai.model_routing.set", "Set AI model routing", aiMeta{"routes": req.Routes})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "model routing updated"})
 }
 
@@ -1138,7 +1146,6 @@ func SetMCPServer(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set MCP server enabled=%v tool_groups=%q",
-		aiAdminUserUUID(r), req.Enabled, req.ToolGroups)
+	recordAIChange(r, "ai.mcp_server.set", "Set the workspace MCP server", aiMeta{"enabled": req.Enabled, "tool_groups": req.ToolGroups})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "msg": "MCP server updated"})
 }

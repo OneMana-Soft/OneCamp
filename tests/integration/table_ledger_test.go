@@ -202,7 +202,7 @@ func TestTableLedger(t *testing.T) {
 
 		// Bo's paste, undone: every row says Open again, in one change set.
 		undone, err := dataTableBusiness.Undo(w.ctx, deals.Id, nil, bo)
-		if err != nil || undone.Reversed != pasted.ChangeSet || undone.Changes != 1000 || undone.Skipped != 0 {
+		if err != nil || undone.Reversed != *pasted.ChangeSet || undone.Changes != 1000 || undone.Skipped != 0 {
 			t.Fatalf("undoing the paste: %+v %v", undone, err)
 		}
 		var open int
@@ -397,7 +397,7 @@ func TestTableLedger(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := dataTableBusiness.Undo(w.ctx, gone.Id, &three.ChangeSet, amara); err != nil {
+		if _, err := dataTableBusiness.Undo(w.ctx, gone.Id, three.ChangeSet, amara); err != nil {
 			t.Fatal(err)
 		}
 		if rows := w.order(gone); len(rows) != 0 {

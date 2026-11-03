@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Team"
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	business "github.com/akashc777/OneCamp/business/Team"
@@ -324,8 +325,13 @@ func AddMemberToTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.AddMemberToTeam(ctx, teamUUID, memberInfo.Uid, memberInfo.Uuid)
-
+	err = auditBusiness.Recorded(r, "team.member.add", auditBusiness.CategorySecurity, "Added someone to a team",
+		auditBusiness.MembershipMeta("team", teamUUID.String(), dgraphTeamInfo.Name, memberInfo.Uuid), func() error {
+			return business.AddMemberToTeam(ctx, teamUUID, memberInfo.Uid, memberInfo.Uuid)
+		})
+	if auditBusiness.RefusedUnrecorded(w, r, err, "controllers/AddMemberToTeam") {
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/AddMemberToTeam Failed to add member to team info err: %+v",
@@ -397,8 +403,13 @@ func AddAdminMemberToTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.AddAdminMemberToTeam(ctx, teamUUID, dgraphTeamInfo.Members[0].Uid, addMemberInfo.UserUuid)
-
+	err = auditBusiness.Recorded(r, "team.admin.add", auditBusiness.CategorySecurity, "Made someone an admin of a team",
+		auditBusiness.MembershipMeta("team", teamUUID.String(), dgraphTeamInfo.Name, addMemberInfo.UserUuid), func() error {
+			return business.AddAdminMemberToTeam(ctx, teamUUID, dgraphTeamInfo.Members[0].Uid, addMemberInfo.UserUuid)
+		})
+	if auditBusiness.RefusedUnrecorded(w, r, err, "controllers/AddAdminMemberToTeam") {
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/AddAdminMemberToTeam Failed to add admin member to team info err: %+v",
@@ -488,8 +499,15 @@ func RemoveMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.RemoveMemberFromTeam(ctx, dgraphTeamInfo, dgraphTeamInfo.Members[0].Uid, dgraphTeamInfo.Members[0].Uuid)
-
+	// Their membership leaves no node or row behind: this row is what keeps
+	// who took them off, and when (V-243).
+	err = auditBusiness.Recorded(r, "team.member.remove", auditBusiness.CategorySecurity, "Took someone off a team",
+		auditBusiness.MembershipMeta("team", removeMemberInfo.TeamUUID, dgraphTeamInfo.Name, dgraphTeamInfo.Members[0].Uuid), func() error {
+			return business.RemoveMemberFromTeam(ctx, dgraphTeamInfo, dgraphTeamInfo.Members[0].Uid, dgraphTeamInfo.Members[0].Uuid)
+		})
+	if auditBusiness.RefusedUnrecorded(w, r, err, "controllers/RemoveMemberFromTeam") {
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/RemoveMemberFromTeam Failed to remove member from team err: %+v",
@@ -578,14 +596,26 @@ func RemoveAdminMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.RemoveAdminMemberFromTeam(ctx, dgraphTeamInfo.Uid, dgraphTeamInfo.Admins[0].Uid)
+	if len(dgraphTeamInfo.Admins) == 0 {
+		helpers.WriteNotFound(w, "They aren't an admin of that team.")
+		return
+	}
 
+	// The role leaves no node or row behind: this row is what keeps who took
+	// it away, and when (V-243).
+	err = auditBusiness.Recorded(r, "team.admin.remove", auditBusiness.CategorySecurity, "Took away someone's admin role on a team",
+		auditBusiness.MembershipMeta("team", removeMemberInfo.TeamUUID, dgraphTeamInfo.Name, removeMemberInfo.UserUuid), func() error {
+			return business.RemoveAdminMemberFromTeam(ctx, dgraphTeamInfo.Uid, dgraphTeamInfo.Admins[0].Uid)
+		})
+	if auditBusiness.RefusedUnrecorded(w, r, err, "controllers/RemoveAdminMemberFromTeam") {
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"controllers/RemoveAdminMemberFromTeam Failed to remove member from team err: %+v",
+			"controllers/RemoveAdminMemberFromTeam Failed to remove admin role from team err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to add member to team",
+			"msg": "Failed to remove their admin role",
 			"err": err,
 		})
 		return
