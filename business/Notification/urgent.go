@@ -46,7 +46,9 @@ func HeldFor(p *prefModels.UserNotificationPreference, now time.Time) HeldStatus
 		at := *until
 		return HeldStatus{Until: &at, Reason: reason}
 	}
-	if at, deferred := quietHoursDelay(now, p); deferred {
+	// The person's hours (a schedule, or the daily window): only until when
+	// is told, never the hours themselves.
+	if at, deferred := p.QuietHoursUntil(now); deferred {
 		return HeldStatus{Until: &at, Reason: "quiet_hours"}
 	}
 	return HeldStatus{}
@@ -57,9 +59,13 @@ func HeldStatusOf(userID uuid.UUID, now time.Time) (HeldStatus, error) {
 	p, err := prefModels.GetByUserID(userID)
 	if err != nil {
 		// No row is no preferences, but focus time is an event in their
-		// calendar, which the push gate holds all the same.
+		// calendar, and their schedule a preference of their own, which the
+		// push gate holds by all the same.
 		p = &prefModels.UserNotificationPreference{UserID: userID}
 		if p.FocusUntil, err = prefModels.FocusUntilOf(userID); err != nil {
+			return HeldStatus{}, nil
+		}
+		if p.Schedule, err = prefModels.ScheduleOf(context.Background(), userID); err != nil {
 			return HeldStatus{}, nil
 		}
 	}

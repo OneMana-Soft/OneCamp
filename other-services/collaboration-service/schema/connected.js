@@ -92,19 +92,23 @@ export const DateMentionSchema = Node.create({
     renderText({ node }) { return dateWords(node.attrs.date) },
 })
 
-const embed = (name, dataType, words, extra = {}) => Node.create({
+// What an embed keeps of what it shows: its id attribute, that id's HTML attribute, and the app's address for it
+// (the web's BLOCK_IDS, lib/codec/connected.ts). A project's, unless an embed says otherwise.
+const PROJECT_ID = { attr: 'projectId', html: 'data-project-id', path: '/app/project/' }
+
+const embed = (name, dataType, words, extra = {}, shows = PROJECT_ID) => Node.create({
     name,
     group: 'block',
     atom: true,
     selectable: true,
     draggable: false,
     addAttributes() {
-        return { projectId: idAttr('projectId', 'data-project-id'), ...extra }
+        return { [shows.attr]: idAttr(shows.attr, shows.html), ...extra }
     },
     parseHTML() { return [{ tag: `div[data-type="${dataType}"]` }] },
     renderHTML({ node, HTMLAttributes }) {
-        const id = idOf(node.attrs.projectId)
-        return ['div', mergeAttributes({ 'data-type': dataType }, HTMLAttributes), ...linked(id && `/app/project/${id}`, words)]
+        const id = idOf(node.attrs[shows.attr])
+        return ['div', mergeAttributes({ 'data-type': dataType }, HTMLAttributes), ...linked(id && `${shows.path}${id}`, words)]
     },
 })
 
@@ -121,6 +125,9 @@ export const TaskListEmbedSchema = embed('taskListEmbed', 'task-list-embed', 'Ta
 
 // A project's board, live.
 export const BoardEmbedSchema = embed('boardEmbed', 'board-embed', 'Board')
+
+// /whiteboard (miro-34): a whiteboard, live and read-only, keeping only the board's id.
+export const WhiteboardEmbedSchema = embed('whiteboardEmbed', 'whiteboard-embed', 'Whiteboard', {}, { attr: 'boardId', html: 'data-board-id', path: '/app/board/' })
 
 // A to-do that became a task (⌘⇧Enter): its task's id on the to-do.
 export const TaskItemLinkSchema = Extension.create({

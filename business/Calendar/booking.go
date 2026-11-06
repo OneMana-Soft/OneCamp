@@ -68,27 +68,27 @@ func CheckPage(in PageInput) (bookingModel.Page, error) {
 	var p bookingModel.Page
 	p.Slug = NormaliseSlug(in.Slug)
 	if n := len(p.Slug); n < 3 || n > 40 {
-		return p, &AvailabilityError{"Use 3 to 40 letters, digits or dashes for the address."}
+		return p, &AvailabilityError{Msg: "Use 3 to 40 letters, digits or dashes for the address."}
 	}
 	p.Title = strings.Join(strings.Fields(in.Title), " ")
 	if p.Title == "" || utf8.RuneCountInString(p.Title) > 80 {
-		return p, &AvailabilityError{"Give the page a title of up to 80 characters."}
+		return p, &AvailabilityError{Msg: "Give the page a title of up to 80 characters."}
 	}
 	p.Description = strings.TrimSpace(in.Description)
 	if utf8.RuneCountInString(p.Description) > 1000 {
-		return p, &AvailabilityError{"Keep the description under 1,000 characters."}
+		return p, &AvailabilityError{Msg: "Keep the description under 1,000 characters."}
 	}
 	if in.DurationMinutes < 10 || in.DurationMinutes > 480 {
-		return p, &AvailabilityError{"Meetings run from 10 minutes to 8 hours."}
+		return p, &AvailabilityError{Msg: "Meetings run from 10 minutes to 8 hours."}
 	}
 	if in.BufferMinutes < 0 || in.BufferMinutes > 240 {
-		return p, &AvailabilityError{"Keep the buffer between 0 and 4 hours."}
+		return p, &AvailabilityError{Msg: "Keep the buffer between 0 and 4 hours."}
 	}
 	if in.MinNoticeMinutes < 0 || in.MinNoticeMinutes > 30*24*60 {
-		return p, &AvailabilityError{"Notice can be up to 30 days."}
+		return p, &AvailabilityError{Msg: "Notice can be up to 30 days."}
 	}
 	if in.MaxDaysAhead < 1 || in.MaxDaysAhead > 180 {
-		return p, &AvailabilityError{"Let people book 1 to 180 days ahead."}
+		return p, &AvailabilityError{Msg: "Let people book 1 to 180 days ahead."}
 	}
 	if _, err := in.Hours.Check(); err != nil {
 		return p, err
@@ -100,7 +100,7 @@ func CheckPage(in PageInput) (bookingModel.Page, error) {
 	if in.Id != "" {
 		id, err := uuid.Parse(in.Id)
 		if err != nil {
-			return p, &AvailabilityError{"That isn't one of your pages."}
+			return p, &AvailabilityError{Msg: "That isn't one of your pages."}
 		}
 		p.Id = id
 	}
@@ -118,7 +118,7 @@ func SaveBookingPage(ctx context.Context, owner uuid.UUID, in PageInput) (*booki
 		if n, err := bookingModel.CountPages(owner); err != nil {
 			return nil, err
 		} else if n >= maxPagesPerPerson {
-			return nil, &AvailabilityError{fmt.Sprintf("You have %d booking pages. Delete one to make another.", n)}
+			return nil, &AvailabilityError{Msg: fmt.Sprintf("You have %d booking pages. Delete one to make another.", n)}
 		}
 	}
 	saved, err := bookingModel.SavePage(p)
@@ -128,7 +128,7 @@ func SaveBookingPage(ctx context.Context, owner uuid.UUID, in PageInput) (*booki
 		return nil, helpers.Conflict(fmt.Sprintf("Another booking page already uses the address %q. Pick another.", p.Slug), err)
 	}
 	if err == nil && saved == nil {
-		return nil, &AvailabilityError{"That isn't one of your pages."}
+		return nil, &AvailabilityError{Msg: "That isn't one of your pages."}
 	}
 	if err == nil {
 		pageCache.forgetOwner(owner.String())
@@ -354,16 +354,16 @@ type Booked struct {
 func CheckGuest(in BookInput) (BookInput, error) {
 	in.Name = strings.Join(strings.Fields(in.Name), " ")
 	if in.Name == "" || utf8.RuneCountInString(in.Name) > 100 {
-		return in, &AvailabilityError{"Enter your name."}
+		return in, &AvailabilityError{Msg: "Enter your name."}
 	}
 	addr, err := mail.ParseAddress(strings.TrimSpace(in.Email))
 	if err != nil || len(addr.Address) > 254 || !strings.Contains(addr.Address[strings.LastIndex(addr.Address, "@")+1:], ".") {
-		return in, &AvailabilityError{"Enter an email address like name@example.com."}
+		return in, &AvailabilityError{Msg: "Enter an email address like name@example.com."}
 	}
 	in.Email = addr.Address
 	in.Note = strings.TrimSpace(in.Note)
 	if utf8.RuneCountInString(in.Note) > 1000 {
-		return in, &AvailabilityError{"Keep the note under 1,000 characters."}
+		return in, &AvailabilityError{Msg: "Keep the note under 1,000 characters."}
 	}
 	// The zone the guest reads the booking's times in, kept with the booking:
 	// one Go knows, and never "Local", the server's own and nobody's.
@@ -400,14 +400,14 @@ func Book(ctx context.Context, slug string, in BookInput, now time.Time) (*Booke
 	if n, err := bookingModel.CountRecentByEmail(l.page.Id, in.Email, now.Add(-24*time.Hour)); err != nil {
 		return nil, err
 	} else if n >= maxBookingsPerEmail {
-		return nil, &AvailabilityError{"You've booked this page a few times today. Try again tomorrow."}
+		return nil, &AvailabilityError{Msg: "You've booked this page a few times today. Try again tomorrow."}
 	}
 
 	dur := time.Duration(l.page.DurationMinutes) * time.Minute
 	start := in.Start.UTC().Truncate(time.Minute)
 	end := start.Add(dur)
 	if end.After(l.horizon(now)) {
-		return nil, &AvailabilityError{"That time is too far ahead. Pick another."}
+		return nil, &AvailabilityError{Msg: "That time is too far ahead. Pick another."}
 	}
 	slots, err := l.slots(ctx, start.Add(-time.Hour), end.Add(time.Hour), now)
 	if err != nil {
@@ -421,7 +421,7 @@ func Book(ctx context.Context, slug string, in BookInput, now time.Time) (*Booke
 		}
 	}
 	if !free {
-		return nil, &AvailabilityError{"That time was just taken. Pick another."}
+		return nil, &AvailabilityError{Msg: "That time was just taken. Pick another."}
 	}
 
 	token, hash, sealed, err := helpers.NewSealedLinkSecret()
@@ -433,7 +433,7 @@ func Book(ctx context.Context, slug string, in BookInput, now time.Time) (*Booke
 		GuestTZ: in.TZ, CancelHash: hash, CancelSealed: sealed,
 	})
 	if errors.Is(err, bookingModel.ErrSlotTaken) {
-		return nil, &AvailabilityError{"That time was just taken. Pick another."}
+		return nil, &AvailabilityError{Msg: "That time was just taken. Pick another."}
 	}
 	if err != nil {
 		return nil, err

@@ -25,10 +25,14 @@ func withStore(t *testing.T, s *store) *Registry {
 	t.Helper()
 	oldR, oldW, oldRec, oldNow := readValues, writeValue, recordIt, now
 	t.Cleanup(func() { readValues, writeValue, recordIt, now = oldR, oldW, oldRec, oldNow })
-	readValues = func([]string) (map[string]string, error) {
+	// Only the keys asked for, as the real read (GetMultipleConfigsByKeys)
+	// answers: a policy the registry forgets to ask for reads as unset.
+	readValues = func(keys []string) (map[string]string, error) {
 		out := map[string]string{}
-		for k, v := range s.values {
-			out[k] = v
+		for _, k := range keys {
+			if v, ok := s.values[k]; ok {
+				out[k] = v
+			}
 		}
 		return out, nil
 	}

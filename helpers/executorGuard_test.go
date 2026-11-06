@@ -26,10 +26,12 @@ import (
 // links away through pgexec; 1,121 once V-237 counted seats and reactivated
 // people through pgexec under the seat lock; 1,116 once head 5a read and
 // kept saved task views through pgexec; 1,115 once head 5b took a thread
-// back through pgexec; 1,114 once V-281 wrote a thread through pgexec). It
-// only goes down: move a function onto the generics, then lower this to the
-// count the test reports.
-const handExecutorBaseline = 1113
+// back through pgexec; 1,114 once V-281 wrote a thread through pgexec;
+// 1,105 once tables H2c made a table's create, change, delete and restore
+// and a comment's edit, removal and thread status join the caller's
+// transaction through pgexec). It only goes down: move a function onto the
+// generics, then lower this to the count the test reports.
+const handExecutorBaseline = 1103
 
 // backgroundTimeoutBaseline is how many times models/ starts a statement's
 // timeout from context.Background() instead of the caller's ctx (206 at the

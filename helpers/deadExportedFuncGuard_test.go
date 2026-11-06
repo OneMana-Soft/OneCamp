@@ -321,6 +321,10 @@ var exemptFromDeadExportedCheck = map[string]string{
 	"SetStartRetriesForTest": "sets how the server's start tries again to hash links left in the clear " +
 		"(models/postgres/LinkSecret), so the integration test can prove a start whose first try failed " +
 		"hashes them on a later try, in seconds; it exists only in the integration build.",
+	"NotPausedAtForTest": "is the push gate's hold (domain/UserFCMToken notPaused) at an instant the " +
+		"integration test names instead of NOW(), so it can prove the SQL gate and the Go hold " +
+		"(QuietHoursUntil) agree at every instant of a grid of schedules, zones and daylight-saving " +
+		"changes; Postgres's clock can't be set. It exists only in the integration build.",
 	"SetMigrationPollForTest": "sets how the schema check's wait for a fresh database's migrations sleeps " +
 		"between looks (initializers/postgresInit), so the integration test can migrate at the moment the " +
 		"start waits and prove its claims land; it exists only in the integration build.",

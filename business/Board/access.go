@@ -13,7 +13,14 @@ import (
 // GetBoardByBoardUUID and GetBasicBoardByUUID read it); one read without it
 // reads as live.
 func CanRead(board *dgraphStruct.DgraphBoard, userUUID string) bool {
-	if board == nil || isDeleted(board) {
+	return board != nil && !isDeleted(board) && couldRead(board, userUUID)
+}
+
+// couldRead is CanRead apart from the deletion: whether the person may read
+// the board, or could while it was there. A deleted board says it is gone to
+// these people only (BoardReadsFor), and to nobody else.
+func couldRead(board *dgraphStruct.DgraphBoard, userUUID string) bool {
+	if board == nil {
 		return false
 	}
 	if board.IsPrivate == nil || !*board.IsPrivate {

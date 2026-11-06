@@ -12,8 +12,10 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	hooksBusiness "github.com/akashc777/OneCamp/business/Hooks"
+	tableAccess "github.com/akashc777/OneCamp/business/TableAccess"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	webhookModel "github.com/akashc777/OneCamp/models/postgres/Webhook"
 	deliveryModel "github.com/akashc777/OneCamp/models/postgres/WebhookDelivery"
 	logModel "github.com/akashc777/OneCamp/models/postgres/WebhookLog"
@@ -32,8 +34,13 @@ type reachWorld struct {
 	trashed    map[string]bool
 	hidden     map[uuid.UUID]map[string]bool
 	restricted map[string]bool
-	failing    error
-	asked      map[string]int
+	// tables is who opens a table as themselves; admins open every one
+	// (Table Access day 0), and a trashed table is no one's.
+	tables        map[string]map[uuid.UUID]bool
+	admins        map[uuid.UUID]bool
+	trashedTables map[string]bool
+	failing       error
+	asked         map[string]int
 }
 
 func stubReach(t *testing.T) *reachWorld {
@@ -42,13 +49,25 @@ func stubReach(t *testing.T) *reachWorld {
 		members: map[uuid.UUID]bool{}, channels: map[string]map[uuid.UUID]bool{}, meetings: map[string]map[uuid.UUID]bool{}, roles: map[string]map[uuid.UUID]workAccess.Role{},
 		docs: map[string]map[uuid.UUID]accessBusiness.Level{}, trashed: map[string]bool{}, hidden: map[uuid.UUID]map[string]bool{},
 		restricted: map[string]bool{}, asked: map[string]int{},
+		tables: map[string]map[uuid.UUID]bool{}, admins: map[uuid.UUID]bool{}, trashedTables: map[string]bool{},
 	}
 	sMember, sChannel, sGraph, sProject, sStanding, sDoc, sHidden, sRestricted := memberNow, readsChannel, graphUser, projectAs, standingIn, resolveDoc, hiddenTasks, restrictedTaskEvent
-	sMeeting := readsMeeting
+	sMeeting, sOwner, sTable := readsMeeting, ownerNow, resolveTable
 	t.Cleanup(func() {
 		memberNow, readsChannel, graphUser, projectAs, standingIn, resolveDoc, hiddenTasks, restrictedTaskEvent = sMember, sChannel, sGraph, sProject, sStanding, sDoc, sHidden, sRestricted
-		readsMeeting = sMeeting
+		readsMeeting, ownerNow, resolveTable = sMeeting, sOwner, sTable
 	})
+	ownerNow = func(_ context.Context, id uuid.UUID) (*userModels.User, error) {
+		return &userModels.User{Id: id, IsAdmin: w.admins[id]}, nil
+	}
+	resolveTable = func(_ context.Context, who tableAccess.Who, table uuid.UUID) (tableAccess.Decision, error) {
+		w.asked["table"]++
+		if w.trashedTables[table.String()] {
+			return tableAccess.Decision{}, tableAccess.ErrNotFound
+		}
+		view := who.Admin || w.tables[table.String()][who.User]
+		return tableAccess.Decision{View: view}, nil
+	}
 	memberNow = func(_ context.Context, id uuid.UUID) (bool, error) {
 		w.asked["member"]++
 		return w.members[id], w.failing
@@ -163,6 +182,9 @@ func TestAnEventNamesWhatItsReaderMustRead(t *testing.T) {
 	}
 	if got := needsOf(context.Background(), "call.ended", map[string]interface{}{"session_id": "s1", "meeting_id": " m1 "}); got != (needs{callEvent: true, meeting: "m1"}) {
 		t.Errorf("a meeting's call's event needs %+v", got)
+	}
+	if got := needsOf(context.Background(), "table.rows.changed", map[string]interface{}{"table_id": " t1 ", "change_set_id": "cs"}); got != (needs{tableEvent: true, table: "t1"}) {
+		t.Errorf("a table's event needs %+v", got)
 	}
 }
 
@@ -420,5 +442,70 @@ func TestALogShowsABodyOnlyToWhoMayReadIt(t *testing.T) {
 	}
 	if w.asked["channel"] != 2 {
 		t.Errorf("asked about the channel %d times, want once a viewer", w.asked["channel"])
+	}
+}
+
+// V-457: a table's event (table.rows.changed names its rows and fields) reaches
+// only webhooks whose owners can open the table now (Table Access View, as an
+// admin or not), at dispatch and again as each delivery is tried. A member who
+// can't open it, a demoted admin among them, is sent nothing, not even ids; a
+// table's event that names no table, or a table in the trash, reaches nobody.
+func TestATablesEventReachesOnlyWebhooksWhoseOwnersCanOpenIt(t *testing.T) {
+	w := stubReach(t)
+	maker, admin, member := uuid.New(), uuid.New(), uuid.New()
+	w.members[maker], w.members[admin], w.members[member] = true, true, true
+	w.admins[admin] = true
+	private, shown := uuid.NewString(), uuid.NewString()
+	w.tables[private] = map[uuid.UUID]bool{maker: true}
+	w.tables[shown] = map[uuid.UUID]bool{maker: true, member: true}
+	ctx := context.Background()
+
+	for _, c := range []struct {
+		name  string
+		who   uuid.UUID
+		event needs
+		want  hooksBusiness.Reach
+	}{
+		{"a private table's event, for its maker", maker, needs{tableEvent: true, table: private}, hooksBusiness.Reaches},
+		{"a private table's event, for an admin", admin, needs{tableEvent: true, table: private}, hooksBusiness.Reaches},
+		{"a private table's event, for a member who can't open it", member, needs{tableEvent: true, table: private}, hooksBusiness.OwnerOutOfEvent},
+		{"a shown table's event, for a member who opens it", member, needs{tableEvent: true, table: shown}, hooksBusiness.Reaches},
+		{"a table's event that names no table", maker, needs{tableEvent: true}, hooksBusiness.OwnerOutOfEvent},
+		{"a table's event whose table doesn't read", maker, needs{tableEvent: true, table: "not-a-table"}, hooksBusiness.OwnerOutOfEvent},
+	} {
+		if got, err := reachOf(ctx, c.who, needs{}, c.event); err != nil || got != c.want {
+			t.Errorf("%s: %v, %v; want %v", c.name, got, err, c.want)
+		}
+	}
+
+	// At dispatch: the member's workspace webhook is sent nothing of the
+	// private table, not even its ids, and the maker's and the admin's are.
+	send := dispatchTo(t, "table.rows.changed", ScopeOrg, nil, []*webhookModel.Webhook{
+		{Id: uuid.New(), Name: "maker's", CreatedBy: maker, ScopeType: ScopeOrg},
+		{Id: uuid.New(), Name: "admin's", CreatedBy: admin, ScopeType: ScopeOrg},
+		{Id: uuid.New(), Name: "member's", CreatedBy: member, ScopeType: ScopeOrg},
+	})
+	sent := send(map[string]interface{}{"table_id": private, "change_set_id": uuid.NewString(), "updated_row_ids": []string{uuid.NewString()}})
+	_, toMaker := sent["maker's"]
+	_, toAdmin := sent["admin's"]
+	_, toMember := sent["member's"]
+	if !toMaker || !toAdmin || toMember {
+		t.Fatalf("a private table's change was sent to %v", sent)
+	}
+
+	// As a delivery is tried: an admin since demoted, who can't open it now,
+	// is sent nothing of it; a table moved to the trash reaches nobody.
+	body, _ := json.Marshal(OutgoingWebhookPayload{Event: "table.rows.changed", Data: map[string]interface{}{"table_id": private}, EventID: "e1"})
+	workspace := deliveryModel.Target{CreatedBy: admin, ScopeType: ScopeOrg}
+	if r, err := deliveryReach(ctx, admin, workspace, body); err != nil || r != hooksBusiness.Reaches {
+		t.Errorf("an admin's delivery: %v %v", r, err)
+	}
+	w.admins[admin] = false
+	if r, err := deliveryReach(ctx, admin, workspace, body); err != nil || r != hooksBusiness.OwnerOutOfEvent {
+		t.Errorf("a demoted admin's delivery: %v %v; want %v", r, err, hooksBusiness.OwnerOutOfEvent)
+	}
+	w.trashedTables[private] = true
+	if r, err := deliveryReach(ctx, maker, deliveryModel.Target{CreatedBy: maker, ScopeType: ScopeOrg}, body); err != nil || r != hooksBusiness.OwnerOutOfEvent {
+		t.Errorf("a trashed table's delivery: %v %v; want %v", r, err, hooksBusiness.OwnerOutOfEvent)
 	}
 }

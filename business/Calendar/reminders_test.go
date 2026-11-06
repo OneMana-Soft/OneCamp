@@ -20,9 +20,14 @@ import (
 
 // memReminders keeps reminders and their waiting jobs in memory.
 type memReminders struct {
-	mu   sync.Mutex
-	own  map[[2]uuid.UUID][]int
-	jobs map[string]memJob
+	mu    sync.Mutex
+	own   map[[2]uuid.UUID][]int
+	email map[[2]uuid.UUID][]int
+	jobs  map[string]memJob
+	// defaults are each person's defaults per calendar; replanned, who had
+	// their coming events planned again.
+	defaults  map[uuid.UUID]map[string]ReminderDefaults
+	replanned []uuid.UUID
 }
 
 type memJob struct {
@@ -32,7 +37,8 @@ type memJob struct {
 }
 
 func newMemReminders() *memReminders {
-	return &memReminders{own: map[[2]uuid.UUID][]int{}, jobs: map[string]memJob{}}
+	return &memReminders{own: map[[2]uuid.UUID][]int{}, email: map[[2]uuid.UUID][]int{}, jobs: map[string]memJob{},
+		defaults: map[uuid.UUID]map[string]ReminderDefaults{}}
 }
 
 func jobKey(person uuid.UUID, event, kind string) string {
@@ -63,14 +69,59 @@ func (m *memReminders) remindersFor(_ context.Context, person uuid.UUID, events 
 	return out, nil
 }
 
-func (m *memReminders) setReminders(_ context.Context, event, person uuid.UUID, minutes []int, _ time.Time) error {
+func (m *memReminders) setReminders(_ context.Context, event, person uuid.UUID, minutes, email []int, _ time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if minutes == nil {
 		delete(m.own, [2]uuid.UUID{event, person})
+		delete(m.email, [2]uuid.UUID{event, person})
 	} else {
 		m.own[[2]uuid.UUID{event, person}] = minutes
+		m.email[[2]uuid.UUID{event, person}] = email
 	}
+	return nil
+}
+
+func (m *memReminders) emailOf(_ context.Context, event uuid.UUID, people []uuid.UUID) (map[uuid.UUID][]int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[uuid.UUID][]int{}
+	for _, p := range people {
+		if set, ok := m.email[[2]uuid.UUID{event, p}]; ok {
+			out[p] = set
+		}
+	}
+	return out, nil
+}
+
+func (m *memReminders) emailFor(_ context.Context, person uuid.UUID, events []uuid.UUID) (map[uuid.UUID][]int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[uuid.UUID][]int{}
+	for _, e := range events {
+		if set, ok := m.email[[2]uuid.UUID{e, person}]; ok {
+			out[e] = set
+		}
+	}
+	return out, nil
+}
+
+func (m *memReminders) defaultsOf(_ context.Context, people []uuid.UUID) (map[uuid.UUID]map[string]ReminderDefaults, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[uuid.UUID]map[string]ReminderDefaults{}
+	for _, p := range people {
+		if d, ok := m.defaults[p]; ok {
+			out[p] = d
+		}
+	}
+	return out, nil
+}
+
+func (m *memReminders) replanPerson(_ context.Context, person uuid.UUID, _, _ time.Time, _ int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.replanned = append(m.replanned, person)
 	return nil
 }
 
@@ -215,7 +266,7 @@ func TestAnEventRemindsWhoOrganisesItOrSaidYes(t *testing.T) {
 		t.Error("Jonas hasn't answered, so the default doesn't remind him")
 	}
 	// Jonas sets his own: he is reminded, at the start and half an hour before.
-	got, err := h.s.SetReminders(ctx, jonas, e.ID, []int{0, 30})
+	got, err := h.s.SetReminders(ctx, jonas, e.ID, []int{0, 30}, nil)
 	if err != nil || got.Default || !slices.Equal(got.Minutes, []int{0, 30}) {
 		t.Fatalf("Jonas's reminders: %+v %v", got, err)
 	}
@@ -223,7 +274,7 @@ func TestAnEventRemindsWhoOrganisesItOrSaidYes(t *testing.T) {
 		t.Errorf("Jonas's next: %+v %v", j, ok)
 	}
 	// Maya chooses none; Sam goes back to the default from his own.
-	if _, err := h.s.SetReminders(ctx, maya, e.ID, []int{}); err != nil {
+	if _, err := h.s.SetReminders(ctx, maya, e.ID, []int{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := rem.next(maya, e.ID, models.ReminderNext); ok {
@@ -286,7 +337,7 @@ func TestAReminderIsSentOnTimeThroughTheirHolds(t *testing.T) {
 	h.series(sam, "Stand-up", "FREQ=WEEKLY", time.Date(2026, 10, 20, 9, 15, 0, 0, lon), 15, maya)
 	in := h.between(sam, time.Date(2026, 10, 19, 0, 0, 0, 0, lon), time.Date(2026, 11, 4, 0, 0, 0, 0, lon))
 	series := in[0].SeriesID
-	if _, err := h.s.SetReminders(ctx, maya, series, []int{10}); err != nil {
+	if _, err := h.s.SetReminders(ctx, maya, series, []int{10}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.s.planReminders(ctx, uuid.MustParse(series), nil); err != nil {
@@ -416,7 +467,7 @@ func TestTheListCarriesTheReadersReminders(t *testing.T) {
 	ctx := context.Background()
 	sam, maya := h.member("Sam"), h.member("Maya")
 	e := h.create(sam, "Design review", maya)
-	if _, err := h.s.SetReminders(ctx, maya, e.ID, []int{30}); err != nil {
+	if _, err := h.s.SetReminders(ctx, maya, e.ID, []int{30}, nil); err != nil {
 		t.Fatal(err)
 	}
 	from, to := time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
@@ -479,7 +530,7 @@ func TestAWorkingLocationRemindsNobodyByDefault(t *testing.T) {
 		}
 	}
 	reads("by default", []int{}, true)
-	if got, err := h.s.SetReminders(ctx, sam, e.ID, []int{-540}); err != nil || got.Default || !slices.Equal(got.Minutes, []int{-540}) {
+	if got, err := h.s.SetReminders(ctx, sam, e.ID, []int{-540}, nil); err != nil || got.Default || !slices.Equal(got.Minutes, []int{-540}) {
 		t.Fatalf("Sam's own: %+v %v", got, err)
 	}
 	if j, ok := rem.next(sam, e.ID, models.ReminderNext); !ok || j.p.Replan {

@@ -203,6 +203,9 @@ POST	/admin/import/{provider}/finalize/{jobId}	admin	none	refused	gate	gate
 POST	/admin/import/{provider}/jobs	admin	none	refused	gate	gate	
 GET	/admin/import/{provider}/oauth-url	admin	none	refused	gate	gate	
 POST	/admin/import/{provider}/presign	admin	none	refused	gate	gate	
+POST	/admin/labels	admin	none	refused	gate	gate	miro-44 L: a workspace admin names a label and its rules; the business refuses an agent too (TestSensitivityLabelsOverHTTP: a member 403)
+PATCH	/admin/labels/{id}	admin	none	refused	gate	gate	a workspace admin changes a label; a rule it gains holds at once on every item it is on
+POST	/admin/labels/{id}/remove	admin	none	refused	gate	gate	a workspace admin removes a label (a soft stamp): its rules stop holding everywhere
 GET	/admin/marketplace	admin	none	refused	gate	gate	
 POST	/admin/marketplace/install	admin	none	refused	gate	gate	
 POST	/admin/marketplace/uninstall	admin	none	refused	gate	gate	
@@ -221,6 +224,15 @@ POST	/admin/removeAdmin	admin	none	refused	gate	gate
 POST	/admin/resendInvitation	admin	none	refused	gate	gate	
 GET	/admin/retention	admin	none	refused	gate	gate	
 POST	/admin/retention	admin	none	refused	gate	gate	
+GET	/admin/retention/holds	admin	none	refused	gate	gate	
+POST	/admin/retention/holds	admin	none	refused	gate	gate	
+PATCH	/admin/retention/holds/{id}	admin	none	refused	gate	gate	
+GET	/admin/retention/holds/{id}/export/{kind}	admin	none	refused	gate	gate	
+GET	/admin/retention/holds/{id}/items/{kind}	admin	none	refused	gate	gate	
+POST	/admin/retention/holds/{id}/release	admin	none	refused	gate	gate	
+GET	/admin/retention/rules	admin	none	refused	gate	gate	
+PUT	/admin/retention/rules/{kind}	admin	none	refused	gate	gate	
+GET	/admin/retention/rules/{kind}/preview	admin	none	refused	gate	gate	
 GET	/admin/scim/tokens	admin	none	refused	gate	gate	
 POST	/admin/scim/tokens	admin	none	refused	gate	gate	
 POST	/admin/scim/tokens/{id}/revoke	admin	none	refused	gate	gate	
@@ -418,6 +430,7 @@ GET	/board/getBoardList	session	none	member	TODO(board)	-
 GET	/board/getBoardPermissions	session	none	member	TODO(board)	-	
 GET	/board/getBoardSnapshots	session	none	member	TODO(board)	-	
 GET	/board/getViewers	session	none	member	TODO(board)	-	
+POST	/board/protect	session	none	member	object:board	TestAnEditorIsRefusedAndTheRefusalIsInTheLog	Protected objects (miro-44): only the board's owner or a workspace admin locks and lifts (403 for anyone else, recorded as refused); a board the caller cannot read answers 404; every lock and lift is in the admin audit log before it is made
 POST	/board/recordExport	session	none	member	object:board	TestRecordBoardExportTellsOnlyAReadableBoardsExport	An export the canvas made in the browser, told to the admin audit log (miro-44); a board the caller cannot read answers 404
 POST	/board/recordView	session	none	member	TODO(board)	-	
 POST	/board/restoreBoardSnapshot	session	none	member	TODO(board)	-	
@@ -803,6 +816,10 @@ POST	/integration/google-calendar/webhook	public	none	public	signed:google	-	cha
 POST	/internal/code-run/llm	public	none	public	link:code-run	-	shared runner token, constant-time compared — Internal service-to-service. Not admin-gated because the caller is not a user; authenticated by a shared runner token compared with subtle.ConstantTimeCompare in business/AI/codePRLLMProxy.go.
 POST	/internal/mqtt/authorize	internal	none	n/a	gate	gate	internal secret, constant-time compared — The broker's question before each subscription. VerifyInternalServiceRequest: the broker sends INTERNAL_SECRET with every ask.
 POST	/invitations	session	none	member	capability:invitation.create	gate	
+GET	/labels	session	none	member	member	gate	miro-44 L: any member reads the live sensitivity labels and their rules (the picker, the chips' names); guests never reach a member route
+GET	/labels/items/{kind}	session	none	member	object:item	TestSensitivityLabelsOverHTTP	a list's chips: the label of each board or doc the caller may read (business/Label OfItems reads each labelled one for them; one they can't is left out); at most 100 ids
+GET	/labels/items/{kind}/{id}	session	none	member	object:item	TestSensitivityLabelsOverHTTP	the label of a board or doc the caller may read (its kind's own access rule); one they can't is 404
+PUT	/labels/items/{kind}/{id}	session	none	member	object:item	TestSensitivityLabelsOverHTTP	putting a label on takes edit access (or an admin who may read it; a reader 403); lowering or taking one off takes the owner or such an admin (403 label_owner_lowers); written, recorded, then committed
 GET	/later/	session	none	member	TODO(later)	-	
 POST	/later/delete	session	none	member	TODO(later)	-	
 POST	/later/save	session	none	member	TODO(later)	-	
@@ -898,6 +915,18 @@ GET	/project/attachments/{project_uuid}	session	none	member	object:project	TestE
 GET	/project/boardColumn/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"
 POST	/project/createProject	session	none	member	object:team	TestATokenActsAsAMemberAcrossTheAPI	the workspace's "Who can make projects" (workAccess.CanMakeProjects), in a team the caller is in
 GET	/project/cycles/running	session	none	member	self	TestV20CycleCountsAreWhatTheReaderMaySee	the running cycle of each project the caller may view (NeedView, OfMany); archived projects left out; counts take in the cycle's live tasks the caller may see (taskread, in the query), as the per-project list
+GET	/project/dashboards	session	none	member	self	TestDashboardsOverHTTP	the caller's own dashboards and the workspace's they may read (shared, or all for its admins): another's own is never listed
+POST	/project/dashboards	session	none	member	member	TestDashboardsOverHTTP	any member makes their own; the workspace's takes a workspace admin (a member is refused 403)
+GET	/project/dashboards/{dashboard_id}	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404)
+POST	/project/dashboards/{dashboard_id}	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404); one they read but don't keep is refused (403); an archived project's are read-only
+POST	/project/dashboards/{dashboard_id}/arrange	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404); only its keepers move widgets (403)
+GET	/project/dashboards/{dashboard_id}/data	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404); every widget is worked out as the caller, so a project they aren't in reads empty
+POST	/project/dashboards/{dashboard_id}/delete	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404); only its keepers delete it (403); deleting is soft
+POST	/project/dashboards/{dashboard_id}/restore	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404); only its keepers restore it
+POST	/project/dashboards/{dashboard_id}/widgets	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404); only its keepers add widgets (403)
+POST	/project/dashboards/{dashboard_id}/widgets/{widget_id}	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404); only its keepers change widgets (403)
+POST	/project/dashboards/{dashboard_id}/widgets/{widget_id}/delete	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404); only its keepers remove widgets (403); removing is soft
+POST	/project/dashboards/{dashboard_id}/widgets/{widget_id}/restore	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404); only its keepers put widgets back
 POST	/project/deleteProject	session	none	member	object:project	TestA1WorkAccessThroughTheHandlers	the project's admins and its team's admins (NeedArchive): a member 403, someone outside 404
 GET	/project/forecasts	session	none	member	object:project	TestLinear20BForecastsInOneRead	each listed project the caller may see (NeedView, the single forecast route's check, made for every listed project in one read: workAccess.ProjectsViewable): a viewer reads it; one they cannot see, an id that names nothing and a string that is not an id are left out without a word; at most 100 distinct ids, more refused whole (400)
 GET	/project/getFile/{project_uuid}/{obj_uuid}	session	none	member	object:project	TestOnlyThoseWhoMaySeeAPlaceHaveItsFiles	FileAccess: the project's people; a restricted task's files only for its readers
@@ -949,6 +978,8 @@ POST	/project/{project_uuid}/cycles/{cycle_id}/complete	session	none	member	obje
 POST	/project/{project_uuid}/cycles/{cycle_id}/delete	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's admins (NeedManage); a cycle of that project only (cycleIn)
 POST	/project/{project_uuid}/cycles/{cycle_id}/rename	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's admins (NeedManage); a cycle of that project only (cycleIn)
 POST	/project/{project_uuid}/cycles/{cycle_id}/start	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's admins (NeedManage); a cycle of that project only (cycleIn)
+GET	/project/{project_uuid}/dashboards	session	none	member	object:project	TestDashboardsOverHTTP	those who see the project (Work Access NeedView) list its shared dashboards, its admins all of them; someone outside it finds nothing (404)
+POST	/project/{project_uuid}/dashboards	session	none	member	object:project	TestDashboardsOverHTTP	the project's admins (Work Access NeedManage; never archived): a member is refused (403); someone outside it finds nothing (404)
 GET	/project/{project_uuid}/estimates	session	none	member	object:project	TestLinear05AProjectsScaleIsItsAdminsToSet	anyone who may see the project (NeedView): its scale, the scales it may take, and can_edit; someone outside it finds no project (404)
 POST	/project/{project_uuid}/estimates	session	none	member	object:project	TestLinear05AProjectsScaleIsItsAdminsToSet	the project's admins (NeedManage): a member, or someone outside it, is refused (403); kind hours puts it back on hours
 GET	/project/{project_uuid}/fields	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
@@ -1283,8 +1314,18 @@ GET	/v1/projects	token	as-member	n/a	object:project	TestATokenActsAsAMemberAcros
 GET	/v1/search	token	as-member	n/a	member	TestATokenActsAsAMemberAcrossTheAPI	results are what the token's member can read (search's own read filter)
 POST	/v1/search	token	as-member	n/a	member	TestATokenActsAsAMemberAcrossTheAPI	results are what the token's member can read (search's own read filter)
 GET	/v1/tables	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+POST	/v1/tables	token	as-member	n/a	member	TestATokenActsAsAMemberAcrossTheAPI	makes a table as the token's member, as any member may in the app, with its audit row in one transaction; the table is the member's to manage (its maker). An app's token is refused: it has no tables of its own
+GET	/v1/tables/trash	token	as-member	n/a	self	TestATokenActsAsAMemberAcrossTheAPI	the deleted tables the token's member made, newest first: never another member's, and never every one as an admin's (a token carries no admin powers). An app's token is refused
+DELETE	/v1/tables/{id}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	moves a table to the tables' trash, with its audit row in one transaction; a manager of the table only (its maker; a token never acts as an admin): 403 for a member who only opens it, 404 for a table they can't open
 GET	/v1/tables/{id}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+PATCH	/v1/tables/{id}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	renames a table or changes its description or icon, with its audit row in one transaction; a manager of the table only (403 for a member who only opens it, 404 for a table they can't open)
 POST	/v1/tables/{id}/aggregate	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/tables/{id}/fields	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	a table's fields, for a token with tables:read acting as a member who may open the table; a table they can't open is 404
+POST	/v1/tables/{id}/fields	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	adds a field, with its audit row in one transaction, for a token with tables:write acting as a manager of the table (its maker or an admin); a member who only opens it is refused 403, a table they can't open is 404
+POST	/v1/tables/{id}/fields/batch	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	creates, changes and deletes up to 100 fields under an idempotency key, checked whole first, each item with its audit row in one transaction; a manager of the table only (403 for a member who only opens it, 404 for a table they can't open)
+DELETE	/v1/tables/{id}/fields/{field}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	moves a field to its table's trash, with its audit row in one transaction; a manager of the table only (403 for a member who only opens it, 404 for a table they can't open)
+PATCH	/v1/tables/{id}/fields/{field}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	changes a field, with its audit row in one transaction; a manager of the table only (403 for a member who only opens it, 404 for a table they can't open)
+POST	/v1/tables/{id}/restore	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	brings a table back from the tables' trash, with its audit row in one transaction; a manager of the table only (its maker), 404 for anyone else
 POST	/v1/tables/{id}/rows	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/tables/{id}/rows/batch	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/tables/{id}/rows/get	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
@@ -1292,9 +1333,20 @@ POST	/v1/tables/{id}/rows/query	token	as-member	n/a	object:table	TestATokenActsA
 DELETE	/v1/tables/{id}/rows/{row}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
 GET	/v1/tables/{id}/rows/{row}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
 PATCH	/v1/tables/{id}/rows/{row}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/tables/{id}/rows/{row}/comments	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	a row's comment threads with their comments, for a token with tables:read acting as a member the row's own table lets read it; a row the named table doesn't hold, or a table they can't open, is 404
+POST	/v1/tables/{id}/rows/{row}/comments	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	starts a thread on a row or one of its cells, or replies in one of its threads, as the token's member (a token bound to an agent comments as the agent), for a token with tables:write acting as a member the row's own table lets comment; 404 for a row the named table doesn't hold, a thread on another row or a table they can't open
 GET	/v1/tables/{id}/rows/{row}/history	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+DELETE	/v1/tables/{id}/rows/{row}/threads/{thread}/comments/{comment}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	deletes (soft) a comment the token's member wrote, with its audit row in one transaction; another person's comment is 403 (a token never moderates), a thread on another row or a row the table doesn't hold is 404
+PATCH	/v1/tables/{id}/rows/{row}/threads/{thread}/comments/{comment}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	edits a comment the token's member wrote, with its audit row in one transaction; another person's comment is 403, a thread on another row or a row the table doesn't hold is 404
+POST	/v1/tables/{id}/rows/{row}/threads/{thread}/reopen	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	reopens a thread on the row, with its audit row in one transaction, for its starter or someone who can edit the row (403 otherwise); a thread on another row is 404
+POST	/v1/tables/{id}/rows/{row}/threads/{thread}/resolve	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	resolves a thread on the row, with its audit row in one transaction, for its starter or someone who can edit the row (403 otherwise); a thread on another row is 404
 GET	/v1/tables/{id}/trash	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/tables/{id}/trash/restore	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/tables/{id}/views	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	the table's shared views and the caller's own, for a token with tables:read acting as a member who may open the table; a table they can't open is 404
+POST	/v1/tables/{id}/views	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	adds a view, with its audit row in one transaction: a personal one for anyone who opens the table, a shared one for a manager of the table only (403 otherwise); a table they can't open is 404
+POST	/v1/tables/{id}/views/batch	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	creates, changes and deletes up to 100 views under an idempotency key, checked whole first, each by the view rule (own views for anyone who opens the table, shared ones for its managers) and each with its audit row in one transaction
+DELETE	/v1/tables/{id}/views/{view}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	moves a view to the table's trash, with its audit row in one transaction: the caller's own view, or a shared one for a manager of the table (403); another person's own view is 404
+PATCH	/v1/tables/{id}/views/{view}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	changes a view, with its audit row in one transaction: the caller's own view, or a shared one for a manager of the table (403); another person's own view is 404, a locked view 409
 GET	/v1/tasks	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/tasks	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/tasks/{id}/status	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	

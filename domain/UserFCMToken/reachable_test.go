@@ -33,6 +33,10 @@ func TestReachableQueriesShareThePushGate(t *testing.T) {
 	if strings.Contains(reachableThroughPauseQuery, "users_notification_preferences") {
 		t.Fatal("ReachableThroughPause must not apply the gate")
 	}
+	// Notify anyway and a VIP's words pass a schedule as they pass quiet hours.
+	if !strings.Contains(reachableQuery(), "person_preferences") || strings.Contains(reachableThroughPauseQuery, "person_preferences") {
+		t.Fatal("the schedule must hold ReachableNow, and only ReachableNow")
+	}
 	// A deactivated person is never told, through a pause or not (BE-11-G-3).
 	for name, q := range map[string]string{"ReachableNow": reachableQuery(), "ReachableThroughPause": reachableThroughPauseQuery} {
 		if !strings.Contains(q, stillActive("u.id")) {

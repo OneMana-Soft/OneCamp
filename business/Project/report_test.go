@@ -136,6 +136,28 @@ func TestNarrowToKeepsToTheReadersProjects(t *testing.T) {
 	}
 }
 
+// Exact (a dashboard's widget): projects asked for that are none of the
+// reader's keep nothing, never all the reader's others; one of theirs keeps it.
+func TestNarrowForExactKeepsNothingWhenNoneIsTheReaders(t *testing.T) {
+	mine := []domain.ReportProject{{UUID: "a"}, {UUID: "b"}}
+	for _, c := range []struct {
+		only        []string
+		exact, none bool
+		keep        map[string]bool
+	}{
+		{[]string{"gone"}, true, true, map[string]bool{}},
+		{[]string{"gone"}, false, false, map[string]bool{}},
+		{[]string{"gone", "a"}, true, false, map[string]bool{"a": true}},
+		{nil, true, false, map[string]bool{}},
+		{[]string{" ", ""}, true, false, map[string]bool{}},
+	} {
+		keep, none := narrowFor(mine, c.only, c.exact)
+		if none != c.none || !reflect.DeepEqual(keep, c.keep) {
+			t.Errorf("narrowFor(%q, exact %v) = %v, %v; want %v, %v", c.only, c.exact, keep, none, c.keep, c.none)
+		}
+	}
+}
+
 // Done by the end of its due day in the reader's zone, wherever the due date's
 // instant falls: a seeded due date at 17:00 UTC, finished the next morning in
 // India, is a day late, not on time.

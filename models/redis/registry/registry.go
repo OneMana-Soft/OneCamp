@@ -227,6 +227,18 @@ var LoginRate = withArity(Spec{
 	Description: "Login attempts per (surface, IP). Window-locked counter; trips after 20 hits.",
 }, 2) // (surface, ip)
 
+// UserWriteRate counts a signed-in member's writes to one surface (an
+// export's tell to the audit log), per member, in a 15-minute window. A count
+// per address (LoginRate) is shared by everyone behind one office's NAT, so a
+// busy team's tells were refused and the log lost them (V-363).
+var UserWriteRate = withArity(Spec{
+	Namespace:   "user:write:rate",
+	TTL:         15 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "A member's writes per (surface, member). Fixed 15-minute window.",
+}, 2) // (surface, member or address)
+
 // PublicReadRate counts reads of a page anyone may open (a booking page's free
 // times, a guest's booking link), per address and per page, in a one-minute
 // window. LoginRate counts only writes; these reads cost the server, and a
@@ -794,6 +806,27 @@ var ApiIdempotency = withArity(Spec{
 	Category:    CategoryRateLimit,
 	Description: "A write's answer under its Idempotency-Key (the public API's writes, a doc import), replayed for a retry with the same body.",
 }, 3) // (caller: an API token's id or member:<uuid>, route, key)
+
+// ApiBatchItems is a batch's record under its key (helpers/idempotency
+// Items): the items a public-API fields or views batch has done and their
+// answers, so the same batch sent again skips them.
+var ApiBatchItems = withArity(Spec{
+	Namespace:   "apibatch:items",
+	TTL:         24 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategoryRateLimit,
+	Description: "A public-API batch's done items and their answers under its key, so a retry after a failure part way never applies one twice.",
+}, 3) // (caller, route, key)
+
+// ApiBatchClaim is a send's hold on a batch's key while it applies its items:
+// a second send with the key meanwhile is refused as still on its way.
+var ApiBatchClaim = withArity(Spec{
+	Namespace:   "apibatch:claim",
+	TTL:         10 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryRateLimit,
+	Description: "A public-API batch's hold on its key while it is applied; let go when it ends, or after 10 minutes.",
+}, 3) // (caller, route, key)
 
 // MCPToolReadRate bounds how fast one credential can READ through the MCP server.
 //

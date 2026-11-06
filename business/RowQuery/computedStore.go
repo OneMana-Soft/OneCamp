@@ -397,8 +397,8 @@ func keptChanges(ctx context.Context, cs *rowLedger.ChangeSet) error {
 		}
 	}
 	for _, ch := range cs.Changes {
-		if ch.Field == rowLedger.FieldPosition {
-			continue // a move changes no value
+		if ch.Field == rowLedger.FieldPosition || ch.Field == rowLedger.FieldColumn {
+			continue // a move changes no value; a column's change is the trigger's (migration 538)
 		}
 		add(ch.Row)
 		if strings.HasPrefix(ch.Field, rowLedger.LinksPrefix) {

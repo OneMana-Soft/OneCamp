@@ -631,7 +631,7 @@ func (s *service) importAlarms(ctx context.Context, me uuid.UUID, e *models.Even
 	if err != nil || len(ok) == 0 {
 		return
 	}
-	if err := s.rem.setReminders(ctx, e.ID, me, ok, now); err != nil {
+	if err := s.rem.setReminders(ctx, e.ID, me, ok, nil, now); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Calendar: an imported event's reminders couldn't be kept: %v", err)
 		return
 	}

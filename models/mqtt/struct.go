@@ -143,6 +143,11 @@ const (
 	// A person changed one of their preferences ({key, value}, business/
 	// Preferences), on their own activity topic only: their other devices follow.
 	MESSAGE_PREFERENCE = 47
+	// An event changed ({event_id, from, to}, business/Calendar head A): told
+	// to the activity topics of who may read it, and a project calendar's
+	// project topic, so open grids read their range again. Never a title:
+	// no more than a busy view shows. Number 48 allotted by INTEGRATOR-106.
+	MESSAGE_CALENDAR_LIVE = 48
 )
 
 // MqttInvitationAccepted is who accepted their invitation.

@@ -141,19 +141,3 @@ func HostByRule(ctx context.Context, roomName string, user *dgraphStruct.DgraphU
 func IsMemberIdentity(identity string) bool {
 	return helpers.IsDgraphUID(identity)
 }
-
-// IsWorkspaceAdmin reports whether a member (by their uuid) is one of the
-// workspace's admins now, as far as this call goes: an admin's powers never
-// reach a call an API token made (helpers.ActsThroughToken). Unknown, or a
-// database that doesn't answer, is no.
-func IsWorkspaceAdmin(ctx context.Context, userUUID string) bool {
-	if helpers.ActsThroughToken(ctx) {
-		return false
-	}
-	id, err := uuid.Parse(strings.TrimSpace(userUUID))
-	if err != nil {
-		return false
-	}
-	u, err := userDomain.GetUserByUUID(ctx, id)
-	return err == nil && u != nil && u.IsAdmin
-}

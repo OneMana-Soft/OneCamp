@@ -5,6 +5,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -32,4 +33,20 @@ func TablesByIDs(ctx context.Context, ids []uuid.UUID) ([]*DataTable, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// FieldsOfTables is the live fields of the tables among ids, by table, each
+// table's in ListFields' order, in one read.
+func FieldsOfTables(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID][]*Field, error) {
+	out := map[uuid.UUID][]*Field{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	fields, err := pgexec.Query(ctx, `SELECT `+fieldColumns+` FROM data_table_fields
+		WHERE table_id = ANY($1) AND deleted_at IS NULL ORDER BY table_id, position ASC, created_at ASC`,
+		func(r pgexec.Row) (*Field, error) { return scanField(r) }, ids)
+	for _, f := range fields {
+		out[f.TableId] = append(out[f.TableId], f)
+	}
+	return out, err
 }

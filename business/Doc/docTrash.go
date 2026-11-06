@@ -44,6 +44,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	opensearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
+	placesModel "github.com/akashc777/OneCamp/models/postgres/Places"
 	"github.com/google/uuid"
 )
 
@@ -738,16 +739,14 @@ func purgeDocRows(ctx context.Context, uuids []string) {
 			removeDocSnapshotObject(ctx, k)
 		}
 	}
-	for _, q := range []string{
-		`DELETE FROM resource_views WHERE resource_type = 'doc' AND resource_uuid = ANY($1)`,
-		`DELETE FROM saved_items WHERE item_type = 'doc' AND item_id = ANY($1)`,
-		`DELETE FROM guest_grants WHERE resource_type = 'doc' AND resource_id = ANY($1)`,
-	} {
-		if _, err := db.ExecContext(c, q, uuids); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/purgeDocRows %s: %v", strings.Fields(q)[2], err)
-		}
+	if err := forgetDocRows(ctx, "doc", uuids); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/purgeDocRows: %v", err)
 	}
 }
+
+// forgetDocRows is who viewed, saved and holds guest links to resources gone
+// for good, as every purge forgets them (models/postgres/Places).
+var forgetDocRows = placesModel.ForgetResourceRows
 
 // purgeExpiredTrash is the trash's retention: deletes older than the
 // retention period, removed for good, a batch at a time. Deletes from before

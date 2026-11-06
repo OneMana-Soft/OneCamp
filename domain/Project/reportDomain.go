@@ -35,19 +35,28 @@ const reportPerson = `uid user_uuid user_name user_full_name user_profile_object
 // reportTask is what the report reads of a task, its status changes included
 // for the flow of work. Only those: every edit to a task leaves an activity
 // (23 kinds), and a nested filter needs no index. (With its uid: Dgraph leaves
-// out a node with nothing to show, which an unassigned one could be.)
-const reportTask = `uid task_status task_priority task_due_date task_created_at task_status_since task_assignee { ` + reportPerson + ` }
+// out a node with nothing to show, which an unassigned one could be.) Its
+// uuid and name are for its type (business/TaskKeys) and its point on the
+// insights' chart.
+const reportTask = `uid task_uuid task_name task_status task_priority task_due_date task_created_at task_status_since task_assignee { ` + reportPerson + ` }
 	task_activities @filter(eq(activity_type, "` + dgraphStruct.ACTIVITY_TYPE_STATUS + `")) { activity_type activity_time activity_prev_state activity_next_state }`
 
 // GetDgraphReport reads, for every live project the person is in, its open
-// live tasks and the live tasks that closed since since.
-func GetDgraphReport(ctx context.Context, userDgraphUID string, since time.Time) ([]ReportProject, error) {
+// live tasks and the live tasks that closed since since, keeping to those
+// filter matches when it isn't "": a task list's filters as one condition
+// (domain/Task.TaskListFilter.Clause, the list's and the board's own), so a
+// report of a view counts the tasks the view shows.
+func GetDgraphReport(ctx context.Context, userDgraphUID string, since time.Time, filter string) ([]ReportProject, error) {
 	const epoch = `"1970-01-01T00:00:00Z"`
 	// Restricted tasks the person may not see are in no list of theirs
 	// (models/taskread).
 	tr, err := taskread.From(ctx)
 	if err != nil {
 		return nil, err
+	}
+	live := dgraphStruct.TASK_LIVE_FILTER + tr.And()
+	if filter != "" {
+		live += " AND (" + filter + ")"
 	}
 	closed := dgraphStruct.TASK_CLOSED_FILTER + ` AND ge(task_status_since, $since)`
 	query := fmt.Sprintf(`query Report($user: string, $since: string) {
@@ -59,7 +68,7 @@ func GetDgraphReport(ctx context.Context, userDgraphUID string, since time.Time)
 				closed: project_tasks @filter(%[2]s AND %[4]s) (orderdesc: task_status_since, first: %[5]d) { %[6]s }
 			}
 		}
-	}`, epoch, dgraphStruct.TASK_LIVE_FILTER+tr.And(), dgraphStruct.TASK_OPEN_FILTER, closed, ReportProjectsCap+1, reportTask)
+	}`, epoch, live, dgraphStruct.TASK_OPEN_FILTER, closed, ReportProjectsCap+1, reportTask)
 	resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx, query, map[string]string{
 		"$user": userDgraphUID, "$since": since.UTC().Format(time.RFC3339),
 	})

@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -252,12 +253,88 @@ func TestA8KTaskKeysAndTypes(t *testing.T) {
 		expect("someone outside the project", code, body, http.StatusNotFound)
 	})
 
+	t.Run("the list and the board filter by type, Task meaning every plain task (linear-03)", func(t *testing.T) {
+		// WEB-1 is a Bug (above); WEB-2 becomes a Feature; WEB-3 is back to a Task.
+		code, body := call("ben", taskKeysController.SetTaskType, nil, "", map[string]string{"task_uuid": w.assigned, "type_id": workTaxonomy.TypeFeature.String()})
+		expect("WEB-2 a Feature", code, body, http.StatusOK, `"builtin":"feature"`)
+		filter := func(ids ...string) string {
+			raw, _ := json.Marshal([]map[string]any{{"id": "task_work_type", "value": ids}})
+			return "filters=" + url.QueryEscape(string(raw))
+		}
+		bug, feature, task := workTaxonomy.TypeBug.String(), workTaxonomy.TypeFeature.String(), workTaxonomy.TypeTask.String()
+		for _, c := range []struct {
+			what       string
+			ids        []string
+			keep, drop []string
+		}{
+			{"Bug", []string{bug}, []string{"WEB-1"}, []string{"WEB-2", "WEB-3"}},
+			{"Task", []string{task}, []string{"WEB-3"}, []string{"WEB-1", "WEB-2"}},
+			{"Task and Bug", []string{task, bug}, []string{"WEB-1", "WEB-3"}, []string{"WEB-2"}},
+			{"Bug and Feature", []string{bug, feature}, []string{"WEB-1", "WEB-2"}, []string{"WEB-3"}},
+			{"no type at all", []string{uuid.NewString()}, nil, []string{"WEB-1", "WEB-2", "WEB-3"}},
+		} {
+			for _, read := range []struct {
+				where string
+				h     http.HandlerFunc
+				query string
+			}{
+				{"the list", projectController.GetProjectTaskList, "?pageSize=50&pageIndex=0&" + filter(c.ids...)},
+				{"the board", projectController.GetProjectTaskListForKanban, "?" + filter(c.ids...)},
+			} {
+				code, body := call("ben", read.h, map[string]string{"project_uuid": w.project}, read.query, nil)
+				if code != http.StatusOK {
+					t.Errorf("%s by %s: %d %s", read.where, c.what, code, body)
+					continue
+				}
+				for _, k := range c.keep {
+					if !strings.Contains(body, `"task_key":"`+k+`"`) {
+						t.Errorf("%s by %s leaves out %s: %s", read.where, c.what, k, body)
+					}
+				}
+				for _, k := range c.drop {
+					if strings.Contains(body, `"task_key":"`+k+`"`) {
+						t.Errorf("%s by %s keeps %s", read.where, c.what, k)
+					}
+				}
+			}
+		}
+	})
+
 	t.Run("keys and types never reach the graph", func(t *testing.T) {
 		got := string(w.dg.Query(t, fmt.Sprintf(`{ q(func: eq(task_uuid, %q)) { expand(_all_) } }`, w.task)))
 		for _, leak := range []string{"task_key", "task_work_type", "WEB-1"} {
 			if strings.Contains(got, leak) {
 				t.Errorf("the graph's task holds %q: %s", leak, got)
 			}
+		}
+	})
+
+	t.Run("the report slices work by the type it was given", func(t *testing.T) {
+		// Types live in Postgres and the graph's report reads none, so the
+		// report lays them on the tasks it read (B9-a). WEB-1, a Bug since
+		// above and still open, is the one dated task here, so its age makes
+		// the only type slice. The seed lists no project on ben (the report's
+		// root) and dates no task: this adds both.
+		var got struct {
+			T []struct {
+				UID string `json:"uid"`
+			} `json:"t"`
+			P []struct {
+				UID string `json:"uid"`
+			} `json:"p"`
+		}
+		raw := w.dg.Query(t, fmt.Sprintf(`{ t(func: eq(task_uuid, %q)) { uid } p(func: eq(project_uuid, %q)) { uid } }`, w.task, w.project))
+		if err := json.Unmarshal(raw, &got); err != nil || len(got.T) != 1 || len(got.P) != 1 {
+			t.Fatalf("WEB-1 and Website in the graph: %s, %v", raw, err)
+		}
+		w.dg.Mutate(t, []map[string]any{
+			{"uid": w.account("ben").UserDgraphInfo.Uid, "user_projects": []map[string]any{{"uid": got.P[0].UID}}},
+			{"uid": got.T[0].UID, "task_created_at": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)},
+		})
+		code, body := call("ben", projectController.Report, nil, "", nil)
+		expect("the report", code, body, http.StatusOK, `"by":"type","key":"`+workTaxonomy.TypeBug.String()+`","name":"Bug","cycle"`)
+		if strings.Contains(body, `"by":"type","key":"","name":""`) {
+			t.Errorf("the report reads WEB-1 as a plain task: %s", body)
 		}
 	})
 }

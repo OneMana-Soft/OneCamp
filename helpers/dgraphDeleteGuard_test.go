@@ -64,6 +64,7 @@ var dgraphDeletes = map[string]string{
 	"domain/Doc/docColor.go colorRequest":                                 "edit: a doc's colour taken off; the doc stays",
 	"domain/Doc/docDomain.go BulkRestoreDocs":                             "edit: a restore takes the archived mark off docs that come back",
 	"domain/Doc/docLook.go lookRequest":                                   "edit: a doc's look fields (icon, cover, width) cleared; the doc stays",
+	"domain/Board/retention.go PurgeBoardNodes":                           "purge: boards past the trash rule take their nodes, their comments and the links tasks and projects held to them; the retention sweep's one audit row counts them",
 	"domain/Doc/docTree.go PurgeDocNodes":                                 "purge: docs purged from the trash take their nodes and the edges other docs held to them",
 	"domain/Doc/docTree.go RestoreDocs":                                   "edit: a restore takes the trash marks off docs that come back",
 	"domain/Doc/docTree.go TrashDocs":                                     "edit: trashing a doc moves its children up, off their old parent edges; the doc is marked deleted",

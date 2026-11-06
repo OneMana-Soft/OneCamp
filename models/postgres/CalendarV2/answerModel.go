@@ -25,6 +25,8 @@ type InstanceAnswer struct {
 	RespondedAt  time.Time
 	// Proposal is another time they proposed for this instance (nil for none).
 	Proposal *Proposal
+	// ByAway says their out of office made this decline (calendar head C).
+	ByAway bool
 }
 
 // Key is who answered.
@@ -44,7 +46,7 @@ func InstanceAnswersOf(ctx context.Context, db DB, series []uuid.UUID, rids []ti
 		return nil, nil
 	}
 	rows, err := db.QueryContext(ctx, `SELECT a.event_id, a.recurrence_id, a.user_id, a.email, a.response, a.note, a.responded_at,
-		a.proposed_start, a.proposed_end, a.proposed_against_start, a.proposed_against_end
+		a.proposed_start, a.proposed_end, a.proposed_against_start, a.proposed_against_end, a.by_away
 		FROM event_instance_answers a
 		JOIN unnest($1::uuid[], $2::timestamptz[]) AS i (event_id, recurrence_id)
 		  ON a.event_id = i.event_id AND a.recurrence_id = i.recurrence_id`, uuidArray(series), timesArray(rids))
@@ -59,7 +61,7 @@ func InstanceAnswersOf(ctx context.Context, db DB, series []uuid.UUID, rids []ti
 		var user uuid.NullUUID
 		var pStart, pEnd, pAgainstStart, pAgainstEnd sql.NullTime
 		if err := rows.Scan(&a.EventID, &a.RecurrenceID, &user, &a.Email, &a.Response, &a.Note, &a.RespondedAt,
-			&pStart, &pEnd, &pAgainstStart, &pAgainstEnd); err != nil {
+			&pStart, &pEnd, &pAgainstStart, &pAgainstEnd, &a.ByAway); err != nil {
 			return nil, err
 		}
 		if user.Valid {
@@ -78,21 +80,22 @@ func InstanceAnswersOf(ctx context.Context, db DB, series []uuid.UUID, rids []ti
 func SetInstanceAnswer(ctx context.Context, db DB, a InstanceAnswer) error {
 	const set = `DO UPDATE SET response = EXCLUDED.response, note = EXCLUDED.note, responded_at = EXCLUDED.responded_at,
 			proposed_start = EXCLUDED.proposed_start, proposed_end = EXCLUDED.proposed_end,
-			proposed_against_start = EXCLUDED.proposed_against_start, proposed_against_end = EXCLUDED.proposed_against_end`
+			proposed_against_start = EXCLUDED.proposed_against_start, proposed_against_end = EXCLUDED.proposed_against_end,
+			by_away = EXCLUDED.by_away`
 	v := a.Proposal.values()
 	var err error
 	if a.UserID != nil {
 		_, err = db.ExecContext(ctx, `INSERT INTO event_instance_answers (event_id, recurrence_id, user_id, email, response, note, responded_at,
-			proposed_start, proposed_end, proposed_against_start, proposed_against_end)
-			VALUES ($1, $2, $3, '', $4, $5, $6, $7, $8, $9, $10)
+			proposed_start, proposed_end, proposed_against_start, proposed_against_end, by_away)
+			VALUES ($1, $2, $3, '', $4, $5, $6, $7, $8, $9, $10, $11)
 			ON CONFLICT (event_id, recurrence_id, user_id) WHERE user_id IS NOT NULL `+set,
-			a.EventID, a.RecurrenceID, *a.UserID, a.Response, a.Note, a.RespondedAt, v[0], v[1], v[2], v[3])
+			a.EventID, a.RecurrenceID, *a.UserID, a.Response, a.Note, a.RespondedAt, v[0], v[1], v[2], v[3], a.ByAway)
 	} else {
 		_, err = db.ExecContext(ctx, `INSERT INTO event_instance_answers (event_id, recurrence_id, user_id, email, response, note, responded_at,
-			proposed_start, proposed_end, proposed_against_start, proposed_against_end)
-			VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10)
+			proposed_start, proposed_end, proposed_against_start, proposed_against_end, by_away)
+			VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			ON CONFLICT (event_id, recurrence_id, lower(email)) WHERE user_id IS NULL `+set,
-			a.EventID, a.RecurrenceID, strings.ToLower(strings.TrimSpace(a.Email)), a.Response, a.Note, a.RespondedAt, v[0], v[1], v[2], v[3])
+			a.EventID, a.RecurrenceID, strings.ToLower(strings.TrimSpace(a.Email)), a.Response, a.Note, a.RespondedAt, v[0], v[1], v[2], v[3], a.ByAway)
 	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.SetInstanceAnswer err: %+v", err)

@@ -296,13 +296,13 @@ func TestALinkToItemsKeepsItsKind(t *testing.T) {
 	tbl := &model.DataTable{Id: uuid.New()}
 	for _, typ := range []string{model.FieldText, model.FieldSelect, model.FieldFormula} {
 		_, err := computedFieldConfig(context.Background(), Actor{UserID: uuid.New()}, tbl, []*model.Field{docs}, docs.Id,
-			&FieldInput{Name: "Docs", Type: typ, Config: map[string]interface{}{"formula": `"x"`}})
+			&FieldInput{Name: "Docs", Type: typ, Config: map[string]interface{}{"formula": `"x"`}}, newLinked())
 		if err == nil || !strings.Contains(err.Error(), "can't become another kind of field") {
 			t.Errorf("a link to docs became %s: %v", typ, err)
 		}
 	}
 	if _, err := computedFieldConfig(context.Background(), Actor{UserID: uuid.New()}, tbl, []*model.Field{docs}, docs.Id,
-		&FieldInput{Name: "Docs", Type: model.FieldRelation, Config: map[string]interface{}{"relation_target": "task"}}); err != nil {
+		&FieldInput{Name: "Docs", Type: model.FieldRelation, Config: map[string]interface{}{"relation_target": "task"}}, newLinked()); err != nil {
 		t.Errorf("a link to docs couldn't link to tasks instead: %v", err)
 	}
 }

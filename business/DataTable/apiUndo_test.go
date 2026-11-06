@@ -21,7 +21,28 @@ func TestEveryRecoverableTablesOpNamesItsPublishedUndo(t *testing.T) {
 		"tables.rows.batch":    "[tables.row.delete tables.row.history tables.row.update tables.trash.restore]",
 		"tables.row.delete":    "[tables.trash.restore]",
 		"tables.row.update":    "[tables.row.history tables.row.update]",
-		"tables.trash.restore": "[tables.row.delete]",
+		"tables.trash.restore": "[tables.field.delete tables.row.delete tables.view.delete]",
+		// Tables H2b: a field or a view made is deleted to the trash, one
+		// changed is changed back (a field's cells from their rows'
+		// history), and one deleted comes back from the trash.
+		"tables.field.create": "[tables.field.delete]",
+		"tables.field.update": "[tables.field.update tables.row.history tables.row.update]",
+		"tables.field.delete": "[tables.trash.restore]",
+		"tables.fields.batch": "[tables.field.delete tables.field.update tables.row.history tables.row.update tables.trash.restore]",
+		"tables.view.create":  "[tables.view.delete]",
+		"tables.view.update":  "[tables.view.update]",
+		"tables.view.delete":  "[tables.trash.restore]",
+		"tables.views.batch":  "[tables.trash.restore tables.view.delete tables.view.update]",
+		// Tables H2c: a table made is deleted to the tables' trash, one
+		// renamed is renamed back, one deleted comes back and one brought
+		// back is deleted again; a thread resolved is reopened, and back. An
+		// edited or deleted comment isn't: its words aren't kept for the API.
+		"tables.table.create":       "[tables.table.delete]",
+		"tables.table.update":       "[tables.table.update]",
+		"tables.table.delete":       "[tables.table.restore]",
+		"tables.table.restore":      "[tables.table.delete]",
+		"tables.row.thread.resolve": "[tables.row.thread.reopen]",
+		"tables.row.thread.reopen":  "[tables.row.thread.resolve]",
 	}
 	seen := 0
 	for _, op := range all {

@@ -386,11 +386,11 @@ business/DataTable/computed.go :: loadLinked :: .load
 business/DataTable/computed.go :: planDeeper :: planUnder
 business/DataTable/computed.go :: planUnder :: .checkRollup
 business/DataTable/computed.go :: planUnder :: .target
-business/DataTable/computed.go :: rollupChainProblem :: fieldsOf
+# 3 Nov 2026: rollupChainProblem's line went when its parameter fieldsOf, which shared the package's fieldsOf (model.ListFields),
+# became tableFields. The guard can't see through that function value; it is the caller's read, which reads each table once.
 business/DataTable/computed.go :: planLinkedReads :: .checkRollup
 business/DataTable/computed.go :: readLinks :: .countLinks
 business/DataTable/computed.go :: readLinks :: model.LinksOf
-business/DataTable/dataTableBusiness.go :: CreateTableFromTemplate :: buildView
 business/DataTable/dataTableBusiness.go :: CreateTableFromTemplate :: model.CreateView
 business/DataTable/importBase.go :: addOptions :: UpdateField
 business/DataTable/importBase.go :: dropOptions :: UpdateField
@@ -470,7 +470,6 @@ business/Doc/docRepair.go :: latestGoodSnapshotBody :: getDocSnapshotObject
 business/Doc/docRepair.go :: repairDocs :: domain.GetCollabDocByUUID
 business/Doc/docRepair.go :: repairDocs :: domain.GetDocBodyPage
 business/Doc/docTrash.go :: purge :: opensearchModels.ForgetEntry
-business/Doc/docTrash.go :: purgeDocRows :: .ExecContext
 business/Doc/docTrash.go :: purgeDocRows :: removeDocSnapshotObject
 business/Doc/docTrash.go :: searchFollowsRestore :: domain.SyncDocSearch
 business/Doc/docTrash.go :: searchFollowsTrash :: domain.SyncDocSearch
@@ -1103,6 +1102,10 @@ business/TaskWriter/contract.go :: Apply :: reorder
 business/WorkFeed/feed.go :: Publish :: publishOne
 business/WorkFeed/feed.go :: Publish :: publishReread
 business/WorkFeed/prune.go :: prune :: deleteBefore
+# 3 Nov 2026, TABLES-LEAD-167 (main's ruling, 3 Nov): an API fields or views batch applies each item in its own
+# transaction with its audit row (main's audit rule, 3 Nov), so runSteps calls applyItem once per item; bounded by
+# the batch cap of 100 items in all (maxSchemaBatch), counted before anything is read, recorded or applied.
+business/DataTable/apiBatch.go :: runSteps :: applyItem
 # RELEASE-LINE ONLY (main and without-ai, from v2.75.0; again for v2.76.0): the release lines carry
 # the old demo seeder (business/DemoSeed as the line has it), never beta's; its loops are recorded as they are.
 business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.GetBasicDgraphChannelInfoByUUID

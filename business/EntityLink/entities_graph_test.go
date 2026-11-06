@@ -8,6 +8,7 @@ import (
 	"time"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	domain "github.com/akashc777/OneCamp/domain/EntityLink"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
@@ -23,6 +24,7 @@ const (
 	teamOut    = "e0000000-0000-4000-8000-000000000002"
 	boardOpen  = "f0000000-0000-4000-8000-000000000001"
 	boardShut  = "f0000000-0000-4000-8000-000000000002"
+	boardGone  = "f0000000-0000-4000-8000-000000000003"
 	cmtOnOpen  = "ab000000-0000-4000-8000-000000000001"
 	cmtOnShut  = "ab000000-0000-4000-8000-000000000002"
 	memMine    = "ac000000-0000-4000-8000-000000000001"
@@ -54,9 +56,9 @@ func withGraphKinds(t *testing.T) {
 	}}
 	past := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	zero := time.Time{}
-	savedC, savedM, savedT, savedB, savedK, savedMem := readChannelChips, readMessageChips, readTeamChips, readBoardTitles, readCommentChips, readMemoryChips
+	savedC, savedM, savedT, savedB, savedK, savedMem := readChannelChips, readMessageChips, readTeamChips, readBoardReads, readCommentChips, readMemoryChips
 	t.Cleanup(func() {
-		readChannelChips, readMessageChips, readTeamChips, readBoardTitles, readCommentChips, readMemoryChips = savedC, savedM, savedT, savedB, savedK, savedMem
+		readChannelChips, readMessageChips, readTeamChips, readBoardReads, readCommentChips, readMemoryChips = savedC, savedM, savedT, savedB, savedK, savedMem
 	})
 	readChannelChips = func(_ context.Context, ids []string) ([]domain.ChannelChip, error) {
 		all := map[string]domain.ChannelChip{
@@ -101,11 +103,11 @@ func withGraphKinds(t *testing.T) {
 		}
 		return []domain.TeamChip{{UUID: teamIn, Name: "Design", Member: 1, DeletedAt: &zero}, {UUID: teamOut, Name: "Board", DeletedAt: &zero}}, nil
 	}
-	readBoardTitles = func(_ context.Context, ids []string, userUUID string) (map[string]string, error) {
+	readBoardReads = func(_ context.Context, ids []string, userUUID string) (map[string]boardBusiness.BoardRead, error) {
 		if userUUID != reader.UserUUID {
 			return nil, fmt.Errorf("read as %q", userUUID)
 		}
-		return map[string]string{boardOpen: "Flows"}, nil
+		return map[string]boardBusiness.BoardRead{boardOpen: {Title: "Flows"}, boardGone: {Gone: true}}, nil
 	}
 	readCommentChips = func(_ context.Context, ids []string) ([]domain.CommentChip, error) {
 		on := func(id, doc string) domain.CommentChip {
@@ -131,15 +133,16 @@ func withGraphKinds(t *testing.T) {
 
 // TestTheGraphKindsShowOnlyWhatTheirReaderMaySee: a channel as the Access
 // Resolver decides it; a post as its channel is; a team for its people; a
-// board by its own rule; a comment as what it's on; a memory item for its
-// owner alone. Whatever the reader can't see says "none" and nothing else.
+// board by its own rule, and gone once deleted to those it was open to; a
+// comment as what it's on; a memory item for its owner alone. Whatever the
+// reader can't see says "none" and nothing else.
 func TestTheGraphKindsShowOnlyWhatTheirReaderMaySee(t *testing.T) {
 	withGraphKinds(t)
 	refs := []Ref{
 		{"channel", openChan}, {"channel", closedChan}, {"channel", oldChan},
 		{"message", postOpen}, {"message", postClosed}, {"message", postGone},
 		{"team", teamIn}, {"team", teamOut},
-		{"board", boardOpen}, {"board", boardShut},
+		{"board", boardOpen}, {"board", boardShut}, {"board", boardGone},
 		{"comment", cmtOnOpen}, {"comment", cmtOnShut},
 		{"memory", memMine}, {"memory", memTheirs},
 	}
@@ -151,7 +154,7 @@ func TestTheGraphKindsShowOnlyWhatTheirReaderMaySee(t *testing.T) {
 		"channel ok launch", "channel none", "channel gone",
 		"message ok See the launch plan", "message none", "message gone",
 		"team ok Design", "team none",
-		"board ok Flows", "board none",
+		"board ok Flows", "board none", "board gone",
 		"comment ok Looks good", "comment none",
 		"memory ok Ship on Friday", "memory none",
 	}
@@ -167,7 +170,7 @@ func TestTheGraphKindsShowOnlyWhatTheirReaderMaySee(t *testing.T) {
 	if d := got[3].Data; d["channel_id"] != openChan || d["channel_name"] != "launch" || d["by_name"] != "Maya Lin" {
 		t.Errorf("a post's data: %+v", d)
 	}
-	if d := got[10].Data; d["on_kind"] != "doc" || d["on_id"] != openDoc {
+	if d := got[11].Data; d["on_kind"] != "doc" || d["on_id"] != openDoc {
 		t.Errorf("a comment's data: %+v", d)
 	}
 }

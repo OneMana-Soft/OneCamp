@@ -15,7 +15,10 @@ package integration_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -23,8 +26,10 @@ import (
 	"github.com/google/uuid"
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
+	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	boardController "github.com/akashc777/OneCamp/controllers/Board"
 	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
+	guestController "github.com/akashc777/OneCamp/controllers/Guest"
 	calendarModel "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 )
 
@@ -119,8 +124,69 @@ func TestEveryBoardShareAndExportIsInTheAuditLog(t *testing.T) {
 		if rec := w.call(boardController.DeleteBoard, "maya", `{"board_uuid":"`+none+`"}`, ""); rec.Code != http.StatusNotFound {
 			t.Fatalf("deleting a board that isn't there: HTTP %d %s, want 404", rec.Code, rec.Body)
 		}
+		// Every other route that reads a board by its uuid (V-368): the id in
+		// the path, the query or the body, as each route takes it.
+		inBody := `{"board_uuid":"` + none + `","prompt":"a flow","title":"x"}`
+		routes := []struct {
+			name    string
+			handler http.HandlerFunc
+			body    string
+			params  []string
+			query   string
+		}{
+			{"GetBoardInfo", boardController.GetBoardInfo, "", []string{"board_uuid", none}, ""},
+			{"GetBoardForCollab", boardController.GetBoardForCollab, "", []string{"board_uuid", none}, ""},
+			{"GetBoardPermissions", boardController.GetBoardPermissions, "", nil, "?board_uuid=" + none},
+			{"UpdateBoard", boardController.UpdateBoard, inBody, nil, ""},
+			{"BoardCollabAuthorize", boardController.BoardCollabAuthorize, inBody, nil, ""},
+			{"GenerateBoardDiagram", boardController.GenerateBoardDiagram, inBody, nil, ""},
+			{"PlanBoardDiagram", boardController.PlanBoardDiagram, inBody, nil, ""},
+			{"GenerateBoardDiagramStream", boardController.GenerateBoardDiagramStream, inBody, nil, ""},
+			{"RefineBoardDiagram", boardController.RefineBoardDiagram, inBody, nil, ""},
+			{"ClusterBoard", boardController.ClusterBoard, inBody, nil, ""},
+			{"GenerateBoardUI", boardController.GenerateBoardUI, inBody, nil, ""},
+			{"RefineBoardUI", boardController.RefineBoardUI, inBody, nil, ""},
+		}
+		for _, rt := range routes {
+			var rec *httptest.ResponseRecorder
+			if rt.query != "" {
+				rec = w.callQuery(rt.handler, "maya", rt.query)
+			} else {
+				rec = w.callAt(rt.handler, "maya", false, rt.body, rt.params...)
+			}
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("%s on a board that isn't there: HTTP %d %s, want 404", rt.name, rec.Code, rec.Body)
+			}
+		}
 		time.Sleep(500 * time.Millisecond)
 		trailRows(t, w.env.PG, none, 0)
+	})
+	t.Run("a link to a board made and turned off is two rows under boards with the link's id", func(t *testing.T) {
+		if err := settingsBusiness.SetGuestAccessEnabled(true); err != nil {
+			t.Fatal(err)
+		}
+		rec := w.guestLink("maya", "board", plan)
+		var out struct {
+			Data struct {
+				GrantID string `json:"grant_id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); rec.Code != http.StatusOK || err != nil || out.Data.GrantID == "" {
+			t.Fatalf("Maya makes a link to the plan: %d %s", rec.Code, rec.Body)
+		}
+		if rec := w.callAt(guestController.RevokeResourceGuestLink, "maya", false, "", "id", out.Data.GrantID); rec.Code != http.StatusOK {
+			t.Fatalf("Maya turns it off: %d %s", rec.Code, rec.Body)
+		}
+		var boards []trailRow
+		for _, r := range trailRows(t, w.env.PG, out.Data.GrantID, 4) {
+			if r.category == "boards" {
+				boards = append(boards, r)
+			}
+		}
+		if len(boards) != 2 || boards[0].action != "board.guest_link_made" || boards[1].action != "board.guest_link_turned_off" ||
+			!strings.Contains(boards[0].meta, plan) || !strings.Contains(boards[1].meta, plan) {
+			t.Fatalf("the plan's own rows for its link: %+v", boards)
+		}
 	})
 	t.Run("a share, an export and a removal on a private board never name it", func(t *testing.T) {
 		if rec := w.call(boardController.UpdateBoardPermissions, "maya", `{"board_uuid":"`+diary+`","add_editors":["`+sam+`"]}`, ""); rec.Code != http.StatusOK {
@@ -203,6 +269,56 @@ func TestEveryCalendarChangeIsInTheAuditLog(t *testing.T) {
 	}
 	if !strings.Contains(rows[0].meta, riaID) {
 		t.Errorf("the share's row doesn't name Ria: %s", rows[0].meta)
+	}
+	// A link to the calendar (V-398): stopping one when none is live records
+	// nothing; a link made, made anew over it, and stopped are a row each, by
+	// Sam under calendar, saying what it shows and never its token or address.
+	feed := func(method, body string, wantCode int) string {
+		t.Helper()
+		handler := eventController.MakeCalendarFeed
+		if method == http.MethodDelete {
+			handler = eventController.StopCalendarFeed
+		}
+		rec := call(t, handler, method, "/calendar/calendars/"+own.String()+"/feed", sam, body, map[string]string{"calendarId": own.String()})
+		if rec.Code != wantCode {
+			t.Fatalf("Sam's %s of his calendar's link: HTTP %d %s", method, rec.Code, rec.Body.String())
+		}
+		if method == http.MethodDelete {
+			return ""
+		}
+		var made struct {
+			Data struct {
+				URL string `json:"url"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &made); err != nil || !strings.HasSuffix(made.Data.URL, ".ics") {
+			t.Fatalf("no link in %s (%v)", rec.Body.String(), err)
+		}
+		return made.Data.URL
+	}
+	feed(http.MethodDelete, "", http.StatusNoContent)
+	links := []string{feed(http.MethodPut, `{"scope":"busy"}`, http.StatusOK)}
+	trailRows(t, env.PG, own.String(), 5)
+	links = append(links, feed(http.MethodPut, `{"scope":"full"}`, http.StatusOK))
+	trailRows(t, env.PG, own.String(), 6)
+	feed(http.MethodDelete, "", http.StatusNoContent)
+	rows = trailRows(t, env.PG, own.String(), 7)
+	for i, w := range []trailRow{
+		{action: "calendar.feed.made", summary: "Made a link to a calendar (busy only)"},
+		{action: "calendar.feed.made", summary: "Made a new link to a calendar (everything), stopping the old one (busy only)"},
+		{action: "calendar.feed.stopped", summary: "Stopped a link to a calendar (everything)"},
+	} {
+		if r := rows[4+i]; r.category != "calendar" || r.action != w.action || r.summary != w.summary || r.actor != sam.UserPostgresInfo.Id.String() {
+			t.Errorf("row %d: %+v, want %s %q by Sam under calendar", 4+i, r, w.action, w.summary)
+		}
+	}
+	for _, link := range links {
+		token := strings.TrimSuffix(path.Base(link), ".ics")
+		for i, r := range rows {
+			if strings.Contains(r.meta, token) || strings.Contains(r.summary, token) || strings.Contains(r.meta, "/public/calendar/") {
+				t.Errorf("row %d tells a link or its token: %+v", i, r)
+			}
+		}
 	}
 	chainVerifies(t)
 }

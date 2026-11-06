@@ -67,6 +67,9 @@ const (
 	EventCalendarUpdated   EventType = "calendar.updated"
 	EventCalendarCancelled EventType = "calendar.cancelled"
 	EventCalendarAnswered  EventType = "calendar.rsvp"
+	// EventCalendarReminder is a reminder a person set to come by email
+	// (calendar head A, gcal-5): sent as Requested.
+	EventCalendarReminder EventType = "calendar.reminder"
 )
 
 // Recipient describes a single user the dispatcher should consider. Only the
@@ -121,6 +124,17 @@ type Event struct {
 	// Used for events where email is the primary channel (digest, calendar
 	// reminders) and where online-status is irrelevant.
 	SkipOnlineCheck bool
+
+	// Requested is an email the recipient asked for by itself, such as a
+	// reminder they set to come by email. Their email switch and per-kind
+	// choices don't hold it back, nor do quiet hours defer it (it is due
+	// now); suppression still does. It carries no unsubscribe link, since an
+	// unsubscribe never stops it: they stop it where they asked for it.
+	Requested bool
+
+	// Why is the email's footer line in place of the one about notifications:
+	// for a Requested email, where to stop it.
+	Why string
 }
 
 // Dispatch is the single entry point. Returns the number of rows enqueued.
@@ -216,6 +230,9 @@ func Dispatch(ctx context.Context, evt Event) int {
 			continue
 		}
 		pref := prefs[uid]
+		if pref == nil && evt.Requested {
+			pref = &prefModels.UserNotificationPreference{}
+		}
 		if pref == nil {
 			// No preference row exists. We *could* lazily create one
 			// here, but it's cheaper to delay creation to the first
@@ -259,10 +276,7 @@ func keepReaders(ctx context.Context, evt Event, candidates []uuid.UUID) []uuid.
 // remaining gates (online-check, quiet-hours, render, dedup) all happen
 // here.
 func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pref *prefModels.UserNotificationPreference) bool {
-	if !pref.EmailEnabled {
-		return false
-	}
-	if !eventEnabledForPref(evt.Type, pref) {
+	if !evt.Requested && (!pref.EmailEnabled || !eventEnabledForPref(evt.Type, pref)) {
 		return false
 	}
 
@@ -277,6 +291,16 @@ func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pre
 	// next_retry_at at insert time so the worker can never pick the row
 	// up before the window closes.
 	deliverAt, deferred := deliveryTime(time.Now(), pref)
+	if evt.Requested {
+		deliverAt, deferred = time.Now(), false
+	}
+
+	// A Requested email carries no unsubscribe link, since an unsubscribe
+	// never stops it; its Why says where to stop it instead.
+	unsubscribeToken := pref.UnsubscribeToken
+	if evt.Requested {
+		unsubscribeToken = ""
+	}
 
 	ctaURL := ctaURLFor(evt, user.Id.String())
 	tmplData := emailService.TemplateData{
@@ -288,9 +312,10 @@ func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pre
 		Body:           evt.Body,
 		CTAText:        evt.CTAText,
 		CTAURL:         ctaURL,
-		UnsubscribeURL: buildUnsubscribeURL(pref.UnsubscribeToken),
+		UnsubscribeURL: buildUnsubscribeURL(unsubscribeToken),
 		BrandName:      "OneCamp",
 		BrandLogo:      brandLogoURL(),
+		Why:            evt.Why,
 	}
 	html, text, err := emailService.Render(tmplData)
 	if err != nil {
@@ -319,7 +344,7 @@ func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pre
 		"actor_uuid":        evt.ActorUUID,
 		"recipient":         user.Id.String(),
 		"deferred":          fmt.Sprintf("%t", deferred),
-		"unsubscribe_token": pref.UnsubscribeToken,
+		"unsubscribe_token": unsubscribeToken,
 	})
 
 	in := emailQueueModels.EnqueueInput{
@@ -403,78 +428,15 @@ func isUserOnline(ctx context.Context, userUUID string) bool {
 }
 
 // deliveryTime is when an email may go out: after a pause, then past quiet
-// hours as they stand at that moment. Returns (whenToDeliver, deferred).
+// hours (QuietHoursUntil: the person's schedule, or the daily window) as they
+// stand at that moment. Returns (whenToDeliver, deferred).
 func deliveryTime(now time.Time, p *prefModels.UserNotificationPreference) (time.Time, bool) {
 	from := now
 	if until := p.QuietUntil(now); until != nil {
 		from = *until
 	}
-	at, _ := quietHoursDelay(from, p)
+	at, _ := p.QuietHoursUntil(from)
 	return at, at.After(now)
-}
-
-// quietHoursDelay decides whether we should defer the email past the user's
-// quiet-hours window. Returns (whenToDeliver, deferred).
-func quietHoursDelay(now time.Time, p *prefModels.UserNotificationPreference) (time.Time, bool) {
-	if !p.QuietHoursEnabled || p.QuietHoursStart == nil || p.QuietHoursEnd == nil {
-		return now, false
-	}
-	loc := time.UTC
-	if p.QuietHoursTZ != nil && *p.QuietHoursTZ != "" {
-		if l, err := time.LoadLocation(*p.QuietHoursTZ); err == nil {
-			loc = l
-		}
-	}
-	local := now.In(loc)
-
-	startH, startM, ok1 := parseHHMM(*p.QuietHoursStart)
-	endH, endM, ok2 := parseHHMM(*p.QuietHoursEnd)
-	if !ok1 || !ok2 {
-		return now, false
-	}
-
-	startToday := time.Date(local.Year(), local.Month(), local.Day(), startH, startM, 0, 0, loc)
-	endToday := time.Date(local.Year(), local.Month(), local.Day(), endH, endM, 0, 0, loc)
-
-	// Two cases: same-day window (08:00 → 17:00) and overnight window (22:00 → 07:00).
-	// A window that starts where it ends is empty, as the push gate reads it.
-	if endToday.Equal(startToday) {
-		return now, false
-	}
-	if endToday.After(startToday) {
-		// Same-day. If now is inside, deliver at end.
-		if (local.Equal(startToday) || local.After(startToday)) && local.Before(endToday) {
-			return endToday, true
-		}
-		return now, false
-	}
-	// Overnight: in window if now ≥ start OR now < end (next morning).
-	if local.Equal(startToday) || local.After(startToday) {
-		// In window, deliver at end (next day).
-		return endToday.AddDate(0, 0, 1), true
-	}
-	if local.Before(endToday) {
-		return endToday, true
-	}
-	return now, false
-}
-
-func parseHHMM(s string) (int, int, bool) {
-	parts := strings.Split(s, ":")
-	if len(parts) != 2 {
-		return 0, 0, false
-	}
-	var h, m int
-	if _, err := fmt.Sscanf(parts[0], "%d", &h); err != nil {
-		return 0, 0, false
-	}
-	if _, err := fmt.Sscanf(parts[1], "%d", &m); err != nil {
-		return 0, 0, false
-	}
-	if h < 0 || h > 23 || m < 0 || m > 59 {
-		return 0, 0, false
-	}
-	return h, m, true
 }
 
 // setNextRetryByDedup is intentionally removed — quiet-hours deferral now
@@ -509,6 +471,9 @@ func buildUnsubscribeURL(token string) string {
 // frontendBaseURL is the package-private accessor used by wiring.go and
 // the dispatcher. It localises the import on services/Auth so callers in
 // this package can use frontendBaseURL() directly.
+// AppURL is a path of the app as an email links to it.
+func AppURL(path string) string { return frontendBaseURL() + path }
+
 func frontendBaseURL() string {
 	return authService.FrontendBaseURL()
 }

@@ -33,8 +33,9 @@ func GetCalendarReminders(w http.ResponseWriter, r *http.Request) {
 }
 
 // SetCalendarReminders sets them: minutes before, up to five; null goes back
-// to the default and [] is none.
-// PUT /calendar/events/{eventId}/reminders {minutes}
+// to the default and [] is none. email names those of them that come by
+// email rather than as a pop-up.
+// PUT /calendar/events/{eventId}/reminders {minutes, email}
 func SetCalendarReminders(w http.ResponseWriter, r *http.Request) {
 	who, ok := member(w, r)
 	if !ok {
@@ -42,12 +43,13 @@ func SetCalendarReminders(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		Minutes []int `json:"minutes"`
+		Email   []int `json:"email"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, reminderBodyLimit)).Decode(&in); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read those reminders."})
 		return
 	}
-	rem, err := business.Events.SetReminders(r.Context(), who, chi.URLParam(r, "eventId"), in.Minutes)
+	rem, err := business.Events.SetReminders(r.Context(), who, chi.URLParam(r, "eventId"), in.Minutes, in.Email)
 	if err != nil {
 		writeCalendarError(w, r, "SetCalendarReminders", err)
 		return

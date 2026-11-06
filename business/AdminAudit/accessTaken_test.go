@@ -105,6 +105,48 @@ func TestContextPrincipalSaysWhoActs(t *testing.T) {
 	}
 }
 
+// A row written while an agent or an API token acts names it beside the
+// person whose authority it carries: the agent its caller names, else the one
+// the call's token is bound to, and the token itself. An unbound token is the
+// person acting, its token named; a session in the app adds nothing.
+func TestARowNamesTheAgentAndTokenActingBesideThePerson(t *testing.T) {
+	id := uuid.New()
+	var ui userModels.UserInfo
+	ui.UserPostgresInfo.Id = id
+	ui.UserPostgresInfo.EmailID = "maya@example.com"
+	session := context.WithValue(context.Background(), helpers.UserInfoContextKey, ui)
+	token := context.WithValue(session, helpers.ApiTokenIDContextKey, "token-1")
+	bound := context.WithValue(token, helpers.ApiAgentIDContextKey, "agent-7")
+	for _, c := range []struct {
+		name, agent, kind, wantAgent, wantToken string
+		ctx                                     context.Context
+	}{
+		{name: "a session in the app", kind: ActorHuman, ctx: session},
+		{name: "an agent its caller names", agent: "agent-1", kind: ActorAgent, wantAgent: "agent-1", ctx: session},
+		{name: "an unbound API token", kind: ActorHuman, wantToken: "token-1", ctx: token},
+		{name: "an API token bound to an agent", kind: ActorAgent, wantAgent: "agent-7", wantToken: "token-1", ctx: bound},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rows := recordAs(t, nil)
+			err := RecordedAs(c.ctx, ContextPrincipal(c.ctx, c.agent), "board.label_refused", CategoryBoards, "Refused an export",
+				map[string]interface{}{"rule": "no_export"}, func() error { return nil })
+			if err != nil || len(*rows) != 1 {
+				t.Fatalf("RecordedAs = %v, %d rows; want one row", err, len(*rows))
+			}
+			r := (*rows)[0]
+			if r.kind != c.kind || r.actorID == nil || *r.actorID != id {
+				t.Errorf("the row is by %q %v; want %q, the person", r.kind, r.actorID, c.kind)
+			}
+			for key, want := range map[string]string{"agent_uuid": c.wantAgent, "token_id": c.wantToken, "rule": "no_export"} {
+				got, has := r.metadata[key]
+				if (want == "") == has || (has && got != want) {
+					t.Errorf("metadata[%s] = %v (present %v); want %q", key, got, has, want)
+				}
+			}
+		})
+	}
+}
+
 func TestRecordedAsWritesTheRowBeforeTheChange(t *testing.T) {
 	rows := recordAs(t, nil)
 	id := uuid.New()

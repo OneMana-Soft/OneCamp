@@ -21,12 +21,14 @@
 //     knows it, never as their tab claims; a guest's says nothing;
 //   - a tab speaks only for its own presence, and a tab that reconnects
 //     speaks for it at once: a member's or a call guest's as who they are, a
-//     share link visitor's by its tab's own key (V-337);
+//     share link visitor's by its tab's own key (V-337); a socket the tab has
+//     left takes nothing with it when it ends (V-353), and a socket carrying
+//     several docs speaks for each doc's own client (V-348);
 //   - a client's broadcast reaches no other tab, and its socket stays open.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { FakeBackend, FakeRedis, TestClient, startServer, until, sleep } from './testkit.js'
+import { FakeBackend, FakeRedis, TestClient, ended, startServer, until, sleep } from './testkit.js'
 import { personOf } from './presenceGuard.js'
 
 const BOARD_ID = '5b0f7a52-3c1e-4d8a-9f6b-2a7c4e1d9b30'
@@ -56,6 +58,27 @@ async function room(name = BOARD) {
         return tab
     }
     return { backend, collab, open }
+}
+
+// A tab's old socket ends after the tab has taken its presence over on a new
+// one (V-353). The relay never closes a superseded socket: the transport ends
+// it, or the ping check 30-60 s later. Its end takes nothing the new socket
+// holds: the server keeps the tab's presence, nobody hears the tab leave, and
+// the new socket goes on speaking for it. Each move is a doc's new connection
+// (again), who hears the tab there, and how (heard, said); `riding` are the
+// old socket's other docs.
+async function oldSocketEnds(collab, { old, riding = [], moves }) {
+    const left = moves.map(({ hears }) => hears.removals.length)
+    await ended(collab, old, ...riding)
+    for (const [i, { again, hears, heard, said }] of moves.entries()) {
+        const name = again.name.slice(0, 5)
+        const id = again.doc.clientID
+        const held = collab.server.hocuspocus.documents.get(again.name).awareness.getStates().has(id)
+        assert.ok(held, `${name}: the server keeps the tab's presence when its old socket ends`)
+        again.presence(said(9))
+        await until(() => heard(9), 1000, `${name}: the new socket speaks for the tab within 1 s of the old one's end`)
+        assert.ok(!hears.removals.slice(left[i]).includes(id), `${name}: nobody hears the tab leave when its old socket ends`)
+    }
 }
 
 test('a guest who may only look shows only who they are, under a name of their own, whatever else it sends', async () => {
@@ -286,9 +309,7 @@ test("a tab that reconnects speaks for its presence at once, on a board and on a
 
         // The old socket's end takes nothing of the tab's presence with it;
         // the new socket's end takes it.
-        await sam.close()
-        await sleep(300)
-        assert.ok(heard(2), `${name}: Sam's presence outlives the old socket`)
+        await oldSocketEnds(collab, { old: sam, moves: [{ again, hears, heard, said }] })
         await again.close()
         await until(() => !hears.others.has(id), 3000, `${name}: Sam's presence goes with the tab's socket`)
     }
@@ -349,9 +370,7 @@ test("a call's guest whose tab reconnects speaks for their presence at once, and
     assert.deepEqual(sam.others.get(id).pointer, { x: 2, y: 2 }, 'their pointer rides along')
     assert.equal(kai.ws.readyState, 1, 'the old socket is still open')
 
-    await kai.close()
-    await sleep(300)
-    assert.ok(heard(2), "the call guest's presence outlives the old socket")
+    await oldSocketEnds(collab, { old: kai, moves: [{ again, hears: sam, heard, said }] })
     await again.close()
     await until(() => !sam.others.has(id), 3000, "the call guest's presence goes with the tab's socket")
 })
@@ -439,9 +458,7 @@ test("a link visitor's tab that reconnects with its key speaks for its presence 
         assert.equal(first.ws.readyState, 1, `${name}: the old socket is still open`)
 
         // The old socket's end takes nothing with it; the new one's takes it.
-        await first.close()
-        await sleep(300)
-        assert.ok(heard(2), `${name}: the visitor's presence outlives the old socket`)
+        await oldSocketEnds(collab, { old: first, moves: [{ again, hears: sam, heard, said }] })
         await again.close()
         await until(() => !sam.others.has(id), 3000, `${name}: the visitor's presence goes with the tab's socket`)
 
@@ -458,6 +475,46 @@ test("a link visitor's tab that reconnects with its key speaks for its presence 
         back.presence(said(3))
         await until(() => heard(3), 1000, `${name}: the visitor's tab binds its presence back within 1 s`)
     }
+})
+
+// A tab carries every doc it opens on one socket (lib/collabSocket.ts), each
+// doc with a client of its own, so one socket speaks for one client per doc: a
+// board's and a doc's presence ride it side by side. When the tab reconnects,
+// its new socket carries both docs and takes both over, and the old socket's
+// end takes nothing from either (V-348).
+test("one socket carrying a board and a doc speaks for each doc's own client, and a reconnect takes both over", async () => {
+    const { collab } = await room()
+    const tab = async (name, token, { doc, via } = {}) => {
+        const t = new TestClient({ url: collab.url, name, token, doc, via })
+        assert.equal(await t.connect(), 'synced')
+        return t
+    }
+    // Sam on each doc, on a socket each; Maya's tab with both docs on one.
+    const sam = { [BOARD]: await tab(BOARD, SAM), [DOC]: await tab(DOC, SAM) }
+    const board = await tab(BOARD, MAYA)
+    const doc = await tab(DOC, MAYA, { via: board })
+    assert.equal(doc.ws, board.ws, "the doc rides the board's socket")
+    assert.notEqual(doc.doc.clientID, board.doc.clientID, 'each doc has a client of its own')
+    const said = (n) => ({ user: { id: 'u-maya', name: 'Maya Chen' }, react: [{ id: `m${n}`, emoji: '🎉' }] })
+    const heard = (maya, n) => !!sam[maya.name].others.get(maya.doc.clientID)?.react?.some((r) => r.id === `m${n}`)
+    for (const maya of [board, doc]) maya.presence(said(1))
+    await until(() => heard(board, 1) && heard(doc, 1), 3000, "Sam hears Maya's own client on the board and on the doc")
+
+    // The tab reconnects: one new socket carries both docs, whose clients and
+    // clocks go on; the old socket stays open and says nothing.
+    const board2 = await tab(BOARD, MAYA, { doc: board.doc })
+    const doc2 = await tab(DOC, MAYA, { doc: doc.doc, via: board2 })
+    for (const [was, now] of [[board, board2], [doc, doc2]]) {
+        now.presenceClock = was.presenceClock
+        now.presence(said(2))
+    }
+    await until(() => heard(board, 2) && heard(doc, 2), 1000, "the new socket speaks for Maya on both within 1 s")
+
+    await oldSocketEnds(collab, {
+        old: board,
+        riding: [doc],
+        moves: [board2, doc2].map((again, i) => ({ again, hears: sam[again.name], heard: (n) => heard([board, doc][i], n), said })),
+    })
 })
 
 test('a sign-in names one person: a member by their id, a call\'s guest by their own sub; a share link names no one', () => {

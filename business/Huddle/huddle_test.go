@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -209,6 +211,62 @@ func TestTheCallsEndGoesOnItsPost(t *testing.T) {
 	run(context.Background(), resourceEventBusiness.Event{Kind: resourceEventBusiness.CallEnded, Data: map[string]string{"session": session, "kind": "huddle"}})
 	if wrote {
 		t.Error("facts written for a call with no post")
+	}
+}
+
+// slack-06's card: an ended call's post says who came (members' faces, at
+// most FactsFaces, guests counted) and whether it was missed: nobody but its
+// starter was ever in it.
+func TestTheCallsEndSaysWhoCameAndAMissedCall(t *testing.T) {
+	ended := started.Add(4 * time.Minute)
+	person := func(user string) callStateBusiness.Person {
+		return callStateBusiness.Person{Identity: "id-" + user, UserUUID: user, Name: user}
+	}
+	guest := callStateBusiness.Person{Identity: "guest-1", Name: "Kai", Guest: true}
+	many := []callStateBusiness.Person{person(maya)}
+	for i := 0; i < 9; i++ {
+		many = append(many, person(fmt.Sprintf("44444444-4444-4444-8444-%012d", i)))
+	}
+	for _, c := range []struct {
+		name   string
+		people []callStateBusiness.Person
+		came   []string
+		count  int
+		missed bool
+	}{
+		{"answered", []callStateBusiness.Person{person(maya), person(jonas), guest}, []string{maya, jonas}, 3, false},
+		{"missed", []callStateBusiness.Person{person(maya)}, []string{maya}, 1, true},
+		{"only a guest besides", []callStateBusiness.Person{person(maya), guest}, []string{maya}, 2, false},
+		{"ten people", many, nil, 10, false},
+	} {
+		s := callIn("dm", maya+" "+jonas)
+		s.Live, s.EndedAt, s.PostUUID, s.StartedBy, s.People = false, &ended, uuid.NewString(), maya, c.people
+		fake(t, s)
+		var system string
+		seams.setChatFacts = func(_ context.Context, _, facts string) error { system = facts; return nil }
+		run(context.Background(), resourceEventBusiness.Event{Kind: resourceEventBusiness.CallEnded, Data: map[string]string{"session": session, "kind": "huddle"}})
+		var facts Facts
+		if err := json.Unmarshal([]byte(system), &facts); err != nil {
+			t.Fatalf("%s: %q, %v", c.name, system, err)
+		}
+		if c.came == nil && len(facts.Came) != FactsFaces {
+			t.Errorf("%s: %d faces kept, want the first %d", c.name, len(facts.Came), FactsFaces)
+		}
+		// Each face carries its name as the call knew it, so the card draws
+		// it without a lookup per person.
+		var came []string
+		for _, f := range facts.Came {
+			came = append(came, f.UUID)
+			if f.Name != f.UUID {
+				t.Errorf("%s: face %s is named %q, want its name in the call", c.name, f.UUID, f.Name)
+			}
+		}
+		if c.came != nil && strings.Join(came, ",") != strings.Join(c.came, ",") {
+			t.Errorf("%s: came %v, want %v", c.name, came, c.came)
+		}
+		if facts.People != c.count || facts.Missed != c.missed {
+			t.Errorf("%s: people %d missed %v, want %d %v", c.name, facts.People, facts.Missed, c.count, c.missed)
+		}
 	}
 }
 

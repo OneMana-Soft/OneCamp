@@ -124,7 +124,9 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 	// Validate the reference BEFORE any lookup. An unusable ref is a refusal on its
 	// own terms, and resolving the user first would spend a query to reach the same
 	// answer on the request hot path.
-	if ref.Kind != ResourceWorkspace && strings.TrimSpace(ref.ID) == "" {
+	// A kind that names no object (the workspace's, or a creation the caller
+	// will own) has no id to name.
+	if !ref.Kind.IdentifiesNoObject() && strings.TrimSpace(ref.ID) == "" {
 		return ReachDecision{Reason: "no resource id for a resource-scoped tool"}
 	}
 

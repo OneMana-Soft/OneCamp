@@ -484,7 +484,10 @@ func aggregateSQL(spec query.Spec, cols map[string]*column, who asker, a *sqlArg
 		}
 		depth := n - bits.OnesCount64(uint64(mask))
 		if depth == 0 {
-			read.summaries = s
+			// The set's own row comes first, so a read run again (one that
+			// ran out of shared memory, model.SummarizeRowsWhere) starts its
+			// groups from nothing.
+			read.summaries, read.groups = s, nil
 			return nil
 		}
 		path := make([]string, depth)

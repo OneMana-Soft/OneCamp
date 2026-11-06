@@ -201,3 +201,70 @@ func TestAFlushOnAPageBoundaryHoldsWhatWasWritten(t *testing.T) {
 		}
 	}
 }
+
+// What a write tells others waits for its transaction's commit.
+//
+// WHY. An API item's write and its audit row share one transaction (main's
+// audit rule, 3 Nov 2026), so the write runs inside one. A live message, an
+// index entry or a webhook sent from inside it would reach readers before
+// the write could be found, and one sent for a write that then rolled back
+// would tell of a change that never happened. AfterCommit holds them until
+// the outermost commit, hands them a ctx with no transaction that isn't
+// cancelled with it, and drops them on a rollback; outside InTx, and under a
+// bare WithTx (whose owner commits), it runs them at once.
+func TestAfterCommitWaitsForTheOutermostCommit(t *testing.T) {
+	was := postgresInit.DBConn
+	t.Cleanup(func() { postgresInit.DBConn = was })
+	rec := &recorder{}
+	pool := sql.OpenDB(rec)
+	defer pool.Close()
+	postgresInit.DBConn = &postgresInit.DB{SqlDB: pool, DBTimeout: time.Second}
+
+	var told []string
+	tell := func(what string) func(context.Context) {
+		return func(ctx context.Context) {
+			if inTx(ctx) || ctx.Err() != nil {
+				what += " (in a transaction, or cancelled)"
+			}
+			told = append(told, what)
+		}
+	}
+	ctx := context.Background()
+	AfterCommit(ctx, tell("at once"))
+	err := InTxFor(ctx, time.Second, func(ctx context.Context) error {
+		AfterCommit(ctx, tell("outer"))
+		if err := InTx(ctx, func(ctx context.Context) error {
+			AfterCommit(ctx, tell("nested"))
+			return nil
+		}); err != nil {
+			return err
+		}
+		if !slices.Equal(told, []string{"at once"}) {
+			t.Errorf("before the commit, told %v; want only what ran outside", told)
+		}
+		return nil
+	})
+	if err != nil || !slices.Equal(told, []string{"at once", "outer", "nested"}) {
+		t.Fatalf("after the commit: %v, told %v; want at once, outer, nested, each with no transaction", err, told)
+	}
+
+	told = nil
+	boom := errors.New("the write failed")
+	err = InTx(ctx, func(ctx context.Context) error {
+		AfterCommit(ctx, tell("rolled back"))
+		return boom
+	})
+	if !errors.Is(err, boom) || len(told) != 0 {
+		t.Fatalf("a rolled-back transaction: %v, told %v; want its error and nothing told", err, told)
+	}
+
+	tx, err := pool.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	AfterCommit(WithTx(ctx, tx), func(context.Context) { told = append(told, "handed") })
+	if !slices.Equal(told, []string{"handed"}) {
+		t.Fatalf("under a bare WithTx, told %v; want it at once", told)
+	}
+}

@@ -284,7 +284,7 @@ func (s *service) withAnswers(ctx context.Context, rows []instance, guests map[u
 			for _, a := range own {
 				if a.Key().Is(gs[i]) {
 					at := a.RespondedAt
-					gs[i].Response, gs[i].Note, gs[i].RespondedAt, gs[i].Proposal = a.Response, a.Note, &at, a.Proposal
+					gs[i].Response, gs[i].Note, gs[i].RespondedAt, gs[i].Proposal, gs[i].ByAway = a.Response, a.Note, &at, a.Proposal, a.ByAway
 				}
 			}
 		}
@@ -355,7 +355,7 @@ func (s *service) Answer(ctx context.Context, who *model.UserInfo, id string, in
 	if err != nil {
 		return nil, err
 	}
-	on, err := s.store.answer(ctx, owner.ID, rid, key, response, note, at, proposal)
+	on, err := s.store.answer(ctx, owner.ID, rid, key, response, note, at, proposal, false)
 	if err != nil {
 		return nil, err
 	}

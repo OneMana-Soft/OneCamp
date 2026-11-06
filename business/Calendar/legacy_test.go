@@ -76,6 +76,8 @@ func TestTheOldRoutesAnswerInTheGraphsShape(t *testing.T) {
 		"event_guests": []any{map[string]any{"user_uuid": mayaID, "role": "required", "response": "needs_action"}},
 		// Calendar A5: the reader's reminders. Maya hasn't answered: none by default.
 		"event_reminders": []any{}, "event_reminders_default": true,
+		// Calendar head A: which of them come by email.
+		"event_reminders_email": []any{},
 		// Calendar A6: the calendar it is on, Sam's own.
 		"event_calendar_id": samCalendar.String(),
 	}

@@ -297,6 +297,7 @@ type pgServer struct {
 // TestTheTestsThatApplyMigrationsGetADatabaseMigratedFromBlank reads the test
 // files and fails when this list and theirs differ.
 var migratesItself = map[string]bool{
+	"TestCalendarReminderEmailMigrationUpDownUp":                true,
 	"TestChangeSetOperationsMigrationDownUp":                    true,
 	"TestContentIOJobsWaitReadyForAChoice":                      true,
 	"TestComputedStoreMigrationUpDownUp":                        true,
@@ -321,8 +322,10 @@ var migratesItself = map[string]bool{
 	"TestCallBoardSlideMigrationUpDownUp":                       true,
 	"TestCallRecordingByMigrationUpDownUp":                      true,
 	"TestCalendarProposalsMigrationUpDownUp":                    true,
+	"TestCalendarAnswerSourceMigrationUpDownUp":                 true,
 	"TestCalendarRemindersMigrationUpDownUp":                    true,
 	"TestCalendarStoreMigrationUpDownUp":                        true,
+	"TestDashboardsMigrationUpDownUp":                           true,
 	"TestCalendarSubscriptionsMigrationUpDownUp":                true,
 	"TestCalendarSyncMigrationUpDownUp":                         true,
 	"TestCalendarSyncRefusalsMigrationUpDownUp":                 true,

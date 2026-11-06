@@ -41,11 +41,12 @@ type store interface {
 	rangeOnCalendars(ctx context.Context, calendars []uuid.UUID, w models.Window, limit int) ([]*models.Event, error)
 	// Secret feeds (feeds.go): a person's live feed of a calendar, the live
 	// feed a token's hash finds, a new feed (the old one revoked with it),
-	// and none.
+	// and none. makeFeed and revokeFeed give the scope of the live feed they
+	// stopped, "" when there was none, for the audit log (V-398).
 	liveFeed(ctx context.Context, calendar, person uuid.UUID) (*models.Feed, error)
 	feedByHash(ctx context.Context, hash []byte) (*models.Feed, error)
-	makeFeed(ctx context.Context, f models.Feed) error
-	revokeFeed(ctx context.Context, calendar, person uuid.UUID) error
+	makeFeed(ctx context.Context, f models.Feed) (string, error)
+	revokeFeed(ctx context.Context, calendar, person uuid.UUID) (string, error)
 	// importedCalendar is owner's calendar of this name brought from another
 	// app, made the first time.
 	importedCalendar(ctx context.Context, owner uuid.UUID, name, tz string) (uuid.UUID, error)
@@ -125,7 +126,7 @@ type store interface {
 	// instances of it; or, with rid, to the one instance of a series that
 	// starts there alone. It says whether they are on it. An answer never
 	// moves the event's sequence.
-	answer(ctx context.Context, event uuid.UUID, rid *time.Time, k models.GuestKey, response, note string, at time.Time, p *models.Proposal) (bool, error)
+	answer(ctx context.Context, event uuid.UUID, rid *time.Time, k models.GuestKey, response, note string, at time.Time, p *models.Proposal, byAway bool) (bool, error)
 	// clearProposal sets aside a guest's proposal for an event or (rid) one
 	// instance of a series, and says whether there was one.
 	clearProposal(ctx context.Context, event uuid.UUID, rid *time.Time, k models.GuestKey) (bool, error)
@@ -264,17 +265,24 @@ func (postgresStore) feedByHash(ctx context.Context, hash []byte) (*models.Feed,
 }
 
 // makeFeed revokes the old feed and keeps the new one in one transaction,
-// which the feed model's statements join through ctx.
-func (postgresStore) makeFeed(ctx context.Context, f models.Feed) error {
-	return pgexec.InTx(ctx, func(ctx context.Context) error {
-		if err := models.RevokeFeeds(ctx, f.CalendarID, f.PersonID); err != nil {
+// which the feed model's statements join through ctx, and gives the old
+// one's scope once both are committed.
+func (postgresStore) makeFeed(ctx context.Context, f models.Feed) (string, error) {
+	var replaced string
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		var err error
+		if replaced, err = models.RevokeFeeds(ctx, f.CalendarID, f.PersonID); err != nil {
 			return err
 		}
 		return models.InsertFeed(ctx, f)
 	})
+	if err != nil {
+		return "", err
+	}
+	return replaced, nil
 }
 
-func (postgresStore) revokeFeed(ctx context.Context, calendar, person uuid.UUID) error {
+func (postgresStore) revokeFeed(ctx context.Context, calendar, person uuid.UUID) (string, error) {
 	return models.RevokeFeeds(ctx, calendar, person)
 }
 
@@ -511,12 +519,12 @@ func (postgresStore) apply(ctx context.Context, b batch) error {
 	})
 }
 
-func (postgresStore) answer(ctx context.Context, event uuid.UUID, rid *time.Time, k models.GuestKey, response, note string, at time.Time, p *models.Proposal) (bool, error) {
+func (postgresStore) answer(ctx context.Context, event uuid.UUID, rid *time.Time, k models.GuestKey, response, note string, at time.Time, p *models.Proposal, byAway bool) (bool, error) {
 	on := false
 	err := inTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var err error
 		if rid == nil {
-			if on, err = models.SetAnswer(ctx, tx, event, k, response, note, at, p); err != nil || !on {
+			if on, err = models.SetAnswer(ctx, tx, event, k, response, note, at, p, byAway); err != nil || !on {
 				return err
 			}
 			return models.ClearInstanceAnswers(ctx, tx, event, k)
@@ -524,7 +532,7 @@ func (postgresStore) answer(ctx context.Context, event uuid.UUID, rid *time.Time
 		if on, err = models.GuestOn(ctx, tx, event, k); err != nil || !on {
 			return err
 		}
-		a := models.InstanceAnswer{EventID: event, RecurrenceID: *rid, UserID: k.UserID, Email: k.Email, Response: response, Note: note, RespondedAt: at, Proposal: p}
+		a := models.InstanceAnswer{EventID: event, RecurrenceID: *rid, UserID: k.UserID, Email: k.Email, Response: response, Note: note, RespondedAt: at, Proposal: p, ByAway: byAway}
 		return models.SetInstanceAnswer(ctx, tx, a)
 	})
 	return on, err

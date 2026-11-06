@@ -368,12 +368,16 @@ func RevokeGuestGrant(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid grant id"})
 		return
 	}
+	g, _ := guestModel.GetByID(ctx, id)
 	if err := guestBusiness.RevokeGrant(ctx, id); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to revoke grant"})
 		return
 	}
 	auditBusiness.Record(r, "guest.grant.revoke", auditBusiness.CategorySecurity,
 		"Revoked a guest grant", map[string]interface{}{"grant_id": id.String()})
+	if g != nil {
+		recordItemLinkRow(r, false, g.ResourceType, g.ResourceID, id)
+	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Guest grant revoked"})
 }
 
@@ -568,6 +572,10 @@ func CreateResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Guest access is disabled for this workspace."})
 			return
 		}
+		// A sensitivity label with no_guest_links (business/Label), in its words.
+		if helpers.WriteRefusal(w, err) {
+			return
+		}
 		helpers.LogErrorWithContext(ctx, "controllers/Guest/CreateResourceGuestLink err: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to create share link"})
 		return
@@ -576,6 +584,7 @@ func CreateResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 	auditBusiness.Record(r, "guest.link.create", auditBusiness.CategorySecurity,
 		"Created an external share link",
 		map[string]interface{}{"resource_type": grant.ResourceType, "resource_id": grant.ResourceID, "grant_id": grant.GrantID.String()})
+	recordItemLinkRow(r, true, grant.ResourceType, grant.ResourceID, grant.GrantID)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{
 		"token":         grant.Token, // raw link token, shown once
@@ -1294,7 +1303,32 @@ func RevokeResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 	}
 	auditBusiness.Record(r, "guest.link.revoke", auditBusiness.CategorySecurity, "Turned off an external share link",
 		map[string]interface{}{"resource_type": g.ResourceType, "resource_id": g.ResourceID, "grant_id": id.String()})
+	recordItemLinkRow(r, false, g.ResourceType, g.ResourceID, id)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Turned off"})
+}
+
+// linkAreas are the log's areas where a link to a board, a doc or a table is
+// also a row of the item's own, beside its row under "security": an admin
+// reading a board's trail sees every link made to it and turned off.
+var linkAreas = map[string]struct{ category, noun string }{
+	guestModel.ResourceBoard: {auditBusiness.CategoryBoards, "board"},
+	guestModel.ResourceDoc:   {auditBusiness.CategoryDocs, "doc"},
+	guestModel.ResourceTable: {auditBusiness.CategoryTables, "table"},
+}
+
+// recordItemLinkRow writes the item's own row for a link made to it (made) or
+// turned off, with the link's id; nothing for kinds with no area of their own.
+func recordItemLinkRow(r *http.Request, made bool, resourceType, resourceID string, grantID uuid.UUID) {
+	area, ok := linkAreas[resourceType]
+	if !ok {
+		return
+	}
+	action, summary := resourceType+".guest_link_made", "Made an external share link to a "+area.noun
+	if !made {
+		action, summary = resourceType+".guest_link_turned_off", "Turned off an external share link to a "+area.noun
+	}
+	auditBusiness.Record(r, action, area.category, summary,
+		map[string]interface{}{"resource_type": resourceType, "resource_id": resourceID, "grant_id": grantID.String()})
 }
 
 // GuestKnockAnswer GET /guest/meet/{token}/knock/{ticket}?language= — what

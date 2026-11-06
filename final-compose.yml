@@ -36,11 +36,21 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    # Two CPUs, in line with ClickHouse (2) and the API (1): every table, doc and task read lands here.
+    # At half a CPU a 100,000-row table's bar sums took 1.8 s alone and every ask beside another read or a
+    # fill ran past RowQuery.SummaryBudget (2 s) and was left out, on the demo and in a capped test (V-519,
+    # logs/tables-189/caps-v519a.out: 0.5 CPU lone p50 1,799 ms, 0/21 beside a fill; 2 CPUs lone p50 227 ms,
+    # 15/15 beside a fill, max 420 ms). Memory stays 512M: nothing measured it as the limit.
     deploy:
       resources:
         limits:
-          cpus: "0.50"
+          cpus: "2"
           memory: 512M
+    # /dev/shm for parallel reads: a parallel hash join's workers share their table there, and Docker's
+    # default 64M ran out under three 100,000-row summaries reads at once (SQLSTATE 53100, about half
+    # the sums lost at any CPU count; V-525, logs/tables-190/trace-v525a.out). Held by
+    # helpers/composePostgresShmGuard_test.go; a read that still runs out is read again without workers.
+    shm_size: 256m
     # NOT PUBLISHED. This service used to carry a Traefik TCP router on a dedicated
     # entrypoint, which put it on the public internet behind nothing but its own
     # password. Nothing in the product reached it that way -- the application uses the

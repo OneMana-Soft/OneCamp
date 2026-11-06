@@ -301,6 +301,102 @@ func dayBound(c *column, f *query.Filter, who asker, a *sqlArgs) string {
 // of its predicate (model.ShortText), worked out once.
 var shortWalkT = model.ShortText("s.t")
 
+// eqEntry is that an entry s holds the value v, in the words of the t
+// index's predicate, so a read of it reads that index (equalityOf takes
+// only a value short enough to be there).
+func eqEntry(a *sqlArgs, v string) string {
+	return `s.t = ` + a.add(v) + `::text COLLATE "C" AND ` + shortWalkT
+}
+
+// walkedOnly says every condition of f, at its top or under ANDs only, is
+// on the field each of walks reads: such walks read only the rows f can
+// keep (an "is" by its value, a range by its bound: onWalk), so a count of
+// f's rows before them would be work on top of theirs.
+func walkedOnly(f *query.Filter, walks []walk) bool {
+	if len(walks) == 0 {
+		return false
+	}
+	for _, leaf := range andLeaves(f) {
+		if leaf == nil {
+			return false
+		}
+		for _, w := range walks {
+			if w.field == nil || (leaf.Field != "field:"+w.field.key && leaf.Field != w.field.key) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// andLeaves is f's conditions at its top or under ANDs only; a nil among
+// them stands for a part that is neither (an OR, a NOT).
+func andLeaves(f *query.Filter) []*query.Filter {
+	switch {
+	case f == nil:
+		return nil
+	case f.Op == query.OpAnd:
+		var out []*query.Filter
+		for i := range f.Filters {
+			out = append(out, andLeaves(&f.Filters[i])...)
+		}
+		return out
+	case f.Op != "":
+		return []*query.Filter{nil}
+	}
+	return []*query.Filter{f}
+}
+
+// keepsFew says filter f keeps at most most rows. It counts the entries of
+// one of f's fields that f's conditions on that field take (an "is" by its
+// value, eqEntry; else a condition onWalk reads, as a range by its bound),
+// at most most+1 of them, along that field's index alone
+// (model.CountEntriesWhere). Every row f keeps has such an entry, so the
+// count is never below the rows f keeps. A filter with no condition an
+// entry can be read by (only ORs, negations, a row's own columns) isn't
+// counted: false, and its view is walked as before.
+func keepsFew(ctx context.Context, f *query.Filter, cols map[string]*column, who asker, most int) (bool, error) {
+	c, cond, args := countedBy(f, cols, who)
+	if c == nil {
+		return false, nil
+	}
+	field, err := uuid.Parse(c.key)
+	if err != nil {
+		return false, nil
+	}
+	n, err := model.CountEntriesWhere(ctx, field, cond, args, most)
+	if err != nil {
+		return false, err
+	}
+	return n <= most, nil
+}
+
+// countedBy is the field keepsFew counts f's entries on, with the condition
+// on its entry s and that condition's parameters (from $2: $1 is the
+// field): an "is" of one value first, as its value's entries are an index's
+// own; else the first field, in f's order, whose conditions an index on its
+// values can read. nil for none.
+func countedBy(f *query.Filter, cols map[string]*column, who asker) (*column, string, []interface{}) {
+	if c, v := equalityOf(f, cols); c != nil {
+		a := &sqlArgs{base: 1}
+		return c, eqEntry(a, v), a.vals
+	}
+	for _, leaf := range andLeaves(f) {
+		if leaf == nil {
+			continue
+		}
+		c := cols[leaf.Field]
+		if c == nil || sortWalks(query.Sort{Field: leaf.Field}, cols) == nil {
+			continue
+		}
+		a := &sqlArgs{base: 1}
+		if cond := onWalk(f, c, who, a); cond != "" {
+			return c, cond, a.vals
+		}
+	}
+	return nil, "", nil
+}
+
 // walkKeys is a walk's keys as it orders by them: its values, then the
 // place and the row.
 func (w walk) walkKeys() []string {
@@ -335,9 +431,7 @@ func (w walk) sql(a *sqlArgs) (joins, cond, order string) {
 		cond = emptyEntry
 	}
 	if w.eq != nil {
-		// In the words of the t index's predicate, so the walk reads it
-		// (equalityOf walks only a value short enough to be there).
-		cond = `s.t = ` + a.add(*w.eq) + `::text COLLATE "C" AND ` + shortWalkT
+		cond = eqEntry(a, *w.eq)
 	}
 	if w.in != nil {
 		cond += " AND COALESCE((" + w.in.cond(a) + "), FALSE)"

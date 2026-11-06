@@ -221,7 +221,8 @@ func (a Access) IsRead() bool { return a == AccessRead }
 // authorization happens on the real target rather than on the tool's name.
 type ResourceRef struct {
 	Kind ResourceKind
-	// ID is the object uuid. Empty is valid only for ResourceWorkspace.
+	// ID is the object uuid. Empty is valid only for a kind that names no object
+	// (ResourceKind.IdentifiesNoObject: the workspace's, or a self-owned creation).
 	ID string
 	// Access is set by the authorizer from the tool's declared Behaviour, NOT by the
 	// tool's Resource function. A Resource function that sets it is overruled, and a

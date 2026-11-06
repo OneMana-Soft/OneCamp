@@ -237,27 +237,31 @@ func (m *memStore) feedByHash(_ context.Context, hash []byte) (*models.Feed, err
 	return nil, nil
 }
 
-func (m *memStore) makeFeed(_ context.Context, f models.Feed) error {
+func (m *memStore) makeFeed(_ context.Context, f models.Feed) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for i := range m.feeds {
-		if m.feeds[i].CalendarID == f.CalendarID && m.feeds[i].PersonID == f.PersonID {
-			m.feeds[i].revoked = true
-		}
-	}
+	replaced := m.revokeLocked(f.CalendarID, f.PersonID)
 	m.feeds = append(m.feeds, memFeed{Feed: f})
-	return nil
+	return replaced, nil
 }
 
-func (m *memStore) revokeFeed(_ context.Context, calendar, person uuid.UUID) error {
+func (m *memStore) revokeFeed(_ context.Context, calendar, person uuid.UUID) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.revokeLocked(calendar, person), nil
+}
+
+// revokeLocked stops person's live feed of a calendar and gives its scope, ""
+// when none was live, as calendar_feeds_live_idx keeps one at most. m.mu held.
+func (m *memStore) revokeLocked(calendar, person uuid.UUID) string {
+	stopped := ""
 	for i := range m.feeds {
-		if m.feeds[i].CalendarID == calendar && m.feeds[i].PersonID == person {
+		if m.feeds[i].CalendarID == calendar && m.feeds[i].PersonID == person && !m.feeds[i].revoked {
 			m.feeds[i].revoked = true
+			stopped = m.feeds[i].Scope
 		}
 	}
-	return nil
+	return stopped
 }
 
 func (m *memStore) updateCalendar(_ context.Context, id uuid.UUID, name, hue *string) error {
@@ -974,7 +978,7 @@ func (m *memStore) setGoogleID(_ context.Context, id uuid.UUID, googleID string)
 	return nil
 }
 
-func (m *memStore) answer(_ context.Context, event uuid.UUID, rid *time.Time, k models.GuestKey, response, note string, at time.Time, p *models.Proposal) (bool, error) {
+func (m *memStore) answer(_ context.Context, event uuid.UUID, rid *time.Time, k models.GuestKey, response, note string, at time.Time, p *models.Proposal, byAway bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	i := slices.IndexFunc(m.guests[event], func(a models.Attendee) bool { return k.Is(a) })
@@ -987,13 +991,13 @@ func (m *memStore) answer(_ context.Context, event uuid.UUID, rid *time.Time, k 
 	}
 	if rid == nil {
 		g := &m.guests[event][i]
-		g.Response, g.Note, g.RespondedAt, g.Proposal = response, note, &at, p
+		g.Response, g.Note, g.RespondedAt, g.Proposal, g.ByAway = response, note, &at, p, byAway
 		m.answered = slices.DeleteFunc(m.answered, mine)
 		return true, nil
 	}
 	m.answered = slices.DeleteFunc(m.answered, func(a models.InstanceAnswer) bool { return mine(a) && a.RecurrenceID.Equal(*rid) })
 	m.answered = append(m.answered, models.InstanceAnswer{EventID: event, RecurrenceID: *rid, UserID: k.UserID, Email: k.Email,
-		Response: response, Note: note, RespondedAt: at, Proposal: p})
+		Response: response, Note: note, RespondedAt: at, Proposal: p, ByAway: byAway})
 	return true, nil
 }
 

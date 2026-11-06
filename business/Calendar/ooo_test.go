@@ -151,7 +151,7 @@ func TestOutOfOfficeDeclinesOnlyForItsOwnerAsGuest(t *testing.T) {
 }
 
 // A weekly series and a week away (CR-68 MF1): "all" declines the one
-// occurrence inside the away, and the next week's stays to answer; a new
+// series that starts while away is never declined whole.
 // series that starts while away is left to answer, never declined whole.
 func TestOutOfOfficeDeclinesOneOccurrenceOfASeries(t *testing.T) {
 	h := newHarness(t)
@@ -188,7 +188,8 @@ func TestOutOfOfficeDeclinesOneOccurrenceOfASeries(t *testing.T) {
 		t.Fatalf("Maya's answers by week: %v, want 10-21 declined and the rest to answer", got)
 	}
 
-	// A new series that starts while away is left to answer, whole.
+	// A new series that starts while away is never declined whole (its days
+	// inside the away are, one by one: oooRecord_test.go).
 	st2, en2 := timed(oooAt(22, 15), 30, "UTC")
 	s2, err := h.s.Create(ctx, sam, EventInput{Title: "Standup", Start: st2, End: en2, Recurrence: &Recurrence{Rule: "FREQ=DAILY;COUNT=5"},
 		Attendees: []GuestInput{{UUID: maya.UserDgraphInfo.Uuid}}})

@@ -248,10 +248,12 @@ var (
 	objectKinds = map[string]bool{
 		"agent": true, "app": true, "approval": true, "attachment": true, "board": true, "booking": true, "calendar": true,
 		"call": true, "channel": true, "chat": true, "comment": true, "connector": true, "conversation": true,
-		"cycle": true, "data-source": true, "doc": true, "event": true, "file": true, "form": true, "goal": true,
+		"cycle": true, "dashboard": true, "data-source": true, "doc": true, "event": true, "file": true, "form": true, "goal": true,
 		"group-chat": true, "guest-link": true, "post": true, "project": true, "proposal": true, "report": true, "skill": true,
 		"table": true, "task": true, "team": true, "template": true, "thread": true, "token": true, "webhook": true,
 		"workflow": true,
+		// item: whatever kind the path names, its own access rule deciding (a sensitivity label's board or doc).
+		"item": true,
 	}
 )
 

@@ -55,7 +55,7 @@ func TestSomeoneElsesEventOrCalendarIsRefusedEveryCall(t *testing.T) {
 		{"give it a call", func() error { _, err := h.s.AddCall(ctx, maya, ev.ID); return err }},
 		{"take its call off", func() error { return h.s.RemoveCall(ctx, maya, ev.ID) }},
 		{"read its reminders", func() error { _, err := h.s.Reminders(ctx, maya, ev.ID); return err }},
-		{"set its reminders", func() error { _, err := h.s.SetReminders(ctx, maya, ev.ID, []int{10}); return err }},
+		{"set its reminders", func() error { _, err := h.s.SetReminders(ctx, maya, ev.ID, []int{10}, nil); return err }},
 		{"snooze its reminder", func() error { _, err := h.s.Snooze(ctx, maya, ev.ID, SnoozeFiveMinutes); return err }},
 		{"list who his calendar is shared with", func() error { _, err := h.s.Shares(ctx, maya, own.String()); return err }},
 		{"share his calendar", func() error {

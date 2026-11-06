@@ -101,24 +101,26 @@ func nullCurrency(c string) any {
 
 // List is a project's fields in their saved order.
 func List(ctx context.Context, projectID uuid.UUID) ([]*Field, error) {
-	c, cancel := withTimeout(ctx)
-	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
-		`SELECT `+columns+` FROM task_fields WHERE project_id = $1 AND `+softDelete.Live("")+` ORDER BY position, created_at`, projectID)
+	return ListForProjects(ctx, []uuid.UUID{projectID})
+}
+
+// ListForProjects is the fields of the projects listed, in one read: each
+// project's in its saved order, the projects in the order listed.
+func ListForProjects(ctx context.Context, projectIDs []uuid.UUID) ([]*Field, error) {
+	if len(projectIDs) == 0 {
+		return []*Field{}, nil
+	}
+	out, err := pgexec.Query(ctx, `SELECT `+columns+` FROM task_fields WHERE project_id = ANY($1) AND `+softDelete.Live("")+
+		` ORDER BY array_position($1::uuid[], project_id), position, created_at`,
+		func(r pgexec.Row) (*Field, error) { return scan(r) }, pq.Array(projectIDs))
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/TaskField List err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "models/TaskField ListForProjects err: %+v", err)
 		return nil, err
 	}
-	defer rows.Close()
-	out := []*Field{}
-	for rows.Next() {
-		f, err := scan(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, f)
+	if out == nil {
+		out = []*Field{}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // Get is one of a project's fields.

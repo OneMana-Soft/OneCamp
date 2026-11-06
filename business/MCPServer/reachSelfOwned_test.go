@@ -1,8 +1,10 @@
 package business
 
 import (
+	"context"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -156,6 +158,54 @@ func TestTheDocExplainsTheContainerlessCreations(t *testing.T) {
 	for _, tool := range []string{"create_doc", "set_reminder"} {
 		if !strings.Contains(doc, "`"+tool+"`") {
 			t.Errorf("the doc never names %q", tool)
+		}
+	}
+}
+
+// A kind that names no object has no id to give, so the reach check must not refuse
+// it for a missing one. Until tables H2c the check exempted only ResourceWorkspace,
+// so EVERY ResourceSelfOwned call (create_doc, set_reminder, and now
+// tables_table_create) was refused with "no resource id", a condition the caller
+// could never meet. Every other kind must still name its object. No database is
+// attached here, so nothing is allowed either way: the reason is what is asserted.
+func TestOnlyAKindThatNamesNoObjectGoesWithoutAnID(t *testing.T) {
+	selfOwned := []string{}
+	for _, b := range bridgedTools {
+		if b.Kind == ResourceSelfOwned {
+			selfOwned = append(selfOwned, b.Tool)
+		}
+	}
+	// Every kind spec.go declares, read from the source, so a kind added later
+	// is walked without anyone listing it here.
+	raw, err := os.ReadFile("spec.go")
+	if err != nil {
+		t.Fatalf("read spec.go: %v", err)
+	}
+	var kinds []ResourceKind
+	for _, m := range regexp.MustCompile(`(?m)^\s*Resource\w+\s+ResourceKind\s*=\s*"([^"]+)"`).FindAllStringSubmatch(string(raw), -1) {
+		kinds = append(kinds, ResourceKind(m[1]))
+	}
+	for _, must := range []ResourceKind{ResourceChannel, ResourceWorkItem, ResourceSelfOwned, ResourceWorkspace} {
+		if !slices.Contains(kinds, must) {
+			t.Fatalf("spec.go's kinds read as %v, without %s: this walk has gone stale", kinds, must)
+		}
+	}
+	for _, kind := range kinds {
+		for _, access := range []Access{AccessRead, AccessWrite} {
+			got := PrincipalCanReach(context.Background(), "11111111-1111-1111-1111-111111111111",
+				ResourceRef{Kind: kind, Access: access})
+			if got.Allow {
+				t.Fatalf("%s/%s with no id and no database was allowed", kind, access)
+			}
+			refusedForID := strings.Contains(got.Reason, "no resource id")
+			switch {
+			case kind.IdentifiesNoObject() && refusedForID:
+				t.Errorf("%s/%s is refused for having no id, but the kind names no object, so "+
+					"no call of it can ever pass (the bridged %v)", kind, access, selfOwned)
+			case !kind.IdentifiesNoObject() && !refusedForID:
+				t.Errorf("%s/%s with no id was refused for %q, not for the missing id it needs",
+					kind, access, got.Reason)
+			}
 		}
 	}
 }

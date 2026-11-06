@@ -16,10 +16,12 @@
 // drawing" (undoGuests) hands that version back: every element in
 // guestAuthors returns as the version had it, or goes if guests drew it, in
 // one transaction, as a newer version so every tab takes it. What members did
-// since stays.
+// since stays, and so does an object protected since (live/ops/protect.js).
 
 import * as Y from 'yjs'
 import { openDoc } from './write.js'
+import { isProtected } from './protect.js'
+import { putBackSocketWrites } from './mapGuard.js'
 
 export const GUEST_AUTHORS = 'guestAuthors'
 
@@ -47,15 +49,7 @@ export function trackGuestStrokes(doc) {
             }
         }, GUEST_ORIGIN)
     })
-    authors.observe((event) => {
-        if (!event.transaction.origin?.context) return
-        doc.transact(() => {
-            event.changes.keys.forEach((change, id) => {
-                if (change.action === 'add') authors.delete(id)
-                else authors.set(id, change.oldValue)
-            })
-        }, GUEST_ORIGIN)
-    })
+    putBackSocketWrites(doc, authors, GUEST_ORIGIN)
 }
 
 const refuse = (status, msg) => Object.assign(new Error(msg), { status })
@@ -115,7 +109,8 @@ export async function undoGuests({ docName, body, hocuspocus }) {
                 const current = elements.get(id)
                 const prior = was.get(id)
                 authors.delete(id)
-                if (!current) continue
+                // A protected object stays as it is (live/ops/protect.js).
+                if (!current || isProtected(doc, id)) continue
                 const version = Math.max(current.version || 0, prior?.version || 0) + 1
                 const versionNonce = Math.floor(Math.random() * 2 ** 31)
                 elements.set(id, prior

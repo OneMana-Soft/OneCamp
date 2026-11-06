@@ -216,7 +216,7 @@ func (s *service) answerInvitation(ctx context.Context, secret string, in Answer
 		return nil, err
 	}
 	key := g.Key()
-	on, err := s.store.answer(ctx, e.ID, nil, key, response, note, now, proposal)
+	on, err := s.store.answer(ctx, e.ID, nil, key, response, note, now, proposal, false)
 	if err != nil {
 		return nil, err
 	}

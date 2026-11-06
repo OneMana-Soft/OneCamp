@@ -21,6 +21,7 @@ import { applyProposal } from './ops/applyProposal.js' // A9
 import { setTaskChecks } from './ops/taskChecks.js' // C1
 import { placeSubpage, removeSubpage } from './ops/subpages.js' // C7a
 import { guestsBegin, guestsSnapshot, undoGuests } from './ops/guestStrokes.js' // calls B
+import { protect } from './ops/protect.js' // miro-44
 
 export const LIVE_ROUTES = new Map([
     ['append', append],
@@ -44,6 +45,7 @@ export const BOARD_ROUTES = new Map([
     ['guestsSnapshot', guestsSnapshot],
     ['guestsBegin', guestsBegin],
     ['undoGuests', undoGuests],
+    ['protect', protect], // miro-44: lock and lift objects (the API's protect route only)
 ])
 
 // Ops about people rather than one doc or board, at /live/people/<op>: who is

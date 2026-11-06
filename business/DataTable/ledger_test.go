@@ -93,6 +93,49 @@ func TestABulkChangeIsOneEventNamingEveryRow(t *testing.T) {
 	}
 }
 
+// V-457 / H3: a table's event says where its change came from (the change
+// set's actor kind: person, api, agent, automation, import, form, system, as
+// Airtable's fromSources) and who made it, the agent too when one acted for
+// them, so a sync tells its own writes from everyone else's with no read; in
+// keys a webhook sent only ids keeps. A change by no one says no one.
+func TestATablesEventSaysWhereItsChangeCameFromAndWho(t *testing.T) {
+	table := &model.DataTable{Id: uuid.New(), Name: "Deals"}
+	person, agent, row := uuid.New(), uuid.New(), uuid.New()
+	cs := &model.ChangeSet{ID: uuid.New(), TableID: table.Id, Kind: string(rowLedger.ChangeEdit), Actor: person, Agent: agent, ActorKind: "api",
+		Changes: []model.Change{cellChange(row, "status", `"Open"`, `"Won"`)}}
+	got := rowsChanged(table, cs)
+	for k, want := range map[string]interface{}{"source": "api", "actor_id": person.String(), "agent_id": agent.String()} {
+		if got[k] != want {
+			t.Errorf("%s: got %v, want %v", k, got[k], want)
+		}
+	}
+	// What a webhook sent only ids keeps (business/Webhook namesSomething):
+	// "source", and keys ending _id.
+	for _, k := range []string{"actor_id", "agent_id"} {
+		if k[len(k)-3:] != "_id" {
+			t.Errorf("%s doesn't name an id, so a webhook sent ids alone loses it", k)
+		}
+	}
+
+	// The server's own change, made by no one and for no one, names neither.
+	own := &model.ChangeSet{ID: uuid.New(), TableID: table.Id, Kind: string(rowLedger.ChangeEdit), Changes: []model.Change{cellChange(row, "status", `"Won"`, `"Lost"`)}}
+	got = rowsChanged(table, own)
+	for _, k := range []string{"source", "actor_id", "agent_id"} {
+		if v, ok := got[k]; ok {
+			t.Errorf("a change by no one says %s %v", k, v)
+		}
+	}
+	// A person acting themselves names no agent.
+	own.Actor, own.ActorKind = person, "person"
+	got = rowsChanged(table, own)
+	if got["source"] != "person" || got["actor_id"] != person.String() {
+		t.Errorf("a person's change says %v / %v", got["source"], got["actor_id"])
+	}
+	if v, ok := got["agent_id"]; ok {
+		t.Errorf("a person acting themselves names agent %v", v)
+	}
+}
+
 // A field's change may rewrite every row: its event names at most a batch's
 // worth, and says how many it changed.
 func TestAFieldsChangeNamesAtMostABatchOfRows(t *testing.T) {
@@ -253,5 +296,60 @@ func TestAComputedReadLeavesOutFieldsInTheTrash(t *testing.T) {
 	all := []*model.Field{a, c}
 	if got := liveOnly(all); &got[0] != &all[0] {
 		t.Error("a list with nothing in the trash was copied")
+	}
+}
+
+// A column's change is no row's (V-455): a change set of columns alone tells
+// no rows, and one with cells names only their rows.
+func TestAColumnsChangeIsNoRowsEvent(t *testing.T) {
+	field, row := uuid.New(), uuid.New()
+	column := model.Change{Row: field, Field: model.FieldColumn, After: json.RawMessage(`{"name":"Size"}`)}
+	alone := &model.ChangeSet{ID: uuid.New(), Kind: string(rowLedger.ChangeField), Changes: []model.Change{column}}
+	if !columnsOnly(alone) {
+		t.Error("a change set of a column alone isn't columns only")
+	}
+	created, updated, deleted, restored, _ := rowsByEvent(alone)
+	if len(created)+len(updated)+len(deleted)+len(restored) != 0 {
+		t.Errorf("a column's change told rows: %v %v %v %v", created, updated, deleted, restored)
+	}
+	both := &model.ChangeSet{ID: uuid.New(), Kind: string(rowLedger.ChangeField),
+		Changes: []model.Change{column, cellChange(row, field.String(), `"12"`, `12`)}}
+	if columnsOnly(both) || columnsOnly(&model.ChangeSet{}) {
+		t.Error("a change set with cells, or with nothing, is columns only")
+	}
+	if got := rowsChanged(&model.DataTable{Id: uuid.New()}, both)["updated_row_ids"].([]string); !reflect.DeepEqual(got, []string{row.String()}) {
+		t.Errorf("a field's change with its cells named rows %v", got)
+	}
+	if n := len(columnsIn(both.Changes)); n != 1 {
+		t.Errorf("%d column changes", n)
+	}
+}
+
+// An undo never puts back a column linking two tables alone (its other half
+// lives in the other table); any other column it may.
+func TestAColumnLinkingTwoTablesIsntPutBackByAnUndo(t *testing.T) {
+	link := json.RawMessage(`{"name":"Vendor","type":"relation","config":{"relation_target":"table","table_id":"` + uuid.NewString() + `"}}`)
+	trashed := json.RawMessage(`{"name":"Vendor","type":"relation","config":{"relation_target":"table","table_id":"` + uuid.NewString() + `"},"deleted":true}`)
+	plain := json.RawMessage(`{"name":"Size","type":"text","config":{}}`)
+	items := json.RawMessage(`{"name":"Refs","type":"relation","config":{"relation_target":"items"}}`)
+	col := func(before, after json.RawMessage) []model.Change {
+		return []model.Change{{Row: uuid.New(), Field: model.FieldColumn, Before: before, After: after}}
+	}
+	for name, c := range map[string]struct {
+		changes []model.Change
+		want    error
+	}{
+		"a link made":            {col(nil, link), errLinkedColumnMade},
+		"a link brought back":    {col(trashed, link), errLinkedColumnMade},
+		"a link deleted":         {col(link, trashed), errLinkedColumnDeleted},
+		"a link renamed":         {col(link, link), errLinkedColumnChanged},
+		"a column made a link":   {col(plain, link), errLinkedColumnChanged},
+		"a plain column made":    {col(nil, plain), nil},
+		"a link to items made":   {col(nil, items), nil},
+		"a plain column renamed": {col(plain, plain), nil},
+	} {
+		if got := columnUndoProblem(c.changes); got != c.want {
+			t.Errorf("%s: %v, want %v", name, got, c.want)
+		}
 	}
 }

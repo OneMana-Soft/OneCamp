@@ -646,7 +646,7 @@ func ChangeLinks(ctx context.Context, tableID, rowID, fieldID uuid.UUID, add, re
 // the config to store and, when its links should show from the other table
 // too ("two_way") and don't yet, that table, which the actor must be able to
 // change.
-func linkFieldConfig(ctx context.Context, actor Actor, self uuid.UUID, cfg map[string]interface{}, fields []*model.Field) (map[string]interface{}, *model.DataTable, error) {
+func linkFieldConfig(ctx context.Context, actor Actor, self uuid.UUID, cfg map[string]interface{}, fields []*model.Field, linked *linkedTables) (map[string]interface{}, *model.DataTable, error) {
 	target, _ := cfg["relation_target"].(string)
 	var was *tableLink
 	for _, f := range fields {
@@ -684,8 +684,8 @@ func linkFieldConfig(ctx context.Context, actor Actor, self uuid.UUID, cfg map[s
 			return out, nil, nil
 		}
 	}
-	t, err := model.GetTableByID(ctx, id)
-	if err != nil || !opens(ctx, t, actor) {
+	t := linked.tableAt(ctx, id).table
+	if !opens(ctx, t, actor) {
 		return nil, nil, fmt.Errorf("Choose a table you can open")
 	}
 	if !twoWay {
@@ -736,7 +736,7 @@ func pairFor(f *model.Field, from, to *model.DataTable, there []*model.Field) *m
 func fieldsThere(ctx context.Context, to *model.DataTable, adding ...*model.Field) ([]*model.Field, error) {
 	there, err := model.ListFields(ctx, to.Id)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load fields")
+		return nil, storeFailed("failed to load fields")
 	}
 	if err := roomFor(append(there, adding...), uuid.Nil, model.FieldRelation, true); err != nil {
 		return nil, fmt.Errorf("%q has no room to show these links: %v", to.Name, err)
@@ -748,7 +748,9 @@ func fieldsThere(ctx context.Context, to *model.DataTable, adding ...*model.Fiel
 // the other table, each pointing at the other, in one transaction. A table
 // linking to itself needs room for both.
 func createLinkPair(ctx context.Context, f *model.Field, from, to *model.DataTable) (*model.Field, error) {
-	f.Id = uuid.New()
+	if f.Id == uuid.Nil { // an API batch's create names its own (model.CreateField)
+		f.Id = uuid.New()
+	}
 	var adding []*model.Field
 	if to.Id == from.Id {
 		adding = append(adding, f)
@@ -758,7 +760,7 @@ func createLinkPair(ctx context.Context, f *model.Field, from, to *model.DataTab
 		return nil, err
 	}
 	if err := model.CreateFieldsWithIDs(ctx, f, pairFor(f, from, to, there)); err != nil {
-		return nil, fmt.Errorf("failed to create field")
+		return nil, storeFailed("failed to create field")
 	}
 	return f, nil
 }
@@ -771,10 +773,10 @@ func showLinksIn(ctx context.Context, f *model.Field, from, to *model.DataTable)
 		return err
 	}
 	if err := model.CreateFieldsWithIDs(ctx, pairFor(f, from, to, there)); err != nil {
-		return fmt.Errorf("failed to create field")
+		return storeFailed("failed to create field")
 	}
 	if err := model.UpdateField(ctx, f); err != nil {
-		return fmt.Errorf("failed to update field")
+		return storeFailed("failed to update field")
 	}
 	return nil
 }
@@ -784,7 +786,7 @@ func showLinksIn(ctx context.Context, f *model.Field, from, to *model.DataTable)
 // are worked out on reads or link to a table, and sets the config to store.
 // For a relation that should show its links in the other table too, it
 // returns that table.
-func computedFieldConfig(ctx context.Context, actor Actor, t *model.DataTable, fields []*model.Field, self uuid.UUID, in *FieldInput) (*model.DataTable, error) {
+func computedFieldConfig(ctx context.Context, actor Actor, t *model.DataTable, fields []*model.Field, self uuid.UUID, in *FieldInput, linked *linkedTables) (*model.DataTable, error) {
 	typ := strings.TrimSpace(in.Type)
 	for _, f := range fields {
 		if f.Id == self {
@@ -795,13 +797,13 @@ func computedFieldConfig(ctx context.Context, actor Actor, t *model.DataTable, f
 	}
 	switch typ {
 	case model.FieldFormula:
-		cfg, err := formulaConfigWith(fields, self, in.Config, linkedFieldsFor(ctx, actor))
+		cfg, err := formulaConfigWith(fields, self, in.Config, linked.fieldsFor(ctx, actor))
 		if err != nil {
 			return nil, err
 		}
 		in.Config = cfg
 	case model.FieldRelation:
-		cfg, other, err := linkFieldConfig(ctx, actor, self, in.Config, fields)
+		cfg, other, err := linkFieldConfig(ctx, actor, self, in.Config, fields, linked)
 		if err != nil {
 			return nil, err
 		}
@@ -816,7 +818,7 @@ func computedFieldConfig(ctx context.Context, actor Actor, t *model.DataTable, f
 		if err := roomFor(fields, self, model.FieldRollup, false); err != nil {
 			return nil, err
 		}
-		cfg, err := rollupFieldConfig(ctx, actor, t.Id, self, fields, in.Config)
+		cfg, err := rollupFieldConfig(ctx, actor, t.Id, self, fields, in.Config, linked)
 		if err != nil {
 			return nil, err
 		}
@@ -851,7 +853,7 @@ func unlinkPair(ctx context.Context, f *model.Field, by uuid.UUID) error {
 // of that table's fields (none for counting), and a way of adding it up that
 // fits that field. When that field is a rollup, the rollups self (the field
 // saved, or none yet) would go through mustn't go too deep or come back round.
-func rollupFieldConfig(ctx context.Context, actor Actor, own, self uuid.UUID, fields []*model.Field, cfg map[string]interface{}) (map[string]interface{}, error) {
+func rollupFieldConfig(ctx context.Context, actor Actor, own, self uuid.UUID, fields []*model.Field, cfg map[string]interface{}, linked *linkedTables) (map[string]interface{}, error) {
 	rel, _ := cfg["relation"].(string)
 	how, _ := cfg["aggregate"].(string)
 	of, _ := cfg["field"].(string)
@@ -868,8 +870,8 @@ func rollupFieldConfig(ctx context.Context, actor Actor, own, self uuid.UUID, fi
 	if _, ok := rollupGives[how]; !ok {
 		return nil, fmt.Errorf("Choose how to add it up")
 	}
-	t, err := model.GetTableByID(ctx, l.table)
-	if err != nil || !opens(ctx, t, actor) {
+	there := linked.tableAt(ctx, l.table)
+	if !opens(ctx, there.table, actor) {
 		return nil, fmt.Errorf("Choose a relation to a table you can open")
 	}
 	out := map[string]interface{}{"relation": rel, "aggregate": how}
@@ -882,8 +884,8 @@ func rollupFieldConfig(ctx context.Context, actor Actor, own, self uuid.UUID, fi
 	}
 	theirs := fields
 	if l.table != own {
-		if theirs, err = model.ListFields(ctx, l.table); err != nil {
-			return nil, fmt.Errorf("failed to load fields")
+		if theirs, err = there.fields, there.err; err != nil {
+			return nil, storeFailed("failed to load fields")
 		}
 	}
 	where, err := rollupWhere(cfg["where"], liveOnly(theirs))
@@ -923,7 +925,7 @@ func rollupFieldConfig(ctx context.Context, actor Actor, own, self uuid.UUID, fi
 		return nil, fmt.Errorf("%s", why)
 	}
 	if field.Type == model.FieldRollup {
-		if why := rollupChainProblem(self, field, theirs, linkedFieldsFor(ctx, actor)); why != "" {
+		if why := rollupChainProblem(self, field, theirs, linked.fieldsFor(ctx, actor)); why != "" {
 			return nil, fmt.Errorf("%s", why)
 		}
 	}
@@ -940,7 +942,7 @@ func ListTableFields(ctx context.Context, id uuid.UUID, actor Actor) ([]*model.F
 	}
 	fields, err := model.ListFields(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load fields")
+		return nil, storeFailed("failed to load fields")
 	}
 	presentComputedFields(fields, planComputed(ctx, fields))
 	return fields, nil

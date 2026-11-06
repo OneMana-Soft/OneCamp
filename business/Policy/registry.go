@@ -48,6 +48,29 @@ type spec struct {
 	// scopes are the kinds of thing it can be set for beside the workspace
 	// (ScopeProject); none, the workspace only.
 	scopes []string
+	// owner is the panel that sets an owned policy (ownedSpecs).
+	owner string
+}
+
+// OwnerRetention is the retention panel (business/Retention), which shows
+// what a rule would remove before it's saved.
+const OwnerRetention = "retention"
+
+// ErrNotOwner is an owned policy set by something other than its panel.
+var ErrNotOwner = errors.New("policy: that policy is set in its own panel")
+
+// ownedSpecs are policies a panel of their own sets, because setting one takes
+// more than its value: the retention panel shows how many items a rule would
+// remove before it can be saved, and its record says so. They aren't in the
+// admin's list (ListAll) and Set doesn't take them; SetOwned does, for their
+// owner, through the same check, record and undo as every other policy.
+var ownedSpecs = []spec{
+	{key: CalendarRetentionDays.Key, kind: KindInt, def: CalendarRetentionDays.Default, min: 0, max: 3650, owner: OwnerRetention,
+		label: "Remove calendar events that ended this many days ago",
+		help:  "0 keeps every event. People on a hold keep theirs, deleted ones included."},
+	{key: BoardRetentionDays.Key, kind: KindInt, def: BoardRetentionDays.Default, min: 0, max: 3650, owner: OwnerRetention,
+		label: "Remove boards that have been in the trash this many days",
+		help:  "0 keeps them. Boards that aren't in the trash are never removed. People on a hold keep theirs, deleted ones included."},
 }
 
 // specs are every policy, in the order an admin sees them.
@@ -147,6 +170,11 @@ func (r *Registry) Bool(ctx context.Context, p BoolPolicy) bool {
 
 func (r *Registry) Int(ctx context.Context, p IntPolicy) int {
 	raw, ok := r.stored(ctx, p.Key)
+	return intOf(raw, ok, p)
+}
+
+// intOf is p's value from its stored text: its default when unset or unread.
+func intOf(raw string, ok bool, p IntPolicy) int {
 	if !ok {
 		return p.Default
 	}
@@ -155,6 +183,19 @@ func (r *Registry) Int(ctx context.Context, p IntPolicy) int {
 		return p.Default
 	}
 	return n
+}
+
+// Ints is several numeric policies at once, by key, through ONE read of the
+// store (the cache's): for a loop over policies, such as the retention sweep
+// over its kinds, so the loop itself reads nothing.
+func (r *Registry) Ints(ctx context.Context, ps []IntPolicy) map[string]int {
+	values := r.snapshot(ctx)
+	out := make(map[string]int, len(ps))
+	for _, p := range ps {
+		raw, ok := values[p.Key]
+		out[p.Key] = intOf(raw, ok, p)
+	}
+	return out
 }
 
 func (r *Registry) List(ctx context.Context, p ListPolicy) []string {
@@ -194,9 +235,34 @@ func (r *Registry) Require(p BoolPolicy) func(http.Handler) http.Handler {
 func (r *Registry) stored(ctx context.Context, key string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.fill(ctx)
+	v, ok := r.values[key]
+	return v, ok
+}
+
+// snapshot is every stored value, through the cache, as one copy.
+func (r *Registry) snapshot(ctx context.Context) map[string]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fill(ctx)
+	out := make(map[string]string, len(r.values))
+	for k, v := range r.values {
+		out[k] = v
+	}
+	return out
+}
+
+// fill reads every policy's stored value once the cache is empty or old.
+// r.mu is held.
+func (r *Registry) fill(ctx context.Context) {
 	if r.values == nil || now().Sub(r.readAt) > cacheFor {
-		keys := make([]string, 0, len(specs))
+		// Every policy's key, the owned ones too: a key not asked for reads
+		// as unset, so a saved retention rule would read as 0 forever.
+		keys := make([]string, 0, len(specs)+len(ownedSpecs))
 		for _, s := range specs {
+			keys = append(keys, s.key)
+		}
+		for _, s := range ownedSpecs {
 			keys = append(keys, s.key)
 		}
 		values, err := readValues(keys)
@@ -206,8 +272,6 @@ func (r *Registry) stored(ctx context.Context, key string) (string, bool) {
 		}
 		r.values, r.readAt = values, now()
 	}
-	v, ok := r.values[key]
-	return v, ok
 }
 
 // forget drops the cache, so the next read is fresh.
@@ -265,6 +329,47 @@ func (r *Registry) Set(ctx context.Context, key string, value json.RawMessage, b
 	if s == nil {
 		return Info{}, ErrUnknownPolicy
 	}
+	return r.apply(ctx, s, value, by, "", nil)
+}
+
+// OwnedInfo is an owned policy as its panel shows it: value, default, bounds.
+func (r *Registry) OwnedInfo(ctx context.Context, owner, key string) (Info, error) {
+	s, err := ownedSpec(owner, key)
+	if err != nil {
+		return Info{}, err
+	}
+	return r.info(ctx, *s), nil
+}
+
+// SetOwned changes an owned policy for its panel. note ends the record's
+// summary ("12 events would be removed at the next sweep") and extra joins its
+// details, so the log says what the admin saw when they saved it.
+func (r *Registry) SetOwned(ctx context.Context, owner, key string, value json.RawMessage, by Changer, note string, extra map[string]interface{}) (Info, error) {
+	s, err := ownedSpec(owner, key)
+	if err != nil {
+		return Info{}, err
+	}
+	return r.apply(ctx, s, value, by, note, extra)
+}
+
+// ownedSpec is key's owned spec, if owner is its panel.
+func ownedSpec(owner, key string) (*spec, error) {
+	for i := range ownedSpecs {
+		if ownedSpecs[i].key != key {
+			continue
+		}
+		if ownedSpecs[i].owner != owner {
+			return nil, ErrNotOwner
+		}
+		return &ownedSpecs[i], nil
+	}
+	return nil, ErrUnknownPolicy
+}
+
+// apply checks value against s, stores it and records the change; a change
+// the audit log can't record is undone and refused.
+func (r *Registry) apply(ctx context.Context, s *spec, value json.RawMessage, by Changer, note string, extra map[string]interface{}) (Info, error) {
+	key := s.key
 	stored, shown, err := canonical(*s, value)
 	if err != nil {
 		return Info{}, err
@@ -276,7 +381,15 @@ func (r *Registry) Set(ctx context.Context, key string, value json.RawMessage, b
 	}
 	r.forget()
 	summary := fmt.Sprintf("Changed “%s” from %s to %s", s.label, describe(before.Value), shown)
+	if note != "" {
+		summary += "; " + note
+	}
 	meta := map[string]interface{}{"policy": key, "from": before.Value, "to": storedJSON(*s, stored)}
+	for k, v := range extra {
+		if _, taken := meta[k]; !taken {
+			meta[k] = v
+		}
+	}
 	if err := recordIt(ctx, &by.UserID, by.Email, auditBusiness.ActorHuman, "policy.changed", auditBusiness.CategorySettings, summary, meta); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Policy: the change to %s couldn't be recorded, so it's undone: %+v", key, err)
 		undo := defaultRaw(*s)

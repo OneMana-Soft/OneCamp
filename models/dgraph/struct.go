@@ -474,6 +474,7 @@ type DgraphBoard struct {
 	ThumbnailKey     string           `json:"board_thumbnail_key,omitempty"`
 	IsPrivate        *bool            `json:"board_private,omitempty"`
 	MqttTopic        string           `json:"board_mqtt_topic,omitempty"`
+	CanProtect       bool             `json:"board_can_protect,omitempty"` // may the reader protect and lift objects (miro-44); getBoardInfo sets it, never Dgraph
 	CreatedBy        *DgraphUser      `json:"board_created_by,omitempty"`
 	EditingUser      []*DgraphUser    `json:"board_editing_users,omitempty"`
 	ReadingUser      []*DgraphUser    `json:"board_reading_users,omitempty"`
@@ -698,6 +699,9 @@ type DgraphEvent struct {
 	// when they set none and these are the default's.
 	Reminders        *[]int `json:"event_reminders,omitempty"`
 	RemindersDefault bool   `json:"event_reminders_default,omitempty"`
+	// RemindersEmail are those of Reminders that come by email, not as a
+	// pop-up (calendar head A).
+	RemindersEmail *[]int `json:"event_reminders_email,omitempty"`
 	// Hue is the colour its organiser gave it, and Location where it is
 	// (the calendar's Event Form, from the one store), so the grid draws
 	// each event in its own colour. Answers only, never stored here.

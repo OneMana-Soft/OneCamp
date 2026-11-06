@@ -43,6 +43,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	bulkModel "github.com/akashc777/OneCamp/models/openSearch/Bulk"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 	"github.com/google/uuid"
 )
@@ -76,10 +77,12 @@ func init() {
 	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "calendar.search", Every: 24 * time.Hour, RunAtStart: true, Run: WriteEverySearchEntry})
 }
 
-// The entries' writes, seams for tests: the outbox events asking for them,
-// whether there is a search index to write to, and the bulk write itself.
+// The entries' writes, seams for tests: the outbox events asking for them
+// (ready, or held in a change's own transaction), whether there is a search
+// index to write to, and the bulk write itself.
 var (
 	enqueueSearch   = outboxBusiness.Enqueue
+	addSearch       = outboxBusiness.AddMany
 	searchConnected = func() bool { return opensearchInit.OpenSearchClient != nil }
 	writeSearch     = bulkModel.BulkIndexChecked
 )
@@ -87,9 +90,58 @@ var (
 // SearchEntriesChanged has the search entries of the events ids name written
 // again from the store, through the outbox: events of at most searchPage ids,
 // written ready in one statement. An instance is its series. It never fails
-// the caller: an entry it couldn't ask for is tonight's pass's.
+// the caller: an entry it couldn't ask for is tonight's pass's, or, for an
+// event that is gone, the repair's once a search finds it. A change that
+// removes events asks in its own transaction instead (searchEntriesChangedIn).
 func SearchEntriesChanged(ctx context.Context, ids []string) {
 	keys := searchKeys(ids)
+	es := searchEntriesFor(keys)
+	if len(es) == 0 {
+		return
+	}
+	if err := enqueueSearch(ctx, es...); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Calendar: the search entries of %d events weren't asked for, so tonight's pass writes them: %v", len(keys), err)
+	}
+}
+
+// searchEntriesChangedIn is SearchEntriesChanged for a change that removes
+// events inside pgexec.InTx: its outbox events are written held, in that
+// transaction, so they commit with the change or not at all, and an event
+// can't be removed with its entry left behind because the process stopped
+// between the two. The entry of an event that is gone is deleted when the
+// sink runs (writeSearchEntries). The caller hands the answered events to
+// searchEntriesAsked once its transaction has committed.
+func searchEntriesChangedIn(ctx context.Context, ids []string) ([]int64, error) {
+	es := searchEntriesFor(searchKeys(ids))
+	if len(es) == 0 {
+		return nil, nil
+	}
+	tx, err := pgexec.Current(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return addSearch(ctx, tx, es)
+}
+
+// searchEntriesAsked releases the outbox events searchEntriesChangedIn wrote,
+// once their change has committed, and delivers them now. Those it can't
+// release stay held until the drain releases them: the topic has no
+// resolver, and a held event was committed with its change.
+func searchEntriesAsked(ctx context.Context, events []int64) {
+	if len(events) == 0 {
+		return
+	}
+	if err := outboxBusiness.ReleaseMany(ctx, events); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Calendar: %d search writes wait for the outbox's drain: %v", len(events), err)
+		return
+	}
+	outboxBusiness.DeliverMany(events)
+}
+
+// searchEntriesFor are the outbox events asking for the entries of the events
+// keys name (searchKeys) to be written again, one per searchPage of them.
+// Pure.
+func searchEntriesFor(keys []string) []outboxBusiness.Entry {
 	var es []outboxBusiness.Entry
 	for from := 0; from < len(keys); from += searchPage {
 		page := keys[from:min(from+searchPage, len(keys))]
@@ -99,12 +151,7 @@ func SearchEntriesChanged(ctx context.Context, ids []string) {
 			Sinks:    []string{searchSink},
 		})
 	}
-	if len(es) == 0 {
-		return
-	}
-	if err := enqueueSearch(ctx, es...); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Calendar: the search entries of %d events weren't asked for, so tonight's pass writes them: %v", len(keys), err)
-	}
+	return es
 }
 
 // searchKeys are the events ids name, each once, in their order: an

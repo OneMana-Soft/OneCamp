@@ -124,6 +124,65 @@ func TestReadableBoardsFor(t *testing.T) {
 	}
 }
 
+// BoardReadsFor names a board the person may read with its title, and a
+// deleted one they could read apart from that as gone, title and all left
+// out; a deleted private board that was never theirs, one they may not read
+// and one the graph doesn't have are left out. ReadableBoardTitles is its
+// readable part, and a graph that doesn't answer is an error for both.
+func TestBoardReadsFor(t *testing.T) {
+	yes, no := true, false
+	deleted := time.Now().Add(-time.Hour)
+	owner := &dgraphStruct.DgraphUser{Uuid: "owner"}
+	old := readBoardsAccess
+	t.Cleanup(func() { readBoardsAccess = old })
+	readBoardsAccess = func(_ context.Context, ids []string, userUUID string) ([]*dgraphStruct.DgraphBoard, error) {
+		if userUUID != "me" {
+			return nil, errors.New("read for someone else")
+		}
+		return []*dgraphStruct.DgraphBoard{
+			{Uuid: "AAAA-open", Title: "Flows", IsPrivate: &no},
+			{Uuid: "aaaa-private", Title: "Salaries", IsPrivate: &yes, CreatedBy: owner},
+			{Uuid: "aaaa-binned", Title: "Old plan", IsPrivate: &no, DeletedAt: &deleted},
+			{Uuid: "aaaa-mine-binned", Title: "My sketch", IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "me"}, DeletedAt: &deleted},
+			{Uuid: "aaaa-shared-binned", Title: "Shared sketch", IsPrivate: &yes, CreatedBy: owner, HasCommentAccess: 1, DeletedAt: &deleted},
+			{Uuid: "aaaa-private-binned", Title: "Their secret", IsPrivate: &yes, CreatedBy: owner, DeletedAt: &deleted},
+		}, nil
+	}
+	ids := []string{"AAAA-open", "aaaa-private", "aaaa-binned", "aaaa-mine-binned", "aaaa-shared-binned", "aaaa-private-binned", "aaaa-absent"}
+	got, err := BoardReadsFor(context.Background(), ids, "me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]BoardRead{
+		"aaaa-open":          {Title: "Flows"},
+		"aaaa-binned":        {Gone: true},
+		"aaaa-mine-binned":   {Gone: true},
+		"aaaa-shared-binned": {Gone: true},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("answered %v, want %v", got, want)
+	}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("%s: %+v, want %+v", id, got[id], w)
+		}
+	}
+	titles, err := ReadableBoardTitles(context.Background(), ids, "me")
+	if err != nil || len(titles) != 1 || titles["aaaa-open"] != "Flows" {
+		t.Errorf("readable titles %v, %v; want only the open board's", titles, err)
+	}
+
+	readBoardsAccess = func(context.Context, []string, string) ([]*dgraphStruct.DgraphBoard, error) {
+		return nil, errors.New("graph down")
+	}
+	if got, err := BoardReadsFor(context.Background(), ids, "me"); err == nil || got != nil {
+		t.Errorf("a graph that didn't answer gave %v, %v; want an error and no answer", got, err)
+	}
+	if got, err := ReadableBoardTitles(context.Background(), ids, "me"); err == nil || got != nil {
+		t.Errorf("titles from a graph that didn't answer: %v, %v; want an error and no answer", got, err)
+	}
+}
+
 // A board is live, for a guest's link and the collaboration service, while
 // it's there and not deleted, private or not, and asked as no one in
 // particular; a graph that doesn't answer says nothing about it.

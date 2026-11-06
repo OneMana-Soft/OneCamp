@@ -10,6 +10,7 @@ import (
 	"context"
 	"slices"
 
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
@@ -72,7 +73,7 @@ func SourcesAtDoor(ctx context.Context, room string, user *dgraphStruct.DgraphUs
 		return PublishSources(s.Held, a.Allowed, callStateModel.RunsCall(a.Role)), nil
 	}
 	// Not in this call before: the part they will take by who they are.
-	host, err := HostByRule(ctx, room, user, IsWorkspaceAdmin(ctx, user.Uuid))
+	host, err := HostByRule(ctx, room, user, userDomain.IsWorkspaceAdmin(ctx, user.Uuid))
 	if err != nil {
 		return nil, unchecked(ctx, room, err)
 	}

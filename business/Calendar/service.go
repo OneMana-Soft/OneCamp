@@ -1163,6 +1163,7 @@ func (s *service) updateInstance(ctx context.Context, who *model.UserInfo, inst 
 		if err != nil {
 			return nil, s.atInstance(ctx, who, inst.ref, err)
 		}
+		s.declineForAway(ctx, updated, newlyOn(guests, after))
 		return s.view(ctx, who, single(updated), after), nil
 	}
 	// This and following: a new series from the instance, as the series says
@@ -1184,6 +1185,9 @@ func (s *service) updateInstance(ctx context.Context, who *model.UserInfo, inst 
 	if err != nil {
 		return nil, err
 	}
+	// Guests it brings in are declined inside their aways, as for a new
+	// invitation (head C).
+	s.declineForAway(ctx, got, newlyOn(guests, g))
 	return s.view(ctx, who, single(got), g), nil
 }
 

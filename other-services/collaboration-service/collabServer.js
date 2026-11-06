@@ -32,6 +32,8 @@ import { createBlockIdsTransform } from './transforms/blockIds.js'
 import { createLegacyContentTransform } from './transforms/legacyContent.js' // B2
 import { closeWhenLinkEnds } from './live/ops/reauth.js'
 import { trackGuestStrokes } from './live/ops/guestStrokes.js'
+import { trackProtected } from './live/ops/protect.js'
+import { guardFacilitation } from './live/ops/facilitationGuard.js'
 
 // Docs connect with the bare doc uuid as the document name. Boards connect with
 // a "board:" prefix so one server routes both to the right backend endpoints.
@@ -464,14 +466,18 @@ export function createCollabServer({
             }
         },
 
-        // A board starts keeping who of a call's guests drew what. A doc whose
-        // blocks have no ids gets them, as one edit, before anyone syncs
-        // (transforms/blockIds.js). Never throws: a doc without ids opens as
-        // it always did.
+        // A board starts keeping who of a call's guests drew what, and its
+        // protected objects as they are. A doc whose blocks have no ids gets
+        // them, as one edit, before anyone syncs (transforms/blockIds.js).
+        // Never throws: a doc without ids opens as it always did.
         async afterLoadDocument(data) {
             if (parseDocumentName(data.documentName).kind === 'board') {
                 // Who of a call's guests drew what (live/ops/guestStrokes.js).
                 trackGuestStrokes(data.document)
+                // Its protected objects stay as they are (live/ops/protect.js).
+                trackProtected(data.document)
+                // Its facilitation is its members' to run (live/ops/facilitationGuard.js).
+                guardFacilitation(data.document)
                 return
             }
             if (parseDocumentName(data.documentName).kind !== 'doc') return

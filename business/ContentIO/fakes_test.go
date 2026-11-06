@@ -73,15 +73,19 @@ func newWorld(t *testing.T) *world {
 		subject func(context.Context, string) (accessBusiness.Subject, *dgraphStruct.DgraphUser, error)
 		load    func(context.Context, accessBusiness.Subject, string) (string, string, error)
 		publish func(Job)
-	}{jobs, store, accessBusiness.Rules, createDoc, discardDoc, uploadAsset, collab.Live, resourceEventBusiness.Bus, subjectFor, loadDoc, publishJob}
+		allows  func(context.Context, string, string, string) error
+	}{jobs, store, accessBusiness.Rules, createDoc, discardDoc, uploadAsset, collab.Live, resourceEventBusiness.Bus, subjectFor, loadDoc, publishJob, labelAllows}
 	t.Cleanup(func() {
 		jobs, store, accessBusiness.Rules, createDoc, discardDoc = saved.jobs, saved.store, saved.rules, saved.create, saved.discard
 		uploadAsset, collab.Live, resourceEventBusiness.Bus, subjectFor = saved.upload, saved.live, saved.bus, saved.subject
-		loadDoc, publishJob = saved.load, saved.publish
+		loadDoc, publishJob, labelAllows = saved.load, saved.publish, saved.allows
 	})
 	jobs = fakeJobs{w}
 	store = fakeStore{w}
 	accessBusiness.Rules = fakeRules{w}
+	// No item carries a label here; business/Label's own tests and the HTTP
+	// integration test hold its refusals.
+	labelAllows = func(context.Context, string, string, string) error { return nil }
 	createDoc = func(_ context.Context, _ *dgraphStruct.DgraphUser, _ accessBusiness.Subject, title, icon, parent string) (string, error) {
 		w.mu.Lock()
 		defer w.mu.Unlock()

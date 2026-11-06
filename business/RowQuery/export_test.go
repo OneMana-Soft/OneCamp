@@ -23,6 +23,20 @@ func FailSummaries() (restore func()) {
 	return func() { summarize = saved }
 }
 
+// SummarizeTwice has every summaries and groups read run twice through the
+// same scan until restore is called, as model.SummarizeRowsWhere reads again
+// a read that ran out of shared memory after it had read rows.
+func SummarizeTwice() (restore func()) {
+	saved := summarize
+	summarize = func(ctx context.Context, table uuid.UUID, joins, selects, where, grouped string, args []interface{}, budget time.Duration, scan func(pgexec.Row) error) error {
+		if err := saved(ctx, table, joins, selects, where, grouped, args, budget, scan); err != nil {
+			return err
+		}
+		return saved(ctx, table, joins, selects, where, grouped, args, budget, scan)
+	}
+	return func() { summarize = saved }
+}
+
 // FailCounts has the planner's count after a fill (CountAfterFill) fail until
 // restore is called, its retry too, as one held past its time can fail twice:
 // the fill goes on, and the planner keeps what it last counted.

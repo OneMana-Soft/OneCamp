@@ -162,3 +162,17 @@ func TestAZoneNameCantChangeTheStructure(t *testing.T) {
 		t.Errorf("paramText %q", got)
 	}
 }
+
+// A file that is one part of a hold's export says so in itself (V-388):
+// X-WR-CALDESC, which calendar apps show as the calendar's description, with
+// its text escaped; a message without a note has no such line.
+func TestAMessageSaysItsNote(t *testing.T) {
+	note := "Part 1 of this hold's export: the first 20,000 calendar events that match, not all of them; more remain."
+	got := unfold(string(WriteMessage(Message{Method: "PUBLISH", Note: note})))
+	if want := "X-WR-CALDESC:Part 1 of this hold's export: the first 20\\,000 calendar events that match\\, not all of them\\; more remain.\r\n"; !strings.Contains(got, want) {
+		t.Fatalf("the note's line: %q, want %q", got, want)
+	}
+	if got := string(WriteMessage(Message{Method: "PUBLISH"})); strings.Contains(got, "X-WR-CALDESC") {
+		t.Fatalf("a message without a note says %q", got)
+	}
+}

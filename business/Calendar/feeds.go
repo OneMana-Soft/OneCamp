@@ -23,6 +23,7 @@ import (
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	ICS "github.com/akashc777/OneCamp/business/ICS"
 	policyBusiness "github.com/akashc777/OneCamp/business/Policy"
+	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	"github.com/akashc777/OneCamp/helpers"
 	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
@@ -142,14 +143,17 @@ func (s *service) MakeFeed(ctx context.Context, who *model.UserInfo, id, scope s
 		return nil, err
 	}
 	f := models.Feed{ID: s.newID(), CalendarID: cal, PersonID: personOf(who), TokenHash: hash, Scope: scope, CreatedAt: s.now()}
-	if err := s.store.makeFeed(ctx, f); err != nil {
+	replaced, err := s.store.makeFeed(ctx, f)
+	if err != nil {
 		return nil, err
 	}
+	s.tellFeed(ctx, who, resourceEventBusiness.CalendarFeedMade, cal, f.Scope, replaced)
 	at := f.CreatedAt
 	return &FeedView{Live: true, URL: feedURL(raw), Scope: scope, CreatedAt: &at, Most: most}, nil
 }
 
 // StopFeed stops who's feed of a calendar: its link answers nothing at once.
+// A stop with no live feed changes nothing and tells nothing.
 func (s *service) StopFeed(ctx context.Context, who *model.UserInfo, id string) error {
 	if err := s.ready(ctx); err != nil {
 		return err
@@ -158,7 +162,26 @@ func (s *service) StopFeed(ctx context.Context, who *model.UserInfo, id string) 
 	if err != nil {
 		return ErrEventNotFound
 	}
-	return s.store.revokeFeed(ctx, cal, personOf(who))
+	stopped, err := s.store.revokeFeed(ctx, cal, personOf(who))
+	if err != nil {
+		return err
+	}
+	if stopped != "" {
+		s.tellFeed(ctx, who, resourceEventBusiness.CalendarFeedStopped, cal, stopped, "")
+	}
+	return nil
+}
+
+// tellFeed tells a link to a calendar made or stopped once the store has it,
+// for the audit log's "calendar" (V-398): the scope the store kept or
+// stopped, and for a new link the scope of the live one it stopped. Never the
+// link's address or token, which only its maker sees, once.
+func (s *service) tellFeed(ctx context.Context, who *model.UserInfo, kind resourceEventBusiness.Kind, cal uuid.UUID, scope, replaced string) {
+	data := map[string]string{"scope": scope}
+	if replaced != "" {
+		data["replaced"] = replaced
+	}
+	s.tellCalendar(ctx, who, kind, cal, nil, data)
 }
 
 // FeedICS is the calendar a feed's token names, as its person may see it

@@ -69,6 +69,8 @@ func GetBoardInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dgraphBoard.MqttTopic = helpers.GetMqttTopicForBoard(dgraphBoard.Uuid)
+	// Whether the board offers this reader Protect and Lift protection (miro-44).
+	dgraphBoard.CanProtect = business.CanProtect(dgraphBoard, userInfo.UserDgraphInfo.Uuid, userDomain.IsWorkspaceAdmin(ctx, userInfo.UserDgraphInfo.Uuid))
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got boardInfo successfully!", "data": dgraphBoard})
 }
@@ -642,9 +644,49 @@ func RecordBoardExport(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteBadRequest(w, "A board exports as a PDF, a picture, a CSV of its notes or a board file.")
 	case errors.Is(err, business.ErrBoardNotFound):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Board not found"})
+	case helpers.WriteRefusal(w, err):
+		// A sensitivity label's refusal (business/Label), in its words.
 	default:
 		helpers.LogErrorWithContext(ctx, "controllers/RecordBoardExport err: %+v", err)
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't record the export. Try again."})
+	}
+}
+
+// ProtectBoardElements POST /board/protect - protects objects on a board, or
+// lifts their protection (miro-44). Only the board's owner or a workspace
+// admin may (403 for anyone else, recorded as refused); a board they can't
+// read answers 404, as if it weren't there. Every lock and lift is in the
+// admin audit log before it is made (503 if it can't be recorded).
+func ProtectBoardElements(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	var input adapter.InputProtectBoardElements
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.Protect == nil {
+		helpers.WriteBadRequest(w, "Send the board's id, the objects' ids and whether to protect or lift them.")
+		return
+	}
+	if _, err := uuid.Parse(input.BoardId); err != nil {
+		helpers.WriteBadRequest(w, "Send the board's id, the objects' ids and whether to protect or lift them.")
+		return
+	}
+	user := userInfo.UserDgraphInfo
+	changed, err := business.ProtectElements(ctx, input.BoardId, input.ElementIds, *input.Protect, user.Uid, user.Uuid, user.DisplayName())
+	switch {
+	case err == nil:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"changed": changed})
+	case errors.Is(err, business.ErrProtectIDs):
+		helpers.WriteBadRequest(w, fmt.Sprintf("Name between 1 and %d objects to protect or lift.", business.MaxProtect))
+	case errors.Is(err, business.ErrBoardNotFound):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Board not found"})
+	case errors.Is(err, business.ErrCannotProtect):
+		helpers.WriteForbidden(w, "Only the board's owner and admins can protect objects or lift their protection.")
+	case auditBusiness.RefusedUnrecorded(w, r, err, "controllers/ProtectBoardElements"):
+	default:
+		helpers.LogErrorWithContext(ctx, "controllers/ProtectBoardElements err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't change the protection. Try again."})
 	}
 }
 
@@ -798,6 +840,13 @@ func RestoreBoardSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := business.RestoreBoardSnapshot(ctx, input.BoardId, snapshotUUID, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid); err != nil {
+		if errors.Is(err, business.ErrCannotProtect) {
+			helpers.WriteForbidden(w, "This version changes which objects are protected, so only the board's owner or an admin can restore it.")
+			return
+		}
+		if auditBusiness.RefusedUnrecorded(w, r, err, "controllers/RestoreBoardSnapshot") {
+			return
+		}
 		helpers.LogErrorWithContext(ctx, "controllers/RestoreBoardSnapshot failed err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to restore board", "err": err.Error()})
 		return

@@ -11,6 +11,7 @@ package business
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -65,6 +66,7 @@ var (
 	updateType  = model.UpdateType
 	archiveType = model.ArchiveType
 	setTaskType = model.SetTaskType
+	typedTasks  = model.TypedTasks
 	writeLine   = taskDomain.UpdateDgraphTaskClearing
 )
 
@@ -174,6 +176,50 @@ func Archive(ctx context.Context, projectID, typeID uuid.UUID) error {
 		return bad("The built-in types can't be archived.")
 	}
 	return archiveType(ctx, projectID, typeID)
+}
+
+// FilterID is the list's and the board's filter by type (linear-03): its
+// values are type ids, and Task's stands for every plain task.
+const FilterID = "task_work_type"
+
+// matchesNothing is a clause no task meets.
+const matchesNothing = `eq(task_uuid, "00000000-0000-0000-0000-000000000000")`
+
+// FilterClause narrows a project's task list to the tasks of the given types.
+// The clause names typed tasks only, never the plain ones, so its size is
+// bounded by the project's typed work: with Task chosen it leaves out the
+// typed tasks of the other types; without it, it keeps the tasks of the
+// chosen ones. An id that is no type here matches nothing. "" narrows
+// nothing (Task chosen, and no other type in use).
+func FilterClause(ctx context.Context, projectID uuid.UUID, ids []string) (string, error) {
+	var chosen []uuid.UUID
+	plain := false
+	for _, raw := range ids {
+		switch id, err := uuid.Parse(raw); {
+		case err != nil:
+		case id == TypeTask:
+			plain = true
+		default:
+			chosen = append(chosen, id)
+		}
+	}
+	if !plain && len(chosen) == 0 {
+		return matchesNothing, nil
+	}
+	tasks, err := typedTasks(ctx, projectID, chosen, plain)
+	if err != nil {
+		return "", err
+	}
+	list, _ := json.Marshal(tasks)
+	switch {
+	case plain && len(tasks) == 0:
+		return "", nil
+	case plain:
+		return fmt.Sprintf(`NOT eq(task_uuid, %s)`, list), nil
+	case len(tasks) == 0:
+		return matchesNothing, nil
+	}
+	return fmt.Sprintf(`eq(task_uuid, %s)`, list), nil
 }
 
 // Builtin says whether id is one of the six built-in types.

@@ -28,6 +28,10 @@ func whoIs(r *http.Request) (accessBusiness.Subject, userModels.UserInfo, bool) 
 // fail answers an error from the pipeline with its status and a line a
 // person can read.
 func fail(w http.ResponseWriter, err error) {
+	// A refusal in its own words and code: a sensitivity label's (business/Label).
+	if helpers.WriteRefusal(w, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, contentIOBusiness.ErrUnsupported):
 		helpers.WriteJSON(w, http.StatusUnsupportedMediaType, helpers.Envolope{"msg": "This file type can't be imported. Use Markdown, HTML, text, Word (.docx) or a zip of them."})

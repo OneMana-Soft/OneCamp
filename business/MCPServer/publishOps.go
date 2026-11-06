@@ -29,7 +29,12 @@ import (
 // Closed: an op whose Reach names a kind missing here fails startup, as a
 // bridged tool without a rule does. A table's ops act on its rows, and Serve
 // holds any op that changes the table itself to CanManage, as on REST.
-var opKinds = map[string]ResourceKind{"table": ResourceTableRows}
+//
+// An op that acts on no existing place (v1api.Op Unplaced) is checked as a
+// bridged tool of that kind is: "self" makes something the caller will own
+// (a table), "workspace" reads only what the caller may see, and neither
+// names an object.
+var opKinds = map[string]ResourceKind{"table": ResourceTableRows, "self": ResourceSelfOwned, "workspace": ResourceWorkspace}
 
 // published are the tools PublishOps registered, in the API's order: tools/list
 // lists them beside ai.ToolRegistry's (controllers/MCP listToolsForScopes).
@@ -81,10 +86,15 @@ func ToolNameForOp(op string) string { return strings.ReplaceAll(op, ".", "_") }
 
 // specForOp is one op as a governed tool: everything from its declaration.
 func specForOp(op v1api.Op) (*ToolSpec, error) {
-	if op.Reach == nil {
+	reachKind := op.Unplaced
+	switch {
+	case op.Reach != nil && reachKind != "":
+		return nil, fmt.Errorf("mcp: op %s names a place (Reach) and none (Unplaced)", op.Name)
+	case op.Reach != nil:
+		reachKind, _ = op.Reach(map[string]any{})
+	case reachKind == "":
 		return nil, fmt.Errorf("mcp: op %s names no place it acts on (Reach), so nothing can be authorised", op.Name)
 	}
-	reachKind, _ := op.Reach(map[string]any{})
 	kind, ok := opKinds[reachKind]
 	if !ok {
 		return nil, fmt.Errorf("mcp: op %s acts on a %q, which has no authority rule here", op.Name, reachKind)
@@ -102,6 +112,9 @@ func specForOp(op v1api.Op) (*ToolSpec, error) {
 		RequiredScope: op.Scope,
 		Behaviour:     b,
 		Resource: func(args map[string]any) (ResourceRef, error) {
+			if kind.IdentifiesNoObject() {
+				return ResourceRef{Kind: kind}, nil
+			}
 			_, id := op.Reach(args)
 			if strings.TrimSpace(id) == "" {
 				// A refusal, never a wider scope: see resourceResolver.

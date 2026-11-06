@@ -200,6 +200,10 @@ for (const name of [BOARD, DOC]) {
 // the same doc (so the same client id) and its token re-issued, re-sends its
 // presence at its clock (startSync), then speaks: the host hears it within
 // 1 s. The same holds for a member on a doc and for a link visitor by its key.
+// An idle tab says nothing after startSync, so its startSync entry alone must
+// be heard within 1 s (CODE-REVIEWER-180's probe, V-348): had the server let
+// the echo pass unbound, it would hold the echo's clock and drop that entry,
+// equal to it, until the tab's next change or its 15 s renewal.
 const KINDS = [
     // who, the doc, their token, its re-issued copy, their tab's key, their level before and after
     ['a call guest', BOARD, CALL_GUEST, CALL_GUEST_REISSUED, undefined, ['view', 'edit']],
@@ -236,6 +240,7 @@ for (const [who, name, token, reissued, tab, [before, after]] of KINDS) {
             assert.equal(await back.connect(), 'synced')
             back.presenceClock = clock
             back.presence(theirs(2), { clock }) // its own, at its clock (startSync)
+            await until(() => heard(host, 2), 1000, "the host hears their idle tab's startSync entry alone within 1 s")
             back.presence(theirs(3))
             await until(() => heard(host, 3), 1000, "the host hears their reconnected tab within 1 s")
             assert.ok(back.others.get(sam.doc.clientID)?.react?.some((r) => r.id === 'r1'), "they hear the host's own")

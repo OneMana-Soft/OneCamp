@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"strings"
 
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
@@ -85,7 +86,7 @@ func MayEnter(ctx context.Context, room string, user *dgraphStruct.DgraphUser, m
 	if meetingHost || !lockedOut(s, a) {
 		return nil
 	}
-	if host, err := HostByRule(ctx, room, user, IsWorkspaceAdmin(ctx, user.Uuid)); err == nil && host {
+	if host, err := HostByRule(ctx, room, user, userDomain.IsWorkspaceAdmin(ctx, user.Uuid)); err == nil && host {
 		return nil
 	}
 	return ErrCallLocked

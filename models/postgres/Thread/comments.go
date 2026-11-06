@@ -14,6 +14,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -109,32 +110,26 @@ func GetComment(ctx context.Context, id uuid.UUID) (*Comment, error) {
 
 // EditComment gives a live comment a new body; false when it is gone.
 func EditComment(ctx context.Context, id uuid.UUID, body string, at time.Time) (bool, error) {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(cctx,
+	n, err := pgexec.Exec(ctx,
 		`UPDATE thread_comments SET body = $2, edited_at = $3 WHERE id = $1 AND deleted_at IS NULL`, id, body, at)
 	if err != nil {
-		helpers.LogErrorWithContext(cctx, "models/Thread EditComment failed: %+v", err)
+		helpers.LogErrorWithContext(ctx, "models/Thread EditComment failed: %+v", err)
 		return false, err
 	}
-	n, err := res.RowsAffected()
-	return n == 1, err
+	return n == 1, nil
 }
 
 // RemoveComment takes a live comment from every reader; false when it is gone
 // already. The row is kept: nothing is purged until the owner decides how long
 // anything removed is kept.
 func RemoveComment(ctx context.Context, id, by uuid.UUID, at time.Time) (bool, error) {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(cctx,
+	n, err := pgexec.Exec(ctx,
 		`UPDATE thread_comments SET deleted_at = $3, deleted_by = $2 WHERE id = $1 AND deleted_at IS NULL`, id, by, at)
 	if err != nil {
-		helpers.LogErrorWithContext(cctx, "models/Thread RemoveComment failed: %+v", err)
+		helpers.LogErrorWithContext(ctx, "models/Thread RemoveComment failed: %+v", err)
 		return false, err
 	}
-	n, err := res.RowsAffected()
-	return n == 1, err
+	return n == 1, nil
 }
 
 // ReactionsOf is the reactions on the comments, by comment, oldest first.

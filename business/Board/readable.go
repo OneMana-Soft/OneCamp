@@ -101,7 +101,34 @@ func ReadableBoardsFor(ctx context.Context, boardUUIDs []string, userUUID string
 // board they may not read, deleted, or not there is left out. One graph query
 // for the lot; an error is the graph not answering.
 func ReadableBoardTitles(ctx context.Context, boardUUIDs []string, userUUID string) (map[string]string, error) {
-	out := make(map[string]string, len(boardUUIDs))
+	reads, err := BoardReadsFor(ctx, boardUUIDs, userUUID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(reads))
+	for id, r := range reads {
+		if !r.Gone {
+			out[id] = r.Title
+		}
+	}
+	return out, nil
+}
+
+// BoardRead is what a person may know of one board: its title while they may
+// read it, by CanRead; once it is deleted, that it is gone and nothing more.
+type BoardRead struct {
+	Title string
+	Gone  bool
+}
+
+// BoardReadsFor answers, of the named boards, what the person (by uuid) may
+// know of each, keyed by lower-case uuid: its title when they may read it now;
+// Gone, with no title, when it is deleted and they could read it apart from
+// that (couldRead), as a link to a deleted doc or project says it is gone to
+// those it was open to. A board they could never read, or not there, is left
+// out. One graph query for the lot; an error is the graph not answering.
+func BoardReadsFor(ctx context.Context, boardUUIDs []string, userUUID string) (map[string]BoardRead, error) {
+	out := make(map[string]BoardRead, len(boardUUIDs))
 	if len(boardUUIDs) == 0 {
 		return out, nil
 	}
@@ -110,9 +137,14 @@ func ReadableBoardTitles(ctx context.Context, boardUUIDs []string, userUUID stri
 		return nil, err
 	}
 	for _, b := range boards {
-		if b != nil && b.Uuid != "" && CanRead(b, userUUID) {
-			out[strings.ToLower(b.Uuid)] = b.Title
+		if b == nil || b.Uuid == "" || !couldRead(b, userUUID) {
+			continue
 		}
+		r := BoardRead{Gone: true}
+		if CanRead(b, userUUID) {
+			r = BoardRead{Title: b.Title}
+		}
+		out[strings.ToLower(b.Uuid)] = r
 	}
 	return out, nil
 }

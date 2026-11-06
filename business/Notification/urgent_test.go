@@ -1,9 +1,11 @@
 package notification
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
+	weekHours "github.com/akashc777/OneCamp/business/WeekHours"
 	prefModels "github.com/akashc777/OneCamp/models/postgres/UserNotificationPreference"
 )
 
@@ -58,5 +60,24 @@ func TestHeldForFocusTime(t *testing.T) {
 		if got.Reason != c.reason || (c.until == nil) != (got.Until == nil) || (c.until != nil && !got.Until.Equal(*c.until)) {
 			t.Errorf("%s: got %+v, want %s until %v", c.name, got, c.reason, c.until)
 		}
+	}
+}
+
+// A schedule (notify.schedule) holds as quiet hours do: outside its ranges a
+// teammate is told "quiet_hours" and until when the next range starts, and
+// nothing of the hours themselves; inside them, nothing is held.
+func TestHeldForASchedule(t *testing.T) {
+	mondays := &prefModels.Schedule{TZ: "UTC", Week: map[string][]weekHours.Span{"1": {{Start: "09:00", End: "17:00"}}}}
+	p := &prefModels.UserNotificationPreference{Schedule: mondays}
+	saturday := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	got := HeldFor(p, saturday)
+	if want := time.Date(2026, 11, 9, 9, 0, 0, 0, time.UTC); got.Reason != "quiet_hours" || got.Until == nil || !got.Until.Equal(want) {
+		t.Fatalf("Saturday: %+v, want quiet_hours until %v", got, want)
+	}
+	if b, _ := json.Marshal(got); string(b) != `{"until":"2026-11-09T09:00:00Z","reason":"quiet_hours"}` {
+		t.Errorf("a teammate is told %s", b)
+	}
+	if got := HeldFor(p, time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)); got.Reason != "" {
+		t.Errorf("Monday at ten: %+v", got)
 	}
 }

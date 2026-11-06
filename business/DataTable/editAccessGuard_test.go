@@ -36,6 +36,8 @@ var tableReads = map[string]string{
 	"CanView":          "the open check itself",
 	"CanManage":        "manage asks loadManageable's rule on what loadViewable loads",
 	"viewToChange":     "a person's own view; a shared view asks loadManageable",
+	"restoreViews":     "views back from the trash by viewToChange's rule (changeable) on the table it loads",
+	"serveViewsBatch":  "the API's view writes, each by viewToChange's rule (changeable) on the table it loads",
 	"loadEditable":     "the write check starts from the open check",
 }
 

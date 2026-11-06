@@ -212,12 +212,17 @@ func (s *Sorter) Check() error {
 // way.
 func (k SortKey) Compare(o SortKey) int { return compareKeys(k.vals, o.vals, k.desc) }
 
-// optionPlace is where label (lower case, trimmed) sorts among a choice's
+// labelKey is a choice label as places compare it: trimmed, in lower case.
+// optionPlace and EntriesAfter (fields.go) both read it, so a change that
+// moves no key moves no place.
+func labelKey(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// optionPlace is where label (its labelKey) sorts among a choice's
 // options, from 1; a label no option has after them all. The evaluator's
 // sort and the index's entry (cellIndex.go) both read it.
 func optionPlace(c *column, label string) float64 {
 	for i, o := range c.options {
-		if strings.ToLower(strings.TrimSpace(o)) == label {
+		if labelKey(o) == label {
 			return float64(i + 1)
 		}
 	}

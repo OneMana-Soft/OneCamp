@@ -120,13 +120,17 @@ const (
 	// "calendar"): a share given, raised or lowered (Data "level", and "from"
 	// when it had one) or stopped ("from"), with the person in Subjects; a
 	// rename or a new colour ("changed": "name", "hue"); an address subscribed
-	// to or dropped ("host" only: an address can carry a private key). Never
-	// the calendar's name.
+	// to or dropped ("host" only: an address can carry a private key); a
+	// secret link to it made ("scope": busy or full, and "replaced": the scope
+	// of the link it stopped, when one was live) or stopped ("scope" it
+	// showed). Never the calendar's name, nor a link's address or token.
 	CalendarShared       Kind = "calendar.shared"
 	CalendarUnshared     Kind = "calendar.unshared"
 	CalendarUpdated      Kind = "calendar.updated"
 	CalendarSubscribed   Kind = "calendar.subscribed"
 	CalendarUnsubscribed Kind = "calendar.unsubscribed"
+	CalendarFeedMade     Kind = "calendar.feed.made"
+	CalendarFeedStopped  Kind = "calendar.feed.stopped"
 	BookingCreated       Kind = "booking.created"
 	BookingCancelled     Kind = "booking.cancelled"
 	BookingRescheduled   Kind = "booking.rescheduled"

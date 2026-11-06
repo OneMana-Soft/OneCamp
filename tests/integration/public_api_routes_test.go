@@ -162,7 +162,7 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	}
 
 	// One case per route, in an order where each has what it needs.
-	var taskID, docID, rowID, spareID string
+	var taskID, docID, rowID, spareID, fieldID, viewID, threadID, commentID, madeID string
 	type step struct {
 		route string // "METHOD /pattern" as the router has it
 		run   func() (int, map[string]any)
@@ -217,6 +217,77 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 		{"POST /v1/tables/{id}/trash/restore", func() (int, map[string]any) {
 			return call("POST", "/v1/tables/"+table.Id.String()+"/trash/restore", map[string]any{"rows": []any{spareID}})
 		}},
+		// A table's fields and views: one made, renamed and deleted, and a
+		// batch of each that makes one.
+		{"GET /v1/tables/{id}/fields", func() (int, map[string]any) { return call("GET", "/v1/tables/"+table.Id.String()+"/fields", nil) }},
+		{"POST /v1/tables/{id}/fields", func() (int, map[string]any) {
+			code, out := call("POST", "/v1/tables/"+table.Id.String()+"/fields", map[string]any{"name": "Owner", "type": "text"})
+			fieldID, _ = out["id"].(string)
+			return code, out
+		}},
+		{"PATCH /v1/tables/{id}/fields/{field}", func() (int, map[string]any) {
+			return call("PATCH", "/v1/tables/"+table.Id.String()+"/fields/"+fieldID, map[string]any{"name": "Writer"})
+		}},
+		{"DELETE /v1/tables/{id}/fields/{field}", func() (int, map[string]any) {
+			return call("DELETE", "/v1/tables/"+table.Id.String()+"/fields/"+fieldID, nil)
+		}},
+		{"POST /v1/tables/{id}/fields/batch", func() (int, map[string]any) {
+			return call("POST", "/v1/tables/"+table.Id.String()+"/fields/batch", map[string]any{"key": "routes-fields",
+				"create": []any{map[string]any{"name": "Due", "type": "date"}}})
+		}},
+		{"GET /v1/tables/{id}/views", func() (int, map[string]any) { return call("GET", "/v1/tables/"+table.Id.String()+"/views", nil) }},
+		{"POST /v1/tables/{id}/views", func() (int, map[string]any) {
+			code, out := call("POST", "/v1/tables/"+table.Id.String()+"/views", map[string]any{"name": "Board", "type": "board"})
+			viewID, _ = out["id"].(string)
+			return code, out
+		}},
+		{"PATCH /v1/tables/{id}/views/{view}", func() (int, map[string]any) {
+			return call("PATCH", "/v1/tables/"+table.Id.String()+"/views/"+viewID, map[string]any{"name": "Kanban"})
+		}},
+		{"DELETE /v1/tables/{id}/views/{view}", func() (int, map[string]any) {
+			return call("DELETE", "/v1/tables/"+table.Id.String()+"/views/"+viewID, nil)
+		}},
+		{"POST /v1/tables/{id}/views/batch", func() (int, map[string]any) {
+			return call("POST", "/v1/tables/"+table.Id.String()+"/views/batch", map[string]any{"key": "routes-views",
+				"create": []any{map[string]any{"name": "Calendar grid", "type": "grid"}}})
+		}},
+		// A row's comments: one that starts a thread, and the row's threads.
+		{"POST /v1/tables/{id}/rows/{row}/comments", func() (int, map[string]any) {
+			code, out := call("POST", "/v1/tables/"+table.Id.String()+"/rows/"+rowID+"/comments", map[string]any{"text": "Out on Monday?"})
+			threadID, _ = out["thread_id"].(string)
+			commentID, _ = out["comment_uuid"].(string)
+			return code, out
+		}},
+		{"GET /v1/tables/{id}/rows/{row}/comments", func() (int, map[string]any) {
+			return call("GET", "/v1/tables/"+table.Id.String()+"/rows/"+rowID+"/comments", nil)
+		}},
+		// A row's thread resolved and reopened, and its comment edited and
+		// deleted.
+		{"POST /v1/tables/{id}/rows/{row}/threads/{thread}/resolve", func() (int, map[string]any) {
+			return call("POST", "/v1/tables/"+table.Id.String()+"/rows/"+rowID+"/threads/"+threadID+"/resolve", nil)
+		}},
+		{"POST /v1/tables/{id}/rows/{row}/threads/{thread}/reopen", func() (int, map[string]any) {
+			return call("POST", "/v1/tables/"+table.Id.String()+"/rows/"+rowID+"/threads/"+threadID+"/reopen", nil)
+		}},
+		{"PATCH /v1/tables/{id}/rows/{row}/threads/{thread}/comments/{comment}", func() (int, map[string]any) {
+			return call("PATCH", "/v1/tables/"+table.Id.String()+"/rows/"+rowID+"/threads/"+threadID+"/comments/"+commentID, map[string]any{"text": "Out on Tuesday?"})
+		}},
+		{"DELETE /v1/tables/{id}/rows/{row}/threads/{thread}/comments/{comment}", func() (int, map[string]any) {
+			return call("DELETE", "/v1/tables/"+table.Id.String()+"/rows/"+rowID+"/threads/"+threadID+"/comments/"+commentID, nil)
+		}},
+		// A table of its own: made, renamed, deleted to the tables' trash and
+		// brought back.
+		{"POST /v1/tables", func() (int, map[string]any) {
+			code, out := call("POST", "/v1/tables", map[string]any{"name": "Launch checklist"})
+			madeID, _ = out["id"].(string)
+			return code, out
+		}},
+		{"PATCH /v1/tables/{id}", func() (int, map[string]any) {
+			return call("PATCH", "/v1/tables/"+madeID, map[string]any{"name": "Launch list", "icon": "🚀"})
+		}},
+		{"DELETE /v1/tables/{id}", func() (int, map[string]any) { return call("DELETE", "/v1/tables/"+madeID, nil) }},
+		{"GET /v1/tables/trash", func() (int, map[string]any) { return call("GET", "/v1/tables/trash", nil) }},
+		{"POST /v1/tables/{id}/restore", func() (int, map[string]any) { return call("POST", "/v1/tables/"+madeID+"/restore", nil) }},
 		{"POST /v1/tasks", func() (int, map[string]any) {
 			code, out := call("POST", "/v1/tasks", map[string]any{"task_name": "Ship the release notes", "project_uuid": project.String(), "priority": "high"})
 			if d, ok := out["data"].(map[string]any); ok {
@@ -303,5 +374,11 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	}
 	if rowID == "" || spareID == "" {
 		t.Error("POST /v1/tables/{id}/rows/batch named no rows")
+	}
+	if fieldID == "" || viewID == "" {
+		t.Errorf("POST /v1/tables/{id}/fields and /views named field %q and view %q", fieldID, viewID)
+	}
+	if threadID == "" || commentID == "" || madeID == "" {
+		t.Errorf("the comment named thread %q and comment %q; POST /v1/tables named table %q", threadID, commentID, madeID)
 	}
 }

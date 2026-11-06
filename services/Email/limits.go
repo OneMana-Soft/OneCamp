@@ -131,9 +131,17 @@ func (c *dailyCounter) roll(now time.Time) {
 // all (when it doesn't, left means nothing). Email being off is
 // IsEmailEnabled's to say.
 func InvitationsLeftToday() (left int, capped bool) {
+	return LeftToday(InvitationReserve)
+}
+
+// LeftToday is how many more messages today has for a send that leaves keep
+// of them unspent, and whether the day has a cap at all (when it doesn't,
+// left means nothing). A notification due now, such as a reminder, asks it
+// before it is queued, since a refused one is only sent tomorrow.
+func LeftToday(keep int) (left int, capped bool) {
 	cap := dailyCapFromEnv()
 	if cap <= 0 {
 		return 0, false
 	}
-	return sentToday.left(time.Now(), cap, InvitationReserve), true
+	return sentToday.left(time.Now(), cap, keep), true
 }

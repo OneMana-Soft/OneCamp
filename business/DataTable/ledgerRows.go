@@ -19,6 +19,7 @@ import (
 	rowQuery "github.com/akashc777/OneCamp/business/RowQuery"
 	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -224,7 +225,7 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 	}
 	fields, err := model.ListFields(ctx, tableId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load fields")
+		return nil, storeFailed("failed to load fields")
 	}
 	var problems BatchErrors
 	refuse := func(index *int, row uuid.UUID, err error) {
@@ -396,7 +397,7 @@ func batchErr(err error) error {
 	case errors.Is(err, sql.ErrNoRows):
 		return errNotFound
 	}
-	return fmt.Errorf("failed to write the rows")
+	return storeFailed("failed to write the rows")
 }
 
 // MoveRows moves rows of a table (actor may write its rows) to a place, in
@@ -458,7 +459,7 @@ func Undo(ctx context.Context, tableId uuid.UUID, changeSet *uuid.UUID, actor Ac
 	op := uuid.Nil
 	if changeSet != nil {
 		if target, err = model.GetChangeSet(ctx, tableId, *changeSet); err != nil {
-			return nil, fmt.Errorf("failed to read the change")
+			return nil, storeFailed("failed to read the change")
 		}
 		if target == nil {
 			return nil, errNotFound
@@ -471,7 +472,7 @@ func Undo(ctx context.Context, tableId uuid.UUID, changeSet *uuid.UUID, actor Ac
 			target, err = model.LatestToUndo(ctx, tableId, actor.UserID)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to read your changes")
+			return nil, storeFailed("failed to read your changes")
 		}
 	}
 	if target == nil {
@@ -486,7 +487,7 @@ func Undo(ctx context.Context, tableId uuid.UUID, changeSet *uuid.UUID, actor Ac
 		// writes after its undo (a write into an undone change set is
 		// refused all the same: model.ErrUndone).
 		if fill, err := model.StopAIFillOf(ctx, tableId, target.ID, actor.UserID); err != nil {
-			return nil, fmt.Errorf("failed to stop the fill")
+			return nil, storeFailed("failed to stop the fill")
 		} else if fill != nil {
 			broadcastFill(tableId.String(), fill)
 		}
@@ -507,7 +508,7 @@ func Redo(ctx context.Context, tableId uuid.UUID, actor Actor) (*UndoResult, err
 		target, err = model.LatestToRedo(ctx, tableId, actor.UserID)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to read your changes")
+		return nil, storeFailed("failed to read your changes")
 	}
 	if target == nil {
 		return nil, errNothingToRedo
@@ -551,7 +552,7 @@ func reverseWhole(ctx context.Context, t *model.DataTable, target *model.ChangeS
 	}
 	sets, err := model.OperationSets(ctx, t.Id, actor.UserID, target.Operation)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read your changes")
+		return nil, storeFailed("failed to read your changes")
 	}
 	if len(sets) == 0 {
 		return nil, errUndoneAlready
@@ -576,10 +577,30 @@ func reverseWhole(ctx context.Context, t *model.DataTable, target *model.ChangeS
 }
 
 // reverse undoes target as a change set of kind (undo or redo), in
-// operation op (uuid.Nil for none).
+// operation op (uuid.Nil for none). A field's change that rewrote cells is
+// refused (errFieldUndo), and so is a column's change an undo can't put back
+// alone (columnUndoProblem). Putting a column back takes the right its change
+// took, as actor holds it now: changing the table's columns (canManage).
 func reverse(ctx context.Context, t *model.DataTable, target *model.ChangeSet, kind rowLedger.ChangeKind, op uuid.UUID, actor Actor) (*UndoResult, error) {
-	if target.Kind == string(rowLedger.ChangeField) {
+	if target.Kind == string(rowLedger.ChangeField) && target.Rows > 0 {
 		return nil, errFieldUndo
+	}
+	if target.Rows == 0 { // columns alone, or an undo that put nothing back
+		whole, err := model.GetChangeSet(ctx, t.Id, target.ID)
+		switch {
+		case err != nil:
+			return nil, storeFailed("failed to read the change")
+		case whole == nil:
+			return nil, errNotFound
+		}
+		if cols := columnsIn(whole.Changes); len(cols) > 0 {
+			if !canManage(t, actor) {
+				return nil, errForbidden
+			}
+			if err := columnUndoProblem(cols); err != nil {
+				return nil, err
+			}
+		}
 	}
 	cs := newChangeSet(ctx, t.Id, actor, kind)
 	cs.Operation = op
@@ -592,11 +613,94 @@ func reverse(ctx context.Context, t *model.DataTable, target *model.ChangeSet, k
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, errNotFound
 	case err != nil:
-		return nil, fmt.Errorf("failed to undo that")
+		return nil, storeFailed("failed to undo that")
 	}
 	announce(ctx, t, cs, liveAndHooks)
+	if cols := columnsIn(cs.Changes); len(cols) > 0 {
+		columnsPutBack(ctx, t.Id, cols)
+	}
 	tellLinkedLater(ctx, t.Id)
 	return &UndoResult{ChangeSet: cs.ID, Reversed: target.ID, Kind: target.Kind, Changes: done.Reversed, Skipped: done.Skipped}, nil
+}
+
+// The refusals of an undo of a column linking two tables: its other half
+// lives in the other table, and putting this one back alone would leave
+// that one pointing at nothing, so it's changed from its menu or the trash.
+var (
+	errLinkedColumnMade    = fmt.Errorf("This column links two tables: delete it from its menu to undo it")
+	errLinkedColumnDeleted = fmt.Errorf("This column links two tables: bring it back from the table's trash")
+	errLinkedColumnChanged = fmt.Errorf("This column links two tables: change it back from its menu")
+)
+
+// columnUndoProblem is why an undo can't put columns' changes (FieldColumn)
+// back: one of a column linking two tables, before or after; nil when it
+// can. Pure.
+func columnUndoProblem(cols []model.Change) error {
+	for _, c := range cols {
+		was, now := c.Columns()
+		if !linksTables(was) && !linksTables(now) {
+			continue
+		}
+		switch {
+		case was == nil || was.Deleted:
+			return errLinkedColumnMade
+		case now == nil || now.Deleted:
+			return errLinkedColumnDeleted
+		}
+		return errLinkedColumnChanged
+	}
+	return nil
+}
+
+// linksTables is whether a column's state is a relation linking to a
+// table (linkOf). Pure.
+func linksTables(s *model.ColumnState) bool {
+	if s == nil {
+		return false
+	}
+	_, ok := linkOf(&model.Field{Type: s.Type, Config: string(s.Config)})
+	return ok
+}
+
+// columnsPutBack is what follows columns an undo or a redo put back: the
+// table's open views read it again (tellFieldsChanged), and a column whose
+// entries the change left needing it has them made again or its places
+// moved (reindexColumns), as restoreField and a field's update have.
+func columnsPutBack(ctx context.Context, table uuid.UUID, cols []model.Change) {
+	tellFieldsChanged(table)
+	reindexColumns(ctx, table, cols, "columnsPutBack")
+}
+
+// reindexColumns brings the cell index to columns' changes, by what Row
+// Query's EntriesAfter says each leaves its entries needing: the columns
+// whose entries are made again in one walk of the table's rows (IndexField),
+// a choice whose options only moved by its places alone (IndexOptions), and
+// nothing for the rest. A failure marks the table's cell index stale. by
+// names the caller in the log.
+func reindexColumns(ctx context.Context, table uuid.UUID, changes []model.Change, by string) {
+	var walk, places []uuid.UUID
+	for _, c := range changes {
+		switch rowQuery.EntriesAfter(c.Columns()) {
+		case rowQuery.MakeEntries:
+			walk = append(walk, c.Row)
+		case rowQuery.PlaceOptions:
+			places = append(places, c.Row)
+		}
+	}
+	failed := func(what string, ids []uuid.UUID, err error) {
+		helpers.LogErrorWithContext(ctx, "business/DataTable %s %s %v: %v", by, what, ids, err)
+		_ = model.MarkCellIndexStale(ctx, table)
+	}
+	if len(walk) > 0 {
+		if err := rowQuery.IndexField(ctx, table, walk...); err != nil {
+			failed("index", walk, err)
+		}
+	}
+	if len(places) > 0 {
+		if err := rowQuery.IndexOptions(ctx, table, places...); err != nil {
+			failed("options of", places, err)
+		}
+	}
 }
 
 // HistoryChange is one change a change set made to a row: a cell's value
@@ -649,7 +753,7 @@ func RowHistory(ctx context.Context, tableId, rowId uuid.UUID, before *uuid.UUID
 	}
 	fields, err := model.ListFields(ctx, tableId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load fields")
+		return nil, storeFailed("failed to load fields")
 	}
 	live := make(map[string]bool, len(fields))
 	for _, f := range fields {
@@ -664,7 +768,7 @@ func RowHistory(ctx context.Context, tableId, rowId uuid.UUID, before *uuid.UUID
 	for i := 0; i < historyReads && len(entries) == 0; i++ {
 		page, pageMore, err := model.RowHistory(ctx, tableId, rowId, from, historyPage)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read the row's history")
+			return nil, storeFailed("failed to read the row's history")
 		}
 		more = pageMore
 		for _, e := range page {
@@ -759,6 +863,9 @@ type Trash struct {
 	Rows   []TrashRow   `json:"rows"`
 	More   bool         `json:"more"`
 	Fields []TrashField `json:"fields"`
+	// Views are its deleted views that actor may change: their own, and
+	// shared ones when they manage it (viewToChange's rule).
+	Views []*model.View `json:"views"`
 }
 
 // trashPage is how many rows a page of a table's trash holds.
@@ -785,7 +892,7 @@ func TableTrash(ctx context.Context, tableId uuid.UUID, before *uuid.UUID, actor
 	// and nothing reads them meanwhile.
 	liveFields, err := model.ListFields(ctx, tableId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load fields")
+		return nil, storeFailed("failed to load fields")
 	}
 	live := make(map[string]bool, len(liveFields))
 	for _, f := range liveFields {
@@ -801,12 +908,22 @@ func TableTrash(ctx context.Context, tableId uuid.UUID, before *uuid.UUID, actor
 	var fields []model.TrashedField
 	if canManage(t, actor) {
 		if fields, err = model.TrashedFields(ctx, tableId, trashPage); err != nil {
-			return nil, fmt.Errorf("failed to read the trash")
+			return nil, storeFailed("failed to read the trash")
 		}
 		for _, f := range fields {
 			if f.DeletedBy != nil {
 				people = append(people, *f.DeletedBy)
 			}
+		}
+	}
+	views, err := model.TrashedViews(ctx, tableId, actor.UserID, trashPage)
+	if err != nil {
+		return nil, storeFailed("failed to read the trash")
+	}
+	out.Views = make([]*model.View, 0, len(views))
+	for _, v := range views {
+		if v.Owner != nil || canManage(t, actor) {
+			out.Views = append(out.Views, v)
 		}
 	}
 	names, _ := model.PeopleNames(ctx, people)
@@ -831,6 +948,7 @@ func TableTrash(ctx context.Context, tableId uuid.UUID, before *uuid.UUID, actor
 type RestoreInput struct {
 	Rows   []uuid.UUID `json:"rows"`
 	Fields []uuid.UUID `json:"fields"`
+	Views  []uuid.UUID `json:"views"`
 }
 
 // RestoreResult is what a restore brought back.
@@ -838,6 +956,7 @@ type RestoreResult struct {
 	ChangeSet uuid.UUID   `json:"change_set,omitempty"`
 	Rows      []uuid.UUID `json:"rows"`
 	Fields    []uuid.UUID `json:"fields"`
+	Views     []uuid.UUID `json:"views"`
 }
 
 // RestoreFromTrash brings rows back from a table's trash (actor may write its
@@ -845,12 +964,17 @@ type RestoreResult struct {
 // row is live, in one change set; and fields (actor can change the table),
 // with their cells and links, which never left.
 func RestoreFromTrash(ctx context.Context, tableId uuid.UUID, in RestoreInput, actor Actor) (*RestoreResult, error) {
+	if len(in.Views) > maxBatch {
+		return nil, badInput("Bring back at most %d views at a time", maxBatch)
+	}
+	// Views alone are the view rule's (restoreViews): whoever opens the table
+	// brings back their own. Rows and fields need a writer, as before.
+	if len(in.Rows) == 0 && len(in.Fields) == 0 {
+		return restoreViews(ctx, tableId, in.Views, actor)
+	}
 	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
-	}
-	if len(in.Rows) == 0 && len(in.Fields) == 0 {
-		return nil, badInput("name the rows or fields to bring back")
 	}
 	if len(in.Rows) > maxBatch {
 		return nil, badInput("Bring back at most %d rows at a time", maxBatch)
@@ -858,7 +982,7 @@ func RestoreFromTrash(ctx context.Context, tableId uuid.UUID, in RestoreInput, a
 	if len(in.Fields) > 0 && !canManage(t, actor) {
 		return nil, errForbidden
 	}
-	out := &RestoreResult{Rows: []uuid.UUID{}, Fields: []uuid.UUID{}}
+	out := &RestoreResult{Rows: []uuid.UUID{}, Fields: []uuid.UUID{}, Views: []uuid.UUID{}}
 	for _, id := range in.Fields {
 		if err := restoreField(ctx, t, id, actor); err != nil {
 			return nil, err
@@ -868,6 +992,10 @@ func RestoreFromTrash(ctx context.Context, tableId uuid.UUID, in RestoreInput, a
 	if len(in.Fields) > 0 {
 		tellFieldsChanged(tableId)
 	}
+	if err := restoreViewsOf(ctx, t, in.Views, actor); err != nil {
+		return nil, err
+	}
+	out.Views = append(out.Views, in.Views...)
 	if len(in.Rows) > 0 {
 		cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeRestore)
 		if err := model.RestoreRows(ctx, tableId, actor.UserID, in.Rows, maxLinks, cs, observe); err != nil {
@@ -880,6 +1008,53 @@ func RestoreFromTrash(ctx context.Context, tableId uuid.UUID, in RestoreInput, a
 	return out, nil
 }
 
+// restoreViews brings views alone back from a table's trash, for whoever
+// opens the table, by restoreViewsOf's rule.
+func restoreViews(ctx context.Context, tableId uuid.UUID, ids []uuid.UUID, actor Actor) (*RestoreResult, error) {
+	if len(ids) == 0 {
+		return nil, badInput("name the rows, fields or views to bring back")
+	}
+	t, err := loadViewable(ctx, tableId, actor)
+	if err != nil {
+		return nil, err
+	}
+	if err := restoreViewsOf(ctx, t, ids, actor); err != nil {
+		return nil, err
+	}
+	return &RestoreResult{Rows: []uuid.UUID{}, Fields: []uuid.UUID{}, Views: append([]uuid.UUID{}, ids...)}, nil
+}
+
+// restoreViewsOf brings views back from table t's trash by the rule their
+// delete had (changeable): one of actor's own, or a shared one when they
+// manage the table. Another person's own view is never theirs to see, so it
+// isn't found. The views are read at once and checked whole, then brought
+// back in one write, so none comes back unless each may.
+func restoreViewsOf(ctx context.Context, t *model.DataTable, ids []uuid.UUID, actor Actor) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	trashed, err := model.TrashedViewsByIDs(ctx, t.Id, ids)
+	if err != nil {
+		return errViewsUnavailable
+	}
+	byID := make(map[uuid.UUID]*model.View, len(trashed))
+	for _, v := range trashed {
+		byID[v.Id] = v
+	}
+	for _, id := range ids {
+		if _, err := changeable(t, byID[id], actor); err != nil {
+			return err
+		}
+	}
+	switch n, err := model.RestoreViews(ctx, t.Id, ids); {
+	case err != nil:
+		return errViewsUnavailable
+	case n < int64(len(byID)):
+		return errViewNotFound // another call brought one back first
+	}
+	return nil
+}
+
 // restoreField brings a field of t back from the trash, in one transaction:
 // with the field showing its links from the other table when it's a relation
 // field that has one, or, for the field showing another's links, only while
@@ -887,32 +1062,46 @@ func RestoreFromTrash(ctx context.Context, tableId uuid.UUID, in RestoreInput, a
 func restoreField(ctx context.Context, t *model.DataTable, id uuid.UUID, actor Actor) error {
 	f, err := model.GetTrashedField(ctx, t.Id, id)
 	if err != nil {
-		return fmt.Errorf("failed to read the trash")
+		return storeFailed("failed to read the trash")
 	}
 	if f == nil {
 		return fmt.Errorf("That field isn't in this table's trash")
 	}
 	both := []*model.Field{f}
 	l, _ := linkOf(f)
-	if l.inverseOf != "" {
-		owner, ok := l.linkField()
-		if ok {
-			err = model.RestoreShowingField(ctx, f, owner, l.table)
-		}
-		if !ok || errors.Is(err, model.ErrRelationGone) {
-			return fmt.Errorf("Bring back the field %q shows links of first", f.Name)
-		}
-	} else {
+	if l.inverseOf == "" {
 		if other, err := uuid.Parse(l.inverse); err == nil {
 			if g, err := model.GetTrashedField(ctx, l.table, other); err == nil && g != nil {
 				both = append(both, g)
 			}
 		}
-		err = model.RestoreFields(ctx, both...)
 	}
-	if err != nil {
-		return fmt.Errorf("failed to bring the field back")
+	// The column brought back is a change set of its own (the row ledger),
+	// so an undo pressed next sends it back to the trash (V-455).
+	cs := newChangeSet(ctx, t.Id, actor, rowLedger.ChangeRestore)
+	if err := columnWrite(ctx, []uuid.UUID{f.Id}, cs, "failed to bring the field back", func(ctx context.Context) error {
+		if l.inverseOf == "" {
+			if err := model.RestoreFields(ctx, both...); err != nil {
+				return storeFailed("failed to bring the field back")
+			}
+			return nil
+		}
+		owner, ok := l.linkField()
+		var err error
+		if ok {
+			err = model.RestoreShowingField(ctx, f, owner, l.table)
+		}
+		switch {
+		case !ok || errors.Is(err, model.ErrRelationGone):
+			return fmt.Errorf("Bring back the field %q shows links of first", f.Name)
+		case err != nil:
+			return storeFailed("failed to bring the field back")
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
+	pgexec.AfterCommit(ctx, func(ctx context.Context) { announce(ctx, t, cs, hooksOnly) })
 	// Rows made while it was in the trash have no entry of it yet.
 	for _, g := range both {
 		if err := rowQuery.IndexField(ctx, g.TableId, g.Id); err != nil {
@@ -942,7 +1131,7 @@ type TrashTable struct {
 func TablesTrash(ctx context.Context, actor Actor) ([]TrashTable, error) {
 	tables, by, err := model.DeletedTables(ctx, actor.UserID, actor.IsAdmin, trashPage)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read the trash")
+		return nil, storeFailed("failed to read the trash")
 	}
 	var people []uuid.UUID
 	for _, id := range by {
@@ -965,7 +1154,7 @@ func TablesTrash(ctx context.Context, actor Actor) ([]TrashTable, error) {
 func RestoreTable(ctx context.Context, id uuid.UUID, actor Actor) (*model.DataTable, error) {
 	t, err := model.GetDeletedTable(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read the trash")
+		return nil, storeFailed("failed to read the trash")
 	}
 	if t == nil {
 		return nil, errNotFound
@@ -977,6 +1166,6 @@ func RestoreTable(ctx context.Context, id uuid.UUID, actor Actor) (*model.DataTa
 		return nil, errNotFound
 	}
 	t.DeletedAt = nil
-	tellLinkedLater(ctx, id)
+	pgexec.AfterCommit(ctx, func(ctx context.Context) { tellLinkedLater(ctx, id) })
 	return t, nil
 }

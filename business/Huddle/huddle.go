@@ -63,7 +63,25 @@ type Facts struct {
 	Started time.Time  `json:"started"`
 	Ended   *time.Time `json:"ended,omitempty"`
 	Seconds int        `json:"seconds,omitempty"`
+	// Came is who was in the ended call, as its card shows their faces:
+	// members, first joined first, at most FactsFaces, each named as the
+	// call knew them (a post's facts are written once, as a system line's
+	// words are). People counts everyone who came, guests too, and Missed is
+	// a call nobody but its starter was ever in (slack-06's card: "Missed
+	// call").
+	Came   []Face `json:"came,omitempty"`
+	People int    `json:"people,omitempty"`
+	Missed bool   `json:"missed,omitempty"`
 }
+
+// Face is a member who came to a call, for its card.
+type Face struct {
+	UUID string `json:"uuid"`
+	Name string `json:"name"`
+}
+
+// FactsFaces is the most faces an ended call's card keeps.
+const FactsFaces = 8
 
 // The reads and writes, seams for tests.
 var seams = struct {
@@ -171,7 +189,7 @@ func finish(ctx context.Context, s *callStateBusiness.Session) {
 	if s.PostUUID == "" || s.EndedAt == nil {
 		return
 	}
-	facts, _ := json.Marshal(Facts{Session: s.ID, Started: s.StartedAt, Ended: s.EndedAt, Seconds: int(s.EndedAt.Sub(s.StartedAt).Seconds())})
+	facts, _ := json.Marshal(endFacts(s))
 	var err error
 	switch s.Resource.Kind {
 	case "channel":
@@ -182,6 +200,25 @@ func finish(ctx context.Context, s *callStateBusiness.Session) {
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Huddle: call %s's end on its post %s: %+v", s.ID, s.PostUUID, err)
 	}
+}
+
+// endFacts is an ended call's facts for its post: how long it ran, the
+// faces of the members who came (first joined first, at most FactsFaces),
+// how many came, guests too, and whether nobody but its starter was ever in
+// it. Pure.
+func endFacts(s *callStateBusiness.Session) Facts {
+	f := Facts{Session: s.ID, Started: s.StartedAt, Ended: s.EndedAt, Seconds: int(s.EndedAt.Sub(s.StartedAt).Seconds()), People: len(s.People)}
+	others := 0
+	for _, p := range s.People {
+		if p.UserUUID != "" && len(f.Came) < FactsFaces {
+			f.Came = append(f.Came, Face{UUID: p.UserUUID, Name: p.Name})
+		}
+		if p.Guest || !strings.EqualFold(p.UserUUID, s.StartedBy) {
+			others++
+		}
+	}
+	f.Missed = len(s.People) > 0 && others == 0
+	return f
 }
 
 // errNoStarter is a call whose starter can't be read as a person: it can't

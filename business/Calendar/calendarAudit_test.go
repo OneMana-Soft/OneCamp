@@ -2,11 +2,13 @@ package Calendar
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
+	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
 
@@ -121,6 +123,92 @@ func TestEveryCalendarChangeIsToldOnceItIsMade(t *testing.T) {
 	}
 }
 
+// A calendar's secret link is a change to it too (V-398): a link made, made
+// anew over the one before, or stopped is told once the store has it, with
+// what the link shows and what the stopped one showed, as the store says. A
+// refused link, or a stop with no live link, tells nothing; the link's token
+// and its address are never told.
+func TestACalendarsLinkIsToldOnceItIsMadeOrStopped(t *testing.T) {
+	h := newHarness(t)
+	feedsOn(t, true)
+	jonas, maya := h.member("Jonas"), h.member("Maya")
+	ctx := context.Background()
+	cal, err := h.s.PersonCalendar(ctx, jonas, personOf(jonas).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]string{personOf(jonas).String(): "Jonas", personOf(maya).String(): "Maya"}
+	var secrets []string // every link made, and its token
+	makes := func(who *model.UserInfo, scope string) func() error {
+		return func() error {
+			v, err := h.s.MakeFeed(ctx, who, cal.String(), scope)
+			if err == nil {
+				secrets = append(secrets, v.URL, tokenOf(t, v))
+			}
+			return err
+		}
+	}
+	refused := func(do func() error) func() error {
+		return func() error {
+			if err := do(); err == nil {
+				return errors.New("it wasn't refused")
+			}
+			return nil
+		}
+	}
+	stops := func(who *model.UserInfo) func() error {
+		return func() error { return h.s.StopFeed(ctx, who, cal.String()) }
+	}
+	steps := []struct {
+		name string
+		do   func() error
+		want []string // kind|scope|replaced|who
+	}{
+		{"stopped with no live link", stops(jonas), nil},
+		{"the workspace turned links off", func() error {
+			prev := feedsAllowed
+			feedsAllowed = func(context.Context) bool { return false }
+			defer func() { feedsAllowed = prev }()
+			return refused(makes(jonas, models.FeedFull))()
+		}, nil},
+		{"Maya asks for everything of a calendar she sees as busy", refused(makes(maya, models.FeedFull)), nil},
+		{"made, busy only", makes(jonas, models.FeedBusy), []string{"calendar.feed.made|busy||Jonas"}},
+		{"made anew, everything", makes(jonas, models.FeedFull), []string{"calendar.feed.made|full|busy|Jonas"}},
+		{"Maya's own, busy only", makes(maya, models.FeedBusy), []string{"calendar.feed.made|busy||Maya"}},
+		{"stopped", stops(jonas), []string{"calendar.feed.stopped|full||Jonas"}},
+		{"stopped again", stops(jonas), nil},
+	}
+	for _, st := range steps {
+		before := len(calendarTold(h))
+		if err := st.do(); err != nil {
+			t.Fatalf("%s: %v", st.name, err)
+		}
+		var got []string
+		for _, e := range calendarTold(h)[before:] {
+			got = append(got, strings.Join([]string{string(e.Kind), e.Data["scope"], e.Data["replaced"], names[e.Actor.UserUUID]}, "|"))
+			if e.At.IsZero() || e.ResourceUUID != cal.String() {
+				t.Errorf("%s: told without when, or of calendar %q, want %s", st.name, e.ResourceUUID, cal)
+			}
+			for k, v := range e.Data {
+				if k != "scope" && k != "replaced" {
+					t.Errorf("%s: %s tells %s=%q", st.name, e.Kind, k, v)
+				}
+				for _, s := range secrets {
+					if strings.Contains(v, s) {
+						t.Errorf("%s: %s tells the link or its token: %s=%q", st.name, e.Kind, k, v)
+					}
+				}
+			}
+		}
+		if strings.Join(got, " ; ") != strings.Join(st.want, " ; ") {
+			t.Errorf("%s: told %q, want %q", st.name, got, st.want)
+		}
+	}
+	if len(secrets) != 6 {
+		t.Fatalf("made %d links, want 3", len(secrets)/2)
+	}
+}
+
 // A calendar's rows say what changed, to whom and at what level, in the
 // words the share dialog uses; they never name the calendar or quote an
 // address. Pure.
@@ -141,6 +229,9 @@ func TestTheCalendarRowsSayWhatChangedWithoutNamingIt(t *testing.T) {
 		{ev(resourceEventBusiness.CalendarUpdated, nil, map[string]string{"changed": "name,hue"}), "Changed a calendar (name, colour)"},
 		{ev(resourceEventBusiness.CalendarSubscribed, nil, map[string]string{"host": "calendar.example"}), "Subscribed to a calendar at calendar.example"},
 		{ev(resourceEventBusiness.CalendarUnsubscribed, nil, map[string]string{"host": "calendar.example"}), "Unsubscribed from a calendar at calendar.example"},
+		{ev(resourceEventBusiness.Kind("calendar.feed.made"), nil, map[string]string{"scope": "busy"}), "Made a link to a calendar (busy only)"},
+		{ev(resourceEventBusiness.Kind("calendar.feed.made"), nil, map[string]string{"scope": "full", "replaced": "busy"}), "Made a new link to a calendar (everything), stopping the old one (busy only)"},
+		{ev(resourceEventBusiness.Kind("calendar.feed.stopped"), nil, map[string]string{"scope": "full"}), "Stopped a link to a calendar (everything)"},
 	} {
 		if !auditsEvent(tc.e) {
 			t.Errorf("%s isn't recorded", tc.e.Kind)

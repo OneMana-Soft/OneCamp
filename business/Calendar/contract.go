@@ -78,7 +78,7 @@ type Service interface {
 	// instance's are its series'), and whether they are the default's.
 	Reminders(ctx context.Context, who *model.UserInfo, id string) (Reminders, error)
 	// SetReminders sets them (nil goes back to the default; empty is none).
-	SetReminders(ctx context.Context, who *model.UserInfo, id string, minutes []int) (Reminders, error)
+	SetReminders(ctx context.Context, who *model.UserInfo, id string, minutes, email []int) (Reminders, error)
 	// Snooze brings a reminder of an occurrence back: in five minutes, when
 	// it starts, or a minute before. It says when.
 	Snooze(ctx context.Context, who *model.UserInfo, id string, until SnoozeFor) (time.Time, error)

@@ -33,8 +33,11 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	MQTT "github.com/eclipse/paho.mqtt.golang"
 	"github.com/google/uuid"
 	"github.com/opensearch-project/opensearch-go/v4"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
@@ -49,8 +52,10 @@ import (
 	mcpBusiness "github.com/akashc777/OneCamp/business/MCPServer"
 	policyBusiness "github.com/akashc777/OneCamp/business/Policy"
 	v1api "github.com/akashc777/OneCamp/business/PublicAPI"
+	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
+	threadBusiness "github.com/akashc777/OneCamp/business/Thread"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	projectController "github.com/akashc777/OneCamp/controllers/Project"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -730,10 +735,18 @@ func TestATokenActsAsAMemberAcrossTheAPI(t *testing.T) {
 			return b
 		}
 		for _, name := range []string{"tables_row_get", "tables_rows_get", "tables_rows_batch", "tables_row_delete",
-			"tables_trash_list", "tables_trash_restore", "tables_row_history"} {
+			"tables_trash_list", "tables_trash_restore", "tables_row_history", "tables_row_comments_list", "tables_row_comment_create"} {
 			if tools[name] == nil {
 				t.Errorf("tools/list (%d) for Ana's token leaves out %s", w.Code, name)
 			}
+		}
+		// A row's comments are read only; a comment is a write that makes one
+		// more each time it is sent (an Idempotency-Key makes a retry safe),
+		// and deletes nothing.
+		if !hint("tables_row_comments_list", "readOnlyHint") || hint("tables_row_comment_create", "readOnlyHint") ||
+			hint("tables_row_comment_create", "idempotentHint") || hint("tables_row_comment_create", "destructiveHint") {
+			t.Errorf("the comments ops' hints aren't their declared behaviour: list %v, create %v",
+				tools["tables_row_comments_list"]["annotations"], tools["tables_row_comment_create"]["annotations"])
 		}
 		if !hint("tables_rows_batch", "destructiveHint") || hint("tables_rows_batch", "idempotentHint") ||
 			!hint("tables_row_delete", "destructiveHint") || !hint("tables_row_delete", "idempotentHint") ||
@@ -887,12 +900,815 @@ func TestATokenActsAsAMemberAcrossTheAPI(t *testing.T) {
 		}
 	})
 
+	// tables H2b-1: a table's fields and views over the public API, declared
+	// once in business/DataTable and published on REST and MCP alike. Each
+	// write is the app's own function, checked as the app checks it, and is
+	// written with its audit row, built from what was stored, in one
+	// transaction (main's audit rule, 3 Nov): a change the log can't record
+	// leaves nothing behind, no field and no notice to an open view. A batch
+	// is checked whole, applied item by item under its key, and sent again
+	// with the same key skips what it did.
+	t.Run("over the public API, a table's manager changes its fields and views with a row each, and a change the log refuses leaves nothing", func(t *testing.T) {
+		plan, err := dataTableBusiness.CreateTable(ctx, dataTableBusiness.TableInput{Name: "Launch plan", Visibility: "workspace"}, boActor)
+		if err != nil {
+			t.Fatalf("make Bo's Launch plan: %v", err)
+		}
+		boKey, err := apiTokenBusiness.CreateToken(ctx, "Bo's schema key", []string{apiTokenBusiness.ScopeTablesRead, apiTokenBusiness.ScopeTablesWrite}, 30, bo.UserPostgresInfo.Id, nil, false)
+		if err != nil {
+			t.Fatalf("make Bo's token: %v", err)
+		}
+		broker := &schemaOpsBroker{Client: MQTT.NewClient(MQTT.NewClientOptions().AddBroker("tcp://127.0.0.1:1"))}
+		integration.UseMqttClient(t, broker)
+		planTopic := helpers.GetMqttTopicForTable(plan.Id.String())
+		send := func(plaintext, method, path string, body any, headers ...string) (int, map[string]any) {
+			t.Helper()
+			var b []byte
+			if body != nil {
+				b, _ = json.Marshal(body)
+			}
+			req := httptest.NewRequest(method, path, bytes.NewReader(b))
+			req.Header.Set("Authorization", "Bearer "+plaintext)
+			req.Header.Set("Content-Type", "application/json")
+			for i := 0; i+1 < len(headers); i += 2 {
+				req.Header.Set(headers[i], headers[i+1])
+			}
+			rec := httptest.NewRecorder()
+			routes.ServeHTTP(rec, req)
+			var out map[string]any
+			_ = json.Unmarshal(rec.Body.Bytes(), &out)
+			return rec.Code, out
+		}
+		listOf := func(v any) []map[string]any {
+			list, _ := v.([]any)
+			out := make([]map[string]any, 0, len(list))
+			for _, x := range list {
+				m, _ := x.(map[string]any)
+				out = append(out, m)
+			}
+			return out
+		}
+		codeOf := func(out map[string]any) string {
+			e, _ := out["error"].(map[string]any)
+			c, _ := e["code"].(string)
+			return c
+		}
+		idsOf := func(v any) (ids []string) {
+			for _, m := range listOf(v) {
+				id, _ := m["id"].(string)
+				ids = append(ids, id)
+			}
+			return ids
+		}
+		// A field in the trash is listed with who deleted it: {field, deleted_by}.
+		trashedFields := func(v any) (ids []string) {
+			for _, m := range listOf(v) {
+				f, _ := m["field"].(map[string]any)
+				id, _ := f["id"].(string)
+				ids = append(ids, id)
+			}
+			return ids
+		}
+		base, key := "/v1/tables/"+plan.Id.String(), boKey.Plaintext
+		names := func(what string) map[string]string { // name -> id, as the API lists them
+			t.Helper()
+			code, out := send(key, "GET", base+"/"+what, nil)
+			if code != http.StatusOK {
+				t.Fatalf("GET %s answered %d: %v", what, code, out)
+			}
+			got := map[string]string{}
+			for _, m := range listOf(out["items"]) {
+				n, _ := m["name"].(string)
+				got[n], _ = m["id"].(string)
+			}
+			return got
+		}
+		rowsAbout := func(id string) (actions []string, meta []map[string]any) {
+			t.Helper()
+			rs, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `SELECT action, metadata FROM admin_audit_log
+				WHERE metadata->>'id' = $1 AND category = 'tables' ORDER BY seq`, id)
+			if err != nil {
+				t.Fatalf("read the audit rows: %v", err)
+			}
+			defer rs.Close()
+			for rs.Next() {
+				var a string
+				var raw []byte
+				if err := rs.Scan(&a, &raw); err != nil {
+					t.Fatal(err)
+				}
+				var m map[string]any
+				_ = json.Unmarshal(raw, &m)
+				actions, meta = append(actions, a), append(meta, m)
+			}
+			return actions, meta
+		}
+
+		// One field at a time: made, renamed (the plan's open views told),
+		// deleted to the trash and brought back, each with its row.
+		code, out := send(key, "POST", base+"/fields", map[string]any{"name": "Budget", "type": "number"})
+		budget, _ := out["id"].(string)
+		if code != http.StatusCreated || budget == "" || out["type"] != "number" {
+			t.Fatalf("POST a field answered %d: %v; want 201 and the field", code, out)
+		}
+		code, out = send(key, "PATCH", base+"/fields/"+budget, map[string]any{"name": "Spend"})
+		if code != http.StatusOK || out["id"] != budget || names("fields")["Spend"] != budget {
+			t.Fatalf("PATCH the field's name answered %d: %v; want 200 and the field renamed", code, out)
+		}
+		if told := broker.to(planTopic); !slices.ContainsFunc(told, func(m string) bool { return strings.Contains(m, `"action":"fields"`) }) {
+			t.Errorf("a field renamed over the API told the plan's open views %q; want its fields read again", told)
+		}
+		if code, out := send(key, "DELETE", base+"/fields/"+budget, nil); code != http.StatusOK || out["deleted"] != true {
+			t.Fatalf("DELETE the field answered %d: %v; want 200, deleted", code, out)
+		}
+		code, out = send(key, "GET", base+"/trash", nil)
+		if code != http.StatusOK || !slices.Contains(trashedFields(out["fields"]), budget) {
+			t.Fatalf("the trash answered %d: %v; want the field in it", code, out)
+		}
+		if code, out := send(key, "POST", base+"/trash/restore", map[string]any{"fields": []any{budget}}, "Idempotency-Key", "h2b-restore-"+budget); code != http.StatusCreated {
+			t.Fatalf("bringing the field back answered %d: %v; want 201", code, out)
+		}
+		if names("fields")["Spend"] != budget {
+			t.Fatalf("the field brought back isn't among the plan's fields: %v", names("fields"))
+		}
+		actions, meta := rowsAbout(budget)
+		if !slices.Equal(actions, []string{"table.field.created", "table.field.updated", "table.field.deleted"}) {
+			t.Fatalf("the field's rows are %q; want its create, update and delete", actions)
+		}
+		if meta[0]["name"] != "Budget" || meta[0]["type"] != "number" || meta[0]["token_id"] != boKey.Token.Id.String() ||
+			meta[0]["op"] != "tables.field.create" || fmt.Sprint(meta[1]["changed"]) != "[name]" || meta[2]["name"] != "Spend" {
+			t.Errorf("the field's rows say %v; want what was stored (Budget, number; changed [name]; Spend) and Bo's token", meta)
+		}
+
+		// A member who opens the plan but doesn't manage it is refused as
+		// forbidden; a table she can't open is one that isn't there.
+		if code, out := send(cyToken.Plaintext, "POST", base+"/fields", map[string]any{"name": "Mine", "type": "text"}); code != http.StatusForbidden {
+			t.Errorf("Cy's field on Bo's plan answered %d: %v; want 403", code, out)
+		}
+		if code, out := send(cyToken.Plaintext, "POST", "/v1/tables/"+salaries.Id.String()+"/fields", map[string]any{"name": "Mine", "type": "text"}); code != http.StatusNotFound {
+			t.Errorf("Cy's field on Bo's private table answered %d: %v; want 404", code, out)
+		}
+
+		// A batch makes, changes and deletes fields under its key; the same
+		// batch with the same key skips what it did; another batch with that
+		// key is refused; one bad item, or the primary field deleted, and none
+		// is applied.
+		code, out = send(key, "POST", base+"/fields", map[string]any{"name": "Scratch", "type": "text"})
+		scratch, _ := out["id"].(string)
+		if code != http.StatusCreated {
+			t.Fatalf("POST a scratch field answered %d: %v", code, out)
+		}
+		// A batch names its key among its arguments.
+		fieldsBatch := func(k string, body map[string]any) (int, map[string]any) {
+			withKey := map[string]any{"key": k}
+			for n, v := range body {
+				withKey[n] = v
+			}
+			return send(key, "POST", base+"/fields/batch", withKey)
+		}
+		k1 := "h2b-fields-" + plan.Id.String()
+		body := map[string]any{"create": []any{map[string]any{"name": "Owner", "type": "text"}, map[string]any{"name": "Due", "type": "date"}},
+			"update": []any{map[string]any{"field": budget, "name": "Cost"}}, "delete": []any{scratch}}
+		code, out = fieldsBatch(k1, body)
+		made := idsOf(out["created"])
+		if code != http.StatusCreated || len(made) != 2 || slices.Contains(made, "") || fmt.Sprint(idsOf(out["updated"])) != "["+budget+"]" ||
+			fmt.Sprint(idsOf(out["deleted"])) != "["+scratch+"]" {
+			t.Fatalf("a fields batch answered %d: %v; want 201, two made, Cost renamed, Scratch deleted", code, out)
+		}
+		count := len(names("fields"))
+		code, out = fieldsBatch(k1, body)
+		if code != http.StatusCreated || !slices.Equal(idsOf(out["created"]), made) || len(names("fields")) != count {
+			t.Errorf("the same batch again answered %d: %v (%d fields, were %d); want the same ids and no field more", code, out, len(names("fields")), count)
+		}
+		if code, out := fieldsBatch(k1, map[string]any{"create": []any{map[string]any{"name": "Other", "type": "text"}}}); code != http.StatusUnprocessableEntity {
+			t.Errorf("another batch with the key answered %d: %v; want 422", code, out)
+		}
+		code, out = fieldsBatch(k1+"-bad", map[string]any{"create": []any{map[string]any{"name": "Fine", "type": "text"}, map[string]any{"name": "Odd", "type": "no such kind"}}})
+		refused := listOf(func() any { e, _ := out["error"].(map[string]any); return e["details"] }())
+		if code != http.StatusBadRequest || len(refused) != 1 || refused[0]["list"] != "create" || refused[0]["index"] != float64(1) || names("fields")["Fine"] != "" {
+			t.Errorf("a batch with one bad item answered %d: %v; want 400 naming create[1], and nothing made", code, out)
+		}
+		primary := ""
+		code, out = send(key, "GET", base+"/fields", nil)
+		for _, f := range listOf(out["items"]) {
+			if f["primary"] == true {
+				primary, _ = f["id"].(string)
+			}
+		}
+		if code, out := fieldsBatch(k1+"-primary", map[string]any{"delete": []any{primary}}); primary == "" || code != http.StatusBadRequest {
+			t.Errorf("a batch deleting the primary field (%q) answered %d: %v; want 400", primary, code, out)
+		}
+		actions, meta = rowsAbout(made[0])
+		if !slices.Equal(actions, []string{"table.field.created"}) || meta[0]["key"] != k1 || meta[0]["op"] != "tables.fields.batch" ||
+			meta[0]["token_id"] != boKey.Token.Id.String() || meta[0]["change_id"] == nil || meta[0]["name"] != "Owner" {
+			t.Errorf("the batch's create is in the log as %q %v; want one row with its key, op, Bo's token, the call's change and Owner", actions, meta)
+		}
+
+		// Views: a member's own view is hers to make, a shared one is the
+		// manager's; a batch makes a board, a change of name keeps it one, a
+		// delete goes to the trash and back, and a locked view takes no change.
+		if code, out := send(cyToken.Plaintext, "POST", base+"/views", map[string]any{"name": "Cy's grid", "type": "grid", "personal": true}); code != http.StatusCreated {
+			t.Errorf("Cy's own view answered %d: %v; want 201", code, out)
+		}
+		if code, out := send(cyToken.Plaintext, "POST", base+"/views", map[string]any{"name": "Cy's shared grid", "type": "grid"}); code != http.StatusForbidden {
+			t.Errorf("Cy's shared view answered %d: %v; want 403", code, out)
+		}
+		code, out = send(key, "POST", base+"/views/batch", map[string]any{"key": "h2b-views-" + plan.Id.String(),
+			"create": []any{map[string]any{"name": "Board", "type": "board"}}})
+		boards := idsOf(out["created"])
+		if code != http.StatusCreated || len(boards) != 1 {
+			t.Fatalf("a views batch making a board answered %d: %v", code, out)
+		}
+		board := boards[0]
+		if code, out := send(key, "PATCH", base+"/views/"+board, map[string]any{"name": "Kanban"}); code != http.StatusOK || out["type"] != "board" || out["name"] != "Kanban" {
+			t.Errorf("renaming the board answered %d: %v; want 200, still a board", code, out)
+		}
+		if code, out := send(key, "DELETE", base+"/views/"+board, nil); code != http.StatusOK {
+			t.Fatalf("deleting the board answered %d: %v", code, out)
+		}
+		code, out = send(key, "GET", base+"/trash", nil)
+		if code != http.StatusOK || !slices.Contains(idsOf(out["views"]), board) {
+			t.Fatalf("the trash answered %d: %v; want the board in it", code, out)
+		}
+		if code, out := send(key, "POST", base+"/trash/restore", map[string]any{"views": []any{board}}, "Idempotency-Key", "h2b-restore-"+board); code != http.StatusCreated || names("views")["Kanban"] != board {
+			t.Fatalf("bringing the board back answered %d: %v (views %v)", code, out, names("views"))
+		}
+		if err := dataTableBusiness.LockView(ctx, plan.Id, uuid.MustParse(board), true, boActor); err != nil {
+			t.Fatalf("lock the board: %v", err)
+		}
+		if code, out := send(key, "PATCH", base+"/views/"+board, map[string]any{"name": "Moved"}); code != http.StatusConflict {
+			t.Errorf("renaming a locked board answered %d: %v; want 409", code, out)
+		}
+		if actions, _ := rowsAbout(board); !slices.Equal(actions, []string{"table.view.created", "table.view.updated", "table.view.deleted"}) {
+			t.Errorf("the board's rows are %q; want its create, update and delete", actions)
+		}
+
+		// Over MCP the batch is a tool with its declared hints.
+		code, out = send(key, "POST", "/v1/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+		res, _ := out["result"].(map[string]any)
+		var batchTool map[string]any
+		for _, x := range listOf(res["tools"]) {
+			if x["name"] == "tables_fields_batch" {
+				batchTool = x
+			}
+		}
+		hints, _ := batchTool["annotations"].(map[string]any)
+		if code != http.StatusOK || hints["destructiveHint"] != true || hints["idempotentHint"] != true {
+			t.Errorf("tools/list (%d) has tables_fields_batch's hints as %v; want destructive and idempotent", code, hints)
+		}
+
+		// A change the log refuses to record: the store refuses the row (a
+		// trigger), so the change is undone with it. No field, no rename, no
+		// notice to the plan's open views, and no row.
+		for _, q := range []string{
+			`CREATE OR REPLACE FUNCTION test_h2b_refuse_row() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN IF NEW.metadata->>'name' = 'Refused column' THEN RAISE EXCEPTION 'refused' USING ERRCODE = 'check_violation'; END IF; RETURN NEW; END $$`,
+			`CREATE TRIGGER test_h2b_refuse_row BEFORE INSERT ON admin_audit_log FOR EACH ROW EXECUTE FUNCTION test_h2b_refuse_row()`,
+		} {
+			if _, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, q); err != nil {
+				t.Fatalf("have the log refuse a row: %v", err)
+			}
+		}
+		t.Cleanup(func() {
+			_, _ = postgresInit.DBConn.SqlDB.ExecContext(ctx, `DROP TRIGGER IF EXISTS test_h2b_refuse_row ON admin_audit_log`)
+			_, _ = postgresInit.DBConn.SqlDB.ExecContext(ctx, `DROP FUNCTION IF EXISTS test_h2b_refuse_row()`)
+		})
+		helpers.SettleBackground(10 * time.Second)
+		broker.forget()
+		if code, out := send(key, "POST", base+"/fields", map[string]any{"name": "Refused column", "type": "text"}); code != http.StatusServiceUnavailable || codeOf(out) != "unavailable" {
+			t.Errorf("a field whose row the log refused answered %d: %v; want 503 unavailable", code, out)
+		}
+		if code, out := send(key, "PATCH", base+"/fields/"+budget, map[string]any{"name": "Refused column"}); code != http.StatusServiceUnavailable || codeOf(out) != "unavailable" {
+			t.Errorf("a rename whose row the log refused answered %d: %v; want 503 unavailable", code, out)
+		}
+		helpers.SettleBackground(10 * time.Second)
+		var left int
+		if err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `SELECT count(*) FROM data_table_fields WHERE table_id = $1 AND name = 'Refused column'`,
+			plan.Id).Scan(&left); err != nil || left != 0 || names("fields")["Cost"] != budget {
+			t.Errorf("changes the log refused left %d fields named for them (%v), and the plan's fields are %v; want none, Cost kept", left, err, names("fields"))
+		}
+		if told := broker.to(planTopic); len(told) != 0 {
+			t.Errorf("changes the log refused told the plan's open views %q; want nothing", told)
+		}
+	})
+
 	// V-331 (main 13:2x, 2 Nov): the bridged row tools ask the rule the app and
 	// REST ask of a table's rows (business/TableAccess's Edit), not CanManage.
 	// Cy is a member and no manager of Bo's Roadmap: her token makes, changes
 	// and links its rows over MCP as she does in the app; a table she can't
 	// open is refused in REST's words, as one that isn't there is; and her
 	// agent, paused, is turned away.
+	t.Run("over the public API, a member comments on a row and replies as themselves, an agent's token as the agent, and nowhere else", func(t *testing.T) {
+		// tables.row.comments.list and tables.row.comment.create (H2b-2): the
+		// app's threads service on the row (business/Thread, the table_row
+		// adapter), as the token's member (accessBusiness.TokenSubjectOf).
+		plan, err := dataTableBusiness.CreateTable(ctx, dataTableBusiness.TableInput{Name: "Hiring plan", Visibility: "workspace"}, boActor)
+		if err != nil {
+			t.Fatalf("make Bo's Hiring plan: %v", err)
+		}
+		role, err := dataTableBusiness.CreateField(ctx, plan.Id, dataTableBusiness.FieldInput{Name: "Role", Type: "text"}, boActor)
+		if err != nil {
+			t.Fatalf("give the Hiring plan a field: %v", err)
+		}
+		lead, err := dataTableBusiness.CreateRow(ctx, plan.Id, dataTableBusiness.RowInput{Values: map[string]interface{}{role.Id.String(): "Design lead"}}, boActor)
+		if err != nil {
+			t.Fatalf("add the Design lead row: %v", err)
+		}
+		pay, err := dataTableBusiness.CreateRow(ctx, salaries.Id, dataTableBusiness.RowInput{Values: map[string]interface{}{}}, boActor)
+		if err != nil {
+			t.Fatalf("add a row to Bo's private table: %v", err)
+		}
+		boKey, err := apiTokenBusiness.CreateToken(ctx, "Bo's comments key", []string{apiTokenBusiness.ScopeTablesRead, apiTokenBusiness.ScopeTablesWrite}, 30, bo.UserPostgresInfo.Id, nil, false)
+		if err != nil {
+			t.Fatalf("make Bo's token: %v", err)
+		}
+		cyKey, err := apiTokenBusiness.CreateToken(ctx, "Cy's comments key", []string{apiTokenBusiness.ScopeTablesRead, apiTokenBusiness.ScopeTablesWrite}, 30, cy.UserPostgresInfo.Id, nil, false)
+		if err != nil {
+			t.Fatalf("make Cy's token: %v", err)
+		}
+		cyReader, err := apiTokenBusiness.CreateToken(ctx, "Cy's comments reader", []string{apiTokenBusiness.ScopeTablesRead}, 30, cy.UserPostgresInfo.Id, nil, false)
+		if err != nil {
+			t.Fatalf("make Cy's reader: %v", err)
+		}
+		scribeID := uuid.New()
+		if _, err := env.PG.Exec(`INSERT INTO ai_agents (id, name, created_by) VALUES ($1, 'Scribe', $2)`, scribeID, bo.UserPostgresInfo.Id); err != nil {
+			t.Fatal(err)
+		}
+		scribe, err := apiTokenBusiness.CreateToken(ctx, "The Scribe's key", []string{apiTokenBusiness.ScopeTablesRead, apiTokenBusiness.ScopeTablesWrite}, 30, bo.UserPostgresInfo.Id, &scribeID, false)
+		if err != nil {
+			t.Fatalf("make the Scribe's token: %v", err)
+		}
+		send := func(key, method, path string, body any, headers ...string) (int, map[string]any) {
+			t.Helper()
+			var b []byte
+			if body != nil {
+				b, _ = json.Marshal(body)
+			}
+			req := httptest.NewRequest(method, path, bytes.NewReader(b))
+			req.Header.Set("Authorization", "Bearer "+key)
+			req.Header.Set("Content-Type", "application/json")
+			for i := 0; i+1 < len(headers); i += 2 {
+				req.Header.Set(headers[i], headers[i+1])
+			}
+			rec := httptest.NewRecorder()
+			routes.ServeHTTP(rec, req)
+			var out map[string]any
+			_ = json.Unmarshal(rec.Body.Bytes(), &out)
+			return rec.Code, out
+		}
+		codeOf := func(out map[string]any) string {
+			e, _ := out["error"].(map[string]any)
+			c, _ := e["code"].(string)
+			return c
+		}
+		stored := func(comment string) (author, kind string, agent *string) {
+			t.Helper()
+			if err := env.PG.QueryRow(`SELECT author_uuid::text, author_kind, agent_uuid::text FROM thread_comments WHERE id = $1`, comment).
+				Scan(&author, &kind, &agent); err != nil {
+				t.Fatalf("read the stored comment %s: %v", comment, err)
+			}
+			return author, kind, agent
+		}
+		comments := "/v1/tables/" + plan.Id.String() + "/rows/" + lead.Id.String() + "/comments"
+
+		// Bo starts a thread on the row: his words as escaped HTML, stored as his.
+		code, out := send(boKey.Plaintext, "POST", comments, map[string]any{"text": "Can we hire by <June>?"})
+		onRow, _ := out["thread_id"].(string)
+		first, _ := out["comment_uuid"].(string)
+		if code != http.StatusCreated || onRow == "" || first == "" || out["comment_text"] != "<p>Can we hire by &lt;June&gt;?</p>" {
+			t.Fatalf("Bo's comment answered %d: %v", code, out)
+		}
+		if author, kind, agent := stored(first); author != bo.UserDgraphInfo.Uuid || kind != "person" || agent != nil {
+			t.Fatalf("Bo's comment is stored as %s (%s, agent %v), want Bo's own", author, kind, agent)
+		}
+		// Sent again under its Idempotency-Key, it is the same comment, not a second.
+		again := func() (int, map[string]any) {
+			return send(boKey.Plaintext, "POST", comments, map[string]any{"text": "On the Role cell", "field": role.Id.String()}, "Idempotency-Key", "cell-1")
+		}
+		code, out = again()
+		onCell, _ := out["thread_id"].(string)
+		if code != http.StatusCreated || onCell == "" || onCell == onRow {
+			t.Fatalf("Bo's cell comment answered %d: %v", code, out)
+		}
+		if code2, out2 := again(); code2 != http.StatusCreated || out2["thread_id"] != onCell || out2["comment_uuid"] != out["comment_uuid"] {
+			t.Fatalf("the same key sent again answered %d %v, want the same comment", code2, out2)
+		}
+
+		// The Scribe's token comments as the Scribe for Bo, and Cy replies in Bo's thread.
+		code, out = send(scribe.Plaintext, "POST", comments, map[string]any{"text": "Noted.", "thread": onRow})
+		noted, _ := out["comment_uuid"].(string)
+		if code != http.StatusCreated || out["thread_id"] != onRow || noted == "" {
+			t.Fatalf("the Scribe's reply answered %d: %v", code, out)
+		}
+		if author, kind, agent := stored(noted); author != bo.UserDgraphInfo.Uuid || kind != "agent" || agent == nil || *agent != scribeID.String() {
+			t.Fatalf("the Scribe's reply is stored as %s (%s, agent %v), want the Scribe's for Bo", author, kind, agent)
+		}
+		if code, out = send(cyKey.Plaintext, "POST", comments, map[string]any{"text": "June works.", "thread": onRow}); code != http.StatusCreated {
+			t.Fatalf("Cy's reply answered %d: %v", code, out)
+		}
+
+		// The row's comments, as Cy's reader sees them: two threads, oldest
+		// first; the row's has Bo's, the Scribe's and Cy's comments.
+		code, out = send(cyReader.Plaintext, "GET", comments, nil)
+		threads, _ := out["threads"].([]any)
+		if code != http.StatusOK || len(threads) != 2 {
+			t.Fatalf("the row's comments answered %d: %v", code, out)
+		}
+		row0, _ := threads[0].(map[string]any)
+		said, _ := row0["comments"].([]any)
+		if row0["id"] != onRow || len(said) != 3 {
+			t.Fatalf("the row's thread is %v with %d comments, want %s with 3", row0["id"], len(said), onRow)
+		}
+		cell, _ := threads[1].(map[string]any)
+		anchor, _ := cell["anchor"].(map[string]any)
+		if meta, _ := anchor["meta"].(map[string]any); cell["id"] != onCell || anchor["kind"] != "cell" || meta["field"] != role.Id.String() {
+			t.Fatalf("the cell's thread is %v at %v, want %s on field %s", cell["id"], anchor, onCell, role.Id)
+		}
+		if code, out = send(cyReader.Plaintext, "GET", comments+"?status=resolved", nil); code != http.StatusOK || len(out["threads"].([]any)) != 0 {
+			t.Fatalf("resolved threads answered %d: %v, want none", code, out)
+		}
+
+		// Refused: a reader's token writes nothing; a row of another table,
+		// a thread on another row and a field the table hasn't got are none
+		// here; Bo's private table is no table for Cy; a blank comment is
+		// nothing to post.
+		if code, out = send(cyReader.Plaintext, "POST", comments, map[string]any{"text": "hi"}); code != http.StatusForbidden {
+			t.Errorf("a reader's token commented: %d %v", code, out)
+		}
+		elsewhere := "/v1/tables/" + plan.Id.String() + "/rows/" + pay.Id.String() + "/comments"
+		if code, out = send(boKey.Plaintext, "GET", elsewhere, nil); code != http.StatusNotFound || codeOf(out) != "not_found" {
+			t.Errorf("another table's row under the Hiring plan answered %d %v, want 404", code, out)
+		}
+		if code, out = send(boKey.Plaintext, "POST", elsewhere, map[string]any{"text": "hi"}); code != http.StatusNotFound {
+			t.Errorf("a comment on another table's row under the Hiring plan answered %d %v, want 404", code, out)
+		}
+		other, err := dataTableBusiness.CreateRow(ctx, plan.Id, dataTableBusiness.RowInput{Values: map[string]interface{}{role.Id.String(): "Recruiter"}}, boActor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		otherRow := "/v1/tables/" + plan.Id.String() + "/rows/" + other.Id.String() + "/comments"
+		if code, out = send(boKey.Plaintext, "POST", otherRow, map[string]any{"text": "hi", "thread": onRow}); code != http.StatusNotFound {
+			t.Errorf("a reply on another row's thread answered %d %v, want 404", code, out)
+		}
+		if code, out = send(boKey.Plaintext, "POST", comments, map[string]any{"text": "hi", "field": uuid.NewString()}); code != http.StatusNotFound {
+			t.Errorf("a comment on a field the table hasn't got answered %d %v, want 404", code, out)
+		}
+		private := "/v1/tables/" + salaries.Id.String() + "/rows/" + pay.Id.String() + "/comments"
+		if code, out = send(cyKey.Plaintext, "GET", private, nil); code != http.StatusNotFound {
+			t.Errorf("Cy read comments on Bo's private table: %d %v", code, out)
+		}
+		if code, out = send(cyKey.Plaintext, "POST", private, map[string]any{"text": "hi"}); code != http.StatusNotFound {
+			t.Errorf("Cy commented on Bo's private table: %d %v", code, out)
+		}
+		if code, out = send(boKey.Plaintext, "POST", comments, map[string]any{"text": " \n "}); code != http.StatusBadRequest {
+			t.Errorf("a blank comment answered %d %v, want 400", code, out)
+		}
+		var n int
+		if err := env.PG.QueryRow(`SELECT count(*) FROM thread_comments WHERE resource_uuid IN ($1, $2, $3)`, lead.Id.String(), pay.Id.String(), other.Id.String()).Scan(&n); err != nil || n != 4 {
+			t.Errorf("%d comments are stored on the rows (%v), want Bo's 2, the Scribe's and Cy's", n, err)
+		}
+	})
+
+	t.Run("over the public API, a table's maker makes, renames, deletes and brings back a table, its rows' threads are resolved and comments edited, with a row each, and no one else does", func(t *testing.T) {
+		// Tables H2c: tables.table.create/update/delete/restore and
+		// tables.deleted.list (the app's CreateTable, UpdateTable,
+		// DeleteTable, RestoreTable and TablesTrash), and a row's
+		// tables.row.thread.resolve/reopen and tables.row.comment.update/
+		// delete (business/Thread), each change with its audit row in one
+		// transaction, as the token's member and never with admin powers.
+		boKey, err := apiTokenBusiness.CreateToken(ctx, "Bo's tables key", []string{apiTokenBusiness.ScopeTablesRead, apiTokenBusiness.ScopeTablesWrite}, 30, bo.UserPostgresInfo.Id, nil, false)
+		if err != nil {
+			t.Fatalf("make Bo's token: %v", err)
+		}
+		cyKey, err := apiTokenBusiness.CreateToken(ctx, "Cy's tables key", []string{apiTokenBusiness.ScopeTablesRead, apiTokenBusiness.ScopeTablesWrite}, 30, cy.UserPostgresInfo.Id, nil, false)
+		if err != nil {
+			t.Fatalf("make Cy's token: %v", err)
+		}
+		bk, ck := boKey.Plaintext, cyKey.Plaintext
+		// What a change tells others (its table's open views over MQTT, a
+		// thread's followers through the resource-event bus) waits for its
+		// commit: told once it commits, and never when the log refuses its row
+		// (the refused changes below).
+		broker := &schemaOpsBroker{Client: MQTT.NewClient(MQTT.NewClientOptions().AddBroker("tcp://127.0.0.1:1"))}
+		integration.UseMqttClient(t, broker)
+		wasBus := resourceEventBusiness.Bus
+		told := &toldEvents{next: wasBus}
+		resourceEventBusiness.Bus = told
+		t.Cleanup(func() { resourceEventBusiness.Bus = wasBus })
+		send := func(key, method, path string, body any, headers ...string) (int, map[string]any) {
+			t.Helper()
+			var b []byte
+			if body != nil {
+				b, _ = json.Marshal(body)
+			}
+			req := httptest.NewRequest(method, path, bytes.NewReader(b))
+			req.Header.Set("Authorization", "Bearer "+key)
+			req.Header.Set("Content-Type", "application/json")
+			for i := 0; i+1 < len(headers); i += 2 {
+				req.Header.Set(headers[i], headers[i+1])
+			}
+			rec := httptest.NewRecorder()
+			routes.ServeHTTP(rec, req)
+			var out map[string]any
+			_ = json.Unmarshal(rec.Body.Bytes(), &out)
+			return rec.Code, out
+		}
+		codeOf := func(out map[string]any) string {
+			e, _ := out["error"].(map[string]any)
+			c, _ := e["code"].(string)
+			return c
+		}
+		rowsAbout := func(id string) (actions []string, meta []map[string]any) {
+			t.Helper()
+			rs, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `SELECT action, metadata FROM admin_audit_log
+				WHERE metadata->>'id' = $1 AND category = 'tables' ORDER BY seq`, id)
+			if err != nil {
+				t.Fatalf("read the audit rows: %v", err)
+			}
+			defer rs.Close()
+			for rs.Next() {
+				var a string
+				var raw []byte
+				if err := rs.Scan(&a, &raw); err != nil {
+					t.Fatal(err)
+				}
+				var m map[string]any
+				_ = json.Unmarshal(raw, &m)
+				actions, meta = append(actions, a), append(meta, m)
+			}
+			return actions, meta
+		}
+		count := func(q string, args ...any) (n int) {
+			t.Helper()
+			if err := env.PG.QueryRow(q, args...).Scan(&n); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+			return n
+		}
+		trashed := func(key string) (ids []string) {
+			t.Helper()
+			code, out := send(key, "GET", "/v1/tables/trash", nil)
+			items, _ := out["items"].([]any)
+			if code != http.StatusOK {
+				t.Fatalf("the tables' trash answered %d: %v", code, out)
+			}
+			for _, x := range items {
+				item, _ := x.(map[string]any)
+				tbl, _ := item["table"].(map[string]any)
+				id, _ := tbl["id"].(string)
+				ids = append(ids, id)
+			}
+			return ids
+		}
+
+		// Bo makes a table by token, with its Name field and grid view, and a
+		// row that names it; sent again under its key, it is the same table.
+		makeIt := func() (int, map[string]any) {
+			return send(bk, "POST", "/v1/tables", map[string]any{"name": "Suppliers", "description": "Who we buy from", "icon": "📦"}, "Idempotency-Key", "h2c-make")
+		}
+		code, out := makeIt()
+		id, _ := out["id"].(string)
+		if code != http.StatusCreated || id == "" || out["name"] != "Suppliers" || out["visibility"] != "workspace" || out["created_by"] != bo.UserPostgresInfo.Id.String() {
+			t.Fatalf("Bo's new table answered %d: %v", code, out)
+		}
+		if code, again := makeIt(); code != http.StatusCreated || again["id"] != id {
+			t.Fatalf("the same key sent again answered %d %v, want table %s", code, again, id)
+		}
+		if n := count(`SELECT count(*) FROM data_tables WHERE name = 'Suppliers' AND deleted_at IS NULL`); n != 1 {
+			t.Fatalf("%d tables named Suppliers, want one", n)
+		}
+		if f, v := count(`SELECT count(*) FROM data_table_fields WHERE table_id = $1 AND name = 'Name'`, id),
+			count(`SELECT count(*) FROM data_table_views WHERE table_id = $1`, id); f != 1 || v != 1 {
+			t.Fatalf("the new table has %d Name fields and %d views, want one of each", f, v)
+		}
+		actions, meta := rowsAbout(id)
+		if !slices.Equal(actions, []string{"table.created"}) || meta[0]["op"] != "tables.table.create" || meta[0]["name"] != "Suppliers" ||
+			meta[0]["table_id"] != id || meta[0]["token_id"] != boKey.Token.Id.String() {
+			t.Fatalf("the new table's rows are %q %v, want one table.created naming it and Bo's token", actions, meta)
+		}
+		base := "/v1/tables/" + id
+
+		// Cy opens it and is no manager of it; Ana's admin token has no admin
+		// powers; Bo's private table is no table for Cy.
+		for who, key := range map[string]string{"Cy": ck, "Ana's admin token": anaToken.Plaintext} {
+			if code, out := send(key, "PATCH", base, map[string]any{"name": "Taken"}); code != http.StatusForbidden || codeOf(out) != "forbidden" {
+				t.Errorf("%s renamed Bo's table: %d %v, want 403", who, code, out)
+			}
+			if code, out := send(key, "DELETE", base, nil); code != http.StatusForbidden {
+				t.Errorf("%s deleted Bo's table: %d %v, want 403", who, code, out)
+			}
+		}
+		if code, out := send(ck, "PATCH", "/v1/tables/"+salaries.Id.String(), map[string]any{"name": "Seen"}); code != http.StatusNotFound {
+			t.Errorf("Cy renamed Bo's private table: %d %v, want 404", code, out)
+		}
+
+		// Bo renames it, with a row that says what changed; the same name
+		// again changes nothing and writes none; naming nothing is refused.
+		if code, out := send(bk, "PATCH", base, map[string]any{"name": "Vendors", "icon": ""}); code != http.StatusOK || out["name"] != "Vendors" || out["icon"] != nil {
+			t.Fatalf("Bo's rename answered %d: %v", code, out)
+		}
+		if got := broker.to(helpers.GetMqttTopicForTable(id)); !slices.ContainsFunc(got, func(m string) bool { return strings.Contains(m, `"action":"table"`) }) {
+			t.Errorf("Bo's rename told the table's open views %q; want its header read again", got)
+		}
+		if code, out := send(bk, "PATCH", base, map[string]any{"name": "Vendors"}); code != http.StatusOK || out["name"] != "Vendors" {
+			t.Fatalf("the same name again answered %d: %v", code, out)
+		}
+		if code, out := send(bk, "PATCH", base, map[string]any{}); code != http.StatusBadRequest {
+			t.Errorf("a rename naming nothing answered %d: %v, want 400", code, out)
+		}
+		actions, meta = rowsAbout(id)
+		if !slices.Equal(actions, []string{"table.created", "table.updated"}) || meta[1]["was_name"] != "Suppliers" || meta[1]["name"] != "Vendors" ||
+			fmt.Sprint(meta[1]["changed"]) != "[name icon]" {
+			t.Fatalf("the table's rows are %q %v, want one update from Suppliers, its name and icon changed", actions, meta)
+		}
+
+		// Bo deletes it to the tables' trash, which lists it for him alone;
+		// Cy can't bring it back; Bo does.
+		if code, out := send(bk, "DELETE", base, nil); code != http.StatusOK || out["id"] != id || out["deleted"] != true {
+			t.Fatalf("Bo's delete answered %d: %v", code, out)
+		}
+		if code, out := send(bk, "GET", base+"/fields", nil); code != http.StatusNotFound {
+			t.Errorf("a deleted table's fields answered %d: %v, want 404", code, out)
+		}
+		if !slices.Contains(trashed(bk), id) || slices.Contains(trashed(ck), id) || slices.Contains(trashed(anaToken.Plaintext), id) {
+			t.Errorf("the tables' trash lists Vendors for Bo %v, Cy %v, Ana's token %v; want Bo alone", trashed(bk), trashed(ck), trashed(anaToken.Plaintext))
+		}
+		if code, out := send(ck, "POST", base+"/restore", nil); code != http.StatusNotFound {
+			t.Errorf("Cy brought Bo's table back: %d %v, want 404", code, out)
+		}
+		if code, out := send(bk, "POST", base+"/restore", nil); code != http.StatusCreated || out["id"] != id || out["name"] != "Vendors" {
+			t.Fatalf("Bo's restore answered %d: %v", code, out)
+		}
+		if code, out := send(bk, "POST", base+"/restore", nil); code != http.StatusNotFound {
+			t.Errorf("restoring a live table answered %d: %v, want 404", code, out)
+		}
+		if actions, _ = rowsAbout(id); !slices.Equal(actions, []string{"table.created", "table.updated", "table.deleted", "table.restored"}) {
+			t.Fatalf("the table's rows are %q, want made, renamed, deleted and brought back", actions)
+		}
+
+		// A row's thread: Bo starts it, Cy replies. Cy, who can edit the
+		// row, resolves it; Bo reopens it; each with a row.
+		tableID := uuid.MustParse(id)
+		lead, err := dataTableBusiness.CreateRow(ctx, tableID, dataTableBusiness.RowInput{Values: map[string]interface{}{}}, boActor)
+		if err != nil {
+			t.Fatalf("add a row to Vendors: %v", err)
+		}
+		comments := base + "/rows/" + lead.Id.String() + "/comments"
+		code, out = send(bk, "POST", comments, map[string]any{"text": "Is the contract signed?"})
+		thread, _ := out["thread_id"].(string)
+		mine, _ := out["comment_uuid"].(string)
+		if code != http.StatusCreated || thread == "" || mine == "" {
+			t.Fatalf("Bo's comment answered %d: %v", code, out)
+		}
+		code, out = send(ck, "POST", comments, map[string]any{"text": "Signed on Monday.", "thread": thread})
+		cys, _ := out["comment_uuid"].(string)
+		if code != http.StatusCreated || cys == "" {
+			t.Fatalf("Cy's reply answered %d: %v", code, out)
+		}
+		threadPath := base + "/rows/" + lead.Id.String() + "/threads/" + thread
+		if code, out := send(ck, "POST", threadPath+"/resolve", nil); code != http.StatusCreated || out["status"] != "resolved" {
+			t.Fatalf("Cy's resolve answered %d: %v", code, out)
+		}
+		if got := told.about(thread); !slices.Contains(got, threadBusiness.ThreadResolved) {
+			t.Errorf("Cy's resolve told the thread's followers %q; want it resolved", got)
+		}
+		if code, out := send(ck, "POST", threadPath+"/resolve", nil); code != http.StatusCreated || out["status"] != "resolved" {
+			t.Fatalf("resolving it again answered %d: %v", code, out)
+		}
+		if code, out := send(bk, "POST", threadPath+"/reopen", nil); code != http.StatusCreated || out["status"] != "open" {
+			t.Fatalf("Bo's reopen answered %d: %v", code, out)
+		}
+		if actions, meta = rowsAbout(thread); !slices.Equal(actions, []string{"table.row.thread.resolved", "table.row.thread.reopened"}) ||
+			meta[0]["token_id"] != cyKey.Token.Id.String() || meta[0]["row_id"] != lead.Id.String() || meta[0]["table_id"] != id {
+			t.Fatalf("the thread's rows are %q %v, want Cy's resolve on the row, then a reopen", actions, meta)
+		}
+		otherRow, err := dataTableBusiness.CreateRow(ctx, tableID, dataTableBusiness.RowInput{Values: map[string]interface{}{}}, boActor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code, out := send(bk, "POST", base+"/rows/"+otherRow.Id.String()+"/threads/"+thread+"/resolve", nil); code != http.StatusNotFound {
+			t.Errorf("resolving the thread under another row answered %d: %v, want 404", code, out)
+		}
+
+		// Bo edits his comment; Cy can't, and neither deletes the other's
+		// (a token never moderates); Bo deletes his own. Each change is a
+		// row that names the comment and never quotes it.
+		if code, out := send(bk, "PATCH", threadPath+"/comments/"+mine, map[string]any{"text": "Is the contract <signed>?"}); code != http.StatusOK || out["comment_text"] != "<p>Is the contract &lt;signed&gt;?</p>" {
+			t.Fatalf("Bo's edit answered %d: %v", code, out)
+		}
+		if code, out := send(ck, "PATCH", threadPath+"/comments/"+mine, map[string]any{"text": "Mine now"}); code != http.StatusForbidden {
+			t.Errorf("Cy edited Bo's comment: %d %v, want 403", code, out)
+		}
+		if code, out := send(ck, "DELETE", threadPath+"/comments/"+mine, nil); code != http.StatusForbidden {
+			t.Errorf("Cy deleted Bo's comment: %d %v, want 403", code, out)
+		}
+		if code, out := send(bk, "DELETE", threadPath+"/comments/"+cys, nil); code != http.StatusForbidden {
+			t.Errorf("Bo's token deleted Cy's comment on his table: %d %v, want 403", code, out)
+		}
+		if code, out := send(bk, "DELETE", threadPath+"/comments/"+mine, nil); code != http.StatusOK || out["id"] != mine || out["deleted"] != true {
+			t.Fatalf("Bo's delete answered %d: %v", code, out)
+		}
+		if code, out := send(bk, "DELETE", threadPath+"/comments/"+mine, nil); code != http.StatusNotFound {
+			t.Errorf("deleting it again answered %d: %v, want 404", code, out)
+		}
+		if n := count(`SELECT count(*) FROM thread_comments WHERE id = $1 AND deleted_at IS NOT NULL AND deleted_by = $2`, mine, bo.UserDgraphInfo.Uuid); n != 1 {
+			t.Errorf("Bo's comment is kept deleted by him %d times, want once", n)
+		}
+		actions, meta = rowsAbout(mine)
+		if !slices.Equal(actions, []string{"table.row.comment.edited", "table.row.comment.deleted"}) || meta[0]["thread_id"] != thread {
+			t.Fatalf("the comment's rows are %q %v, want its edit and delete", actions, meta)
+		}
+		if raw, _ := json.Marshal(meta); strings.Contains(string(raw), "contract") {
+			t.Errorf("a comment's rows quote it: %s", raw)
+		}
+
+		// Over MCP: the ops are tools with their hints, and a table made
+		// there is Bo's, with its row.
+		code, out = send(bk, "POST", "/v1/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+		res, _ := out["result"].(map[string]any)
+		hints := map[string]map[string]any{}
+		list, _ := res["tools"].([]any)
+		for _, x := range list {
+			m, _ := x.(map[string]any)
+			name, _ := m["name"].(string)
+			h, _ := m["annotations"].(map[string]any)
+			hints[name] = h
+		}
+		for name, want := range map[string][2]bool{ // destructive, idempotent
+			"tables_table_create": {false, false}, "tables_table_update": {false, true}, "tables_table_delete": {true, true},
+			"tables_table_restore": {false, true}, "tables_deleted_list": {false, true}, "tables_row_thread_resolve": {false, true},
+			"tables_row_thread_reopen": {false, true}, "tables_row_comment_update": {false, true}, "tables_row_comment_delete": {true, true},
+		} {
+			h, ok := hints[name]
+			if d, _ := h["destructiveHint"].(bool); !ok || d != want[0] || h["idempotentHint"] != want[1] {
+				t.Errorf("tools/list (%d) has %s as %v (listed %v); want destructive %v, idempotent %v", code, name, h, ok, want[0], want[1])
+			}
+		}
+		text, refusal := toolAs(bk, "tables_table_create", map[string]any{"name": "Made over MCP", "visibility": "private"})
+		if refusal != "" || !strings.Contains(text, "Made over MCP") {
+			t.Fatalf("tables_table_create over MCP answered %q (%s)", text, refusal)
+		}
+		var made string
+		if err := env.PG.QueryRow(`SELECT id::text FROM data_tables WHERE name = 'Made over MCP' AND created_by = $1 AND visibility = 'private'`,
+			bo.UserPostgresInfo.Id).Scan(&made); err != nil {
+			t.Fatalf("the table made over MCP isn't Bo's private one: %v", err)
+		}
+		if actions, _ = rowsAbout(made); !slices.Equal(actions, []string{"table.created"}) {
+			t.Errorf("the table made over MCP has rows %q, want one", actions)
+		}
+
+		// A change the log refuses to record: the store refuses the row (a
+		// trigger), so the change is undone with it: no table made, no
+		// rename, no delete, the thread as it was, and no row.
+		for _, q := range []string{
+			`CREATE OR REPLACE FUNCTION test_h2c_refuse_row() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN IF NEW.metadata->>'name' = 'Refused table' OR NEW.action IN ('table.deleted', 'table.row.thread.resolved') THEN
+			RAISE EXCEPTION 'refused' USING ERRCODE = 'check_violation'; END IF; RETURN NEW; END $$`,
+			`CREATE TRIGGER test_h2c_refuse_row BEFORE INSERT ON admin_audit_log FOR EACH ROW EXECUTE FUNCTION test_h2c_refuse_row()`,
+		} {
+			if _, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, q); err != nil {
+				t.Fatalf("have the log refuse a row: %v", err)
+			}
+		}
+		t.Cleanup(func() {
+			_, _ = postgresInit.DBConn.SqlDB.ExecContext(ctx, `DROP TRIGGER IF EXISTS test_h2c_refuse_row ON admin_audit_log`)
+			_, _ = postgresInit.DBConn.SqlDB.ExecContext(ctx, `DROP FUNCTION IF EXISTS test_h2c_refuse_row()`)
+		})
+		helpers.SettleBackground(10 * time.Second)
+		broker.forget()
+		told.forget()
+		if code, out := send(bk, "POST", "/v1/tables", map[string]any{"name": "Refused table"}); code != http.StatusServiceUnavailable || codeOf(out) != "unavailable" {
+			t.Errorf("a table whose row the log refused answered %d: %v; want 503 unavailable", code, out)
+		}
+		if code, out := send(bk, "PATCH", base, map[string]any{"name": "Refused table"}); code != http.StatusServiceUnavailable {
+			t.Errorf("a rename whose row the log refused answered %d: %v; want 503", code, out)
+		}
+		if code, out := send(bk, "DELETE", base, nil); code != http.StatusServiceUnavailable {
+			t.Errorf("a delete whose row the log refused answered %d: %v; want 503", code, out)
+		}
+		if code, out := send(ck, "POST", threadPath+"/resolve", nil); code != http.StatusServiceUnavailable {
+			t.Errorf("a resolve whose row the log refused answered %d: %v; want 503", code, out)
+		}
+		helpers.SettleBackground(10 * time.Second)
+		if got := broker.all(); len(got) != 0 {
+			t.Errorf("changes the log refused told open views %q; want nothing", got)
+		}
+		if got := told.kinds(); len(got) != 0 {
+			t.Errorf("changes the log refused told followers %q; want nothing", got)
+		}
+		if n := count(`SELECT count(*) FROM data_tables WHERE name = 'Refused table'`); n != 0 {
+			t.Errorf("changes the log refused left %d tables named for them; want none", n)
+		}
+		if n := count(`SELECT count(*) FROM data_tables WHERE id = $1 AND name = 'Vendors' AND deleted_at IS NULL`, id); n != 1 {
+			t.Errorf("Vendors is renamed or deleted by changes the log refused")
+		}
+		if n := count(`SELECT count(*) FROM threads WHERE id = $1 AND status = 'open'`, thread); n != 1 {
+			t.Errorf("the thread isn't open after a resolve the log refused")
+		}
+		if actions, _ = rowsAbout(id); len(actions) != 4 {
+			t.Errorf("refused changes wrote rows: %q", actions)
+		}
+	})
+
 	t.Run("over MCP, a member who can edit a table makes, changes and links its rows, and no one else does", func(t *testing.T) {
 		note, err := dataTableBusiness.CreateField(ctx, roadmap.Id, dataTableBusiness.FieldInput{Name: "Note", Type: "text"}, boActor)
 		if err != nil {
@@ -1204,4 +2020,91 @@ func TestATokenActsAsAMemberAcrossTheAPI(t *testing.T) {
 			t.Errorf("a job asked for in the app is held to a token's powers: %v", s)
 		}
 	})
+}
+
+// schemaOpsBroker stands in for the MQTT broker: it keeps what is published,
+// by topic. What it doesn't override is an unconnected client's.
+type schemaOpsBroker struct {
+	MQTT.Client
+	mu   sync.Mutex
+	sent map[string][]string
+}
+
+func (b *schemaOpsBroker) Publish(topic string, _ byte, _ bool, payload interface{}) MQTT.Token {
+	body, _ := payload.([]byte)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sent == nil {
+		b.sent = map[string][]string{}
+	}
+	b.sent[topic] = append(b.sent[topic], string(body))
+	return &MQTT.DummyToken{}
+}
+
+// to is what was published on topic since the last forget.
+func (b *schemaOpsBroker) to(topic string) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.sent[topic])
+}
+
+// all is what was published on any topic since the last forget.
+func (b *schemaOpsBroker) all() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []string
+	for topic, sent := range b.sent {
+		for _, m := range sent {
+			out = append(out, topic+": "+m)
+		}
+	}
+	return out
+}
+
+func (b *schemaOpsBroker) forget() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sent = nil
+}
+
+// toldEvents stands in for the resource-event bus: it keeps each event and
+// hands it on to the bus it stands in for, so every sink still runs.
+type toldEvents struct {
+	eventLog
+	next resourceEventBusiness.Emitter
+}
+
+func (l *toldEvents) Emit(ctx context.Context, e resourceEventBusiness.Event) {
+	l.eventLog.Emit(ctx, e)
+	l.next.Emit(ctx, e)
+}
+
+// about is the kinds told about one thread since the last forget.
+func (l *toldEvents) about(thread string) []resourceEventBusiness.Kind {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []resourceEventBusiness.Kind
+	for _, e := range l.events {
+		if e.Data["thread_id"] == thread {
+			out = append(out, e.Kind)
+		}
+	}
+	return out
+}
+
+// kinds is every kind told since the last forget, about anything.
+func (l *toldEvents) kinds() []resourceEventBusiness.Kind {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []resourceEventBusiness.Kind
+	for _, e := range l.events {
+		out = append(out, e.Kind)
+	}
+	return out
+}
+
+func (l *toldEvents) forget() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = nil
 }

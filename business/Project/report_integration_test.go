@@ -40,7 +40,7 @@ func TestReportQuery(t *testing.T) {
 				"uid": "_:p", "dgraph.type": "Project", "project_uuid": launch, "project_name": "Launch",
 				"project_tasks": []map[string]any{
 					task("Open", "todo", map[string]any{"task_due_date": "2026-10-01T00:00:00Z", "task_assignee": map[string]any{"uid": "_:me"}}),
-					task("Reviewing", "inReview", nil),
+					task("Reviewing", "inReview", map[string]any{"task_created_at": "2026-09-01T10:00:00Z"}),
 					task("Shipped this week", "done", map[string]any{"task_status_since": "2026-10-06T10:00:00Z", "task_created_at": "2026-09-20T10:00:00Z",
 						"task_activities": []map[string]any{
 							{"dgraph.type": "Activity", "activity_type": "statusUpdate", "activity_time": "2026-10-06T10:00:00Z", "activity_prev_state": "inProgress", "activity_next_state": "done"},
@@ -58,7 +58,7 @@ func TestReportQuery(t *testing.T) {
 		},
 	})
 	since := time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)
-	projects, err := domain.GetDgraphReport(ctx, uids["me"], since)
+	projects, err := domain.GetDgraphReport(ctx, uids["me"], since, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +91,20 @@ func TestReportQuery(t *testing.T) {
 	flow := buildFlow(projects, nil, since, now, 4, nil)
 	if flow[1].InProgress != 1 || flow[3].Done != 1 || flow[3].InProgress != 0 {
 		t.Fatalf("the flow: %+v", flow)
+	}
+	// Work insights read the same history, through the whole report: made on
+	// 20 September and in progress from then, done on 6 October (16 days);
+	// in review since 1 September (37 days and 2 hours old).
+	full, err := ReportFor(ctx, uids["me"], now, time.UTC, ReportAsk{Weeks: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := full.Insights
+	if in.Cycle.N != 1 || in.Cycle.P50 != 384 || in.Lead.N != 1 || in.Lead.P50 != 384 || in.Age.N != 1 || in.Age.P50 != 890 {
+		t.Fatalf("insights: cycle %+v lead %+v age %+v", in.Cycle, in.Lead, in.Age)
+	}
+	if len(in.Points) != 1 || in.Points[0].Name != "Shipped this week" || in.Points[0].Project != launch || in.Points[0].Task == "" {
+		t.Fatalf("a point names its task and project: %+v", in.Points)
 	}
 }
 

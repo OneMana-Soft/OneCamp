@@ -86,6 +86,10 @@ const (
 	// LinksPrefix and a relation field's id is that field's links from the
 	// row changed (linkChange).
 	LinksPrefix = "#links:"
+	// FieldColumn is a column made, changed, deleted or brought back: Row is
+	// the field's id, not a row's, and Before and After are its ColumnState
+	// (ledgerColumns.go).
+	FieldColumn = "#column"
 )
 
 // wholeRow is a WholeRow change's Before or After: the row as it was or is.
@@ -287,17 +291,22 @@ func appendTx(ctx context.Context, tx *sql.Tx, cs *ChangeSet) error {
 }
 
 // rowsAndFields counts the rows changes touch and names the fields whose
-// cells or links they change, in the order they come: a whole row made or
-// deleted, or a move, names none. The list is empty, never nil: the column
-// is NOT NULL, and pq.Array of a nil list is NULL, which refused every
-// change set of new rows.
+// cells, links or column they change, in the order they come: a whole row
+// made or deleted, or a move, names none; a column's change names its field
+// and counts no row, so a change set of columns alone has none. The list is
+// empty, never nil: the column is NOT NULL, and pq.Array of a nil list is
+// NULL, which refused every change set of new rows.
 func rowsAndFields(changes []Change) (int, []string) {
 	rows := map[uuid.UUID]bool{}
 	seen := map[string]bool{}
 	fields := []string{}
 	for _, c := range changes {
-		rows[c.Row] = true
 		f := strings.TrimPrefix(c.Field, LinksPrefix)
+		if c.Field == FieldColumn {
+			f = c.Row.String()
+		} else {
+			rows[c.Row] = true
+		}
 		if f == WholeRow || f == FieldPosition || seen[f] {
 			continue
 		}
@@ -1435,7 +1444,9 @@ type Reversal struct {
 //     left it at, with its links whose other row is live;
 //   - a row moved goes back only while it's where target put it;
 //   - links made are taken away, and links taken away made again where both
-//     rows are live.
+//     rows are live;
+//   - a column goes back as it was only while it's as target left it
+//     (reverseColumns).
 //
 // target is marked undone by cs. A change set undone already is ErrUndone.
 func ApplyInverse(ctx context.Context, table, by uuid.UUID, target uuid.UUID, maxPerRow int, cs *ChangeSet, committing Committing) (Reversal, error) {
@@ -1461,9 +1472,11 @@ func ApplyInverse(ctx context.Context, table, by uuid.UUID, target uuid.UUID, ma
 		}
 		var cells []Change
 		var made, deleted, restored, moved []Change
-		var links []Change
+		var links, columns []Change
 		for _, c := range changes {
 			switch {
+			case c.Field == FieldColumn:
+				columns = append(columns, c)
 			case c.Field == WholeRow:
 				var b, a wholeRow
 				_ = json.Unmarshal(c.Before, &b)
@@ -1529,6 +1542,11 @@ func ApplyInverse(ctx context.Context, table, by uuid.UUID, target uuid.UUID, ma
 		}
 		done.Reversed += n
 		n, err = reverseLinks(ctx, tx, links, maxPerRow, cs)
+		if err != nil {
+			return err
+		}
+		done.Reversed += n
+		n, err = reverseColumns(ctx, tx, table, by, columns, cs)
 		if err != nil {
 			return err
 		}
@@ -1894,7 +1912,7 @@ func GetTrashedField(ctx context.Context, table, id uuid.UUID) (*Field, error) {
 // transaction. Their cells stayed in their rows, and a relation field's links
 // stayed (DeleteFieldPair), so each comes back whole.
 func RestoreFields(ctx context.Context, fields ...*Field) error {
-	return postgresInit.InTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
+	return joinTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
 		for _, f := range fields {
 			if err := restoreField(ctx, tx, f); err != nil {
 				return err
@@ -1945,27 +1963,20 @@ func DeletedTables(ctx context.Context, user uuid.UUID, isAdmin bool, limit int)
 
 // GetDeletedTable is a deleted table; nil when there's none such.
 func GetDeletedTable(ctx context.Context, id uuid.UUID) (*DataTable, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	t, err := scanTable(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, `SELECT `+tableColumns+` FROM data_tables
-		WHERE id = $1 AND deleted_at IS NOT NULL AND purge_at IS NULL`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+	t, _, err := pgexec.QueryOne(ctx, `SELECT `+tableColumns+` FROM data_tables
+		WHERE id = $1 AND deleted_at IS NOT NULL AND purge_at IS NULL`, func(r pgexec.Row) (*DataTable, error) { return scanTable(r) }, id)
 	return t, err
 }
 
 // RestoreTable brings a deleted table back.
 func RestoreTable(ctx context.Context, id uuid.UUID) error {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, `UPDATE data_tables SET deleted_at = NULL, deleted_by = NULL, updated_at = NOW()
+	n, err := pgexec.Exec(ctx, `UPDATE data_tables SET deleted_at = NULL, deleted_by = NULL, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NOT NULL AND purge_at IS NULL`, id)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/RestoreTable err: %+v", err)
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		return sql.ErrNoRows
 	}
 	return nil

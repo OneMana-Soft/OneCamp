@@ -12,8 +12,8 @@ package business
 //
 // reachOf is the one rule now. It holds a webhook to what its owner may read:
 // the channel or project it is set up for, and everything an event names (its
-// channel, its project, a doc's event's doc, and a task its project keeps to a
-// few people). It is asked
+// channel, its project, a doc's event's doc, a table's event's table, and a
+// task its project keeps to a few people). It is asked
 //   - when a webhook is set up, set up for somewhere else, or pointed at a new
 //     address (webhookScope): a channel or project its owner can't read is
 //     refused;
@@ -27,12 +27,14 @@ package business
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	hooksBusiness "github.com/akashc777/OneCamp/business/Hooks"
+	tableAccess "github.com/akashc777/OneCamp/business/TableAccess"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -58,6 +60,13 @@ type needs struct {
 	// one that names neither reaches nobody.
 	meeting   string
 	callEvent bool
+	// table is a table's event's table (business/DataTable ledger.go), and
+	// tableEvent says the event is one: it reaches only someone who opens the
+	// table now (Table Access View), and one that names no table, nobody
+	// (V-457: a member who couldn't open a private table was sent its rows'
+	// and fields' ids).
+	table      string
+	tableEvent bool
 }
 
 // needsOf is what an event names. Whether its task is kept to a few people is
@@ -69,6 +78,9 @@ func needsOf(ctx context.Context, eventType string, data map[string]interface{})
 	}
 	if strings.HasPrefix(eventType, "call.") {
 		n.callEvent, n.meeting = true, named(data, "meeting_id")
+	}
+	if strings.HasPrefix(eventType, "table.") {
+		n.tableEvent, n.table = true, named(data, "table_id")
 	}
 	if task := taskOfEvent(data); task != "" && restrictedTaskEvent(ctx, data) {
 		n.task = task
@@ -120,6 +132,14 @@ var (
 		return accessBusiness.Rules.Resolve(ctx, who, res)
 	}
 	hiddenTasks = taskread.For
+	// ownerNow is the owner as they are now, an admin or not (a demoted
+	// admin opens only what a member does), and resolveTable Table Access's
+	// decision for them (business/TableAccess imports no business package,
+	// so asking it cycles nothing).
+	ownerNow     = userDomain.GetActiveUserWithAdminFlagByUserUUID
+	resolveTable = func(ctx context.Context, who tableAccess.Who, table uuid.UUID) (tableAccess.Decision, error) {
+		return tableAccess.Tables.Resolve(ctx, who, table)
+	}
 )
 
 // ReadChannelsWith sets who may read a channel's messages: business/Channel's
@@ -262,6 +282,16 @@ func (r *reader) reads(ctx context.Context, n needs) (bool, error) {
 			return false, err
 		}
 	}
+	if n.tableEvent {
+		table, err := uuid.Parse(n.table)
+		if err != nil {
+			return false, nil
+		}
+		ok, err := r.once("table "+table.String(), func() (bool, error) { return r.opensTable(ctx, table) })
+		if err != nil || !ok {
+			return false, err
+		}
+	}
 	if n.task != "" {
 		if r.hidden == nil {
 			f, err := hiddenTasks(ctx, r.who.String())
@@ -275,6 +305,24 @@ func (r *reader) reads(ctx context.Context, n needs) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// opensTable is whether r's person may open table now, as Table Access
+// decides for them as they are now (an admin or not). A table that isn't
+// there, or is in the trash, is opened by nobody, as the API answers it.
+func (r *reader) opensTable(ctx context.Context, table uuid.UUID) (bool, error) {
+	owner, err := ownerNow(ctx, r.who)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && owner == nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	d, err := resolveTable(ctx, tableAccess.Who{User: r.who, Admin: owner.IsAdmin}, table)
+	if errors.Is(err, tableAccess.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil && d.View, err
 }
 
 // sent is a delivery's body read back (OutgoingWebhookPayload). Data that isn't

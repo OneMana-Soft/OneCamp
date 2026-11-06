@@ -62,7 +62,31 @@ var ErrSummariesTooLong = errors.New("the summaries ran past their budget")
 // for a budget above zero, a statement_timeout at it. The transaction has a
 // statement's DBTimeout (pgexec.InTx's TxTimeout is longer). stopped says the
 // budget stopped fn.
+//
+// A read that runs out of shared memory (helpers.IsDiskFull) is read once
+// more without parallel workers, within what is left of the budget: a
+// parallel hash join keeps its table in dynamic shared memory, a container's
+// /dev/shm, and several big reads at once run it out, where a read without
+// workers keeps its hashes in its own memory (V-525: three 100,000-row
+// summaries reads at once lost about half their sums). So fn may run twice,
+// and each run starts from nothing.
 func inBudget(ctx context.Context, settings []string, budget time.Duration, fn func(ctx context.Context) error) (stopped bool, err error) {
+	start := time.Now()
+	stopped, err = budgetedTx(ctx, settings, budget, fn)
+	if !helpers.IsDiskFull(err) {
+		return stopped, err
+	}
+	if budget > 0 {
+		if budget -= time.Since(start); budget <= 0 {
+			return true, err
+		}
+	}
+	helpers.LogWarnWithContext(ctx, "models: a read ran out of shared memory; reading it again without parallel workers: %v", err)
+	return budgetedTx(ctx, append(append([]string{}, settings...), "SET LOCAL max_parallel_workers_per_gather = 0"), budget, fn)
+}
+
+// budgetedTx is one run of inBudget's transaction.
+func budgetedTx(ctx context.Context, settings []string, budget time.Duration, fn func(ctx context.Context) error) (stopped bool, err error) {
 	err = postgresInit.InTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
 		ctx = pgexec.WithTx(ctx, tx)
 		if budget > 0 {
@@ -137,6 +161,21 @@ func CountRowsWhere(ctx context.Context, table uuid.UUID, where string, args []i
 	n, err := pgexec.Scalar[int](ctx, q, append([]interface{}{table}, args...)...)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CountRowsWhere err: %+v", err)
+		return 0, err
+	}
+	return n, nil
+}
+
+// CountEntriesWhere is how many of field's cell index entries meet where (a
+// condition on the entry, s; its parameters from $2), counting at most
+// limit+1, so a count past limit says it is. It reads the field's entries
+// alone, never a row.
+func CountEntriesWhere(ctx context.Context, field uuid.UUID, where string, args []interface{}, limit int) (int, error) {
+	q := fmt.Sprintf(`SELECT COUNT(*) FROM (SELECT 1 FROM data_table_cell_index s
+		WHERE s.field_id = $1 AND (%s) LIMIT %d) n`, where, limit+1)
+	n, err := pgexec.Scalar[int](ctx, q, append([]interface{}{field}, args...)...)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CountEntriesWhere err: %+v", err)
 		return 0, err
 	}
 	return n, nil

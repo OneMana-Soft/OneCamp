@@ -15,7 +15,6 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Project"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
-	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	business "github.com/akashc777/OneCamp/business/Project"
 	templateBusiness "github.com/akashc777/OneCamp/business/ProjectTemplate"
@@ -23,7 +22,6 @@ import (
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
-	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
@@ -1048,21 +1046,8 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	taskSearchStr := queryParams["taskSearchString"]
-
-	// One builder for every task list (domain/Task.TaskListFilter, PR1).
-	params := make([]taskDomain.TaskListParam, 0, len(filtersParam))
-	for _, p := range filtersParam {
-		params = append(params, taskDomain.TaskListParam{ID: p.Id, Value: p.Value})
-	}
-	listFilter := taskDomain.TaskListFilter{Params: params, Now: time.Now(), Status: taskStatusBusiness.FilterClause}
-	listFilter.Side = func(id string, values []string) (string, bool) {
-		return sideFilterClause(ctx, projectUUIDString, id, values)
-	}
-	if len(taskSearchStr) != 0 {
-		listFilter.Search = taskSearchStr[0]
-	}
-	filterQuery, err := listFilter.Clause()
+	// One builder for every task list (business.ListFilter).
+	filterQuery, err := business.ListFilter(ctx, projectUUIDString, listParams(filtersParam), queryParams.Get("taskSearchString"), time.Now()).Clause()
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "search string is too long or invalid"})
 		return
@@ -1264,16 +1249,17 @@ func kanbanFilterQuery(ctx context.Context, projectUUIDString string, r *http.Re
 
 	}
 
-	// One builder for every task list (domain/Task.TaskListFilter, PR1).
-	params := make([]taskDomain.TaskListParam, 0, len(filtersParam))
-	for _, p := range filtersParam {
+	// One builder for every task list (business.ListFilter).
+	return business.ListFilter(ctx, projectUUIDString, listParams(filtersParam), "", time.Now()).Clause()
+}
+
+// listParams is a list's filters as the one builder takes them.
+func listParams(in []adapter.FilterParam) []taskDomain.TaskListParam {
+	params := make([]taskDomain.TaskListParam, 0, len(in))
+	for _, p := range in {
 		params = append(params, taskDomain.TaskListParam{ID: p.Id, Value: p.Value})
 	}
-	listFilter := taskDomain.TaskListFilter{Params: params, Now: time.Now(), Status: taskStatusBusiness.FilterClause}
-	listFilter.Side = func(id string, values []string) (string, bool) {
-		return sideFilterClause(ctx, projectUUIDString, id, values)
-	}
-	return listFilter.Clause()
+	return params
 }
 
 // decorate sets what the reader may do in the project they read
@@ -1287,31 +1273,6 @@ func decorate(ctx context.Context, u *userModels.UserInfo, p *dgraphStruct.Dgrap
 	if err := workAccess.Decorate(ctx, u.UserDgraphInfo.Uuid, p); err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/Project couldn't read what the reader may do in project %s err: %+v", p.Uuid, err)
 	}
-}
-
-// sideFilterClause is the clause for a filter on what Postgres keeps beside a
-// project's tasks: their cycle (business/Cycle) or a custom field's value
-// (business/TaskField). ok is false for any other filter.
-func sideFilterClause(ctx context.Context, projectUUID, id string, values []string) (clause string, ok bool) {
-	var err error
-	switch {
-	case id == "task_cycle":
-		clause, err = cycleBusiness.FilterClause(projectUUID, values)
-	case strings.HasPrefix(id, taskFieldBusiness.FilterPrefix):
-		var project uuid.UUID
-		if project, err = uuid.Parse(projectUUID); err == nil {
-			clause, err = taskFieldBusiness.FilterClause(ctx, project, id, values)
-		}
-	default:
-		return "", false
-	}
-	// A filter that couldn't be read narrows to nothing: an empty list says
-	// something went wrong, where the whole list would pass for a filtered one.
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/Project %s filter err: %+v", id, err)
-		return `eq(task_uuid, "00000000-0000-0000-0000-000000000000")`, true
-	}
-	return clause, true
 }
 
 // GetProjectBoardColumn answers GET /project/boardColumn/{project_uuid}

@@ -4,10 +4,12 @@ import (
 	"testing"
 	"time"
 
+	weekHours "github.com/akashc777/OneCamp/business/WeekHours"
 	prefModels "github.com/akashc777/OneCamp/models/postgres/UserNotificationPreference"
 )
 
-// TestQuietHoursDelay covers the four meaningful cases of quietHoursDelay:
+// TestQuietHoursDelay covers the four meaningful cases of the daily window
+// (QuietHoursUntil with no schedule), unchanged since it was quietHoursDelay:
 //   - prefs disabled (returns now)
 //   - same-day window (08:00–17:00)
 //   - overnight window (22:00–07:00) when "now" is in the night portion
@@ -28,7 +30,7 @@ func TestQuietHoursDelay(t *testing.T) {
 
 	t.Run("disabled returns now", func(t *testing.T) {
 		now := time.Date(2026, 5, 23, 10, 0, 0, 0, loc)
-		got, deferred := quietHoursDelay(now, &prefModels.UserNotificationPreference{})
+		got, deferred := (&prefModels.UserNotificationPreference{}).QuietHoursUntil(now)
 		if deferred {
 			t.Fatalf("expected !deferred when disabled")
 		}
@@ -41,7 +43,7 @@ func TestQuietHoursDelay(t *testing.T) {
 		// 10:00 with window 08:00-17:00 → defer to 17:00.
 		pref := makePref(true, "08:00", "17:00")
 		now := time.Date(2026, 5, 23, 10, 0, 0, 0, loc)
-		got, deferred := quietHoursDelay(now, pref)
+		got, deferred := pref.QuietHoursUntil(now)
 		if !deferred {
 			t.Fatalf("expected deferred inside window")
 		}
@@ -54,7 +56,7 @@ func TestQuietHoursDelay(t *testing.T) {
 	t.Run("same-day window outside", func(t *testing.T) {
 		pref := makePref(true, "08:00", "17:00")
 		now := time.Date(2026, 5, 23, 20, 0, 0, 0, loc)
-		got, deferred := quietHoursDelay(now, pref)
+		got, deferred := pref.QuietHoursUntil(now)
 		if deferred {
 			t.Fatalf("expected !deferred outside window")
 		}
@@ -67,7 +69,7 @@ func TestQuietHoursDelay(t *testing.T) {
 		// 23:00 with 22:00-07:00 → defer to 07:00 next day.
 		pref := makePref(true, "22:00", "07:00")
 		now := time.Date(2026, 5, 23, 23, 0, 0, 0, loc)
-		got, deferred := quietHoursDelay(now, pref)
+		got, deferred := pref.QuietHoursUntil(now)
 		if !deferred {
 			t.Fatalf("expected deferred")
 		}
@@ -81,7 +83,7 @@ func TestQuietHoursDelay(t *testing.T) {
 		// 03:00 with 22:00-07:00 → defer to 07:00 same day.
 		pref := makePref(true, "22:00", "07:00")
 		now := time.Date(2026, 5, 23, 3, 0, 0, 0, loc)
-		got, deferred := quietHoursDelay(now, pref)
+		got, deferred := pref.QuietHoursUntil(now)
 		if !deferred {
 			t.Fatalf("expected deferred")
 		}
@@ -94,7 +96,7 @@ func TestQuietHoursDelay(t *testing.T) {
 	t.Run("overnight window — outside", func(t *testing.T) {
 		pref := makePref(true, "22:00", "07:00")
 		now := time.Date(2026, 5, 23, 12, 0, 0, 0, loc)
-		got, deferred := quietHoursDelay(now, pref)
+		got, deferred := pref.QuietHoursUntil(now)
 		if deferred {
 			t.Fatalf("expected !deferred")
 		}
@@ -106,7 +108,7 @@ func TestQuietHoursDelay(t *testing.T) {
 	t.Run("invalid HHMM falls back to now", func(t *testing.T) {
 		pref := makePref(true, "bad", "07:00")
 		now := time.Date(2026, 5, 23, 23, 0, 0, 0, loc)
-		got, deferred := quietHoursDelay(now, pref)
+		got, deferred := pref.QuietHoursUntil(now)
 		if deferred {
 			t.Fatalf("expected !deferred for invalid input")
 		}
@@ -158,5 +160,23 @@ func TestDeliveryTime(t *testing.T) {
 		if !got.Equal(c.want) || deferred != c.deferred {
 			t.Errorf("%s: got %v %v, want %v %v", c.name, got, deferred, c.want, c.deferred)
 		}
+	}
+}
+
+// An email raised during a pause that ends outside the person's schedule
+// waits on for the schedule's next range, as it waits past the daily window.
+func TestDeliveryTimeKeepsTheSchedule(t *testing.T) {
+	friday := time.Date(2026, 11, 6, 16, 0, 0, 0, time.UTC)
+	pausedUntil := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
+	p := &prefModels.UserNotificationPreference{
+		NotificationsPausedUntil: &pausedUntil,
+		Schedule:                 &prefModels.Schedule{TZ: "UTC", Week: map[string][]weekHours.Span{"1": {{Start: "09:00", End: "17:00"}}, "5": {{Start: "09:00", End: "17:00"}}}},
+	}
+	if got, deferred := deliveryTime(friday, p); !deferred || !got.Equal(time.Date(2026, 11, 9, 9, 0, 0, 0, time.UTC)) {
+		t.Errorf("got %v %v, want Monday at nine", got, deferred)
+	}
+	p.NotificationsPausedUntil = nil
+	if got, deferred := deliveryTime(friday, p); deferred || !got.Equal(friday) {
+		t.Errorf("inside the schedule: got %v %v, want now", got, deferred)
 	}
 }

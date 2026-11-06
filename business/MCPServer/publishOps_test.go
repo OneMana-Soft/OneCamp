@@ -39,11 +39,22 @@ func TestEveryAPIOpIsAToolWithItsScopeHintsAndSchema(t *testing.T) {
 			t.Errorf("%s is published as %+v: not as declared", op.Name, spec)
 		}
 		id := uuid.NewString()
-		if ref, err := spec.Resource(map[string]any{"id": id}); err != nil || ref.Kind != ResourceTableRows || ref.ID != id {
-			t.Errorf("%s acts on %+v (%v), want the rows of table %s", op.Name, ref, err, id)
-		}
-		if _, err := spec.Resource(map[string]any{}); err == nil {
-			t.Errorf("%s with no table named acts on something", op.Name)
+		if op.Unplaced != "" {
+			// An op on no place acts on its kind alone, whatever it is sent:
+			// never on a table an argument names.
+			want := opKinds[op.Unplaced]
+			for _, args := range []map[string]any{{"id": id}, {}} {
+				if ref, err := spec.Resource(args); err != nil || ref.Kind != want || ref.ID != "" || !want.IdentifiesNoObject() {
+					t.Errorf("%s acts on %+v (%v) given %v, want a %s and no object", op.Name, ref, err, args, want)
+				}
+			}
+		} else {
+			if ref, err := spec.Resource(map[string]any{"id": id}); err != nil || ref.Kind != ResourceTableRows || ref.ID != id {
+				t.Errorf("%s acts on %+v (%v), want the rows of table %s", op.Name, ref, err, id)
+			}
+			if _, err := spec.Resource(map[string]any{}); err == nil {
+				t.Errorf("%s with no table named acts on something", op.Name)
+			}
 		}
 		// A key exactly for a write that isn't idempotent (a batch that makes
 		// rows): a read, or the same cells set twice, needs none.
@@ -61,10 +72,16 @@ func TestAnOpThatCantBePublishedStopsStartup(t *testing.T) {
 	planet.Reach = func(map[string]any) (string, string) { return "planet", "" }
 	blind := tableOp("tables.blind", v1api.Behaviour{ReadOnly: true}, rows)
 	blind.Reach = nil
+	both := tableOp("tables.both", v1api.Behaviour{}, rows)
+	both.Unplaced = "self"
+	nowhere := tableOp("tables.nowhere", v1api.Behaviour{}, rows)
+	nowhere.Reach, nowhere.Unplaced = nil, "planet"
 	for name, op := range map[string]v1api.Op{
 		"read.table, read_table as a tool": tableOp("read.table", v1api.Behaviour{ReadOnly: true}, rows),
 		"a planet":                         planet,
 		"no Reach":                         blind,
+		"a place and none":                 both,
+		"no place, of a kind with no rule": nowhere,
 	} {
 		if err := publish([]v1api.Op{op}); err == nil {
 			t.Errorf("%s: published", name)
@@ -148,5 +165,41 @@ func TestAResultIsItsTextOrItsJSON(t *testing.T) {
 	}
 	if got := []rune(ResultText([]string{long})); len(got) > maxToolOutputRunes+3 {
 		t.Errorf("a long result's text is %d runes, past the cut", len(got))
+	}
+}
+
+// The tables ops that act on no table are checked as the bridged tools of
+// their kind are (H2c): a table made is the caller's own, in no container
+// (ResourceSelfOwned, a write with the creations' key), and the deleted
+// tables are a read the handler holds to the caller (ResourceWorkspace, which
+// refuses every write).
+func TestTheTablesOpsOnNoTableAreTheirKindsTools(t *testing.T) {
+	want := map[string]ResourceKind{"tables.table.create": ResourceSelfOwned, "tables.deleted.list": ResourceWorkspace}
+	for _, op := range dataTableBusiness.APIOps() {
+		kind, ok := want[op.Name]
+		if !ok {
+			if op.Unplaced != "" {
+				t.Errorf("%s acts on no place (%s); only %v do", op.Name, op.Unplaced, want)
+			}
+			continue
+		}
+		delete(want, op.Name)
+		spec, err := specForOp(op)
+		if err != nil {
+			t.Fatalf("%s: %v", op.Name, err)
+		}
+		ref, err := spec.Resource(map[string]any{"id": uuid.NewString()})
+		if err != nil || ref.Kind != kind || ref.ID != "" {
+			t.Errorf("%s acts on %+v (%v), want a %s", op.Name, ref, err, kind)
+		}
+		if kind == ResourceSelfOwned && (op.Behaviour.ReadOnly || op.Behaviour.Idempotent || spec.IdempotencyKey == nil) {
+			t.Errorf("%s makes a table: a write not safe to repeat, with the creations' key; it is %+v", op.Name, op.Behaviour)
+		}
+		if kind == ResourceWorkspace && !op.Behaviour.ReadOnly {
+			t.Errorf("%s writes on the workspace's say alone", op.Name)
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("the tables ops leave out %v", want)
 	}
 }

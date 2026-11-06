@@ -27,6 +27,7 @@ package business
 import (
 	"context"
 	"errors"
+	labelBusiness "github.com/akashc777/OneCamp/business/Label"
 	"os"
 	"strings"
 	"time"
@@ -117,6 +118,11 @@ func CreateResourceGrant(ctx context.Context, creatorUUID uuid.UUID, resourceTyp
 	resourceID = strings.TrimSpace(resourceID)
 	if resourceID == "" {
 		return nil, errors.New("missing resource id")
+	}
+	// A label with no_guest_links refuses every external link to its item,
+	// whoever asks (business/Label; the refusal is a row in the log).
+	if err := labelBusiness.Allows(ctx, resourceType, resourceID, labelBusiness.RuleNoGuestLinks); err != nil {
+		return nil, err
 	}
 	// Normalize capability: comment is for docs and projects, post for
 	// channels; everything else is view.
