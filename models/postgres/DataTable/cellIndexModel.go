@@ -12,6 +12,7 @@ package models
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -176,20 +177,42 @@ func SyncPlaces(ctx context.Context, rows []uuid.UUID) error {
 	return err
 }
 
-// PlaceChoices sets a choice field's entries' option places (n) by their
-// labels (t): a label's place is where it first stands in labels, from 1,
-// and a label not there sorts after them all, at unknown. Only the entries
-// whose place changes are written; the field's entries are read once, each
-// label's place found by a hash of the few labels. In the transaction ctx
-// carries.
-func PlaceChoices(ctx context.Context, field uuid.UUID, labels []string, unknown float64) error {
-	_, err := pgexec.Exec(ctx, `UPDATE data_table_cell_index ci SET n = placed.n
-		FROM (SELECT x.row_id, COALESCE(o.place, $3::numeric) AS n
-		      FROM data_table_cell_index x
-		      LEFT JOIN (SELECT label COLLATE "C" AS label, min(i)::numeric AS place
-		                 FROM unnest($2::text[]) WITH ORDINALITY AS u(label, i) GROUP BY 1) o ON o.label = x.t
-		      WHERE x.field_id = $1 AND x.t IS NOT NULL) placed
-		WHERE ci.field_id = $1 AND ci.row_id = placed.row_id AND ci.n IS DISTINCT FROM placed.n`, field, pq.Array(labels), unknown)
+// ChoicePlaces is a choice field's option labels in their order, and the
+// place a label none of them is sorts at (PlaceChoices).
+type ChoicePlaces struct {
+	Field   uuid.UUID `json:"field"`
+	Labels  []string  `json:"labels"`
+	Unknown float64   `json:"unknown"`
+}
+
+// PlaceChoices sets choice fields' entries' option places (n) by their
+// labels (t): for each field, a label's place is where it first stands in
+// its labels, from 1, and a label not there sorts after them all, at its
+// unknown. Only the entries whose place changes are written; each field's
+// entries are read once, each label's place found by a hash of the few
+// labels. One statement for every field, in the transaction ctx carries.
+func PlaceChoices(ctx context.Context, fields []ChoicePlaces) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	ids := make([]string, len(fields))
+	for i, f := range fields {
+		ids[i] = f.Field.String()
+	}
+	js, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	_, err = pgexec.Exec(ctx, `UPDATE data_table_cell_index ci SET n = placed.n
+		FROM (SELECT x.field_id, x.row_id, COALESCE(o.place, f.unknown) AS n
+		      FROM (SELECT (e->>'field')::uuid AS field_id, (e->>'unknown')::numeric AS unknown
+		              FROM jsonb_array_elements($1::jsonb) e) f
+		      JOIN data_table_cell_index x ON x.field_id = f.field_id
+		      LEFT JOIN (SELECT (e->>'field')::uuid AS field_id, u.label COLLATE "C" AS label, min(u.i)::numeric AS place
+		                   FROM jsonb_array_elements($1::jsonb) e, jsonb_array_elements_text(e->'labels') WITH ORDINALITY AS u(label, i)
+		                  GROUP BY 1, 2) o ON o.field_id = x.field_id AND o.label = x.t
+		      WHERE x.field_id = ANY($2::uuid[]) AND x.t IS NOT NULL) placed
+		WHERE ci.field_id = placed.field_id AND ci.row_id = placed.row_id AND ci.n IS DISTINCT FROM placed.n`, string(js), pq.Array(ids))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/PlaceChoices err: %+v", err)
 	}

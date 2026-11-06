@@ -17,9 +17,9 @@ package Calendar
 //     the move), but never the demo's seeded events: its visitor is shared.
 //   - A reminder of an event someone organises or said yes to reaches them
 //     through a pause, quiet hours and focus time (D-CAL-4); anyone else's
-//     keeps to their holds. It goes to their devices and open apps, never
-//     their inbox, and a reminder found late (the server was down) isn't
-//     sent at all.
+//     keeps to their holds. It goes to their devices and open apps, or by
+//     email when they set it so (head A, remindersLive.go), and a reminder
+//     found late (the server was down) isn't sent at all.
 
 import (
 	"context"
@@ -31,6 +31,7 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	preferencesBusiness "github.com/akashc777/OneCamp/business/Preferences"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
 	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
@@ -85,7 +86,15 @@ func defaultsOf(e *models.Event) []int {
 type reminderStore interface {
 	remindersOf(ctx context.Context, event uuid.UUID, people []uuid.UUID) (map[uuid.UUID][]int, error)
 	remindersFor(ctx context.Context, person uuid.UUID, events []uuid.UUID) (map[uuid.UUID][]int, error)
-	setReminders(ctx context.Context, event, person uuid.UUID, minutes []int, at time.Time) error
+	setReminders(ctx context.Context, event, person uuid.UUID, minutes, email []int, at time.Time) error
+	// emailOf is which of each person's own reminders come by email.
+	emailOf(ctx context.Context, event uuid.UUID, people []uuid.UUID) (map[uuid.UUID][]int, error)
+	// emailFor is which of person's own reminders for each event come by email.
+	emailFor(ctx context.Context, person uuid.UUID, events []uuid.UUID) (map[uuid.UUID][]int, error)
+	// defaultsOf is each person's defaults per calendar (PrefDefaultReminders).
+	defaultsOf(ctx context.Context, people []uuid.UUID) (map[uuid.UUID]map[string]ReminderDefaults, error)
+	// replanPerson plans again, now, what may remind person from from to to.
+	replanPerson(ctx context.Context, person uuid.UUID, from, to time.Time, limit int) error
 	planReminder(ctx context.Context, person uuid.UUID, p models.ReminderPayload, at time.Time) error
 	cancelReminders(ctx context.Context, event uuid.UUID, people []uuid.UUID, kind string) error
 	cancelRemindersExcept(ctx context.Context, event uuid.UUID, keep []uuid.UUID) error
@@ -100,8 +109,31 @@ func (postgresReminders) remindersOf(ctx context.Context, event uuid.UUID, peopl
 func (postgresReminders) remindersFor(ctx context.Context, person uuid.UUID, events []uuid.UUID) (map[uuid.UUID][]int, error) {
 	return models.RemindersForPerson(ctx, models.Pool(), person, events)
 }
-func (postgresReminders) setReminders(ctx context.Context, event, person uuid.UUID, minutes []int, at time.Time) error {
-	return models.SetReminders(ctx, models.Pool(), event, person, minutes, at)
+func (postgresReminders) setReminders(ctx context.Context, event, person uuid.UUID, minutes, email []int, at time.Time) error {
+	return models.SetReminders(ctx, models.Pool(), event, person, minutes, email, at)
+}
+func (postgresReminders) emailOf(ctx context.Context, event uuid.UUID, people []uuid.UUID) (map[uuid.UUID][]int, error) {
+	return models.EmailRemindersOf(ctx, event, people)
+}
+func (postgresReminders) emailFor(ctx context.Context, person uuid.UUID, events []uuid.UUID) (map[uuid.UUID][]int, error) {
+	return models.EmailRemindersForPerson(ctx, person, events)
+}
+func (postgresReminders) defaultsOf(ctx context.Context, people []uuid.UUID) (map[uuid.UUID]map[string]ReminderDefaults, error) {
+	raw, err := preferencesBusiness.OfPeople(ctx, people, PrefDefaultReminders)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]map[string]ReminderDefaults, len(raw))
+	for p, v := range raw {
+		var d map[string]ReminderDefaults
+		if json.Unmarshal(v, &d) == nil && len(d) > 0 {
+			out[p] = d
+		}
+	}
+	return out, nil
+}
+func (postgresReminders) replanPerson(ctx context.Context, person uuid.UUID, from, to time.Time, limit int) error {
+	return models.ReplanPersonJobs(ctx, person, from, to, limit)
 }
 func (postgresReminders) planReminder(ctx context.Context, person uuid.UUID, p models.ReminderPayload, at time.Time) error {
 	return models.PlanReminderJob(ctx, models.Pool(), person, p, at)
@@ -114,6 +146,17 @@ func (postgresReminders) cancelRemindersExcept(ctx context.Context, event uuid.U
 }
 func (postgresReminders) unplanned(ctx context.Context, from, to time.Time, limit int) ([]uuid.UUID, error) {
 	return models.UnplannedEvents(ctx, models.Pool(), from, to, limit)
+}
+
+// keepIn is those of xs that are in of. Pure.
+func keepIn(xs, of []int) []int {
+	var out []int
+	for _, x := range xs {
+		if slices.Contains(of, x) {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // checkReminders is a person's reminders as written: at most five, each in
@@ -266,6 +309,15 @@ func (s *service) planAfter(ctx context.Context, id uuid.UUID, only []uuid.UUID,
 	if err != nil {
 		return err
 	}
+	emails, err := s.rem.emailOf(ctx, id, people)
+	if err != nil {
+		return err
+	}
+	defaults, err := s.rem.defaultsOf(ctx, people)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Calendar: defaults for %s couldn't be read, so D-CAL-4's: %v", id, err)
+		defaults = nil
+	}
 	zones, err := s.zonesOf(ctx, people)
 	if err != nil {
 		zones = map[uuid.UUID]string{}
@@ -292,11 +344,18 @@ func (s *service) planAfter(ctx context.Context, id uuid.UUID, only []uuid.UUID,
 			if a := answerOf(answers[inst.ref], models.GuestKey{UserID: &person}); a != nil {
 				response = a.Response
 			}
-			return remindersIn(mine, set, defaultsOf(inst.Event), person == e.CreatedBy, response)
+			dm, _ := defaultsFor(defaults[person], inst.Event)
+			return remindersIn(mine, set, dm, person == e.CreatedBy, response)
 		})
+		emailed := emails[p]
+		if !set {
+			_, emailed = defaultsFor(defaults[p], e)
+		}
 		switch {
 		case ok:
-			err = s.rem.planReminder(ctx, p, reminderPayload(id, next), next.at)
+			payload := reminderPayload(id, next)
+			payload.Email = slices.Contains(emailed, next.minutes)
+			err = s.rem.planReminder(ctx, p, payload, next.at)
 		case e.RRule != "" && (e.UntilAt == nil || e.UntilAt.After(w.To)):
 			// Nothing in reach of a series that goes on: planned again at the edge.
 			wake := w.To.Add(-24 * time.Hour)
@@ -446,10 +505,21 @@ func (s *service) sendReminder(ctx context.Context, person uuid.UUID, e *models.
 	if through {
 		data["through_holds"] = "true"
 	}
+	dedup := dedupOf(inst.ref, p, at)
+	// One set to come by email is emailed; when it can't be, it comes as a
+	// pop-up that says why.
+	if p.Email {
+		why := sendByEmail(ctx, person, title, body, eventPath(inst.ref), dedup)
+		if why == "" {
+			return nil
+		}
+		data["email_fallback"] = why
+		body += " · " + fallbackWords[why]
+	}
 	recipient := notificationBusiness.NoticeRecipient{UserUUID: person.String(), Reason: "reminder", Listed: true, ThroughHolds: through}
 	tellNotice(ctx, notificationBusiness.Notice{
 		Kind: noticeReminder, ResourceKind: KindEvent, ResourceUUID: e.ID.String(), ResourceTitle: called,
-		Data: data, DedupKey: noticeReminder + "|" + inst.ref + "|" + strconv.Itoa(p.Minutes) + "|" + p.Kind + "|" + at.UTC().Format(time.RFC3339),
+		Data: data, DedupKey: dedup,
 		Title: title, Body: body, Path: eventPath(inst.ref),
 		Push: &notificationBusiness.Push{Type: firebaseInit.FIREBASE_PUSH_DATA_TYPE_CALENDAR, ID: inst.ref, Tag: "reminder:" + inst.ref},
 	}, []notificationBusiness.NoticeRecipient{recipient})
@@ -530,20 +600,28 @@ func (s *service) remindersView(ctx context.Context, e *models.Event, guests []m
 	if err != nil {
 		return Reminders{}, err
 	}
-	if mine, set := own[person]; set {
-		return Reminders{Minutes: mine}, nil
+	emails, err := s.rem.emailOf(ctx, e.ID, []uuid.UUID{person})
+	if err != nil {
+		return Reminders{}, err
+	}
+	prefs, err := s.rem.defaultsOf(ctx, []uuid.UUID{person})
+	if err != nil {
+		return Reminders{}, err
 	}
 	response := ""
 	if a := answerOf(guests, models.GuestKey{UserID: &person}); a != nil {
 		response = a.Response
 	}
-	return Reminders{Minutes: remindersIn(nil, false, defaultsOf(e), person == e.CreatedBy, response), Default: true}, nil
+	mine, set := own[person]
+	minutes, email := remindersShown(mine, emails[person], set, prefs[person], e, person == e.CreatedBy, response)
+	return Reminders{Minutes: minutes, Email: email, Default: !set}, nil
 }
 
 // SetReminders sets who's own reminders for an event or series (nil goes
-// back to the default; empty is none), and plans their next. Saved without
+// back to the default; empty is none), with those of them that come by
+// email, and plans their next. Saved without
 // a word to anyone: they are theirs alone.
-func (s *service) SetReminders(ctx context.Context, who *model.UserInfo, id string, minutes []int) (Reminders, error) {
+func (s *service) SetReminders(ctx context.Context, who *model.UserInfo, id string, minutes, email []int) (Reminders, error) {
 	if err := s.ready(ctx); err != nil {
 		return Reminders{}, err
 	}
@@ -557,7 +635,10 @@ func (s *service) SetReminders(ctx context.Context, who *model.UserInfo, id stri
 		return Reminders{}, err
 	}
 	me := personOf(who)
-	if err := s.rem.setReminders(ctx, owner.ID, me, minutes, s.now()); err != nil {
+	if email, err = checkEmail(minutes, email); err != nil {
+		return Reminders{}, err
+	}
+	if err := s.rem.setReminders(ctx, owner.ID, me, minutes, email, s.now()); err != nil {
 		return Reminders{}, err
 	}
 	if err := s.planReminders(ctx, owner.ID, []uuid.UUID{me}); err != nil {
@@ -619,6 +700,14 @@ func (s *service) withReminders(ctx context.Context, rows []instance, occ map[st
 		// The list is shown without them, rather than not at all.
 		return
 	}
+	email, err := s.rem.emailFor(ctx, reader, owners)
+	if err != nil {
+		return
+	}
+	prefs, err := s.rem.defaultsOf(ctx, []uuid.UUID{reader})
+	if err != nil {
+		return
+	}
 	for i, inst := range rows {
 		owner := inst.owner()
 		mine, set := own[owner.ID]
@@ -626,12 +715,29 @@ func (s *service) withReminders(ctx context.Context, rows []instance, occ map[st
 		if a := answerOf(occ[inst.ref], models.GuestKey{UserID: &reader}); a != nil {
 			response = a.Response
 		}
-		minutes := slices.Clone(remindersIn(mine, set, defaultsOf(owner), reader == owner.CreatedBy, response))
-		if minutes == nil {
-			minutes = []int{}
-		}
-		out[i].Reminders, out[i].RemindersDefault = &minutes, !set
+		minutes, byEmail := remindersShown(mine, email[owner.ID], set, prefs[reader], owner, reader == owner.CreatedBy, response)
+		out[i].Reminders, out[i].RemindersDefault, out[i].RemindersEmail = &minutes, !set, &byEmail
 	}
+}
+
+// remindersShown is what reminds a person of e, and which of those come by
+// email, as a list or the card shows it: their own (set), else their
+// default for e's calendar when they organise it or said yes or maybe; never
+// nil. Pure.
+func remindersShown(own, ownEmail []int, set bool, prefs map[string]ReminderDefaults, e *models.Event, organiser bool, response string) ([]int, []int) {
+	var dm, de []int
+	if set {
+		de = ownEmail
+	} else {
+		dm, de = defaultsFor(prefs, e)
+	}
+	minutes := slices.Clone(remindersIn(own, set, dm, organiser, response))
+	if minutes == nil {
+		minutes = []int{}
+	}
+	email := keepIn(de, minutes)
+	slices.Sort(email)
+	return minutes, slices.Compact(append([]int{}, email...))
 }
 
 // Reminders is a person's reminders for an event.
@@ -639,6 +745,8 @@ type Reminders struct {
 	// Minutes are minutes before it (an all-day event's, before 00:00 of its
 	// first day): empty for none.
 	Minutes []int `json:"minutes"`
+	// Email are those of Minutes that come by email, not as a pop-up.
+	Email []int `json:"email"`
 	// Default says they set none, and these are the default's.
 	Default bool `json:"default"`
 }

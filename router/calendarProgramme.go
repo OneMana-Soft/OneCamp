@@ -44,4 +44,5 @@ func mountCalendarProgramme(rt calendarRouters) {
 	mountCalendarEvents(rt)    // A1: the calendar's events in its one store
 	mountCalendarAnswers(rt)   // A2: answers, nudges and guests' links
 	mountCalendarReminders(rt) // A5: each person's reminders, and snoozes
+	mountCalendarRetention(rt) // governance trail H2: retention rules and holds
 }

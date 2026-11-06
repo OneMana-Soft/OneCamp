@@ -42,6 +42,12 @@ func RequireID(w http.ResponseWriter, r *http.Request, raw string, need workAcce
 	return id, p, ok
 }
 
+// RequireIDStanding is RequireID with the caller's standing, for a handler
+// whose project is named by what it reads (a dashboard's project_id).
+func RequireIDStanding(w http.ResponseWriter, r *http.Request, raw string, need workAccess.Need, deniedMsg string) (uuid.UUID, *dgraphStruct.DgraphProject, workAccess.Standing, bool) {
+	return requireID(w, r, raw, need, deniedMsg)
+}
+
 func requireID(w http.ResponseWriter, r *http.Request, raw string, need workAccess.Need, deniedMsg string) (uuid.UUID, *dgraphStruct.DgraphProject, workAccess.Standing, bool) {
 	id, err := uuid.Parse(raw)
 	if err != nil {

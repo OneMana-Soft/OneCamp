@@ -1,12 +1,14 @@
 // Package business (WorkInsights) is Work Insights
-// (design/projects-vs-asana-jira/PROGRAM.md §4.2 #99; B9 builds it): flow
-// metrics from the Work Change Log (cycle time, lead time, triage time,
-// throughput, age, scope change, flow per status), rolled up daily, queried
-// through the Query Spec's filters.
+// (design/projects-vs-asana-jira/PROGRAM.md §4.2 #99): flow metrics from the
+// Work Change Log, rolled up daily, queried through the Query Spec's filters.
 //
-// DAY 0. There is no log to measure yet, so Series answers ErrNotBuilt.
-// Today's Reports page keeps its own reads (business/Project report.go).
-// Nothing calls Insights yet.
+// B9-a defines the metrics, and the report already answers them:
+// business/Project insights.go measures cycle time, lead time, triage time,
+// age and time in status from each task's status history, as helpers.Spread
+// percentiles sliced by project, person, priority and type. When Series is
+// built (daily rollups over a Query Spec), it measures with those
+// definitions and spreads, never a second copy. Until then it answers
+// ErrNotBuilt, and nothing calls Insights.
 package business
 
 import (
@@ -43,7 +45,7 @@ type Measures interface {
 	Series(ctx context.Context, who accessBusiness.Subject, m Metric, over querySpec.Spec, from, to time.Time) ([]Point, error)
 }
 
-// ErrNotBuilt is insights before B9.
+// ErrNotBuilt is Series before its daily rollups are built.
 var ErrNotBuilt = errors.New("insights: that isn't built yet")
 
 // Insights is the measures everything asks.

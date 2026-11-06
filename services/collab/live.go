@@ -253,6 +253,9 @@ type wire struct {
 	RunID         string          `json:"run_id,omitempty"`
 	SnapshotFirst bool            `json:"snapshot_first,omitempty"`
 	Quiet         bool            `json:"quiet,omitempty"`
+	ElementIDs    []string        `json:"element_ids,omitempty"`
+	Protect       *bool           `json:"protect,omitempty"`
+	Name          string          `json:"name,omitempty"`
 }
 
 type writeAnswer struct {
@@ -429,6 +432,20 @@ var UndoGuests = func(ctx context.Context, boardUUID, state string) (int, error)
 	}
 	err := callAt(ctx, "/live/boards/"+boardUUID+"/undoGuests", "undoGuests", wire{State: state}, &out)
 	return out.Undone, err
+}
+
+// ProtectBoard protects the elements ids on a board's live copy (protect
+// true), with the text bound to them, or lifts their protection (false), as
+// the person by (name is how the board names them), answering how many of
+// them changed (miro-44; the collaboration service's live/ops/protect.js).
+// Only business/Board's ProtectElements calls it, once it has checked who
+// may and written the audit row. A test may swap it.
+var ProtectBoard = func(ctx context.Context, boardUUID string, ids []string, protect bool, by, name string) (int, error) {
+	var out struct {
+		Changed int `json:"changed"`
+	}
+	err := callAt(ctx, "/live/boards/"+boardUUID+"/protect", "protect", wire{ElementIDs: ids, Protect: &protect, By: &By{UserUUID: by}, Name: name}, &out)
+	return out.Changed, err
 }
 
 // ClosePeople closes every live socket the people named have open, on every

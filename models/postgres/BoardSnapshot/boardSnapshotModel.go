@@ -18,6 +18,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -247,6 +248,21 @@ func DeleteByIDs(ctx context.Context, ids []uuid.UUID) error {
 		helpers.LogErrorWithContext(cctx, "models/BoardSnapshot DeleteByIDs failed: %+v", err)
 	}
 	return err
+}
+
+// DeleteBoardsSnapshots removes every snapshot row of boards gone for good (a
+// board purged past the trash takes its history with it), and answers the
+// keys of their objects, for the caller to remove once the rows are gone.
+func DeleteBoardsSnapshots(ctx context.Context, boardUUIDs []string) ([]string, error) {
+	if len(boardUUIDs) == 0 {
+		return nil, nil
+	}
+	keys, err := pgexec.Query(ctx, `DELETE FROM board_snapshots WHERE board_uuid = ANY($1) RETURNING object_key`, pgexec.Text, pq.Array(boardUUIDs))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/BoardSnapshot DeleteBoardsSnapshots failed: %+v", err)
+		return nil, err
+	}
+	return keys, nil
 }
 
 // --- scan helpers ----------------------------------------------------------

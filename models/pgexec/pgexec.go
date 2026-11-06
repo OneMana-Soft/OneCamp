@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -291,15 +292,69 @@ func Current(ctx context.Context) (Querier, error) {
 // rolls back). Inside another InTx it joins that transaction: fn's statements
 // commit or roll back with the outer one. TxTimeout bounds it.
 func InTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	return InTxFor(ctx, TxTimeout, fn)
+}
+
+// InTxFor is InTx with budget d: for a transaction longer than a few
+// statements (a column's cells rewritten with it, postgresInit.BulkTimeout).
+// Inside another InTx it joins that one, under its budget. What fn hands
+// AfterCommit runs once the transaction has committed.
+func InTxFor(ctx context.Context, d time.Duration, fn func(ctx context.Context) error) error {
 	if inTx(ctx) {
 		return fn(ctx)
 	}
 	if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
 		return ErrNoDatabase
 	}
-	return postgresInit.InTx(ctx, TxTimeout, func(ctx context.Context, tx *sql.Tx) error {
-		return fn(WithTx(ctx, tx))
+	after := &afterCommit{}
+	err := postgresInit.InTx(ctx, d, func(tctx context.Context, tx *sql.Tx) error {
+		return fn(context.WithValue(WithTx(tctx, tx), afterKey{}, after))
 	})
+	if err == nil {
+		after.run(ctx)
+	}
+	return err
+}
+
+// afterKey holds the outermost InTx's afterCommit.
+type afterKey struct{}
+
+// afterCommit is what a transaction's writes tell others once it commits.
+type afterCommit struct {
+	mu  sync.Mutex
+	fns []func(ctx context.Context)
+}
+
+func (a *afterCommit) add(fn func(ctx context.Context)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.fns = append(a.fns, fn)
+}
+
+// run runs what was handed over, in order, with ctx: InTx's caller's, which
+// carries no transaction and isn't cancelled with it.
+func (a *afterCommit) run(ctx context.Context) {
+	a.mu.Lock()
+	fns := a.fns
+	a.fns = nil
+	a.mu.Unlock()
+	for _, fn := range fns {
+		fn(ctx)
+	}
+}
+
+// AfterCommit runs fn once ctx's transaction has committed, so what a write
+// tells others (a live message, an index, a webhook) reaches them when a
+// reader can find the write, and a write rolled back tells nothing. Inside
+// InTx fn waits for the outermost commit and gets InTx's caller's ctx; it is
+// dropped if the transaction rolls back. Anywhere else, a bare WithTx
+// included (its owner commits), fn runs at once with ctx.
+func AfterCommit(ctx context.Context, fn func(ctx context.Context)) {
+	if a, ok := ctx.Value(afterKey{}).(*afterCommit); ok && inTx(ctx) {
+		a.add(fn)
+		return
+	}
+	fn(ctx)
 }
 
 // WithTx is ctx carrying tx: every pgexec statement made with it runs in tx,

@@ -28,6 +28,7 @@ import (
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // budgetRows is the table's size: big enough that reading it through costs
@@ -208,6 +209,81 @@ func TestRowQueryWindowsReadOnlyAlongTheirIndexes(t *testing.T) {
 		}
 		if n, most := after.indexTuples-before.indexTuples, int64(windows*(windowSize+1)*entriesPerRow); n > most {
 			t.Errorf("%s: %d windows read %d index entries, past the budget of %d", s.name, windows, n, most)
+		}
+	}
+}
+
+// TestAWalkItsFilterBoundsCountsNothingFirst: a first window walked along the
+// field its filter is on (an amount in a range, by amount) reads only its own
+// entries. No count of the filter's rows runs before it (runner.go's
+// walkedOnly): that count reads an entry for each row the range keeps, as far
+// as NarrowSet, and a range under NarrowSet would then be read again whole as
+// its set, where the walk reads only the window's rows (CR-213, mutant MG).
+func TestAWalkItsFilterBoundsCountsNothingFirst(t *testing.T) {
+	b := newBudgetTable(t)
+	ctx := b.ctx
+	lo, hi := 40000.0, 44999.0
+	kept := 0
+	for j := 0; j < budgetRows; j++ {
+		if v := float64((j * 104729) % 100000); v >= lo && v <= hi {
+			kept++
+		}
+	}
+	// The case that matters: more rows than a few windows, few enough that a
+	// count would pick the set.
+	if kept <= 4*windowSize || kept > rowQuery.NarrowSet {
+		t.Fatalf("the range keeps %d rows: want more than %d and at most NarrowSet (%d)", kept, 4*windowSize, rowQuery.NarrowSet)
+	}
+	field := "field:" + b.amount.Id.String()
+	inRange := &query.Filter{Field: field, Operator: query.OperatorBetween, Values: []query.Value{{Number: &lo}, {Number: &hi}}}
+	who := accessBusiness.Subject{UserUUID: b.me.String()}
+	for _, s := range []struct {
+		name string
+		sort query.Sort
+	}{
+		{"an amount in a range, by amount", query.Sort{Field: field}},
+		{"an amount in a range, by amount, most first", query.Sort{Field: field, Desc: true}},
+	} {
+		spec := query.Spec{Scope: query.Scope{Kind: query.ScopeTable, ID: b.tb.Id.String()}, Filter: inRange, Sorts: []query.Sort{s.sort}}
+		before := readsNow(ctx, t)
+		res, err := query.Queries.Run(ctx, who, spec, query.Page{Size: windowSize})
+		after := readsNow(ctx, t)
+		if err != nil {
+			t.Fatalf("%s: %v", s.name, err)
+		}
+		if len(res.IDs) != windowSize || res.Next == "" {
+			t.Fatalf("%s: the first window has %d rows (next %q)", s.name, len(res.IDs), res.Next)
+		}
+		// Its rows are the range's, in the sort's order.
+		var amounts []float64
+		rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `SELECT ("values"->>$2)::float8 FROM unnest($1::uuid[]) WITH ORDINALITY AS w(id, n)
+			JOIN data_table_rows r ON r.id = w.id ORDER BY w.n`, pq.Array(res.IDs), b.amount.Id.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var v float64
+			if err := rows.Scan(&v); err != nil {
+				t.Fatal(err)
+			}
+			amounts = append(amounts, v)
+		}
+		rows.Close()
+		for i, v := range amounts {
+			if v < lo || v > hi || (i > 0 && (v < amounts[i-1]) != s.sort.Desc && v != amounts[i-1]) {
+				t.Fatalf("%s: row %d's amount %v is outside %v..%v or out of order (%v)", s.name, i, v, lo, hi, amounts)
+			}
+		}
+		// A count of the range alone reads an entry for each row it keeps;
+		// the walk reads about one for each row it shows.
+		n := after.indexTuples - before.indexTuples
+		if n >= int64(kept/2) {
+			t.Errorf("%s: the first window read %d index entries for %d rows; its range keeps %d, so it was counted (or read as its set) first", s.name, n, windowSize, kept)
+		} else {
+			t.Logf("%s: the first window read %d index entries for %d rows (the range keeps %d)", s.name, n, windowSize, kept)
+		}
+		if n := after.seqScans - before.seqScans; n != 0 {
+			t.Errorf("%s: the first window read the rows or the cell index through, %d times", s.name, n)
 		}
 	}
 }

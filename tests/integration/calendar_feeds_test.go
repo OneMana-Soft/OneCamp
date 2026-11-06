@@ -104,8 +104,15 @@ func TestCalendarFeeds(t *testing.T) {
 	if err := models.InsertFeed(ctx, feed("second-secret", models.FeedBusy)); err == nil {
 		t.Fatal("a second live feed was kept beside the first")
 	}
-	// Revoked: found by neither its hash nor as live; a new one is.
-	must(models.RevokeFeeds(ctx, cal, sam))
+	// Revoked: found by neither its hash nor as live; a new one is. The
+	// revoke gives the scope it stopped (the audit log's row says it), and
+	// nothing once none is live.
+	if stopped, err := models.RevokeFeeds(ctx, cal, sam); err != nil || stopped != models.FeedFull {
+		t.Fatalf("the revoke stopped %q (%v), want the live feed's %q", stopped, err, models.FeedFull)
+	}
+	if again, err := models.RevokeFeeds(ctx, cal, sam); err != nil || again != "" {
+		t.Fatalf("a second revoke stopped %q (%v), want nothing", again, err)
+	}
 	if got, err := models.FeedByHash(ctx, helpers.LinkSecretHash("first-secret")); err != nil || got != nil {
 		t.Fatalf("a revoked feed was found: %+v %v", got, err)
 	}

@@ -131,7 +131,7 @@ func (w *tableWorld) order(tb *dataTableModel.DataTable) []uuid.UUID {
 
 func TestTableLedger(t *testing.T) {
 	listenForTableEvents()
-	w := newTableWorld(t, "amara", "bo")
+	w := newTableWorld(t, "amara", "bo", "cy")
 	amara, bo := w.people["amara"], w.people["bo"]
 	select2 := map[string]interface{}{"options": []map[string]interface{}{{"label": "Open"}, {"label": "Won"}}}
 
@@ -155,7 +155,8 @@ func TestTableLedger(t *testing.T) {
 			}
 		}
 		var sets, changes int
-		if err := w.env.PG.QueryRow(`SELECT COUNT(*), COALESCE(SUM(rows), 0) FROM data_table_change_sets WHERE table_id = $1`, deals.Id).Scan(&sets, &changes); err != nil {
+		// Of rows: the columns made are change sets of their own, of none (V-455).
+		if err := w.env.PG.QueryRow(`SELECT COUNT(*), COALESCE(SUM(rows), 0) FROM data_table_change_sets WHERE table_id = $1 AND rows > 0`, deals.Id).Scan(&sets, &changes); err != nil {
 			t.Fatal(err)
 		}
 		if sets != 1 || changes != 1000 {
@@ -261,8 +262,18 @@ func TestTableLedger(t *testing.T) {
 
 	t.Run("an undo puts back only what still holds what it changed, and says what it left", func(t *testing.T) {
 		tb := w.table("amara", "Undo")
-		status := w.field("amara", tb, "Status", dataTableModel.FieldSelect, select2)
-		notes := w.field("amara", tb, "Notes", dataTableModel.FieldText, nil)
+		// Cy, an admin, sets the columns up: a column made is on its maker's
+		// undo (V-455), and this is of Amara's and Bo's rows alone.
+		cy := dataTableBusiness.Actor{UserID: w.people["cy"].UserID, IsAdmin: true}
+		column := func(name, typ string, cfg map[string]interface{}) string {
+			f, err := dataTableBusiness.CreateField(w.ctx, tb.Id, dataTableBusiness.FieldInput{Name: name, Type: typ, Config: cfg}, cy)
+			if err != nil {
+				t.Fatalf("create field %s: %v", name, err)
+			}
+			return f.Id.String()
+		}
+		status := column("Status", dataTableModel.FieldSelect, select2)
+		notes := column("Notes", dataTableModel.FieldText, nil)
 		r, err := dataTableBusiness.CreateRow(w.ctx, tb.Id, dataTableBusiness.RowInput{Values: map[string]interface{}{status: "Open", notes: "first"}}, bo)
 		if err != nil {
 			t.Fatal(err)

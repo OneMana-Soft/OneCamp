@@ -2,7 +2,8 @@ package contentcodec
 
 // The codec's rules for connected work (docs programme C1): a page in a doc
 // (subpage), a date in a line (dateMention), a project's tasks or board
-// (taskListEmbed, boardEmbed), and a to-do's task (taskId on taskItem). The
+// (taskListEmbed, boardEmbed), a whiteboard (whiteboardEmbed, miro-34), and a
+// to-do's task (taskId on taskItem). The
 // same rules, in the same order, as the web's lib/codec/connected.ts; the
 // golden fixture testdata/codec/connected.* holds the two to the same bytes.
 //
@@ -21,10 +22,23 @@ import (
 var (
 	taskListShows = map[string]bool{"open": true, "mine": true, "all": true}
 	// connectedDataTypes is each connected block's data-type in HTML, by node.
-	connectedDataTypes = map[string]string{"subpage": "subpage", "taskListEmbed": "task-list-embed", "boardEmbed": "board-embed"}
-	// embedNodes is each project embed's node, by its data-type.
-	embedNodes = map[string]string{"task-list-embed": "taskListEmbed", "board-embed": "boardEmbed"}
+	connectedDataTypes = map[string]string{"subpage": "subpage", "taskListEmbed": "task-list-embed", "boardEmbed": "board-embed", "whiteboardEmbed": "whiteboard-embed"}
+	// embedNodes is each embed's node, by its data-type.
+	embedNodes = map[string]string{"task-list-embed": "taskListEmbed", "board-embed": "boardEmbed", "whiteboard-embed": "whiteboardEmbed"}
+	// embedBlocks is what each embed keeps of what it shows (the web's BLOCK_IDS):
+	// its id attribute, that id's HTML attribute, and the app's address and
+	// words for it.
+	embedBlocks = map[string]embedBlock{
+		"taskListEmbed":   {idAttr: "projectId", htmlAttr: "data-project-id", path: "/app/project/", words: "Tasks"},
+		"boardEmbed":      {idAttr: "projectId", htmlAttr: "data-project-id", path: "/app/project/", words: "Board"},
+		"whiteboardEmbed": {idAttr: "boardId", htmlAttr: "data-board-id", path: "/app/board/", words: "Whiteboard"},
+	}
 )
+
+// embedBlock is one embed's id, as embedBlocks holds it.
+type embedBlock struct {
+	idAttr, htmlAttr, path, words string
+}
 
 // connectedID is v as an id: a uuid in lower case, or "".
 func connectedID(v any) string {
@@ -72,6 +86,7 @@ func init() {
 	nodeSpecs["dateMention"] = &nodeSpec{name: "dateMention", inline: true, attrs: []attrSpec{{"date", nil}, {"reminder", nil}}}
 	nodeSpecs["taskListEmbed"] = &nodeSpec{name: "taskListEmbed", attrs: []attrSpec{{"projectId", nil}, {"show", "open"}}}
 	nodeSpecs["boardEmbed"] = &nodeSpec{name: "boardEmbed", attrs: []attrSpec{{"projectId", nil}}}
+	nodeSpecs["whiteboardEmbed"] = &nodeSpec{name: "whiteboardEmbed", attrs: []attrSpec{{"boardId", nil}}}
 }
 
 // connectedAttrs is the to-do's task, on the to-do.
@@ -86,8 +101,11 @@ var connectedAttrs = []globalAttr{{
 // typedConnectedAttr is a connected node's attribute as the editor's schema
 // types it.
 func typedConnectedAttr(typ, name string, v any) (any, bool) {
+	if e, ok := embedBlocks[typ]; ok && name == e.idAttr {
+		return orNil(connectedID(v)), true
+	}
 	switch {
-	case typ == "subpage" && name == "docId", (typ == "taskListEmbed" || typ == "boardEmbed") && name == "projectId":
+	case typ == "subpage" && name == "docId":
 		return orNil(connectedID(v)), true
 	case typ == "dateMention" && name == "date":
 		return orNil(isoDate(v)), true
@@ -105,16 +123,12 @@ func connectedLink(n *Node) (path, words string) {
 			return "/app/doc/" + id, helpers.FirstNonEmpty(n.attrString("title"), "Page")
 		}
 		return "", helpers.FirstNonEmpty(n.attrString("title"), "Page")
-	case "taskListEmbed":
-		if id := connectedID(n.attr("projectId")); id != "" {
-			return "/app/project/" + id, "Tasks"
+	}
+	if e, ok := embedBlocks[n.Type]; ok {
+		if id := connectedID(n.attr(e.idAttr)); id != "" {
+			return e.path + id, e.words
 		}
-		return "", "Tasks"
-	case "boardEmbed":
-		if id := connectedID(n.attr("projectId")); id != "" {
-			return "/app/project/" + id, "Board"
-		}
-		return "", "Board"
+		return "", e.words
 	}
 	return "", ""
 }
@@ -136,8 +150,9 @@ func writeConnectedBlock(b *strings.Builder, n *Node) bool {
 			writeAttr(b, "data-title", t)
 		}
 	default:
-		if id := connectedID(n.attr("projectId")); id != "" {
-			writeAttr(b, "data-project-id", id)
+		e := embedBlocks[n.Type]
+		if id := connectedID(n.attr(e.idAttr)); id != "" {
+			writeAttr(b, e.htmlAttr, id)
 		}
 		if n.Type == "taskListEmbed" {
 			writeAttr(b, "data-show", taskListShow(n.attr("show")))
@@ -176,10 +191,11 @@ func readConnectedBlock(dataType string, n *html.Node) *Node {
 			m.setAttr("title", t)
 		}
 		return m
-	case "task-list-embed", "board-embed":
+	case "task-list-embed", "board-embed", "whiteboard-embed":
 		m := newNode(embedNodes[dataType])
-		if id := connectedID(attrVal(n, "data-project-id")); id != "" {
-			m.setAttr("projectId", id)
+		e := embedBlocks[m.Type]
+		if id := connectedID(attrVal(n, e.htmlAttr)); id != "" {
+			m.setAttr(e.idAttr, id)
 		}
 		if m.Type == "taskListEmbed" {
 			m.setAttr("show", taskListShow(attrVal(n, "data-show")))

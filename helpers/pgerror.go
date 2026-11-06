@@ -29,6 +29,11 @@ func IsUniqueViolation(err error) bool { return pgErrorCodeIs(err, pgUniqueViola
 // IsQueryCanceled is whether Postgres stopped a statement: its statement_timeout, or a cancel.
 func IsQueryCanceled(err error) bool { return pgErrorCodeIs(err, "57014") }
 
+// IsDiskFull is whether Postgres ran out of space for a statement (53100): a temporary file's
+// disk, or, in a container, the /dev/shm a parallel query's workers share their hashes in
+// ("could not resize shared memory segment ... No space left on device", V-525).
+func IsDiskFull(err error) bool { return pgErrorCodeIs(err, "53100") }
+
 // IsUniqueViolationOn reports whether err is Postgres refusing a duplicate
 // value for the one unique constraint named (booking_pages_slug_key), so a
 // handler names the clash it knows ("another page uses that address") and

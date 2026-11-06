@@ -83,6 +83,30 @@ func TestTheWebAppCanReadADownloadsNameAndCounts(t *testing.T) {
 	}
 }
 
+// A legal hold's export says how many items its file holds (X-Exported-Items),
+// which part it is (X-Export-Part), and the token for the next part when more
+// remain (X-Export-Next), so the panel can say when a file is only part of the
+// hold's items and offer the rest (V-388, V-375). Before, the browser hid the
+// count, and an export cut at its cap looked whole.
+func TestTheWebAppCanReadAHoldExportsCountAndParts(t *testing.T) {
+	const app = "https://acme.onemana.dev"
+	h := corsFor([]string{app})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Exported-Items", "20000")
+		w.Header().Set("X-Export-Part", "1")
+		w.Header().Set("X-Export-Next", "2.Yw")
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/admin/retention/holds/h/export/calendar", nil)
+	req.Header.Set("Origin", app)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	exposed := strings.ToLower(rec.Header().Get("Access-Control-Expose-Headers"))
+	for _, want := range []string{"x-exported-items", "x-export-part", "x-export-next"} {
+		if !strings.Contains(exposed, want) {
+			t.Errorf("exposed %q, want %s", rec.Header().Get("Access-Control-Expose-Headers"), want)
+		}
+	}
+}
+
 // An admin's change to what an app may do names the version it was read at in
 // If-Match (PUT /admin/apps/{id}/access), and the web app calls the API from its
 // own origin: the browser asks first, and a header CORS doesn't allow stops

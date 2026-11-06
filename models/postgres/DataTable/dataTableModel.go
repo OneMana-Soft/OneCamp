@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	tableDomain "github.com/akashc777/OneCamp/domain/DataTable"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
@@ -86,32 +87,22 @@ const (
 	FieldModifiedBy   = "modified_by"
 )
 
-// View type constants.
+// View type constants: domain/DataTable's, which says which a view may take
+// (tableDomain.ValidViewType), a check with no store round trip.
 const (
-	ViewGrid     = "grid"
-	ViewBoard    = "board"
-	ViewCalendar = "calendar"
-	ViewChart    = "chart"
-	// B4's layouts: cards, a list of rows, bars across their dates, and the
-	// bars with the links that say what waits on what (migration 927).
-	ViewGallery  = "gallery"
-	ViewList     = "list"
-	ViewTimeline = "timeline"
-	ViewGantt    = "gantt"
+	ViewGrid     = tableDomain.ViewGrid
+	ViewBoard    = tableDomain.ViewBoard
+	ViewCalendar = tableDomain.ViewCalendar
+	ViewChart    = tableDomain.ViewChart
+	ViewGallery  = tableDomain.ViewGallery
+	ViewList     = tableDomain.ViewList
+	ViewTimeline = tableDomain.ViewTimeline
+	ViewGantt    = tableDomain.ViewGantt
 )
 
-// ValidVisibility / ValidViewType validate inputs. Which kinds a field may be
-// is business/FieldTypes' (Kinds.Valid): a kind registered there.
+// ValidVisibility validates an input. Which kinds a field may be is
+// business/FieldTypes' (Kinds.Valid): a kind registered there.
 func ValidVisibility(v string) bool { return v == VisibilityPrivate || v == VisibilityWorkspace }
-
-func ValidViewType(t string) bool {
-	switch t {
-	case ViewGrid, ViewBoard, ViewCalendar, ViewChart, ViewGallery, ViewList, ViewTimeline, ViewGantt:
-		return true
-	default:
-		return false
-	}
-}
 
 // DataTable mirrors a row of data_tables.
 type DataTable struct {
@@ -266,15 +257,13 @@ func scanTable(s scanner) (*DataTable, error) {
 
 // CreateTable inserts a new table and returns the generated id.
 func CreateTable(ctx context.Context, t *DataTable) (uuid.UUID, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
 	id := uuid.New()
 	if t.GeneralLevel == "" {
 		t.GeneralLevel = GeneralEdit
 	}
 	const q = `INSERT INTO data_tables (id, name, description, icon, visibility, created_by, general_level)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)`
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, t.Name, t.Description, t.Icon, t.Visibility, t.CreatedBy, t.GeneralLevel)
+	_, err := pgexec.Exec(ctx, q, id, t.Name, t.Description, t.Icon, t.Visibility, t.CreatedBy, t.GeneralLevel)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateTable err: %+v", err)
 		return uuid.Nil, err
@@ -295,8 +284,6 @@ type TableChange struct {
 // one statement: a field written from a copy read earlier can't undo another
 // changed since. It returns the table, and its visibility as it was.
 func UpdateTable(ctx context.Context, id uuid.UUID, c TableChange) (*DataTable, string, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
 	const q = `WITH was AS (SELECT id, visibility FROM data_tables WHERE id = $1 AND deleted_at IS NULL FOR UPDATE)
 		UPDATE data_tables t SET name = COALESCE($2, t.name),
 			description = CASE WHEN $3 THEN $4 ELSE t.description END,
@@ -305,8 +292,9 @@ func UpdateTable(ctx context.Context, id uuid.UUID, c TableChange) (*DataTable, 
 		FROM was WHERE t.id = was.id
 		RETURNING t.id, t.name, t.description, t.icon, t.visibility, t.created_by, t.created_at, t.updated_at, t.deleted_at, t.general_level, was.visibility`
 	var before string
-	out, err := scanTable(thenScan{postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id, c.Name, c.SetDescription, c.Description, c.SetIcon, c.Icon, c.Visibility), []any{&before}})
-	if errors.Is(err, sql.ErrNoRows) {
+	out, found, err := pgexec.QueryOne(ctx, q, func(r pgexec.Row) (*DataTable, error) { return scanTable(thenScan{r, []any{&before}}) },
+		id, c.Name, c.SetDescription, c.Description, c.SetIcon, c.Icon, c.Visibility)
+	if err == nil && !found {
 		return nil, "", sql.ErrNoRows
 	}
 	if err != nil {
@@ -320,15 +308,12 @@ func UpdateTable(ctx context.Context, id uuid.UUID, c TableChange) (*DataTable, 
 // table_id scoping of every read), by who deleted it: it goes to the trash
 // (DeletedTables), from which RestoreTable brings it back.
 func SoftDeleteTable(ctx context.Context, id, by uuid.UUID) error {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
 	const q = `UPDATE data_tables SET deleted_at=NOW(), updated_at=NOW(), deleted_by=$2 WHERE id=$1 AND deleted_at IS NULL`
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, nullUUID(by))
+	n, err := pgexec.Exec(ctx, q, id, nullUUID(by))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SoftDeleteTable err: %+v", err)
 		return err
 	}
-	n, _ := res.RowsAffected()
 	if n == 0 {
 		return sql.ErrNoRows
 	}
@@ -337,13 +322,8 @@ func SoftDeleteTable(ctx context.Context, id, by uuid.UUID) error {
 
 // GetTableByID returns a single non-deleted table, or (nil, nil) if absent.
 func GetTableByID(ctx context.Context, id uuid.UUID) (*DataTable, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
 	q := `SELECT ` + tableColumns + ` FROM data_tables WHERE id=$1 AND deleted_at IS NULL`
-	t, err := scanTable(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+	t, _, err := pgexec.QueryOne(ctx, q, func(r pgexec.Row) (*DataTable, error) { return scanTable(r) }, id)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/GetTableByID err: %+v", err)
 		return nil, err
@@ -430,8 +410,13 @@ func CreateField(ctx context.Context, f *Field) (uuid.UUID, error) {
 	if strings.TrimSpace(f.Config) == "" {
 		f.Config = "{}"
 	}
-	id := uuid.New()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, insertFieldSQL, id, f.TableId, f.Name, f.Type, f.Config, f.Position,
+	// A given id is kept: an API batch names its creates, so a retry finds
+	// the one it made (business/DataTable apiBatch). Otherwise a new one.
+	id := f.Id
+	if id == uuid.Nil {
+		id = uuid.New()
+	}
+	_, err := current(ctx).ExecContext(dbctx, insertFieldSQL, id, f.TableId, f.Name, f.Type, f.Config, f.Position,
 		f.Description, f.Required, defaultOf(f))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateField err: %+v", err)
@@ -459,11 +444,34 @@ type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// current is what a write runs on: the transaction ctx carries (an API
+// batch's item writes in one with its audit row, pgexec.InTxFor), or the
+// pool.
+func current(ctx context.Context) execer {
+	if q, err := pgexec.Current(ctx); err == nil {
+		if tx, ok := q.(*sql.Tx); ok {
+			return tx
+		}
+	}
+	return postgresInit.DBConn.SqlDB
+}
+
+// joinTx runs fn in the transaction ctx carries, or in one of its own within
+// d: a write of several statements stays whole either way.
+func joinTx(ctx context.Context, d time.Duration, fn func(ctx context.Context, tx *sql.Tx) error) error {
+	if q, err := pgexec.Current(ctx); err == nil {
+		if tx, ok := q.(*sql.Tx); ok {
+			return fn(ctx, tx)
+		}
+	}
+	return postgresInit.InTx(ctx, d, fn)
+}
+
 // UpdateField updates a column's editable attributes.
 func UpdateField(ctx context.Context, f *Field) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
-	return updateField(dbctx, postgresInit.DBConn.SqlDB, f)
+	return updateField(dbctx, current(ctx), f)
 }
 
 func updateField(ctx context.Context, db execer, f *Field) error {
@@ -597,12 +605,14 @@ type FieldPlan func(current *Field) (*Field, Convert, []CellRewrite, error)
 // one copy (an option renamed twice in quick succession) would each rewrite
 // the cells as the field was before the other. It has BulkTimeout, as the
 // cells of every row may change. The cells it changes are cs's changes,
-// stored in the same transaction (the row ledger; cs nil records none). It
-// returns how many rows' cells changed; a field that's gone is sql.ErrNoRows.
+// stored in the same transaction (the row ledger; cs nil records none), after
+// the field's own change (FieldColumn), so an update that changed the field
+// and no cell is a change set too. It returns how many rows' cells changed; a
+// field that's gone is sql.ErrNoRows.
 func UpdateFieldAndCells(ctx context.Context, tableID, fieldID uuid.UUID, plan FieldPlan, cs *ChangeSet, committing Committing) (int, error) {
 	changed := map[uuid.UUID]bool{}
 	var cells []Change
-	err := postgresInit.InTx(ctx, postgresInit.BulkTimeout, func(ctx context.Context, tx *sql.Tx) error {
+	err := joinTx(ctx, postgresInit.BulkTimeout, func(ctx context.Context, tx *sql.Tx) error {
 		current, err := scanField(tx.QueryRowContext(ctx, `SELECT `+fieldColumns+` FROM data_table_fields
 			WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL FOR UPDATE`, fieldID, tableID))
 		if err != nil {
@@ -643,10 +653,20 @@ func UpdateFieldAndCells(ctx context.Context, tableID, fieldID uuid.UUID, plan F
 				return err
 			}
 		}
-		if cs == nil || len(cells) == 0 {
+		if cs == nil {
 			return nil
 		}
+		now, err := columnsTx(ctx, tx, tableID, []uuid.UUID{fieldID})
+		if err != nil {
+			return err
+		}
+		if c, ok := ColumnChange(fieldID, StateOf(current), StateOf(now[fieldID])); ok {
+			cs.Changes = append(cs.Changes, c)
+		}
 		cs.Changes = append(cs.Changes, cells...)
+		if !cs.Stored() {
+			return nil
+		}
 		if err := recordTx(ctx, tx, cs); err != nil {
 			return err
 		}
@@ -737,7 +757,7 @@ func SetFieldConfigIf(ctx context.Context, id uuid.UUID, was, next string) (bool
 // columns, in one transaction: the field that was primary isn't any more, and
 // no reader finds two or none.
 func SetPrimary(ctx context.Context, tableId, fieldId uuid.UUID) error {
-	return postgresInit.InTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
+	return joinTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE data_table_fields SET is_primary = false, updated_at = NOW()
 			WHERE table_id = $1 AND is_primary AND id <> $2`, tableId, fieldId); err != nil {
 			return err
@@ -760,7 +780,7 @@ func SetPrimary(ctx context.Context, tableId, fieldId uuid.UUID) error {
 func DeleteField(ctx context.Context, tableId, fieldId, by uuid.UUID) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
-	return deleteField(dbctx, postgresInit.DBConn.SqlDB, tableId, fieldId, by)
+	return deleteField(dbctx, current(ctx), tableId, fieldId, by)
 }
 
 // deleteField soft-deletes a live field of a table on db; by is who deleted
@@ -1232,14 +1252,18 @@ func CreateView(ctx context.Context, v *View) (uuid.UUID, error) {
 	if strings.TrimSpace(v.Config) == "" {
 		v.Config = "{}"
 	}
-	id := uuid.New()
+	// A given id is kept, as CreateField keeps a field's.
+	id := v.Id
+	if id == uuid.Nil {
+		id = uuid.New()
+	}
 	const q = `INSERT INTO data_table_views (id, table_id, name, type, config, position, owner_id, locked)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
 	var owner any
 	if v.Owner != nil {
 		owner = *v.Owner
 	}
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, v.TableId, v.Name, v.Type, v.Config, v.Position, owner, v.Locked)
+	_, err := current(ctx).ExecContext(dbctx, q, id, v.TableId, v.Name, v.Type, v.Config, v.Position, owner, v.Locked)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateView err: %+v", err)
 		return uuid.Nil, err
@@ -1258,7 +1282,7 @@ func UpdateView(ctx context.Context, v *View) error {
 	}
 	const q = `UPDATE data_table_views SET name=$2, type=$3, config=$4, position=$5, updated_at=NOW()
 		WHERE id=$1 AND table_id=$6 AND deleted_at IS NULL AND NOT locked`
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, v.Id, v.Name, v.Type, v.Config, v.Position, v.TableId)
+	res, err := current(ctx).ExecContext(dbctx, q, v.Id, v.Name, v.Type, v.Config, v.Position, v.TableId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/UpdateView err: %+v", err)
 		return err
@@ -1305,7 +1329,7 @@ func DeleteView(ctx context.Context, tableId, viewId uuid.UUID) error {
 	defer cancel()
 	const q = `UPDATE data_table_views SET deleted_at=NOW(), updated_at=NOW()
 		WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL AND NOT locked`
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, viewId, tableId)
+	res, err := current(ctx).ExecContext(dbctx, q, viewId, tableId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/DeleteView err: %+v", err)
 		return err

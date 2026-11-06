@@ -148,6 +148,14 @@ type InputRecordBoardView struct {
 	BoardId string `json:"board_uuid"`
 }
 
+// InputProtectBoardElements is objects on a board to protect (protect true)
+// or lift the protection of (false).
+type InputProtectBoardElements struct {
+	BoardId    string   `json:"board_uuid"`
+	ElementIds []string `json:"element_ids"`
+	Protect    *bool    `json:"protect"`
+}
+
 // InputRecordBoardExport is an export the canvas made in the browser.
 type InputRecordBoardExport struct {
 	BoardId string `json:"board_uuid"`

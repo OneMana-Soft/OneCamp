@@ -212,7 +212,19 @@ func indexChanges(ctx context.Context, tx *sql.Tx, cs *rowLedger.ChangeSet) erro
 	if err := keptChanges(ctx, cs); err != nil {
 		return err
 	}
+	// A field's change that rewrote cells walks them in this transaction. One
+	// that changed only the column (made, renamed, retyped or reconfigured
+	// with every cell kept, deleted, brought back: rows 0) walks nothing
+	// here, as walking a 100,000-row table inside the write ran past its 3 s
+	// timeout (V-455, CR-210 row 2490 F1). Its writer brings the column's
+	// entries to it after the commit instead, by what EntriesAfter says the
+	// change leaves them needing (made again by IndexField, a choice's places
+	// moved by IndexOptions, or nothing for a change to how it looks):
+	// CreateField, a field's update, an undo's or a redo's columns.
 	if cs.Kind == rowLedger.ChangeField {
+		if cs.Rows == 0 {
+			return nil
+		}
 		return reindexFields(ctx, cs.Table, listOf(cols, cs.Fields))
 	}
 	wholeRows := map[uuid.UUID]bool{}
@@ -442,8 +454,13 @@ const analyzeAfter = 1000
 // entry of (cellEntry). A write while it runs indexes its own rows. A field
 // the index doesn't hold (a formula or a rollup: the store fills those), or
 // no longer holds once it's deleted or its type changes, has nothing more to
-// walk, and its rows aren't counted for the planner (CR-97).
-func IndexField(ctx context.Context, table, field uuid.UUID) error {
+// walk, and its rows aren't counted for the planner (CR-97). Several fields
+// go in one walk of the rows (an undo that put columns back); none is
+// nothing to do.
+func IndexField(ctx context.Context, table uuid.UUID, fields ...uuid.UUID) error {
+	if len(fields) == 0 {
+		return nil
+	}
 	after := uuid.Nil
 	indexed := 0
 	for {
@@ -454,21 +471,28 @@ func IndexField(ctx context.Context, table, field uuid.UUID) error {
 		if len(ids) == 0 {
 			break
 		}
-		held := false
+		var held []uuid.UUID
 		if err := inBatch(ctx, func(ctx context.Context) error {
 			fs, err := model.LiveFields(ctx, table)
 			if err != nil {
 				return err
 			}
-			c := indexedColumns(fs)[field.String()]
-			if held = c != nil; !held {
+			cols := indexedColumns(fs)
+			var walked []*column
+			held = held[:0]
+			for _, f := range fields {
+				if c := cols[f.String()]; c != nil {
+					walked, held = append(walked, c), append(held, f)
+				}
+			}
+			if len(held) == 0 {
 				return nil
 			}
-			return reindexRows(ctx, table, ids, []*column{c}, []uuid.UUID{field})
+			return reindexRows(ctx, table, ids, walked, held)
 		}); err != nil {
 			return err
 		}
-		if !held {
+		if len(held) == 0 {
 			break
 		}
 		after = ids[len(ids)-1]
@@ -486,29 +510,37 @@ func IndexField(ctx context.Context, table, field uuid.UUID) error {
 	return nil
 }
 
-// IndexOptions makes a choice field's entries' option places (n) its options'
-// again, in a transaction of its own: its options were reordered, added or
-// taken away by a save that changed no cell, which the ledger's observer
-// never hears (a save that changes cells reindexes the field in its own
-// transaction). Only entries whose place changed are written. Not a choice:
-// nothing to do.
-func IndexOptions(ctx context.Context, table, field uuid.UUID) error {
+// IndexOptions makes choice fields' entries' option places (n) their
+// options' again, in one statement, in a transaction of its own: their
+// options were reordered, added, taken away or renamed by a save or an undo
+// that changed no cell, which the ledger's observer never hears (a save that
+// changes cells reindexes the field in its own transaction). Only entries
+// whose place changed are written. A field that isn't a choice is skipped.
+func IndexOptions(ctx context.Context, table uuid.UUID, fields ...uuid.UUID) error {
+	if len(fields) == 0 {
+		return nil
+	}
 	return inBatch(ctx, func(ctx context.Context) error {
 		fs, err := model.LiveFields(ctx, table)
 		if err != nil {
 			return err
 		}
-		c := indexedColumns(fs)[field.String()]
-		if c == nil || c.family != famChoice {
-			return nil
+		cols := indexedColumns(fs)
+		var places []model.ChoicePlaces
+		for _, f := range fields {
+			c := cols[f.String()]
+			if c == nil || c.family != famChoice {
+				continue
+			}
+			labels := make([]string, len(c.options))
+			for i, o := range c.options {
+				labels[i] = strings.ToLower(strings.TrimSpace(o))
+			}
+			// optionPlace's places: the first option a label is, from 1; a
+			// label none is, after them all.
+			places = append(places, model.ChoicePlaces{Field: f, Labels: labels, Unknown: float64(len(labels) + 1)})
 		}
-		labels := make([]string, len(c.options))
-		for i, o := range c.options {
-			labels[i] = strings.ToLower(strings.TrimSpace(o))
-		}
-		// optionPlace's places: the first option a label is, from 1; a label
-		// none is, after them all.
-		return model.PlaceChoices(ctx, field, labels, float64(len(labels)+1))
+		return model.PlaceChoices(ctx, places)
 	})
 }
 

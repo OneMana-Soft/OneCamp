@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 
 	"github.com/google/uuid"
 
@@ -61,7 +62,7 @@ func APIOps() []v1api.Op {
 		Versioned: true,
 		Reach:     tableReach,
 		Serve:     serveRowUpdate,
-	}}, rowOps()...)
+	}}, slices.Concat(rowOps(), schemaOps(), commentOps(), tableOps())...)
 }
 
 // tableReach is the table a call names: an app's token is held to the tables
@@ -212,6 +213,11 @@ func apiErr(err error) error {
 		errors.Is(err, rowQuery.ErrTooManyToWorkOut):
 		return v1api.Errorf(http.StatusBadRequest, "invalid_argument", "a query's filter and sorts are a view's, as the reference shows",
 			"%s", rowQuery.Refusal(err))
+	// The store's failure is the server's, the app's words aside (storeFailed).
+	case errors.As(err, new(storeFailed)), errors.Is(err, errViewsUnavailable):
+		e := v1api.Errorf(http.StatusServiceUnavailable, "unavailable", "send it again in a few seconds", "the table couldn't be read or changed just now")
+		e.RetryAfter = retryRows
+		return e
 	case IsUnavailable(err):
 		e := v1api.Errorf(http.StatusServiceUnavailable, "unavailable", "send it again in a few seconds", "the rows couldn't be read just now")
 		e.RetryAfter = retryRows
@@ -233,6 +239,12 @@ func apiErr(err error) error {
 		return v1api.Errorf(http.StatusNotFound, "not_found", "", tableAccess.AnswerUnseen)
 	case IsRowNotFound(err):
 		return v1api.Errorf(http.StatusNotFound, "not_found", "", "there is no such row")
+	case errors.Is(err, errFieldNotFound):
+		return v1api.Errorf(http.StatusNotFound, "not_found", "", "there is no such field")
+	case IsViewNotFound(err):
+		return v1api.Errorf(http.StatusNotFound, "not_found", "", "there is no such view")
+	case errors.Is(err, errViewLocked):
+		return v1api.Errorf(http.StatusConflict, "locked", "a manager of the table unlocks it", "%s", errViewLocked.Error())
 	}
 	return err
 }
@@ -266,3 +278,11 @@ func rowErrors(rows BatchErrors) []apiRowError {
 	}
 	return out
 }
+
+// storeFailed is a read or write the store didn't take, in the app's words
+// ("failed to load fields"): the server's to answer (the API's 503), where a
+// plain error is the app's refusal of what was sent. The app's controller
+// words both as before (writeErr).
+type storeFailed string
+
+func (e storeFailed) Error() string { return string(e) }

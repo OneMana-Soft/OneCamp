@@ -66,13 +66,16 @@ func FeedByHash(ctx context.Context, hash []byte) (*Feed, error) {
 	return f, err
 }
 
-// RevokeFeeds stops person's live feed of a calendar, if there is one.
-func RevokeFeeds(ctx context.Context, calendar, person uuid.UUID) error {
-	_, err := pgexec.Exec(ctx, `UPDATE calendar_feeds SET revoked_at = NOW() WHERE calendar_id = $1 AND person_id = $2 AND revoked_at IS NULL`, calendar, person)
+// RevokeFeeds stops person's live feed of a calendar, if there is one, and
+// gives the scope it showed: "" when none was live (a person has one live
+// feed of a calendar at most: calendar_feeds_live_idx).
+func RevokeFeeds(ctx context.Context, calendar, person uuid.UUID) (string, error) {
+	scope, _, err := pgexec.QueryOne(ctx, `UPDATE calendar_feeds SET revoked_at = NOW() WHERE calendar_id = $1 AND person_id = $2 AND revoked_at IS NULL RETURNING scope`,
+		pgexec.Text, calendar, person)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.RevokeFeeds err: %+v", err)
 	}
-	return err
+	return scope, err
 }
 
 // InsertFeed keeps a new live feed (the caller revokes the old one first, in

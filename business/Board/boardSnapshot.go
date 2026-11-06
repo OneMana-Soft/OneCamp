@@ -167,6 +167,28 @@ func removeSnapshotObject(ctx context.Context, key string) {
 	_ = minioInit.MinioClient.RemoveObject(ctx, snapshotBucket(), key, minio.RemoveObjectOptions{})
 }
 
+// removeSnapshotObjects is removeSnapshotObject for many keys (a purge's
+// snapshots and live drawings), in one multi-delete of object storage. A key
+// already gone is no error; one that can't be removed is logged and left, as
+// removeSnapshotObject leaves it.
+func removeSnapshotObjects(ctx context.Context, keys []string) {
+	if len(keys) == 0 || minioInit.MinioClient == nil {
+		return
+	}
+	objects := make(chan minio.ObjectInfo, len(keys))
+	for _, k := range keys {
+		if k != "" {
+			objects <- minio.ObjectInfo{Key: k}
+		}
+	}
+	close(objects)
+	for res := range minioInit.MinioClient.RemoveObjects(ctx, snapshotBucket(), objects, minio.RemoveObjectsOptions{}) {
+		if res.Err != nil {
+			helpers.LogErrorWithContext(ctx, "business/Board removeSnapshotObjects %s: %v", res.ObjectName, res.Err)
+		}
+	}
+}
+
 // liveStateObjectKey is the stable object-storage key for a board's current
 // canvas state. It is overwritten on every save (history lives in snapshots),
 // so a board never accumulates live-state objects.
@@ -403,7 +425,9 @@ func ListBoardSnapshots(ctx context.Context, boardUUID string, userUID string) (
 
 // RestoreBoardSnapshot rewrites the board's persisted state to a chosen
 // snapshot. The current state is first captured as a 'manual' snapshot so the
-// restore is itself reversible. Requires edit access or ownership.
+// restore is itself reversible. Requires edit access or ownership; one that
+// lifts or brings back protection on its objects, its owner or a workspace
+// admin (ErrCannotProtect, recorded as refused).
 //
 // Note: the restored state takes effect when the board is next opened with no
 // active collaborators connected (the live Yjs document, if loaded, keeps its
@@ -434,10 +458,33 @@ func RestoreBoardSnapshot(ctx context.Context, boardUUID string, snapshotID uuid
 		return err
 	}
 
+	// The board as it is now, from the business read so the current canvas is
+	// resolved from object storage when applicable. What the restore does to
+	// its protected objects (miro-44) is read from it and from the version: a
+	// restore that lifts or brings back protection is the owner's or an
+	// admin's, recorded (restoreRecorded). Neither read is guessed past: a
+	// canvas that couldn't be fetched refuses the restore (restoreProtectionOver).
+	cur, cerr := GetSystemBoardByUUID(ctx, boardUUID)
+	if cerr != nil {
+		helpers.LogErrorWithContext(ctx, "business/RestoreBoardSnapshot current read failed err: %+v", cerr)
+		return errors.New("could not restore the board")
+	}
+	lifted, again, perr := restoreProtectionOver(cur, stateB64)
+	if perr != nil {
+		helpers.LogErrorWithContext(ctx, "business/RestoreBoardSnapshot protection read failed err: %+v", perr)
+		return errors.New("could not restore the board")
+	}
+	return restoreRecorded(ctx, board, userUUID, lifted, again, func() error {
+		return persistRestore(ctx, boardUUID, cur, snap, stateB64, userUUID)
+	})
+}
+
+// persistRestore writes a version's state as the board's, once the board as
+// it was (cur) is kept as a 'manual' snapshot so the restore can be undone.
+func persistRestore(ctx context.Context, boardUUID string, cur *dgraphStruct.DgraphBoard, snap *snapshotModels.BoardSnapshot, stateB64, userUUID string) error {
 	// Capture the current (pre-restore) state so the restore can be undone.
-	// Attribute it to the user performing the restore. Uses the business read so
-	// the current canvas is resolved from object storage when applicable.
-	if cur, cerr := GetSystemBoardByUUID(ctx, boardUUID); cerr == nil && cur != nil && cur.State != "" {
+	// Attribute it to the user performing the restore.
+	if cur != nil && cur.State != "" {
 		if serr := storeSnapshot(ctx, boardUUID, cur.State, parseElementCount(cur.Snippet), snapshotModels.ReasonManual, []string{userUUID}); serr != nil {
 			helpers.LogErrorWithContext(ctx, "business/RestoreBoardSnapshot pre-restore snapshot failed err: %+v", serr)
 		}

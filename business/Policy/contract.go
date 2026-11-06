@@ -113,6 +113,17 @@ var (
 	TablesHistoryRetentionDays = IntPolicy{Key: "tables.history.retention_days", Default: 0}
 )
 
+// CalendarRetentionDays removes calendar events that ended this many days ago
+// (the governance trail's H2, business/Retention); 0, the default, keeps every
+// event, as before. The retention panel sets it (ownedSpecs), never a hold's
+// people: their events stay, deleted ones included.
+var CalendarRetentionDays = IntPolicy{Key: "calendar.retention.days", Default: 0}
+
+// BoardRetentionDays removes boards that have been in the trash this many days
+// (miro-44 head R, business/Board/retention.go); 0, the default, keeps them,
+// as before. Never a live board, and never a hold's people's boards.
+var BoardRetentionDays = IntPolicy{Key: "boards.retention.days", Default: 0}
+
 // The projects programme's policies (design/projects-vs-asana-jira/PROGRAM.md
 // §5), declared at its day 0 with today's behaviour as each default. A policy
 // joins the admin's list (registry.go's specs) when the package that reads it

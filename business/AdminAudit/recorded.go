@@ -22,12 +22,14 @@ var recordedSeams = struct {
 }{written: RecordWritten, record: Record, as: RecordForPrincipal}
 
 // RecordedAs is Recorded where the change runs with no request to read (a
-// business path that several routes share, an agent's call): its rows name p.
+// business path that several routes share, an agent's call): its rows name p,
+// with p's agent and token beside the person (Principal.Meta).
 // The row is written before change runs; if it can't be, change never runs
 // and the answer wraps ErrNotRecorded. If change then fails, an
 // action+"_failed" row with the same metadata says it didn't take (logged if
 // that one can't be written), and the answer is change's error.
 func RecordedAs(ctx context.Context, p Principal, action, category, summary string, metadata map[string]interface{}, change func() error) error {
+	metadata = p.Meta(metadata)
 	if err := recordedSeams.as(ctx, p.ID, p.Email, p.Kind, action, category, summary, metadata); err != nil {
 		return fmt.Errorf("%w: %v", ErrNotRecorded, err)
 	}

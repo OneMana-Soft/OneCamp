@@ -115,6 +115,8 @@ func all() []Spec {
 		ApiRowReads,
 		ApiRowWrites,
 		ApiIdempotency,
+		ApiBatchItems,
+		ApiBatchClaim,
 		InviterDailyInvites,
 		MCPToolReadRate,
 		MCPToolWriteRate,

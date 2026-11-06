@@ -17,169 +17,41 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
+	weekHours "github.com/akashc777/OneCamp/business/WeekHours"
 	"github.com/google/uuid"
 )
 
-// Interval is a stretch of time, start inclusive, end exclusive.
-type Interval struct {
-	Start time.Time `json:"start"`
-	End   time.Time `json:"end"`
-}
+// Interval is a stretch of time, start inclusive, end exclusive
+// (weekHours.Interval). The calendar's own type, not an alias, so the
+// unkeyed literals its tests write stay its own to vet.
+type Interval weekHours.Interval
 
-// WorkingHours is when someone takes meetings, in their time zone: these
-// weekdays (0 Sunday to 6 Saturday) between two wall-clock times, or, with
-// Week, each weekday's own ranges, several a day (a person's hours, calendar
-// A3: "09:00–12:30 and 13:30–17:00"). Booking pages keep the first shape.
-type WorkingHours struct {
-	Days  []int  `json:"days"`
-	Start string `json:"start"`
-	End   string `json:"end"`
-	TZ    string `json:"tz"`
-	// Week is each weekday's ranges, keyed "0" (Sunday) to "6"; a day it
-	// leaves out is off. When set it stands for Days, Start and End.
-	Week map[string][]Span `json:"week,omitempty"`
-}
+// The week of hours this engine reads is business/WeekHours's: these names
+// stay the calendar's, so its callers read as they did, and a refusal Check
+// gives is an AvailabilityError, which the controllers answer with its words.
+type (
+	// WorkingHours is when someone takes meetings, in their time zone
+	// (weekHours.Hours): these weekdays between two wall-clock times, or,
+	// with Week, each weekday's own ranges. Booking pages keep the first shape.
+	WorkingHours = weekHours.Hours
+	// Span is a stretch of a day, between two wall-clock times.
+	Span = weekHours.Span
+	// AvailabilityError is a request that can't be answered as asked; its
+	// text is written for the person.
+	AvailabilityError = weekHours.Refused
+)
 
-// Span is a stretch of a day, between two wall-clock times ("09:00", "12:30").
-type Span struct {
-	Start string `json:"start"`
-	End   string `json:"end"`
-}
-
-// minutes is a span's start and end in minutes after midnight, and whether it reads.
-func (s Span) minutes() (int, int, bool) {
-	sh, sm, ok1 := clock(s.Start)
-	eh, em, ok2 := clock(s.End)
-	return sh*60 + sm, eh*60 + em, ok1 && ok2
-}
-
-// spansOn is a weekday's ranges in order, read as Check reads them. Pure.
-func (w WorkingHours) spansOn(d time.Weekday) []Span {
-	if w.Week != nil {
-		out := append([]Span(nil), w.Week[strconv.Itoa(int(d))]...)
-		sort.Slice(out, func(i, j int) bool { a, _, _ := out[i].minutes(); b, _, _ := out[j].minutes(); return a < b })
-		return out
-	}
-	for _, day := range w.Days {
-		if time.Weekday(day) == d {
-			return []Span{{Start: w.Start, End: w.End}}
-		}
-	}
-	return nil
-}
-
-// AvailabilityError is a request that can't be answered as asked; its text is
-// written for the person.
-type AvailabilityError struct{ msg string }
-
-func (e *AvailabilityError) Error() string { return e.msg }
-
-func clock(s string) (int, int, bool) {
-	h, m, ok := strings.Cut(s, ":")
-	if !ok || len(h) != 2 || len(m) != 2 {
-		return 0, 0, false
-	}
-	hh, err1 := strconv.Atoi(h)
-	mm, err2 := strconv.Atoi(m)
-	if err1 != nil || err2 != nil || hh < 0 || hh > 24 || mm < 0 || mm > 59 || (hh == 24 && mm != 0) {
-		return 0, 0, false
-	}
-	return hh, mm, true
-}
-
-// Check validates working hours and returns their zone.
-func (w WorkingHours) Check() (*time.Location, error) {
-	if w.Week != nil {
-		return w.checkWeek()
-	}
-	if len(w.Days) == 0 {
-		return nil, &AvailabilityError{"Pick at least one day."}
-	}
-	for _, d := range w.Days {
-		if d < 0 || d > 6 {
-			return nil, &AvailabilityError{"Days run from Sunday (0) to Saturday (6)."}
-		}
-	}
-	sh, sm, ok1 := clock(w.Start)
-	eh, em, ok2 := clock(w.End)
-	if !ok1 || !ok2 {
-		return nil, &AvailabilityError{"Hours look like 09:00."}
-	}
-	if eh*60+em <= sh*60+sm {
-		return nil, &AvailabilityError{"The day has to end after it starts."}
-	}
-	loc, err := time.LoadLocation(w.TZ)
-	if err != nil || w.TZ == "" {
-		return nil, &AvailabilityError{"Pick a time zone."}
-	}
-	return loc, nil
-}
-
-// checkWeek validates a week of ranges: days "0" to "6", each range ending
-// after it starts, none overlapping another that day, and at least one.
-func (w WorkingHours) checkWeek() (*time.Location, error) {
-	any := false
-	for key := range w.Week {
-		d, err := strconv.Atoi(key)
-		if err != nil || d < 0 || d > 6 || strconv.Itoa(d) != key {
-			return nil, &AvailabilityError{"Days run from Sunday (0) to Saturday (6)."}
-		}
-		ordered := w.spansOn(time.Weekday(d))
-		last := -1
-		for _, s := range ordered {
-			a, b, ok := s.minutes()
-			if !ok {
-				return nil, &AvailabilityError{"Hours look like 09:00."}
-			}
-			if b <= a {
-				return nil, &AvailabilityError{"Each range has to end after it starts."}
-			}
-			if a < last {
-				return nil, &AvailabilityError{"A day's ranges can't overlap."}
-			}
-			last = b
-			any = true
-		}
-	}
-	if !any {
-		return nil, &AvailabilityError{"Pick at least one day."}
-	}
-	loc, err := time.LoadLocation(w.TZ)
-	if err != nil || w.TZ == "" {
-		return nil, &AvailabilityError{"Pick a time zone."}
-	}
-	return loc, nil
-}
-
-// Windows is the working time between from and to, each range of each day
-// in the hours' zone (wall-clock times hold across daylight-saving changes),
-// clipped to from and to. Pure.
+// Windows is the working time between from and to (weekHours.Windows). Pure.
 func Windows(hours WorkingHours, from, to time.Time) []Interval {
-	loc, err := hours.Check()
-	if err != nil {
+	ws := weekHours.Windows(hours, from, to)
+	if ws == nil {
 		return nil
 	}
-	var out []Interval
-	local := from.In(loc)
-	for day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc); day.Before(to); day = day.AddDate(0, 0, 1) {
-		for _, s := range hours.spansOn(day.Weekday()) {
-			a, b, _ := s.minutes()
-			open := time.Date(day.Year(), day.Month(), day.Day(), a/60, a%60, 0, 0, loc)
-			shut := time.Date(day.Year(), day.Month(), day.Day(), b/60, b%60, 0, 0, loc)
-			if open.Before(from) {
-				open = from
-			}
-			if shut.After(to) {
-				shut = to
-			}
-			if shut.After(open) {
-				out = append(out, Interval{Start: open.UTC(), End: shut.UTC()})
-			}
-		}
+	out := make([]Interval, len(ws))
+	for i, w := range ws {
+		out[i] = Interval(w)
 	}
 	return out
 }
@@ -248,11 +120,11 @@ func FreeSlots(busy []Interval, from, to time.Time, hours WorkingHours, r SlotRu
 	local := from.In(loc)
 	for day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc); day.Before(to); day = day.AddDate(0, 0, 1) {
 		n := 0
-		for _, span := range hours.spansOn(day.Weekday()) {
+		for _, span := range hours.SpansOn(day.Weekday()) {
 			if r.PerDay > 0 && n >= r.PerDay {
 				break
 			}
-			a, b, _ := span.minutes()
+			a, b, _ := span.Minutes()
 			open := time.Date(day.Year(), day.Month(), day.Day(), a/60, a%60, 0, 0, loc)
 			shut := time.Date(day.Year(), day.Month(), day.Day(), b/60, b%60, 0, 0, loc)
 			for s := open; !s.Add(r.Duration).After(shut); s = s.Add(step) {
@@ -381,7 +253,7 @@ func FindTime(ctx context.Context, requesterUUID string, in FindTimeInput, now t
 	seen := map[string]bool{requesterUUID: true}
 	for _, p := range in.Participants {
 		if _, err := uuid.Parse(p); err != nil {
-			return nil, &AvailabilityError{"One of those people isn't in this workspace."}
+			return nil, &AvailabilityError{Msg: "One of those people isn't in this workspace."}
 		}
 		if !seen[p] {
 			seen[p] = true
@@ -389,10 +261,10 @@ func FindTime(ctx context.Context, requesterUUID string, in FindTimeInput, now t
 		}
 	}
 	if len(people) > maxFindTimePeople {
-		return nil, &AvailabilityError{fmt.Sprintf("Find a time for up to %d people.", maxFindTimePeople)}
+		return nil, &AvailabilityError{Msg: fmt.Sprintf("Find a time for up to %d people.", maxFindTimePeople)}
 	}
 	if in.DurationMinutes < 15 || in.DurationMinutes > 8*60 {
-		return nil, &AvailabilityError{"Meetings run from 15 minutes to 8 hours."}
+		return nil, &AvailabilityError{Msg: "Meetings run from 15 minutes to 8 hours."}
 	}
 	if _, err := in.Hours.Check(); err != nil {
 		return nil, err
@@ -402,7 +274,7 @@ func FindTime(ctx context.Context, requesterUUID string, in FindTimeInput, now t
 		from = now
 	}
 	if !to.After(from) {
-		return nil, &AvailabilityError{"Pick a range that ends after it starts."}
+		return nil, &AvailabilityError{Msg: "Pick a range that ends after it starts."}
 	}
 	if to.Sub(from) > maxFindTimeRange {
 		to = from.Add(maxFindTimeRange)

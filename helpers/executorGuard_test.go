@@ -21,7 +21,7 @@ import (
 // one lower (1,166 on v2.75.0's main). without-ai leaves out the AI edition's
 // packages too, so its own count is 984 (v1.60.0; 981 once
 // UpdateAttachmentDeletedTimeByUUID went).
-const handExecutorBaseline = 934
+const handExecutorBaseline = 924
 
 // backgroundTimeoutBaseline is how many times models/ starts a statement's
 // timeout from context.Background() instead of the caller's ctx (206 at the

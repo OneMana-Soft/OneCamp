@@ -288,6 +288,18 @@ func cursorOf(kind string, keys []interface{}) query.Cursor {
 // one query's (runSQL). A seam for tests.
 var WalkBudget = 150 * time.Millisecond
 
+// NarrowSet is the most rows a filter may keep for its view to be read as
+// its set and sorted rather than walked along the sort's index (runSQL). A
+// walk reads about window/kept of the table per window, the set reads what
+// it keeps, so the two cost the same near the square root of the window
+// times the table. Measured at 100,000 rows and windows of 100
+// (rowQuery_scale_integration_test.go's crossover, 4 Nov, the set's count
+// included): a filter keeping 2,000 read as its set took 8,008 index
+// entries and 14 ms where its walk took 15,223 and 21 ms; at 3,000 the
+// set's plan read 115,008 (20 ms) and the walk 10,087 (15 ms). So 2,000,
+// the most the set was measured to win.
+var NarrowSet = 2000
+
 // summarize reads a first window's summaries and groups
 // (model.SummarizeRowsWhere). A seam for tests.
 var summarize = model.SummarizeRowsWhere
@@ -409,6 +421,24 @@ func runSQL(ctx context.Context, table uuid.UUID, fields []*model.Field, cols ma
 	// or a list would read every row before it to get there.
 	if k := cursorKind(after); k == "sql" || k == "list" || at > 0 {
 		walks = nil
+	}
+	// A filter that keeps few rows is read as its set and sorted (the one
+	// query), never walked: a walk along the sort's index reads about
+	// size/kept of the table to find a window's rows, the set reads only what
+	// it keeps. A first window whose walk would probe the filter (a condition
+	// off the walked field) counts first, as far as NarrowSet and no further,
+	// along one of the filter's fields' index alone (keepsFew); a walk the
+	// filter bounds itself reads only its rows already. The count is never
+	// shown, it only picks the read, and both come after Run settled the
+	// reader's access to the table. A listing goes on as its cursor says.
+	if walks != nil && !unkeyed && first && NarrowSet > 0 && spec.Filter != nil && !walkedOnly(spec.Filter, walks) {
+		few, err := keepsFew(ctx, spec.Filter, cols, who, NarrowSet)
+		if err != nil {
+			return query.Result{}, err
+		}
+		if few {
+			walks = nil
+		}
 	}
 	if walks != nil && !unkeyed {
 		// A window walks under a budget: a filter few rows meet makes a walk

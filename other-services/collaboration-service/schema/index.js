@@ -34,7 +34,7 @@ import { TocSchema } from './toc.js' // B2
 import { TableSchema, TableRowSchema, TableHeaderSchema, TableCellSchema } from './simpleTable.js'
 import { InlineMathSchema, BlockMathSchema } from './math.js'
 import { BookmarkSchema, FileBlockSchema, LinkMentionSchema, WebEmbedSchema } from './media.js'
-import { BoardEmbedSchema, DateMentionSchema, SubpageSchema, TaskItemLinkSchema, TaskListEmbedSchema } from './connected.js' // C1
+import { BoardEmbedSchema, DateMentionSchema, SubpageSchema, TaskItemLinkSchema, TaskListEmbedSchema, WhiteboardEmbedSchema } from './connected.js' // C1, miro-34
 
 export const COLLAB_EXTENSIONS = [
     StarterKitSchema,
@@ -64,4 +64,5 @@ export const COLLAB_EXTENSIONS = [
     TableSchema, TableRowSchema, TableHeaderSchema, TableCellSchema, InlineMathSchema, BlockMathSchema, // B3: simple tables, equations
     BookmarkSchema, WebEmbedSchema, FileBlockSchema, LinkMentionSchema, // B4: links and media
     SubpageSchema, DateMentionSchema, TaskListEmbedSchema, BoardEmbedSchema, TaskItemLinkSchema, // C1: pages, dates, task lists, boards, to-dos that are tasks
+    WhiteboardEmbedSchema, // miro-34: a whiteboard in a doc
 ]

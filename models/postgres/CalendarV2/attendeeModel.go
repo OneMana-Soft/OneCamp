@@ -43,6 +43,9 @@ type Attendee struct {
 	NudgedAt *time.Time
 	// Proposal is another time they proposed for the event (nil for none).
 	Proposal *Proposal
+	// ByAway says their decline was made by their out of office (calendar
+	// head C, gcal-9b), not by them: any answer they give clears it.
+	ByAway bool
 }
 
 // Proposal is another time a guest proposed for an event, or one instance of
@@ -126,14 +129,14 @@ const attendeeWritten = `event_id, user_id, email, name, role, response, note, a
 // it is written with, then its proposal.
 const attendeeColumns = `event_id, user_id, email, name, role, response, note, added_at, responded_at,
 	invite_state, rsvp_token_hash, rsvp_token_sealed, nudged_at,
-	proposed_start, proposed_end, proposed_against_start, proposed_against_end`
+	proposed_start, proposed_end, proposed_against_start, proposed_against_end, by_away`
 
 func scanAttendee(s scanner) (Attendee, error) {
 	var a Attendee
 	var user uuid.NullUUID
 	var responded, nudged, pStart, pEnd, pAgainstStart, pAgainstEnd sql.NullTime
 	if err := s.Scan(&a.EventID, &user, &a.Email, &a.Name, &a.Role, &a.Response, &a.Note, &a.AddedAt, &responded,
-		&a.InviteState, &a.LinkHash, &a.LinkSealed, &nudged, &pStart, &pEnd, &pAgainstStart, &pAgainstEnd); err != nil {
+		&a.InviteState, &a.LinkHash, &a.LinkSealed, &nudged, &pStart, &pEnd, &pAgainstStart, &pAgainstEnd, &a.ByAway); err != nil {
 		return a, err
 	}
 	if user.Valid {
@@ -330,13 +333,14 @@ func SetRoles(ctx context.Context, db DB, guests []Attendee) error {
 // SetAnswer is a guest's answer to an event, with their note and their
 // proposal of another time (nil for none), and whether they were on it. An
 // answer is the guest's, not a change to the event: the event's sequence
-// stays, so nobody's open edit is made stale by it.
-func SetAnswer(ctx context.Context, db DB, event uuid.UUID, k GuestKey, response, note string, at time.Time, p *Proposal) (bool, error) {
-	cond, who := guestMatch(k, 9)
+// stays, so nobody's open edit is made stale by it. byAway records that their
+// out of office made it.
+func SetAnswer(ctx context.Context, db DB, event uuid.UUID, k GuestKey, response, note string, at time.Time, p *Proposal, byAway bool) (bool, error) {
+	cond, who := guestMatch(k, 10)
 	v := p.values()
 	res, err := db.ExecContext(ctx, `UPDATE event_attendees SET response = $2, note = $3, responded_at = $4,
-		proposed_start = $5, proposed_end = $6, proposed_against_start = $7, proposed_against_end = $8
-		WHERE event_id = $1 AND `+cond, event, response, note, at, v[0], v[1], v[2], v[3], who)
+		proposed_start = $5, proposed_end = $6, proposed_against_start = $7, proposed_against_end = $8, by_away = $9
+		WHERE event_id = $1 AND `+cond, event, response, note, at, v[0], v[1], v[2], v[3], byAway, who)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.SetAnswer err: %+v", err)
 		return false, err

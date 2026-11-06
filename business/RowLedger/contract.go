@@ -90,6 +90,12 @@ const (
 	// LinksPrefix and a relation field's id is that field's links changed: the
 	// rows linked and unlinked.
 	LinksPrefix = "#links:"
+	// FieldColumn is a column made, changed, deleted or brought back: Row is
+	// the field's id, not a row's, and Before and After are the column as it
+	// was and is (its name, type, config, place, description, requiredness,
+	// default and whether it's in the trash). A change set of columns alone
+	// counts no row (Rows 0).
+	FieldColumn = "#column"
 )
 
 // Change is one cell's value before and after a write (JSON as stored; nil

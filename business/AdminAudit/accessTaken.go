@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/google/uuid"
 )
 
@@ -124,25 +125,62 @@ func AccessMeta(kind, resourceUUID string, taken []AccessShift) map[string]inter
 // Principal is who an audit row names when it's written with no request to
 // read: the accountable person's Postgres id and email, and whether a person,
 // an agent or the workspace itself acted (ActorHuman, ActorAgent, ActorSystem).
+// Agent is the agent acting with the person's authority, and Token the API
+// token the call came through; each is "" when none did. Meta writes them
+// into the row beside the person.
 type Principal struct {
 	ID    *uuid.UUID
 	Email string
 	Kind  string
+	Agent string
+	Token string
 }
 
+// Metadata keys for the agent and the API token acting beside the person:
+// "agent_uuid" as EventMeta writes it, "token_id" as the public API's rows do.
+const (
+	MetaAgentUUID = "agent_uuid"
+	MetaTokenID   = "token_id"
+)
+
 // ContextPrincipal is who acts in ctx: the person whose request it carries, or
-// an agent acting with their authority when agentUUID is set, or the workspace
-// itself (a sweep, the demo reset) when ctx names no one.
+// an agent acting with their authority, or the workspace itself (a sweep, the
+// demo reset) when ctx names no one. The agent is agentUUID when the caller
+// names one, else the agent the call's API token is bound to (the API token
+// middleware puts it on ctx). A token's call names its token, bound or not;
+// an unbound token is the person acting. A session in the app is neither.
 func ContextPrincipal(ctx context.Context, agentUUID string) Principal {
 	id, email, ok := ActorFromContext(ctx)
-	switch {
-	case !ok:
+	if !ok {
 		return Principal{Kind: ActorSystem}
-	case agentUUID != "":
-		return Principal{ID: &id, Email: email, Kind: ActorAgent}
-	default:
-		return Principal{ID: &id, Email: email, Kind: ActorHuman}
 	}
+	if agentUUID == "" {
+		agentUUID = helpers.GetApiAgentID(ctx)
+	}
+	p := Principal{ID: &id, Email: email, Kind: ActorHuman, Agent: agentUUID, Token: helpers.GetApiTokenID(ctx)}
+	if agentUUID != "" {
+		p.Kind = ActorAgent
+	}
+	return p
+}
+
+// Meta is a row's metadata with p's agent and token beside the person, under
+// MetaAgentUUID and MetaTokenID, each only when set; a key the caller already
+// wrote is kept. metadata is changed in place, and made when nil and p has one
+// to add.
+func (p Principal) Meta(metadata map[string]interface{}) map[string]interface{} {
+	for key, v := range map[string]string{MetaAgentUUID: p.Agent, MetaTokenID: p.Token} {
+		if v == "" {
+			continue
+		}
+		if metadata == nil {
+			metadata = map[string]interface{}{}
+		}
+		if _, already := metadata[key]; !already {
+			metadata[key] = v
+		}
+	}
+	return metadata
 }
 
 // RecordedTaking makes change, which may take access away, as RecordedAs

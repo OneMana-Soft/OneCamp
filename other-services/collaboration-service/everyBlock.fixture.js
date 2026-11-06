@@ -106,6 +106,7 @@ export const EVERY_BLOCK = withBlockIds(withLayout({
         { type: 'subpage', attrs: { docId: '0d0c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b', title: 'Launch plan' } },
         { type: 'taskListEmbed', attrs: { projectId: '2f2e3c4d-5e6f-4a7b-8c1d-2e3f4a5b6c7d', show: 'mine' } },
         { type: 'boardEmbed', attrs: { projectId: '2f2e3c4d-5e6f-4a7b-8c1d-2e3f4a5b6c7d' } },
+        { type: 'whiteboardEmbed', attrs: { boardId: '4c4b5f6a-7b8c-4d9e-9f3a-4b5c6d7e8f9a' } },
     ],
 }))
 

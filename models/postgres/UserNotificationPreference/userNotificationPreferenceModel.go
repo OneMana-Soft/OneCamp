@@ -47,10 +47,15 @@ type UserNotificationPreference struct {
 	RecordViews bool `json:"record_views"`
 	// FocusUntil is when the focus-time event the person is in ends; nil when
 	// they are in none. Computed, never written.
-	FocusUntil       *time.Time `json:"focus_until,omitempty"`
-	UnsubscribeToken string     `json:"-"` // never expose to the client
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	FocusUntil *time.Time `json:"focus_until,omitempty"`
+	// Schedule is the hours notifications may reach the person
+	// (notify.schedule, a person preference); nil when they set none, and
+	// the daily quiet-hours window decides. Read with the row, never written
+	// through it: the person reads and sets it through their preferences.
+	Schedule         *Schedule `json:"-"`
+	UnsubscribeToken string    `json:"-"` // never expose to the client
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // allColumns is every column a read returns, in scanRow's order. Built on
@@ -60,8 +65,15 @@ func allColumns() string {
 		email_task_status, email_comments, email_calls, email_channel_invites,
 		email_only_when_offline, email_digest_frequency, quiet_hours_enabled,
 		quiet_hours_start, quiet_hours_end, quiet_hours_tz, unsubscribe_token,
-		created_at, updated_at, notifications_paused_until, read_receipts, record_views, ` + focusUntilColumn(FocusStoreNow())
+		created_at, updated_at, notifications_paused_until, read_receipts, record_views, ` +
+		focusUntilColumn(FocusStoreNow()) + `, ` + scheduleColumn
 }
+
+// scheduleColumn is the person's notify.schedule (a person preference), or
+// NULL: read with the row, so every reader of quiet hours sees the schedule
+// the push gate holds by.
+const scheduleColumn = `(SELECT s.value FROM person_preferences s
+		WHERE s.user_id = users_notification_preferences.user_id AND s.key = '` + ScheduleKey + `') AS notify_schedule`
 
 // FocusStore is where focus time is read from: the calendar's one store's
 // events table once its events are there (helpers.CalendarReadsFromStore),
@@ -151,17 +163,19 @@ type rowScanner interface{ Scan(dest ...any) error }
 // for 20 columns), and every batched email lookup failed.
 func scanRow(row rowScanner) (*UserNotificationPreference, error) {
 	var p UserNotificationPreference
+	var schedule []byte
 	err := row.Scan(
 		&p.ID, &p.UserID, &p.EmailEnabled, &p.EmailMentions, &p.EmailDMs,
 		&p.EmailTaskAssigned, &p.EmailTaskStatus, &p.EmailComments, &p.EmailCalls,
 		&p.EmailChannelInvites, &p.EmailOnlyWhenOffline, &p.EmailDigestFrequency,
 		&p.QuietHoursEnabled, &p.QuietHoursStart, &p.QuietHoursEnd, &p.QuietHoursTZ,
 		&p.UnsubscribeToken, &p.CreatedAt, &p.UpdatedAt, &p.NotificationsPausedUntil,
-		&p.ReadReceipts, &p.RecordViews, &p.FocusUntil,
+		&p.ReadReceipts, &p.RecordViews, &p.FocusUntil, &schedule,
 	)
 	if err != nil {
 		return nil, err
 	}
+	p.Schedule = parseSchedule(schedule)
 	return &p, nil
 }
 

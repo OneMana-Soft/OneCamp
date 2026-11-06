@@ -119,4 +119,5 @@ func mountDocsProgramme(rt docsRouters) {
 	mountGuestThread(rt) // C5-2: a doc's conversation with its guests, and its client verdict
 	mountDocFiles(rt)    // F1: Docs & Files' files and their versions
 	mountDocsAdmin(rt)   // C6-2: the work of people who left, and the link lifetime's count
+	mountLabels(rt)      // miro-44 L: sensitivity labels on boards and docs
 }

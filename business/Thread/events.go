@@ -17,6 +17,7 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
+	"github.com/akashc777/OneCamp/models/pgexec"
 )
 
 // The kinds of thread event. Never renamed once shipped.
@@ -37,11 +38,14 @@ func (s *service) emit(ctx context.Context, kind resourceEventBusiness.Kind, t T
 	if commentID != "" {
 		data["comment_id"] = commentID
 	}
-	resourceEventBusiness.Bus.Emit(ctx, resourceEventBusiness.Event{
+	e := resourceEventBusiness.Event{
 		Kind: kind, ResourceKind: t.ResourceKind, ResourceUUID: t.ResourceUUID,
 		Actor:    resourceEventBusiness.Actor{UserUUID: who.UserUUID, AgentUUID: who.AgentUUID},
 		At:       s.now(),
 		Subjects: subjects,
 		Data:     data,
-	})
+	}
+	// A change made in a caller's transaction (the API's, with its audit row)
+	// is told once it commits, and never when it rolls back.
+	pgexec.AfterCommit(ctx, func(ctx context.Context) { resourceEventBusiness.Bus.Emit(ctx, e) })
 }

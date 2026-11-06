@@ -35,7 +35,7 @@ var (
 	readTeamChips    = domain.TeamChips
 	readCommentChips = domain.CommentChips
 	readMemoryChips  = domain.MemoryChips
-	readBoardTitles  = boardBusiness.ReadableBoardTitles
+	readBoardReads   = boardBusiness.BoardReadsFor
 )
 
 func init() {
@@ -214,17 +214,22 @@ func readChats(ctx context.Context, who accessBusiness.Subject, ids []string) (m
 	return out, nil
 }
 
-// readBoards: a whiteboard by its own rule, in one read.
+// readBoards: a whiteboard by its own rule, in one read; gone once deleted,
+// to those it was open to.
 func readBoards(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]Entity, error) {
 	asked := askedAs(ids)
-	titles, err := readBoardTitles(ctx, ids, who.UserUUID)
+	reads, err := readBoardReads(ctx, ids, who.UserUUID)
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]Entity{}
-	for id, title := range titles {
+	for id, r := range reads {
+		e := Entity{Access: AccessGone}
+		if !r.Gone {
+			e = Entity{Access: AccessOK, Title: r.Title, Data: map[string]any{"title": r.Title}}
+		}
 		for _, a := range asked[strings.ToLower(id)] {
-			out[a] = Entity{Access: AccessOK, Title: title, Data: map[string]any{"title": title}}
+			out[a] = e
 		}
 	}
 	return out, nil

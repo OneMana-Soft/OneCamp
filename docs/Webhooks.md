@@ -328,7 +328,10 @@ All outgoing webhooks receive:
   "deleted_row_ids": [],
   "restored_row_ids": [],
   "field_ids": ["uuid"],
-  "row_field_ids": {"uuid": ["uuid"], "uuid": ["uuid"]}
+  "row_field_ids": {"uuid": ["uuid"], "uuid": ["uuid"]},
+  "source": "api",
+  "actor_id": "uuid",
+  "agent_id": "uuid"
 }
 ```
 
@@ -340,8 +343,17 @@ or links changed; `field_ids` is all of them. `change` is what kind of change it
 `restore` or `field` (a field's change rewrote its cells: an option renamed, its type
 changed). A change is at most 1,000 rows, except a field's, which can change every
 row of its table: its event names at most 1,000 and `rows_changed` says how many
-it changed. A webhook sent only ids keeps every key here but `table_name` and
-`change`. An AI column's fill sends none.
+it changed. `source` is where the change came from: `person` (in the app), `api`,
+`agent`, `automation`, `import`, `form` or `system`; `actor_id` is who made it and
+`agent_id` the agent acting for them, when one did. A change by no one names neither.
+With `change_set_id`, which every API write answers, a sync tells its own changes
+from everyone else's. A webhook sent only ids keeps every key here but `table_name`,
+`change` and `rows_changed`. A table's event goes only to webhooks whose owners can
+open the table now (an admin, its maker, or someone it's shown or shared to); a
+member who can't is sent nothing of it, not even its ids. An AI column's fill sends
+none, and neither does a change to columns alone (a column made, renamed, deleted or
+brought back, or an undo of one): it changes no row. A field's change that rewrote
+cells names only the rows.
 
 **doc.shared:**
 ```json

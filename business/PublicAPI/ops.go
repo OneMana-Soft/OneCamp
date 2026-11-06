@@ -63,6 +63,12 @@ type Op struct {
 	Reach       func(args map[string]any) (kind, id string)
 	AppsInside  bool
 	AppsRefused string
+	// Unplaced is what an op that acts on no existing place acts on instead,
+	// for MCP's authority (business/MCPServer opKinds): "self", a thing it
+	// makes that will be the caller's own (a table); "workspace", a read of
+	// only what the caller may see. Such an op has no Reach, and an app is
+	// refused it (AppsRefused says why): an app has no things of its own.
+	Unplaced string
 	// Cost is what a call spends of the token's row budget (ChargeRows),
 	// worked out once the arguments are valid: at least 1; nil is 1.
 	Cost func(args map[string]any) int
@@ -109,6 +115,9 @@ func RegisterOps(res Resource, list []Op) {
 		}
 		if seen[op.Name] {
 			panic(fmt.Sprintf("v1api: op %s is registered twice", op.Name))
+		}
+		if op.Unplaced != "" && (op.Reach != nil || op.AppsRefused == "") {
+			panic(fmt.Sprintf("v1api: op %s acts on no place (%s): it has no Reach, and an app is refused it", op.Name, op.Unplaced))
 		}
 		if b := op.Behaviour; b.Recoverable != (len(op.UndoneBy) > 0) || (b.Recoverable && b.ReadOnly) {
 			panic(fmt.Sprintf("v1api: op %s: a write is Recoverable exactly when UndoneBy names the ops that take it back", op.Name))

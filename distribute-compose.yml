@@ -28,6 +28,11 @@ services:
     image: postgres:12-alpine
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+    # /dev/shm for parallel reads: a parallel hash join's workers share their table there, and Docker's
+    # default 64M ran out under three 100,000-row summaries reads at once (SQLSTATE 53100, about half
+    # the sums lost at any CPU count; V-525, logs/tables-190/trace-v525a.out). Held by
+    # helpers/composePostgresShmGuard_test.go; a read that still runs out is read again without workers.
+    shm_size: 256m
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_USER: ${DB_USER}

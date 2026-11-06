@@ -15,6 +15,7 @@ import (
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
 	model "github.com/akashc777/OneCamp/models/postgres/CallState"
@@ -70,7 +71,7 @@ func roleRule(ctx context.Context, ref callStateBusiness.Ref, e callStateBusines
 	if err != nil || u == nil {
 		return model.RoleParticipant
 	}
-	host, err := liveKitBusiness.HostByRule(ctx, e.Room, u, liveKitBusiness.IsWorkspaceAdmin(ctx, u.Uuid))
+	host, err := liveKitBusiness.HostByRule(ctx, e.Room, u, userDomain.IsWorkspaceAdmin(ctx, u.Uuid))
 	if err == nil && host {
 		return model.RoleHost
 	}

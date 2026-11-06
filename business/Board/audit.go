@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	labelBusiness "github.com/akashc777/OneCamp/business/Label"
 	"strconv"
 	"strings"
 	"time"
@@ -154,6 +155,11 @@ func RecordBoardExport(ctx context.Context, boardUUID, format, userUID, userUUID
 	}
 	if !CanRead(board, userUUID) {
 		return ErrBoardNotFound
+	}
+	// A label with no_export refuses it before the browser makes the file
+	// (the web awaits this tell first); the refusal is a row of its own.
+	if err := labelBusiness.Allows(ctx, KindBoard, board.Uuid, labelBusiness.RuleNoExport); err != nil {
+		return err
 	}
 	data := boardEventData(board)
 	data["format"], data["via"] = format, "browser"

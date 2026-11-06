@@ -17,6 +17,7 @@ import (
 	"time"
 
 	query "github.com/akashc777/OneCamp/business/QuerySpec"
+	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 )
 
@@ -288,12 +289,7 @@ func medianOf(nums []float64) *float64 {
 		return nil
 	}
 	sort.Float64s(nums)
-	mid := len(nums) / 2
-	m := nums[mid]
-	if len(nums)%2 == 0 {
-		lo := nums[mid-1]
-		m = lo + (m-lo)*0.5
-	}
+	m := helpers.Percentile(nums, 0.5)
 	return &m
 }
 

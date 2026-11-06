@@ -289,6 +289,23 @@ func TestRowQueryGroupsEveryRowItKeeps(t *testing.T) {
 			t.Errorf("a groups read that fails: %v, %v of %d, groups %v; want Chairs Booth Banners of 8 and no groups", err, shown, res.Total, res.Groups)
 		}
 	}()
+
+	// A groups read that is read again (a first read ran out of shared
+	// memory after it had read rows) answers each group once, as a lone read.
+	func() {
+		s := spec(tb, by(stage, false, ""), by(paid, false, ""))
+		once, err := query.Queries.Run(cctx, mine, s, query.Page{Size: 3})
+		if err != nil || len(once.Groups) == 0 {
+			t.Fatalf("groups read once: %v, %v", err, once.Groups)
+		}
+		defer rowQuery.SummarizeTwice()()
+		twice, err := query.Queries.Run(cctx, mine, s, query.Page{Size: 3})
+		a, _ := json.Marshal([]interface{}{once.Groups, once.Summaries})
+		b, _ := json.Marshal([]interface{}{twice.Groups, twice.Summaries})
+		if err != nil || string(a) != string(b) {
+			t.Errorf("a groups read read again: %v\n%s\nwant, as read once\n%s", err, b, a)
+		}
+	}()
 }
 
 // sameJSON is whether two JSON texts hold the same values.

@@ -9,6 +9,7 @@ package business
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	query "github.com/akashc777/OneCamp/business/QuerySpec"
@@ -136,6 +137,48 @@ func columnOf(f *model.Field) *column {
 		}
 	}
 	return c
+}
+
+// Reindex is what a column's change leaves its cells' entries needing once
+// it commits (EntriesAfter).
+type Reindex int
+
+const (
+	// KeepEntries: every entry stands as it was.
+	KeepEntries Reindex = iota
+	// PlaceOptions: only a choice's option places (n) move (IndexOptions).
+	PlaceOptions
+	// MakeEntries: every entry is made again (IndexField).
+	MakeEntries
+)
+
+// EntriesAfter is what a column's change from was to now (nil: none) leaves
+// its cells' entries needing, by what entryOf makes an entry from: the
+// column's family, its row column and the link it reads (columnOf), and a
+// choice's option labels in order (optionPlace). A column made, or brought
+// back from the trash, or one whose family, row column or link changed (a
+// type; a relation's target or side) makes its entries again; a choice whose
+// labels changed in order or in number (moved, added, taken away, renamed)
+// moves its places alone; anything else (a name, a colour, a wrap, a format,
+// an option's group or id, a formula, which the Computed Store keeps) leaves
+// them, as does a column sent to the trash. Pure: the one rule for a field's
+// update that rewrote no cell and for an undo's or a redo's columns.
+func EntriesAfter(was, now *model.ColumnState) Reindex {
+	if now == nil || now.Deleted {
+		return KeepEntries
+	}
+	if was == nil || was.Deleted {
+		return MakeEntries
+	}
+	a := columnOf(&model.Field{Type: was.Type, Config: string(was.Config)})
+	b := columnOf(&model.Field{Type: now.Type, Config: string(now.Config)})
+	if a.family != b.family || a.col != b.col || a.linkField != b.linkField || a.reverse != b.reverse {
+		return MakeEntries
+	}
+	if a.family == famChoice && !slices.EqualFunc(a.options, b.options, func(x, y string) bool { return labelKey(x) == labelKey(y) }) {
+		return PlaceOptions
+	}
+	return KeepEntries
 }
 
 // errNoField is a spec naming a field the table hasn't got: a bad spec, as

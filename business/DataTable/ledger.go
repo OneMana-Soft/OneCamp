@@ -115,7 +115,10 @@ const (
 // listen after commit, the Resource Event, one live message for the table's
 // open views (unless the write sends its own), and one table.rows.changed
 // webhook naming every row and what happened to it (unless it's an AI fill),
-// in place of one event a row. Nothing for a change set that changed nothing.
+// in place of one event a row. Nothing for a change set that changed nothing,
+// and the observers alone for one of columns alone (columnsOnly), which
+// changed no row: the column's write tells open views itself
+// (tellFieldsChanged).
 func announce(ctx context.Context, t *model.DataTable, cs *model.ChangeSet, how telling) {
 	if !cs.Stored() {
 		return
@@ -128,6 +131,9 @@ func announce(ctx context.Context, t *model.DataTable, cs *model.ChangeSet, how 
 				o.Committed(ctx, public)
 			}
 		}
+	}
+	if columnsOnly(cs) {
+		return
 	}
 	resourceEventBusiness.Bus.Emit(ctx, resourceEventBusiness.Event{
 		Kind: resourceEventBusiness.TableRowsChanged, ResourceKind: "table", ResourceUUID: t.Id.String(),
@@ -148,6 +154,28 @@ func announce(ctx context.Context, t *model.DataTable, cs *model.ChangeSet, how 
 	}
 }
 
+// columnsOnly is whether every change of cs is a column's (FieldColumn):
+// a change set that changed no row. Pure.
+func columnsOnly(cs *model.ChangeSet) bool {
+	for _, c := range cs.Changes {
+		if c.Field != model.FieldColumn {
+			return false
+		}
+	}
+	return len(cs.Changes) > 0
+}
+
+// columnsIn is cs's column changes (FieldColumn), in order. Pure.
+func columnsIn(changes []model.Change) []model.Change {
+	var out []model.Change
+	for _, c := range changes {
+		if c.Field == model.FieldColumn {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func actorUUID(cs *model.ChangeSet) string {
 	if cs.Actor == uuid.Nil {
 		return ""
@@ -158,7 +186,7 @@ func actorUUID(cs *model.ChangeSet) string {
 // rowsByEvent is a change set's rows by what happened to them: made,
 // deleted, brought back, or otherwise changed (cells, place or links), each
 // once, in the order the change set made them; and each changed row's
-// fields.
+// fields. A column's change (FieldColumn) is no row's.
 func rowsByEvent(cs *model.ChangeSet) (created, updated, deleted, restored []uuid.UUID, fields map[uuid.UUID][]string) {
 	whole := map[uuid.UUID]string{}
 	for _, c := range cs.Changes {
@@ -170,6 +198,9 @@ func rowsByEvent(cs *model.ChangeSet) (created, updated, deleted, restored []uui
 	fields = map[uuid.UUID][]string{}
 	seenField := map[uuid.UUID]map[string]bool{}
 	for _, c := range cs.Changes {
+		if c.Field == model.FieldColumn {
+			continue
+		}
 		if f := strings.TrimPrefix(c.Field, model.LinksPrefix); f != model.WholeRow && f != model.FieldPosition {
 			if seenField[c.Row] == nil {
 				seenField[c.Row] = map[string]bool{}
@@ -202,7 +233,13 @@ func rowsByEvent(cs *model.ChangeSet) (created, updated, deleted, restored []uui
 // happened to it, with the fields it changed row by row, so a consumer needs
 // no read per row. Keys naming ids end in _id or _ids, which a webhook sent
 // only ids keeps (business/Webhook outgoingPrivacy.go); no cell's value is
-// sent, as no row event sends one. A field's change (an option renamed, a
+// sent, as no row event sends one. It says where the change came from
+// (source: the change set's actor kind, person, api, agent, automation,
+// import, form or system, as Airtable's fromSources) and who made it
+// (actor_id, and agent_id when an agent acted for them), so a sync tells
+// its own writes from everyone else's; a change by no one names no one.
+// Only webhooks whose owners can open the table are sent it (V-457,
+// business/Webhook reach.go). A field's change (an option renamed, a
 // type changed) may change every row: it names at most maxBatch, and
 // rows_changed says how many it changed. Pure.
 func rowsChanged(t *model.DataTable, cs *model.ChangeSet) map[string]interface{} {
@@ -230,7 +267,7 @@ func rowsChanged(t *model.DataTable, cs *model.ChangeSet) map[string]interface{}
 	if fieldIDs == nil {
 		fieldIDs = []string{}
 	}
-	return map[string]interface{}{
+	out := map[string]interface{}{
 		"table_id":         t.Id.String(),
 		"table_name":       t.Name,
 		"change_set_id":    cs.ID.String(),
@@ -243,6 +280,16 @@ func rowsChanged(t *model.DataTable, cs *model.ChangeSet) map[string]interface{}
 		"field_ids":        fieldIDs,
 		"row_field_ids":    rowFields,
 	}
+	if cs.ActorKind != "" {
+		out["source"] = cs.ActorKind
+	}
+	if cs.Actor != uuid.Nil {
+		out["actor_id"] = cs.Actor.String()
+	}
+	if cs.Agent != uuid.Nil {
+		out["agent_id"] = cs.Agent.String()
+	}
+	return out
 }
 
 // liveChanged is the one live message a change set of many rows sends on its

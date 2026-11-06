@@ -216,7 +216,7 @@ func (w *mdWriter) block(n *Node, alt bool) []string {
 		return []string{"[Table](" + linkDest(w.appURL("/app/tables/"+id)) + ")"}
 	case "poll":
 		return []string{"*Poll*"}
-	case "subpage", "taskListEmbed", "boardEmbed":
+	case "subpage", "taskListEmbed", "boardEmbed", "whiteboardEmbed":
 		return w.connectedMarkdown(n)
 	case "chartEmbed":
 		return fence(n.attrString("spec"), "chart")

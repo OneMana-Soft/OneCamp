@@ -81,7 +81,7 @@ func rowOps() []v1api.Op {
 		Serve:     serveRowDelete,
 	}, {
 		Name:    "tables.trash.list",
-		Summary: "A table's trash: its deleted rows, newest first, a page at a time, and its deleted fields for those who manage it",
+		Summary: "A table's trash: its deleted rows, newest first, a page at a time, its deleted fields for those who manage it, and its deleted views the caller may bring back",
 		Method:  http.MethodGet, Path: "/tables/{id}/trash", Scope: apiTokenBusiness.ScopeTablesRead,
 		Behaviour: v1api.Behaviour{ReadOnly: true, Idempotent: true},
 		Input:     json.RawMessage(`{"type":"object","properties":{` + tableArg + `,` + pageArg + `},"required":["id"]}`),
@@ -90,16 +90,17 @@ func rowOps() []v1api.Op {
 		Serve:     serveTrashList,
 	}, {
 		Name:    "tables.trash.restore",
-		Summary: "Bring rows and fields back from a table's trash, with their cells and links",
+		Summary: "Bring rows, fields and views back from a table's trash, rows and fields with their cells and links",
 		Method:  http.MethodPost, Path: "/tables/{id}/trash/restore", Scope: apiTokenBusiness.ScopeTablesWrite,
 		Behaviour: v1api.Behaviour{Idempotent: true, Recoverable: true},
-		UndoneBy:  []string{"tables.row.delete"},
+		UndoneBy:  []string{"tables.field.delete", "tables.row.delete", "tables.view.delete"},
 		Input: json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{`+tableArg+`,
 			"rows":{"type":"array","maxItems":%[1]d,"items":{"type":"string","maxLength":64},"description":"Rows to bring back."},
-			"fields":{"type":"array","maxItems":%[1]d,"items":{"type":"string","maxLength":64},"description":"Fields to bring back: for those who manage the table."}},
+			"fields":{"type":"array","maxItems":%[1]d,"items":{"type":"string","maxLength":64},"description":"Fields to bring back: for those who manage the table."},
+			"views":{"type":"array","maxItems":%[1]d,"items":{"type":"string","maxLength":64},"description":"Views to bring back: one's own, and shared ones for those who manage the table."}},
 			"required":["id"]}`, maxBatch)),
 		Reach: tableReach,
-		Cost:  countOf("rows", "fields"),
+		Cost:  countOf("rows", "fields", "views"),
 		Serve: serveTrashRestore,
 	}, {
 		Name:    "tables.row.history",
@@ -200,11 +201,12 @@ func serveRowDelete(ctx context.Context, call v1api.Call) (any, error) {
 }
 
 // apiTrash is a page of a table's trash as the API answers it: the rows in
-// the one page shape, and the deleted fields beside them.
+// the one page shape, and the deleted fields and views beside them.
 type apiTrash struct {
-	Items      []TrashRow   `json:"items"`
-	Fields     []TrashField `json:"fields"`
-	NextCursor string       `json:"next_cursor,omitempty"`
+	Items      []TrashRow    `json:"items"`
+	Fields     []TrashField  `json:"fields"`
+	Views      []*model.View `json:"views"`
+	NextCursor string        `json:"next_cursor,omitempty"`
 }
 
 func serveTrashList(ctx context.Context, call v1api.Call) (any, error) {
@@ -220,7 +222,7 @@ func serveTrashList(ctx context.Context, call v1api.Call) (any, error) {
 	if err != nil {
 		return nil, apiErr(unseen(err))
 	}
-	out := apiTrash{Items: trash.Rows, Fields: trash.Fields}
+	out := apiTrash{Items: trash.Rows, Fields: trash.Fields, Views: trash.Views}
 	if trash.More && len(trash.Rows) > 0 {
 		out.NextCursor = trash.Rows[len(trash.Rows)-1].ID.String()
 	}
@@ -237,6 +239,9 @@ func serveTrashRestore(ctx context.Context, call v1api.Call) (any, error) {
 		return nil, err
 	}
 	if in.Fields, err = idsArg(call.Args, "fields"); err != nil {
+		return nil, err
+	}
+	if in.Views, err = idsArg(call.Args, "views"); err != nil {
 		return nil, err
 	}
 	done, err := RestoreFromTrash(ctx, table, in, actorBy(apiBy(ctx, actor)))

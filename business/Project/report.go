@@ -10,15 +10,21 @@ package business
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"sort"
 	"strings"
 	"time"
 
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	domain "github.com/akashc777/OneCamp/domain/Project"
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	taskFieldModel "github.com/akashc777/OneCamp/models/postgres/TaskField"
 	taskStatusModels "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
 	timeModels "github.com/akashc777/OneCamp/models/postgres/TimeEntry"
 	"github.com/google/uuid"
@@ -95,6 +101,8 @@ type Report struct {
 	Truncated   bool                `json:"truncated"`
 	// Flow is where the tasks stood at the end of each week (flow.go).
 	Flow []FlowWeek `json:"flow"`
+	// Insights is how long the work took (insights.go).
+	Insights Insights `json:"insights"`
 }
 
 // weekStart is the Monday, at midnight in loc, of the week t falls in.
@@ -284,6 +292,23 @@ func BuildReport(projects []domain.ReportProject, hours []timeModels.WeekSeconds
 // reader's. A remembered choice that has gone (left, archived, or the demo's
 // nightly copy) narrows nothing rather than emptying the report; empty keeps
 // them all. Pure.
+// narrowFor is narrowTo, and, when exact, whether it keeps nothing at all:
+// projects were asked for and none of them is the reader's. Pure.
+func narrowFor(projects []domain.ReportProject, only []string, exact bool) (keep map[string]bool, none bool) {
+	keep = narrowTo(projects, only)
+	return keep, exact && len(keep) == 0 && asksAny(only)
+}
+
+// asksAny is whether only names any project at all. Pure.
+func asksAny(only []string) bool {
+	for _, id := range only {
+		if strings.TrimSpace(id) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func narrowTo(projects []domain.ReportProject, only []string) map[string]bool {
 	mine := map[string]bool{}
 	for _, p := range projects {
@@ -298,19 +323,64 @@ func narrowTo(projects []domain.ReportProject, only []string) map[string]bool {
 	return keep
 }
 
-// GetReport reads and works out the report of the reader's live projects
-// (only those in only, if any) for the weeks up to now's, in loc. The hours
-// are left out, not the report, if the time logged can't be read.
-func GetReport(ctx context.Context, readerUID string, now time.Time, loc *time.Location, weeks int, only []string) (*Report, error) {
+// ReportAsk is what a report is asked for: its weeks, the projects it keeps
+// to (none: all the reader's), and a view's filters and search, as its list
+// sends them (B9-b1).
+type ReportAsk struct {
+	Weeks  int
+	Only   []string
+	Params []taskDomain.TaskListParam
+	Search string
+	// Exact keeps to exactly those of Only the reader is in, and to none
+	// when they are in none of them: a dashboard's widget (business/
+	// Dashboard), whose projects someone else chose. Without it a choice
+	// that has gone narrows nothing, as the report page's remembered one.
+	Exact bool
+}
+
+// ReportFor is the report the reader asked for, the one path the report page
+// and a dashboard's widgets take: the filters go through the list's own
+// builder, with one project the reader reads its side filters (cycles,
+// custom fields, types) too, as on its list; across several, none, as on a
+// person's own list. A search that can't be made safe is
+// taskDomain.ErrSearchTerm, the asker's to fix.
+func ReportFor(ctx context.Context, readerUID string, now time.Time, loc *time.Location, a ReportAsk) (*Report, error) {
+	project := ""
+	if len(a.Only) == 1 && (len(a.Params) > 0 || a.Search != "") {
+		// A side filter reads the project's own cycles and fields: only for
+		// a reader of it, as its list checks first.
+		if p, err := GetBasicDgraphProjectInfo(ctx, strings.TrimSpace(a.Only[0]), readerUID); err == nil && p.ReaderIsIn() {
+			project = p.Uuid
+		}
+	}
+	filter, err := ListFilter(ctx, project, a.Params, a.Search, now).Clause()
+	if err != nil {
+		return nil, err
+	}
+	return getReport(ctx, readerUID, now, loc, a.Weeks, a.Only, filter, a.Exact)
+}
+
+// getReport reads and works out the report of the reader's live projects
+// (only those in only, if any) for the weeks up to now's, in loc, of the
+// tasks filter matches ("" for all: a view's filters, ListFilter's Clause).
+// The hours are left out, not the report, if the time logged can't be
+// read; the custom-field slices, if the fields can't be.
+// With exact, projects asked for that are none of the reader's keep none.
+func getReport(ctx context.Context, readerUID string, now time.Time, loc *time.Location, weeks int, only []string, filter string, exact bool) (*Report, error) {
 	if weeks < 1 || weeks > MaxReportWeeks {
 		weeks = ReportWeeks
 	}
 	first := weekStart(now, loc).AddDate(0, 0, -7*(weeks-1))
-	projects, err := domain.GetDgraphReport(ctx, readerUID, first)
+	projects, err := domain.GetDgraphReport(ctx, readerUID, first, filter)
 	if err != nil {
 		return nil, err
 	}
-	keep := narrowTo(projects, only)
+	keep, none := narrowFor(projects, only, exact)
+	if none {
+		// None of the projects asked for is the reader's: an empty report,
+		// never the reader's others.
+		projects = nil
+	}
 	var ids []uuid.UUID
 	for _, p := range projects {
 		if id, err := uuid.Parse(p.UUID); err == nil && (len(keep) == 0 || keep[p.UUID]) {
@@ -323,8 +393,63 @@ func GetReport(ctx context.Context, readerUID string, now time.Time, loc *time.L
 		hours = nil
 	}
 	r := BuildReport(projects, hours, now, loc, weeks, keep)
-	r.Flow = buildFlow(projects, ownStatuses(ctx, ids), first, now, weeks, keep)
+	own := ownStatuses(ctx, ids)
+	r.Flow = buildFlow(projects, own, first, now, weeks, keep)
+	// The insights slice by type: the tasks' types live in Postgres.
+	var tasks []*dgraphStruct.DgraphTask
+	for _, p := range projects {
+		if len(keep) == 0 || keep[p.UUID] {
+			tasks = append(append(tasks, p.Open...), p.Closed...)
+		}
+	}
+	taskKeys.Lay(ctx, tasks...)
+	fields, capped := reportFields(ctx, ids, tasks)
+	r.Insights = buildInsights(projects, own, first, now, keep, fields...)
+	r.Insights.FieldsCapped = capped
 	return r, nil
+}
+
+// reportFields are the ways to slice the report's tasks by its projects'
+// custom fields (fieldDims), with the tasks' values laid on them and the
+// people their person fields name read, each in one read. Only the projects
+// the report kept are read, all of them the reader's. A failed read costs the
+// fields' slices, not the report.
+func reportFields(ctx context.Context, projects []uuid.UUID, tasks []*dgraphStruct.DgraphTask) ([]insightDim, bool) {
+	fields, err := taskFieldModel.ListForProjects(ctx, projects)
+	if err == nil && len(fields) > 0 {
+		err = taskFieldBusiness.MergeFieldValues(ctx, tasks)
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetReport fields err: %+v", err)
+		return nil, false
+	}
+	var ids []string
+	seen := map[string]bool{}
+	for _, f := range fields {
+		if f.Type != taskFieldModel.TypePerson {
+			continue
+		}
+		for _, t := range tasks {
+			var id string
+			if json.Unmarshal(t.Fields[f.ID.String()], &id) == nil && id != "" && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	names := map[string]string{}
+	if len(ids) > 0 {
+		people, err := userDomain.GetUserDisplayMapByUUIDs(ctx, ids)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "business/GetReport field people err: %+v", err)
+		}
+		for id, u := range people {
+			if u != nil {
+				names[id] = u.DisplayName()
+			}
+		}
+	}
+	return fieldDims(fields, names)
 }
 
 // ownStatuses is each project's own statuses, lower-cased name → category,

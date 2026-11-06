@@ -320,21 +320,16 @@ func SearchRowsByCell(ctx context.Context, tableId uuid.UUID, fieldId, q string,
 // transaction: a relation field and the field showing its links from the
 // other table, which point at each other.
 func CreateFieldsWithIDs(ctx context.Context, fields ...*Field) error {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	tx, err := postgresInit.DBConn.SqlDB.BeginTx(dbctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	for _, f := range fields {
-		if _, err := tx.ExecContext(dbctx, insertFieldSQL, f.Id, f.TableId, f.Name, f.Type, f.Config, f.Position,
-			f.Description, f.Required, defaultOf(f)); err != nil {
-			helpers.LogErrorWithContext(ctx, "models/CreateFieldsWithIDs err: %+v", err)
-			return err
+	return joinTx(ctx, postgresInit.DBConn.DBTimeout, func(dbctx context.Context, tx *sql.Tx) error {
+		for _, f := range fields {
+			if _, err := tx.ExecContext(dbctx, insertFieldSQL, f.Id, f.TableId, f.Name, f.Type, f.Config, f.Position,
+				f.Description, f.Required, defaultOf(f)); err != nil {
+				helpers.LogErrorWithContext(ctx, "models/CreateFieldsWithIDs err: %+v", err)
+				return err
+			}
 		}
-	}
-	return tx.Commit()
+		return nil
+	})
 }
 
 // DeleteFieldPair soft-deletes a relation field and the one showing its links
@@ -343,7 +338,7 @@ func CreateFieldsWithIDs(ctx context.Context, fields ...*Field) error {
 // field, so restoring the field brings it back whole (RestoreFields); they go
 // with it when the trash is purged (PurgeTrash).
 func DeleteFieldPair(ctx context.Context, a, b *Field, by uuid.UUID) error {
-	return postgresInit.InTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
+	return joinTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
 		if err := deleteField(ctx, tx, a.TableId, a.Id, by); err != nil {
 			return err
 		}
@@ -365,7 +360,7 @@ var ErrRelationGone = errors.New("the relation whose links it shows is deleted")
 // says f shows its links ("inverse") no longer saying so. Their links stay,
 // shown in their own table alone. by is who deleted f.
 func DeleteShowingField(ctx context.Context, f *Field, owners, by uuid.UUID) error {
-	return postgresInit.InTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
+	return joinTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
 		if err := deleteField(ctx, tx, f.TableId, f.Id, by); err != nil {
 			return err
 		}
@@ -383,7 +378,7 @@ func DeleteShowingField(ctx context.Context, f *Field, owners, by uuid.UUID) err
 // showing its links there again when it shows them in no other field. It is
 // ErrRelationGone when owner is deleted, as it can't show links then.
 func RestoreShowingField(ctx context.Context, f *Field, owner, owners uuid.UUID) error {
-	return postgresInit.InTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
+	return joinTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
 		var shown bool
 		err := tx.QueryRowContext(ctx, `SELECT config ? 'inverse' FROM data_table_fields
 			WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL FOR UPDATE`, owner, owners).Scan(&shown)

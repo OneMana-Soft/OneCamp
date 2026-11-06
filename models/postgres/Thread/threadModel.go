@@ -125,21 +125,16 @@ func ListByResource(ctx context.Context, kind, resourceUUID, status string) ([]*
 // nothing changed: it was in that state, or there is no such thread. Two
 // people resolving at once change it once.
 func SetStatus(ctx context.Context, id uuid.UUID, status string, by *uuid.UUID, at time.Time) (*Row, error) {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
 	var resolvedAt *time.Time
 	if by != nil {
 		resolvedAt = &at
 	}
-	r, err := scanRow(postgresInit.DBConn.SqlDB.QueryRowContext(cctx,
+	r, _, err := pgexec.QueryOne(ctx,
 		`UPDATE threads SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = $5
 		  WHERE id = $1 AND status <> $2
-		  RETURNING `+rowColumns, id, status, by, resolvedAt, at))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+		  RETURNING `+rowColumns, func(row pgexec.Row) (*Row, error) { return scanRow(row) }, id, status, by, resolvedAt, at)
 	if err != nil {
-		helpers.LogErrorWithContext(cctx, "models/Thread SetStatus failed: %+v", err)
+		helpers.LogErrorWithContext(ctx, "models/Thread SetStatus failed: %+v", err)
 		return nil, err
 	}
 	return r, nil

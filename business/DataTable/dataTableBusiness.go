@@ -28,7 +28,9 @@ import (
 	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	rowQuery "github.com/akashc777/OneCamp/business/RowQuery"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
+	tableDomain "github.com/akashc777/OneCamp/domain/DataTable"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -142,6 +144,9 @@ type FieldInput struct {
 	// keptDefault is a default the save didn't name, the field's own: one
 	// its new type can't read goes rather than refusing the save.
 	keptDefault bool
+	// id is the id a new field takes: an API batch names its creates, so a
+	// retry finds one it made (apiBatch). Zero is a new one.
+	id uuid.UUID
 }
 
 // FieldPatch is a change to a field: what it names changes, and what it
@@ -247,6 +252,8 @@ type ViewInput struct {
 	Position float64                `json:"position"`
 	// Personal makes a new view the actor's own; a view stays whose it is.
 	Personal bool `json:"personal"`
+	// id is the id a new view takes, as FieldInput's.
+	id uuid.UUID
 }
 
 // TableBundle is the one-call payload for opening a table: header + structure +
@@ -443,7 +450,7 @@ func createTableRow(ctx context.Context, in TableInput, actor Actor) (uuid.UUID,
 	}
 	id, err := model.CreateTable(ctx, t)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to create table")
+		return uuid.Nil, storeFailed("failed to create table")
 	}
 	indexSoon(ctx, id, 0)
 	return id, nil
@@ -458,18 +465,23 @@ func createTableRow(ctx context.Context, in TableInput, actor Actor) (uuid.UUID,
 // filled is how many rows were just written to it. A table whose index kept
 // up with them isn't walked, but a big fill is still counted for the planner,
 // as a walk's would be (rowQuery.CountAfterFill, V-48).
+//
+// Made inside a transaction (the API's table create, with its audit row), the
+// walk starts once it commits: before, it would read a table that isn't there.
 func indexSoon(ctx context.Context, table uuid.UUID, filled int) {
-	helpers.GoSafeNamed("business/DataTable:indexSoon", func() {
-		ctx := context.WithoutCancel(ctx)
-		if !indexWanted(ctx, table) {
-			if err := rowQuery.CountAfterFill(ctx, filled); err != nil {
-				helpers.LogErrorWithContext(ctx, "business/DataTable indexSoon %s: counting %d rows for the planner: %v", table, filled, err)
+	pgexec.AfterCommit(ctx, func(ctx context.Context) {
+		helpers.GoSafeNamed("business/DataTable:indexSoon", func() {
+			ctx := context.WithoutCancel(ctx)
+			if !indexWanted(ctx, table) {
+				if err := rowQuery.CountAfterFill(ctx, filled); err != nil {
+					helpers.LogErrorWithContext(ctx, "business/DataTable indexSoon %s: counting %d rows for the planner: %v", table, filled, err)
+				}
+				return
 			}
-			return
-		}
-		if err := rowQuery.IndexTable(ctx, table); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/DataTable indexSoon %s: %v", table, err)
-		}
+			if err := rowQuery.IndexTable(ctx, table); err != nil {
+				helpers.LogErrorWithContext(ctx, "business/DataTable indexSoon %s: %v", table, err)
+			}
+		})
 	})
 }
 
@@ -506,7 +518,7 @@ func seedGridView(ctx context.Context, id uuid.UUID) {
 func loadManageable(ctx context.Context, id uuid.UUID, actor Actor) (*model.DataTable, error) {
 	t, err := model.GetTableByID(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load table")
+		return nil, storeFailed("failed to load table")
 	}
 	if t == nil {
 		return nil, errNotFound
@@ -565,7 +577,7 @@ func CanManage(ctx context.Context, id uuid.UUID, actor Actor) error {
 func loadViewable(ctx context.Context, id uuid.UUID, actor Actor) (*model.DataTable, error) {
 	t, err := model.GetTableByID(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load table")
+		return nil, storeFailed("failed to load table")
 	}
 	if t == nil {
 		return nil, errNotFound
@@ -643,13 +655,17 @@ func UpdateTable(ctx context.Context, id uuid.UUID, in TablePatch, actor Actor) 
 		return nil, "", errNotFound
 	}
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to update table")
+		return nil, "", storeFailed("failed to update table")
 	}
-	mqttBusiness.PublishTableRow(id.String(), map[string]interface{}{"action": "table"})
-	if change.Visibility != nil && *change.Visibility != was {
-		// Who may open its rows' pages changed with it (rowPages.go).
-		tablePagesChanged(ctx, id)
-	}
+	// Told once it commits: inside the API's transaction, a reader told
+	// sooner would read the header as it was.
+	pgexec.AfterCommit(ctx, func(ctx context.Context) {
+		mqttBusiness.PublishTableRow(id.String(), map[string]interface{}{"action": "table"})
+		if change.Visibility != nil && *change.Visibility != was {
+			// Who may open its rows' pages changed with it (rowPages.go).
+			tablePagesChanged(ctx, id)
+		}
+	})
 	return t, was, nil
 }
 
@@ -703,8 +719,9 @@ func DeleteTable(ctx context.Context, id uuid.UUID, actor Actor) error {
 	if err := model.SoftDeleteTable(ctx, id, actor.UserID); err != nil {
 		return err
 	}
-	// Its rows' pages go to the trash with it (rowPages.go).
-	tablePagesChanged(ctx, id)
+	// Its rows' pages go to the trash with it (rowPages.go), once it commits:
+	// a page's socket closed sooner reconnects to a table not yet deleted.
+	pgexec.AfterCommit(ctx, func(ctx context.Context) { tablePagesChanged(ctx, id) })
 	return nil
 }
 
@@ -779,13 +796,13 @@ func loadBundle(ctx context.Context, t *model.DataTable, reader uuid.UUID, manag
 	wg.Wait()
 
 	if fErr != nil {
-		return nil, fmt.Errorf("failed to load fields")
+		return nil, storeFailed("failed to load fields")
 	}
 	if vErr != nil {
-		return nil, fmt.Errorf("failed to load views")
+		return nil, storeFailed("failed to load views")
 	}
 	if rErr != nil || cErr != nil {
-		return nil, fmt.Errorf("failed to load rows")
+		return nil, storeFailed("failed to load rows")
 	}
 	truncated := false
 	if len(rows) > bundleRowPage {
@@ -806,7 +823,7 @@ func loadBundle(ctx context.Context, t *model.DataTable, reader uuid.UUID, manag
 func GetGuestBundle(ctx context.Context, id uuid.UUID) (*TableBundle, error) {
 	t, err := model.GetTableByID(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load table")
+		return nil, storeFailed("failed to load table")
 	}
 	if t == nil {
 		return nil, errNotFound // gone, unlike a load that failed (IsNotFound)
@@ -880,9 +897,9 @@ func CreateField(ctx context.Context, tableId uuid.UUID, in FieldInput, actor Ac
 	}
 	fields, err := model.ListFields(ctx, tableId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load fields")
+		return nil, storeFailed("failed to load fields")
 	}
-	other, err := computedFieldConfig(ctx, actor, t, fields, uuid.Nil, &in)
+	other, err := computedFieldConfig(ctx, actor, t, fields, uuid.Nil, &in, newLinked())
 	if err != nil {
 		return nil, err
 	}
@@ -890,22 +907,60 @@ func CreateField(ctx context.Context, tableId uuid.UUID, in FieldInput, actor Ac
 	if err != nil {
 		return nil, err
 	}
-	if other != nil {
-		f, err = createLinkPair(ctx, f, t, other)
-	} else if f.Id, err = model.CreateField(ctx, f); err != nil {
-		err = fmt.Errorf("failed to create field")
+	f.Id = in.id
+	if f.Id == uuid.Nil {
+		f.Id = uuid.New()
 	}
+	// The column made is a change set of its own (the row ledger), stored
+	// with it, so an undo pressed next takes it back (V-455).
+	cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeField)
+	err = columnWrite(ctx, []uuid.UUID{f.Id}, cs, "failed to create field", func(ctx context.Context) error {
+		if other != nil {
+			made, err := createLinkPair(ctx, f, t, other)
+			f = made
+			return err
+		}
+		if _, err := model.CreateField(ctx, f); err != nil {
+			return storeFailed("failed to create field")
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 	// Its entries for the rows already there (Row Query walks a field's
-	// empty cells along its index too).
-	if err := rowQuery.IndexField(ctx, tableId, f.Id); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/DataTable CreateField index %s: %v", f.Id, err)
-		_ = model.MarkCellIndexStale(ctx, tableId)
-	}
-	helpers.GoSafeNamed("tellTablesLinkedWith", func() { tellTablesLinkedWith(context.WithoutCancel(ctx), tableId) })
+	// empty cells along its index too), and the tables linked with it told,
+	// once the field is there to find: at once, or when an API item's
+	// transaction commits (pgexec.AfterCommit).
+	made := f.Id
+	pgexec.AfterCommit(ctx, func(ctx context.Context) {
+		if err := rowQuery.IndexField(ctx, tableId, made); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/DataTable CreateField index %s: %v", made, err)
+			_ = model.MarkCellIndexStale(ctx, tableId)
+		}
+		helpers.GoSafeNamed("tellTablesLinkedWith", func() { tellTablesLinkedWith(context.WithoutCancel(ctx), tableId) })
+		announce(ctx, t, cs, hooksOnly)
+	})
 	return f, nil
+}
+
+// columnWrite is model.WriteColumns for a write of table columns ids, with
+// the ledger's observers: write's own refusal as it gave it, a failure of the
+// store as failed.
+func columnWrite(ctx context.Context, ids []uuid.UUID, cs *model.ChangeSet, failed string, write func(ctx context.Context) error) error {
+	var refused error
+	err := model.WriteColumns(ctx, ids, cs, observe, func(ctx context.Context) error {
+		refused = write(ctx)
+		return refused
+	})
+	switch {
+	case refused != nil:
+		return refused
+	case err != nil:
+		helpers.LogErrorWithContext(ctx, "business/DataTable columnWrite %s: %v", failed, err)
+		return storeFailed(failed)
+	}
+	return nil
 }
 
 // UpdateField edits a column (manage only): what the patch names changes,
@@ -916,13 +971,28 @@ func CreateField(ctx context.Context, tableId uuid.UUID, in FieldInput, actor Ac
 // read as v2.72.2 read it (FieldPatch.whole). It returns how many rows' cells
 // changed, and has the table's open views read it again.
 func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, actor Actor) (int, error) {
+	w, err := updateFieldStored(ctx, tableId, fieldId, p, actor)
+	return w.Cells, err
+}
+
+// fieldWritten is a field's update as the store took it: the field as the
+// write found it, as the write left it, and how many rows' cells changed
+// with it. An API item's audit row is built from it.
+type fieldWritten struct {
+	Was, Now *model.Field
+	Cells    int
+}
+
+// updateFieldStored is UpdateField answering what it wrote (fieldWritten).
+// What it tells others waits for the commit (pgexec.AfterCommit).
+func updateFieldStored(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, actor Actor) (fieldWritten, error) {
 	t, err := loadManageable(ctx, tableId, actor)
 	if err != nil {
-		return 0, err
+		return fieldWritten{}, err
 	}
 	fields, err := model.ListFields(ctx, tableId)
 	if err != nil {
-		return 0, fmt.Errorf("failed to load fields")
+		return fieldWritten{}, storeFailed("failed to load fields")
 	}
 	var was *model.Field
 	for _, f := range fields {
@@ -931,21 +1001,21 @@ func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, 
 		}
 	}
 	if was == nil {
-		return 0, errFieldNotFound
+		return fieldWritten{}, errFieldNotFound
 	}
 	signs, ok := p.NumberSigns.Checked()
 	if !ok {
-		return 0, errNumberSigns
+		return fieldWritten{}, errNumberSigns
 	}
 	if p.Primary != nil {
 		if err := primaryProblem(was, *p.Primary, fields); err != nil {
-			return 0, err
+			return fieldWritten{}, err
 		}
 	}
 	in := p.onto(was)
-	other, err := computedFieldConfig(ctx, actor, t, fields, fieldId, &in)
+	other, err := computedFieldConfig(ctx, actor, t, fields, fieldId, &in, newLinked())
 	if err != nil {
-		return 0, err
+		return fieldWritten{}, err
 	}
 	if p.Config != nil {
 		p.Config = in.Config // as checked: a formula's fields named by id
@@ -953,13 +1023,20 @@ func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, 
 	whole := p.whole()
 	f, _, err := buildField(tableId, in, was, whole)
 	if err != nil {
-		return 0, err
+		return fieldWritten{}, err
 	}
 	f.Id = fieldId
 	changed := 0
 	var cs *model.ChangeSet
+	before, after := was, f
 	if other != nil {
-		err = showLinksIn(ctx, f, t, other)
+		// Its column's change is a change set too, so an undo pressed next
+		// meets it (and is refused: it links two tables) rather than taking
+		// the change before it.
+		cs = newChangeSet(ctx, tableId, actor, rowLedger.ChangeField)
+		err = columnWrite(ctx, []uuid.UUID{fieldId}, cs, "failed to update field", func(ctx context.Context) error {
+			return showLinksIn(ctx, f, t, other)
+		})
 	} else {
 		var planErr error
 		// The cells the change rewrites are a change set of their own (the
@@ -976,6 +1053,7 @@ func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, 
 				return nil, nil, nil, err
 			}
 			f.Id = fieldId
+			before, after = current, f
 			var convert model.Convert
 			if converts(current.Type, f.Type) && !whole {
 				convert = func(cells map[uuid.UUID]json.RawMessage) (map[uuid.UUID]json.RawMessage, error) {
@@ -991,54 +1069,40 @@ func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, 
 		case errors.Is(err, sql.ErrNoRows):
 			err = errFieldNotFound
 		case err != nil:
-			err = fmt.Errorf("failed to update field")
+			err = storeFailed("failed to update field")
 		}
 	}
 	if err != nil {
-		return 0, err
+		return fieldWritten{}, err
 	}
-	// A choice's options reordered, added or taken away with no cell changed:
-	// the ledger's observer, which reindexes a field whose cells changed,
-	// heard nothing, and Row Query sorts by the places its entries hold.
-	if other == nil && changed == 0 && optionsMoved(was, f) {
-		if err := rowQuery.IndexOptions(ctx, tableId, fieldId); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/DataTable UpdateField options of %s: %v", fieldId, err)
-			_ = model.MarkCellIndexStale(ctx, tableId)
-		}
+	// A column changed with no cell rewritten (every cell kept as it was):
+	// the cell index's observer walks only a change that rewrote cells, so
+	// once the change commits the column's entries are brought to it here,
+	// by the rule an undo's columns follow (reindexColumns, Row Query's
+	// EntriesAfter): made again for a new type, a choice's places moved for
+	// options reordered, added or taken away, nothing for a change to how it
+	// looks. It runs before the primary is set, as it always has: at once,
+	// or in that order once an API item's transaction commits.
+	if changed == 0 && cs.Rows == 0 && len(cs.Changes) > 0 {
+		cols := cs.Changes
+		pgexec.AfterCommit(ctx, func(ctx context.Context) { reindexColumns(ctx, tableId, cols, "UpdateField") })
 	}
+	// The write leaves is_primary as it found it, but for SetPrimary.
+	now := *after
+	now.Primary = before.Primary
 	if p.Primary != nil && *p.Primary && !was.Primary {
 		if err := model.SetPrimary(ctx, tableId, fieldId); err != nil {
-			return 0, fmt.Errorf("failed to make it the primary field")
+			return fieldWritten{}, storeFailed("failed to make it the primary field")
 		}
+		now.Primary = true
 	}
-	tellFieldsChanged(tableId)
-	go tellTablesLinkedWith(context.WithoutCancel(ctx), tableId)
-	announce(ctx, t, cs, hooksOnly)
-	return changed, nil
-}
-
-// optionsMoved is whether a save made a select or a status field's options
-// sort differently: their labels, as a choice's place reads them (ignoring
-// case and the spaces around), aren't the same in the same order, or the
-// field became a choice.
-func optionsMoved(was, now *model.Field) bool {
-	choice := func(f *model.Field) bool { return f.Type == model.FieldSelect || f.Type == model.FieldStatus }
-	if !choice(now) {
-		return false
-	}
-	if !choice(was) {
-		return true
-	}
-	a, b := fieldTypes.OptionsOf(was), fieldTypes.OptionsOf(now)
-	if len(a) != len(b) {
-		return true
-	}
-	for i := range a {
-		if strings.ToLower(strings.TrimSpace(a[i].Label)) != strings.ToLower(strings.TrimSpace(b[i].Label)) {
-			return true
-		}
-	}
-	return false
+	after = &now
+	pgexec.AfterCommit(ctx, func(ctx context.Context) {
+		tellFieldsChanged(tableId)
+		helpers.GoSafeNamed("tellTablesLinkedWith", func() { tellTablesLinkedWith(context.WithoutCancel(ctx), tableId) })
+		announce(ctx, t, cs, hooksOnly)
+	})
+	return fieldWritten{Was: before, Now: after, Cells: changed}, nil
 }
 
 // errPrimaryKept is a field asked to stop being the primary: one becomes the
@@ -1075,12 +1139,21 @@ var errPrimaryDeleted = fmt.Errorf("This is the primary field, which names every
 
 // DeleteField removes a column (manage only).
 func DeleteField(ctx context.Context, tableId, fieldId uuid.UUID, actor Actor) error {
-	if _, err := loadManageable(ctx, tableId, actor); err != nil {
-		return err
+	_, err := deleteFieldStored(ctx, tableId, fieldId, actor)
+	return err
+}
+
+// deleteFieldStored is DeleteField answering the field it moved to the
+// trash, as it found it. The tables linked with it are told once that has
+// committed (pgexec.AfterCommit).
+func deleteFieldStored(ctx context.Context, tableId, fieldId uuid.UUID, actor Actor) (*model.Field, error) {
+	t, err := loadManageable(ctx, tableId, actor)
+	if err != nil {
+		return nil, err
 	}
 	fields, err := model.ListFields(ctx, tableId)
 	if err != nil {
-		return fmt.Errorf("failed to load fields")
+		return nil, storeFailed("failed to load fields")
 	}
 	var field *model.Field
 	for _, f := range fields {
@@ -1089,23 +1162,32 @@ func DeleteField(ctx context.Context, tableId, fieldId uuid.UUID, actor Actor) e
 		}
 	}
 	if field == nil {
-		return errFieldNotFound
+		return nil, errFieldNotFound
 	}
 	if field.Primary {
-		return errPrimaryDeleted
+		return nil, errPrimaryDeleted
 	}
 	// The tables told are those linking with this one before the field goes.
 	linked, _ := model.TablesLinkedWith(ctx, tableId)
 	// A relation linking to a table goes with the field showing its links
-	// there.
-	switch err := unlinkPair(ctx, field, actor.UserID); {
-	case errors.Is(err, sql.ErrNoRows):
-		return errFieldNotFound
-	case err != nil:
-		return fmt.Errorf("failed to delete field")
+	// there. The column's delete is a change set of its own (V-455).
+	cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeField)
+	if err := columnWrite(ctx, []uuid.UUID{field.Id}, cs, "failed to delete field", func(ctx context.Context) error {
+		switch err := unlinkPair(ctx, field, actor.UserID); {
+		case errors.Is(err, sql.ErrNoRows):
+			return errFieldNotFound
+		case err != nil:
+			return storeFailed("failed to delete field")
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	tellTables(ctx, linked...)
-	return nil
+	pgexec.AfterCommit(ctx, func(ctx context.Context) {
+		tellTables(ctx, linked...)
+		announce(ctx, t, cs, hooksOnly)
+	})
+	return field, nil
 }
 
 // buildField checks a field being saved, and gives a select field's options
@@ -1245,7 +1327,7 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	}
 	fields, ferr := model.ListFields(ctx, tableId)
 	if ferr != nil {
-		return nil, fmt.Errorf("failed to load fields")
+		return nil, storeFailed("failed to load fields")
 	}
 	values := in.Values
 	if values == nil {
@@ -1268,7 +1350,7 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 		return nil, errTooManyLinks
 	}
 	if cerr != nil {
-		return nil, fmt.Errorf("failed to create row")
+		return nil, storeFailed("failed to create row")
 	}
 	created := done.Created[0]
 	written := changedCells("{}", created.Values)
@@ -1280,7 +1362,7 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	// Continuous AI autofill: fill the new row's auto AI columns it wasn't
 	// given, as the creator, off the request path. Loop-safe (writes via the
 	// model layer, not CreateRow/UpdateRow).
-	go AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, written, actor)
+	helpers.GoSafeNamed("AutofillRowOnWrite", func() { AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, written, actor) })
 	// Reactive triggers: let agents react to new table rows (Notion-DB-style
 	// automation). Loop-safe — DispatchEvent skips in-process listeners for
 	// automation-generated writes, so an agent's own row write can't re-trigger.
@@ -1305,7 +1387,7 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 	}
 	fields, ferr := model.ListFields(ctx, tableId)
 	if ferr != nil {
-		return nil, fmt.Errorf("failed to load fields")
+		return nil, storeFailed("failed to load fields")
 	}
 	values := in.Values
 	if values == nil {
@@ -1319,7 +1401,7 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 	// types checked writes, mustn't make the edit fail.
 	stored, rerr := model.GetRowByID(ctx, tableId, rowId)
 	if rerr != nil {
-		return nil, fmt.Errorf("failed to update row")
+		return nil, storeFailed("failed to update row")
 	}
 	if stored == nil {
 		return nil, errRowNotFound
@@ -1337,7 +1419,7 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 		return nil, errRowNotFound
 	}
 	if uerr != nil {
-		return nil, fmt.Errorf("failed to update row")
+		return nil, storeFailed("failed to update row")
 	}
 	return rowWritten(rowUpdated(ctx, t, fields, r, cs, actor), cs), nil
 }
@@ -1357,7 +1439,7 @@ func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]i
 	}
 	fields, ferr := model.ListFields(ctx, tableId)
 	if ferr != nil {
-		return nil, fmt.Errorf("failed to load fields")
+		return nil, storeFailed("failed to load fields")
 	}
 	if values == nil {
 		values = map[string]interface{}{}
@@ -1402,12 +1484,12 @@ func singleRowErr(err error, otherwise string) error {
 func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, r *model.Row, cs *model.ChangeSet, actor Actor) *model.Row {
 	changed := changedIn(cs, r.Id)
 	announce(ctx, t, cs, hooksOnly)
-	go tellLinkedTables(context.WithoutCancel(ctx), t.Id, r.Id, false)
+	helpers.GoSafeNamed("tellLinkedTables", func() { tellLinkedTables(context.WithoutCancel(ctx), t.Id, r.Id, false) })
 	// The row as written, before its cells are worked out for this reader.
 	stored := *r
 	withComputed(ctx, fields, []*model.Row{r})
 	broadcastRow(t.Id.String(), "updated", r)
-	go AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, changed, actor)
+	helpers.GoSafeNamed("AutofillRowOnWrite", func() { AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, changed, actor) })
 	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() {
 		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "table.row.updated", map[string]interface{}{
 			"table_id":   t.Id.String(),
@@ -1434,7 +1516,7 @@ func DeleteRow(ctx context.Context, tableId, rowId uuid.UUID, actor Actor) error
 	mqttBusiness.PublishTableRow(t.Id.String(), map[string]interface{}{"action": "deleted", "row_id": rowId.String()})
 	announce(ctx, t, cs, hooksOnly)
 	if done.Linked {
-		go tellLinkedTables(context.WithoutCancel(ctx), tableId, rowId, true)
+		helpers.GoSafeNamed("tellLinkedTables", func() { tellLinkedTables(context.WithoutCancel(ctx), tableId, rowId, true) })
 	}
 	return nil
 }
@@ -1529,6 +1611,7 @@ func CreateView(ctx context.Context, tableId uuid.UUID, in ViewInput, actor Acto
 	if err != nil {
 		return nil, err
 	}
+	v.Id = in.id
 	if in.Personal {
 		owner := actor.UserID
 		v.Owner = &owner
@@ -1613,20 +1696,26 @@ func LockView(ctx context.Context, tableId, viewId uuid.UUID, locked bool, actor
 // of their own, or a shared one when they manage the table. Another person's
 // own view is never listed for them, so it isn't found.
 func viewToChange(ctx context.Context, tableId, viewId uuid.UUID, actor Actor) (*model.View, error) {
-	if _, err := loadViewable(ctx, tableId, actor); err != nil {
+	t, err := loadViewable(ctx, tableId, actor)
+	if err != nil {
 		return nil, err
 	}
 	v, err := model.GetView(ctx, tableId, viewId)
 	if err != nil {
 		return nil, errViewsUnavailable
 	}
+	return changeable(t, v, actor)
+}
+
+// changeable is view v of table t if actor may change it, by viewToChange's
+// rule on what was read: one of their own, or a shared one when they manage
+// the table. None, or another person's own view, isn't found.
+func changeable(t *model.DataTable, v *model.View, actor Actor) (*model.View, error) {
 	if v == nil || (v.Owner != nil && *v.Owner != actor.UserID) {
 		return nil, errViewNotFound
 	}
-	if v.Owner == nil {
-		if _, err := loadManageable(ctx, tableId, actor); err != nil {
-			return nil, err
-		}
+	if v.Owner == nil && !canManage(t, actor) {
+		return nil, errForbidden
 	}
 	return v, nil
 }
@@ -1643,7 +1732,7 @@ func buildView(tableId uuid.UUID, in ViewInput) (*model.View, error) {
 	if vtype == "" {
 		vtype = model.ViewGrid
 	}
-	if !model.ValidViewType(vtype) {
+	if !tableDomain.ValidViewType(vtype) {
 		return nil, fmt.Errorf("invalid view type")
 	}
 	cfg, err := jsonObject(in.Config)

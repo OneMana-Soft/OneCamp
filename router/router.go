@@ -99,8 +99,10 @@ func corsFor(origins []string) func(http.Handler) http.Handler {
 		// X-CSRF-Token: the web app takes its CSRF token from the answers (the
 		// cookie holding it is the API host's own and HttpOnly).
 		// Content-Disposition names a download; X-Total-Count and X-Export-Rows
-		// say when a task list's CSV holds only the first part of the list.
-		ExposedHeaders:   []string{"Link", "Retry-After", "X-CSRF-Token", "Content-Disposition", "X-Total-Count", "X-Export-Rows"},
+		// say when a task list's CSV holds only the first part of the list;
+		// X-Exported-Items, X-Export-Part and X-Export-Next say how many a legal
+		// hold's export holds, which part it is, and how to get the next.
+		ExposedHeaders:   []string{"Link", "Retry-After", "X-CSRF-Token", "Content-Disposition", "X-Total-Count", "X-Export-Rows", "X-Exported-Items", "X-Export-Part", "X-Export-Next"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	})
@@ -1641,6 +1643,8 @@ func routes() *chi.Mux {
 		r.Post("/{project_uuid}/fields/{field_id}/delete", taskFieldController.DeleteField)
 		// Task templates, the workspace's and each project's: router/taskTemplates.go.
 		taskTemplateRoutes(r)
+		// Dashboards, a person's own, the workspace's and each project's: router/dashboards.go.
+		dashboardRoutes(r)
 	})
 
 	channelRouter.Group(func(r chi.Router) {
@@ -1894,9 +1898,11 @@ func routes() *chi.Mux {
 		r.Post("/commentDelete", boardController.BoardCommentDelete)
 		r.Get("/getBoardSnapshots", boardController.GetBoardSnapshots)
 		r.Post("/restoreBoardSnapshot", boardController.RestoreBoardSnapshot)
+		// Protected objects: the owner or an admin locks and lifts, each in the audit log (miro-44).
+		r.Post("/protect", boardController.ProtectBoardElements)
 		r.Post("/recordView", boardController.RecordBoardView)
 		// An export the canvas made in the browser, for the admin audit log (miro-44).
-		r.With(customMiddleware.IPRateLimit("board-export", 60, "Too many exports from here. Wait a few minutes and try again.")).Post("/recordExport", boardController.RecordBoardExport)
+		mountBoardExportTell(r)
 		r.Get("/getViewers", boardController.GetBoardViewers)
 		r.Get("/getBoardAttachment/{board_uuid}/{obj_uuid}", userController.GetBoardAttachment)
 	})

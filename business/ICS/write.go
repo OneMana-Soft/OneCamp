@@ -110,6 +110,9 @@ type Message struct {
 	// and X-PUBLISHED-TTL). Both are left out when empty, as an invitation.
 	Name    string
 	Refresh time.Duration
+	// Note is what the file says about itself (X-WR-CALDESC), such as that it
+	// is one part of an export; left out when empty.
+	Note string
 }
 
 // Write is an iCalendar message about ev alone: METHOD method, and the event
@@ -132,6 +135,9 @@ func WriteMessage(m Message) []byte {
 	line("METHOD:" + value(m.Method))
 	if m.Name != "" {
 		line("X-WR-CALNAME:" + text(m.Name))
+	}
+	if m.Note != "" {
+		line("X-WR-CALDESC:" + text(m.Note))
 	}
 	if m.Refresh > 0 {
 		d := durationOf(m.Refresh)

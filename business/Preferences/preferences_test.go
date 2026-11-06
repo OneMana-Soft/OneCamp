@@ -64,3 +64,32 @@ func TestAKeyIsRegisteredOnce(t *testing.T) {
 	}()
 	Register("zone", Key{Default: json.RawMessage("null")})
 }
+
+// A key's Prepare runs once its check passes and before anything is written:
+// its refusal is Set's, and what it makes is held to the size limit too.
+func TestPrepareRefusesBeforeAnythingIsWritten(t *testing.T) {
+	Register("test.prepared", Key{Default: json.RawMessage("null"), Prepare: func(_ context.Context, _ uuid.UUID, v json.RawMessage) (json.RawMessage, error) {
+		if string(v) == `"big"` {
+			return json.RawMessage(`"` + strings.Repeat("a", MaxValueBytes) + `"`), nil
+		}
+		return nil, &Refused{"Not as given."}
+	}})
+	var refused *Refused
+	for value, says := range map[string]string{`"small"`: "Not as given.", `"big"`: "Keep it under 4 KB."} {
+		if err := Set(context.Background(), uuid.New(), "test.prepared", json.RawMessage(value)); !errors.As(err, &refused) || refused.Msg != says {
+			t.Errorf("%s: %v, want %q", value, err, says)
+		}
+	}
+}
+
+// What follows a change follows only a change: a refused value calls no hook.
+func TestARefusalCallsNoHook(t *testing.T) {
+	called := 0
+	OnChange("week_start", func(context.Context, uuid.UUID, json.RawMessage) { called++ })
+	if err := Set(context.Background(), uuid.New(), "week_start", json.RawMessage(`9`)); err == nil || called != 0 {
+		t.Errorf("a refused week_start: %v, the hook called %d times", err, called)
+	}
+	if got := len(changeHooks("week_start")); got != 1 {
+		t.Errorf("week_start has %d hooks", got)
+	}
+}

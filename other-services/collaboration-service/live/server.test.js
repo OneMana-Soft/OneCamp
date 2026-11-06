@@ -25,9 +25,9 @@ function call(base, path, { secret = SECRET, method = 'POST', body = '{}' } = {}
 
 test('the Live Doc Writer answers its ops, and nothing else', async () => {
     assert.deepEqual([...LIVE_ROUTES.keys()].sort(), ['append', 'applyProposal', 'insertAfter', 'placeSubpage', 'read', 'reauth', 'removeSubpage', 'render', 'replaceAll', 'replaceBlocks', 'seed', 'setTaskChecks'])
-    // A board takes no content op (its canvas is no doc): only its reauth and
-    // a call's guests' drawing (calls B).
-    assert.deepEqual([...BOARD_ROUTES.keys()], ['reauth', 'guestsSnapshot', 'guestsBegin', 'undoGuests'])
+    // A board takes no content op (its canvas is no doc): only its reauth, a
+    // call's guests' drawing (calls B) and protecting objects (miro-44).
+    assert.deepEqual([...BOARD_ROUTES.keys()], ['reauth', 'guestsSnapshot', 'guestsBegin', 'undoGuests', 'protect'])
     assert.deepEqual([...PEOPLE_ROUTES.keys()], ['close'])
     await withServer(LIVE_ROUTES, async (base) => {
         const res = await call(base, `/live/docs/${DOC}/rewriteHistory`)

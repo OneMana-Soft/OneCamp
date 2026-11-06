@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -114,5 +115,58 @@ func TestARefusedWriteSaysWhy(t *testing.T) {
 	two := append(one, RowError{Row: uuid.New(), Err: ErrRowTooLarge})
 	if two.Error() != "2 rows couldn't be written" {
 		t.Errorf("two rows: %q", two.Error())
+	}
+}
+
+// A column's change names its field and counts no row (V-455): a change set
+// of columns alone has none, and one with cells counts their rows alone.
+func TestAColumnsChangeCountsNoRow(t *testing.T) {
+	field, row := uuid.New(), uuid.New()
+	rows, fields := rowsAndFields([]Change{{Row: field, Field: FieldColumn}})
+	if rows != 0 || !reflect.DeepEqual(fields, []string{field.String()}) {
+		t.Errorf("columns alone: %d rows, fields %v", rows, fields)
+	}
+	rows, fields = rowsAndFields([]Change{{Row: field, Field: FieldColumn}, {Row: row, Field: field.String()}})
+	if rows != 1 || !reflect.DeepEqual(fields, []string{field.String()}) {
+		t.Errorf("a column and its cells: %d rows, fields %v", rows, fields)
+	}
+}
+
+// A column's state is what an undo puts back; the same column read twice is
+// no change, whatever its config's spacing, and a column made has no before.
+func TestAColumnsStateAndItsChange(t *testing.T) {
+	id := uuid.New()
+	note := "what it's for"
+	f := &Field{Id: id, Name: "Size", Type: "text", Config: `{"a": 1}`, Position: 2, Description: &note, Default: json.RawMessage("null")}
+	again := *f
+	again.Config = `{"a":1}`
+	if _, ok := ColumnChange(id, StateOf(f), StateOf(&again)); ok {
+		t.Error("the same column read twice is a change")
+	}
+	made, ok := ColumnChange(id, nil, StateOf(f))
+	if !ok || made.Before != nil || made.Field != FieldColumn || made.Row != id {
+		t.Fatalf("a column made: %+v, %v", made, ok)
+	}
+	if got := ColumnOf(made.After); !got.Same(StateOf(f)) || got.Default != nil || got.Description == nil || *got.Description != note {
+		t.Errorf("its state as stored: %+v", got)
+	}
+	for name, change := range map[string]func(*Field){
+		"renamed":       func(g *Field) { g.Name = "Bulk" },
+		"moved":         func(g *Field) { g.Position = 3 },
+		"retyped":       func(g *Field) { g.Type = "number" },
+		"reconfigured":  func(g *Field) { g.Config = `{"a":2}` },
+		"described":     func(g *Field) { g.Description = nil },
+		"made required": func(g *Field) { g.Required = true },
+		"defaulted":     func(g *Field) { g.Default = json.RawMessage(`"S"`) },
+		"trashed":       func(g *Field) { now := time.Now(); g.DeletedAt = &now },
+	} {
+		g := *f
+		change(&g)
+		if _, ok := ColumnChange(id, StateOf(f), StateOf(&g)); !ok {
+			t.Errorf("a column %s is no change", name)
+		}
+	}
+	if ColumnOf(nil) != nil || ColumnOf(json.RawMessage("null")) != nil {
+		t.Error("no state read as a column")
 	}
 }

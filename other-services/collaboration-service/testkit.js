@@ -291,18 +291,24 @@ class Reader {
 export class TestClient {
     // `schema` and `tab` go on the socket's URL, as a tab's do: the editor
     // schema it was built with and its own key (lib/collabSocket.ts).
-    constructor({ url, name, token = '{"sub":"user-1"}', schema, tab, doc = new Y.Doc() }) {
+    // `via` is a connected TestClient whose socket this doc rides: a tab
+    // carries every doc it opens on one socket (lib/collabSocket.ts), each doc
+    // with a client of its own.
+    constructor({ url, name, token = '{"sub":"user-1"}', schema, tab, doc = new Y.Doc(), via }) {
         this.url = url
         this.name = name
         this.token = token
         this.schema = schema
         this.tab = tab
         this.doc = doc
+        this.via = via
         this.events = []
         this.stateless = []
         this.statuses = []
         // Everyone's presence this tab has heard (awareness: client id -> state).
         this.others = new Map()
+        // Every client whose removal this tab heard, in order.
+        this.removals = []
         this.presenceClock = 0
         this.onUpdate = (update, origin) => {
             if (origin === this) return
@@ -331,17 +337,15 @@ export class TestClient {
         this.denied = null
         this.synced = false
         this.error = null
-        const params = new URLSearchParams()
-        if (this.schema) params.set('schema', this.schema)
-        if (this.tab) params.set('tab', this.tab)
-        const query = params.toString()
-        const ws = new WebSocket(query ? `${this.url}/?${query}` : this.url)
+        // A doc riding another's socket says who it is on that open socket,
+        // which stays its owner's to close.
+        if (this.via && this.via.ws?.readyState !== WebSocket.OPEN) throw new Error('the socket to ride is not open')
+        const ws = this.via ? this.via.ws : this.open()
         this.ws = ws
-        ws.binaryType = 'nodebuffer'
-        // Closed when the test ends, unless it closes the tab first.
-        this.release = onClose(() => closeSocket(ws))
         return new Promise((resolve) => {
-            ws.on('open', () => ws.send(this.msg(2, 0, this.token)))
+            const hello = () => ws.send(this.msg(2, 0, this.token))
+            if (this.via) hello()
+            else ws.on('open', hello)
             ws.on('message', (data) => this.handle(Buffer.from(data), resolve))
             // A socket that fails is closed next ('close' follows); kept here,
             // not thrown out of the test file.
@@ -349,9 +353,22 @@ export class TestClient {
             ws.on('close', () => resolve('closed'))
         })
     }
+    // open opens this tab's own socket, closed when the test ends unless the
+    // test closes the tab first.
+    open() {
+        const params = new URLSearchParams()
+        if (this.schema) params.set('schema', this.schema)
+        if (this.tab) params.set('tab', this.tab)
+        const query = params.toString()
+        const ws = new WebSocket(query ? `${this.url}/?${query}` : this.url)
+        ws.binaryType = 'nodebuffer'
+        this.release = onClose(() => closeSocket(ws))
+        return ws
+    }
     handle(buf, resolve) {
         const r = new Reader(buf)
-        r.string() // name
+        // A socket may carry other docs (via): each tab reads its own doc's.
+        if (r.string() !== this.name) return
         const type = r.uint()
         if (type === 2) {
             const auth = r.uint()
@@ -389,8 +406,10 @@ export class TestClient {
                 const id = u.uint()
                 u.uint()
                 const state = JSON.parse(u.string())
-                if (state === null) this.others.delete(id)
-                else this.others.set(id, state)
+                if (state === null) {
+                    this.others.delete(id)
+                    this.removals.push(id)
+                } else this.others.set(id, state)
             }
         }
     }
@@ -418,6 +437,7 @@ export class TestClient {
         writeVarString(out, payload)
         if (this.ws?.readyState === WebSocket.OPEN && this.authenticated) this.ws.send(Buffer.from(out))
     }
+    // close closes this tab's own socket; a doc riding another's closes with it.
     async close() {
         const release = this.release
         this.release = null
@@ -437,6 +457,18 @@ function closeSocket(ws) {
         ws.once('close', resolve)
         ws.close()
     })
+}
+
+// ended closes a tab's socket and waits until the server has ended it on the
+// tab's doc and on each doc riding it: Hocuspocus drops a connection and the
+// presence it held at once.
+export async function ended(collab, tab, ...riding) {
+    const tabs = [tab, ...riding]
+    const docs = tabs.map((t) => collab.server.hocuspocus.documents.get(t.name))
+    const before = docs.map((d) => d.getConnectionsCount())
+    await tab.close()
+    const what = `the server ends the socket on ${tabs.map((t) => t.name.slice(0, 5)).join(' and ')}`
+    await until(() => docs.every((d, i) => d.getConnectionsCount() < before[i]), 3000, what)
 }
 
 // Wait until a condition holds (polling), or fail after `ms`.

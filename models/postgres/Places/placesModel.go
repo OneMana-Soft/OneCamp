@@ -6,10 +6,13 @@ package models
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
+	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	"github.com/google/uuid"
 )
 
@@ -111,6 +114,40 @@ func RemoveEverywhere(ctx context.Context, resourceKind string, resourceUUIDs []
 	}
 	return err
 }
+
+// ForgetResourceRows removes what people's own rows hold of resources of one
+// kind ("doc", "board") gone for good: who viewed them, their saved-for-later
+// entries, and their guest links (the guests' one forget,
+// guestModel.ForgetResources; the guests' comments cascade), so no link
+// outlives what it opened. Each is tried on its own, and the first failure is
+// answered once every one was tried.
+func ForgetResourceRows(ctx context.Context, kind string, resourceUUIDs []string) error {
+	if len(resourceUUIDs) == 0 || postgresInit.DBConn == nil {
+		return nil
+	}
+	var first error
+	for _, q := range []string{
+		`DELETE FROM resource_views WHERE resource_type = $1 AND resource_uuid = ANY($2)`,
+		`DELETE FROM saved_items WHERE item_type = $1 AND item_id = ANY($2)`,
+	} {
+		if _, err := pgexec.Exec(ctx, q, kind, resourceUUIDs); err != nil {
+			helpers.LogErrorWithContext(ctx, "models/Places ForgetResourceRows %s: %v", strings.Fields(q)[2], err)
+			if first == nil {
+				first = err
+			}
+		}
+	}
+	if _, err := forgetGuestGrants(ctx, kind, resourceUUIDs); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/Places ForgetResourceRows guest_grants: %v", err)
+		if first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+// forgetGuestGrants is the guests' forget of links to resources gone for good.
+var forgetGuestGrants = guestModel.ForgetResources
 
 // View is one thing a person opened, and when they last did.
 type View struct {

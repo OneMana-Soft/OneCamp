@@ -164,3 +164,59 @@ func TestAnswersReadTypesAsTheAppDoes(t *testing.T) {
 		t.Fatalf("no types read as %#v, want an empty list", none)
 	}
 }
+
+// The list's and the board's filter by type (linear-03) names typed tasks
+// only: the chosen types' tasks, or, with Task chosen, the typed tasks of the
+// other types to leave out. Plain tasks are never listed, so a project of
+// plain work never sends the graph a list of every task.
+func TestTheTypeFilterNamesOnlyTypedTasks(t *testing.T) {
+	project, spike := uuid.New(), uuid.New()
+	var asked struct {
+		types   []uuid.UUID
+		outside bool
+		calls   int
+	}
+	held := map[bool][]string{}
+	swap(t, &typedTasks, func(_ context.Context, p uuid.UUID, types []uuid.UUID, outside bool) ([]string, error) {
+		if p != project {
+			t.Fatalf("read project %s, want %s", p, project)
+		}
+		asked.types, asked.outside, asked.calls = types, outside, asked.calls+1
+		return held[outside], nil
+	})
+	nothing := `eq(task_uuid, "00000000-0000-0000-0000-000000000000")`
+	for _, c := range []struct {
+		what    string
+		ids     []string
+		inside  []string
+		outside []string
+		want    string
+		types   []uuid.UUID
+		reads   int
+	}{
+		{"Bug", []string{TypeBug.String()}, []string{"t1", "t2"}, nil, `eq(task_uuid, ["t1","t2"])`, []uuid.UUID{TypeBug}, 1},
+		{"Bug and a project's own", []string{TypeBug.String(), spike.String()}, []string{"t1"}, nil, `eq(task_uuid, ["t1"])`, []uuid.UUID{TypeBug, spike}, 1},
+		{"a type with no tasks", []string{TypeFeature.String()}, nil, nil, nothing, []uuid.UUID{TypeFeature}, 1},
+		{"Task", []string{TypeTask.String()}, nil, []string{"t3"}, `NOT eq(task_uuid, ["t3"])`, nil, 1},
+		{"Task and Bug", []string{TypeTask.String(), TypeBug.String()}, nil, []string{"t3"}, `NOT eq(task_uuid, ["t3"])`, []uuid.UUID{TypeBug}, 1},
+		{"Task with no typed work", []string{TypeTask.String()}, nil, nil, "", nil, 1},
+		{"ids that are no type", []string{"bug", "", "1; drop"}, []string{"t1"}, []string{"t3"}, nothing, nil, 0},
+	} {
+		held[false], held[true], asked.calls = c.inside, c.outside, 0
+		got, err := FilterClause(context.Background(), project, c.ids)
+		if err != nil || got != c.want {
+			t.Errorf("%s: %q, %v; want %q", c.what, got, err, c.want)
+		}
+		if asked.calls != c.reads {
+			t.Errorf("%s: %d reads, want %d", c.what, asked.calls, c.reads)
+			continue
+		}
+		plain := c.what == "Task" || strings.HasPrefix(c.what, "Task ")
+		if c.reads > 0 && (asked.outside != plain || len(asked.types) != len(c.types)) {
+			t.Errorf("%s: read types %v outside %v; want %v outside %v", c.what, asked.types, asked.outside, c.types, plain)
+		}
+	}
+	if FilterID != "task_work_type" {
+		t.Errorf("the filter's id is %q; the web sends task_work_type", FilterID)
+	}
+}

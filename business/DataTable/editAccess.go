@@ -83,7 +83,7 @@ func loadEditable(ctx context.Context, id uuid.UUID, actor Actor) (*model.DataTa
 	}
 	ok, err := editsRows(ctx, t, actor)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load table")
+		return nil, storeFailed("failed to load table")
 	}
 	if !ok {
 		return nil, errReadOnly

@@ -8,8 +8,9 @@ package Calendar
 // A bulk write (an import, the demo's seeding) is its job's to record, not
 // each event's. Every change to a calendar itself is a row too
 // (gcal-new-audit-retention): who shared it with whom at what level, changed
-// or stopped a share, renamed or recoloured it, or subscribed to an address
-// or dropped one; never its name, and of an address only its host.
+// or stopped a share, renamed or recoloured it, subscribed to an address or
+// dropped one, or made or stopped a secret link to it (V-398: what the link
+// shows); never its name, of an address only its host, and of a link nothing.
 
 import (
 	"context"
@@ -50,6 +51,8 @@ var calendarChanges = map[resourceEventBusiness.Kind]bool{
 	resourceEventBusiness.CalendarUpdated:      true,
 	resourceEventBusiness.CalendarSubscribed:   true,
 	resourceEventBusiness.CalendarUnsubscribed: true,
+	resourceEventBusiness.CalendarFeedMade:     true,
+	resourceEventBusiness.CalendarFeedStopped:  true,
 }
 
 func auditsEvent(e resourceEventBusiness.Event) bool {
@@ -105,6 +108,17 @@ func eventChange(e resourceEventBusiness.Event) (string, map[string]interface{})
 // shareWords are a share's levels as the share dialog names them.
 var shareWords = map[string]string{models.ShareDetails: "see details", models.ShareEdit: "edit", models.ShareManage: "edit and share"}
 
+// feedWords are what a link to a calendar shows, as its row says it.
+var feedWords = map[string]string{models.FeedBusy: "busy only", models.FeedFull: "everything"}
+
+// showing is " (<what a link shows>)", or "" for a scope it doesn't know.
+func showing(scope string) string {
+	if w := feedWords[scope]; w != "" {
+		return " (" + w + ")"
+	}
+	return ""
+}
+
 // calendarChange is what happened to a calendar, and its row's metadata:
 // the calendar's id, the people a share reached, the levels and the host the
 // event names. Never the calendar's name, which its events don't carry. Pure.
@@ -131,6 +145,13 @@ func calendarChange(e resourceEventBusiness.Event) (string, map[string]interface
 		what = "subscribed to a calendar at " + e.Data["host"]
 	case resourceEventBusiness.CalendarUnsubscribed:
 		what = "unsubscribed from a calendar at " + e.Data["host"]
+	case resourceEventBusiness.CalendarFeedMade:
+		what = "made a link to a calendar" + showing(e.Data["scope"])
+		if old := e.Data["replaced"]; old != "" {
+			what = "made a new link to a calendar" + showing(e.Data["scope"]) + ", stopping the old one" + showing(old)
+		}
+	case resourceEventBusiness.CalendarFeedStopped:
+		what = "stopped a link to a calendar" + showing(e.Data["scope"])
 	}
 	meta := auditBusiness.EventMeta(e, true)
 	meta["calendar_uuid"] = e.ResourceUUID

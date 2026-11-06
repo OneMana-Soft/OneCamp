@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	labelBusiness "github.com/akashc777/OneCamp/business/Label"
 	"io"
 	"os"
 	"path"
@@ -60,6 +61,11 @@ func newPipeline() *pipeline { return &pipeline{exporters: map[string]Exporter{}
 // thePipeline is the pipeline the worker runs; Pipeline is it, unless a test
 // swapped Pipeline for a fake.
 var thePipeline = Pipeline.(*pipeline)
+
+// labelAllows is the label check every export asks before anything is made
+// (business/Label: no_export refuses it, and an unreadable label refuses too):
+// a seam for tests, which have no Postgres.
+var labelAllows = labelBusiness.Allows
 
 func (p *pipeline) RegisterImporter(i Importer) {
 	p.mu.Lock()
@@ -386,6 +392,9 @@ func (p *pipeline) export(ctx context.Context, who accessBusiness.Subject, res a
 	if err := checkRead(ctx, who, res); err != nil {
 		return err
 	}
+	if err := labelAllows(ctx, res.Kind, res.UUID, labelBusiness.RuleNoExport); err != nil {
+		return err
+	}
 	if err := exp.Export(ctx, who, res, to); err != nil {
 		return err
 	}
@@ -398,6 +407,11 @@ func (p *pipeline) RecordExport(ctx context.Context, who accessBusiness.Subject,
 		return ErrUnsupported
 	}
 	if err := checkRead(ctx, who, res); err != nil {
+		return err
+	}
+	// A label with no_export refuses the export before the browser makes it
+	// (the web awaits this tell first), as the server's own export above.
+	if err := labelAllows(ctx, res.Kind, res.UUID, labelBusiness.RuleNoExport); err != nil {
 		return err
 	}
 	emitExported(ctx, who, res, format, "browser")

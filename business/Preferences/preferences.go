@@ -34,12 +34,33 @@ type Key struct {
 	Default json.RawMessage
 	// Check says why a value can't be kept, in words for the person, or nil.
 	Check func(value json.RawMessage) error
+	// Prepare, when set, is the value kept for this person from one Check
+	// passed, or why it can't be kept: a key filled from the person's other
+	// keys (notify.schedule following their working hours) is filled here,
+	// before anything is written. Nil keeps the value as given.
+	Prepare func(ctx context.Context, user uuid.UUID, value json.RawMessage) (json.RawMessage, error)
 }
 
 var (
 	mu   sync.RWMutex
 	keys = map[string]Key{}
+	// hooks are what follows a change of each key (OnChange), by name.
+	hooks = map[string][]changeHook{}
 )
+
+// changeHook is what follows a change of a key (OnChange).
+type changeHook = func(ctx context.Context, user uuid.UUID, value json.RawMessage)
+
+// OnChange calls fn after every Set of the key named that keeps a value or
+// clears one, with the value the key reads as now (its default once
+// cleared), from an init. The key may be another package's: notify.schedule
+// follows calendar.working_hours and zone so (business/Notification). The
+// change is made by then, so fn answers nothing; it logs what it couldn't do.
+func OnChange(name string, fn changeHook) {
+	mu.Lock()
+	defer mu.Unlock()
+	hooks[name] = append(hooks[name], fn)
+}
 
 // Register declares a key, once, from its owner's package (an init).
 func Register(name string, k Key) {
@@ -131,6 +152,14 @@ func Set(ctx context.Context, user uuid.UUID, name string, value json.RawMessage
 		}
 	}
 	var err error
+	if !clear && k.Prepare != nil {
+		if value, err = k.Prepare(ctx, user, value); err != nil {
+			return err
+		}
+		if len(value) > MaxValueBytes {
+			return &Refused{fmt.Sprintf("Keep it under %d KB.", MaxValueBytes/1024)}
+		}
+	}
 	if clear {
 		err = models.Clear(ctx, user, name)
 		value = k.Default
@@ -142,7 +171,19 @@ func Set(ctx context.Context, user uuid.UUID, name string, value json.RawMessage
 	}
 	// Their other devices follow, on their own activity topic only.
 	mqttBusiness.PublishMessageToUser(user.String(), mqttStruct.MESSAGE_PREFERENCE, map[string]any{"key": name, "value": value})
+	// And what follows the change (OnChange), even once the request that
+	// made it is gone: the change is made.
+	for _, fn := range changeHooks(name) {
+		fn(context.WithoutCancel(ctx), user, value)
+	}
 	return nil
+}
+
+// changeHooks is what follows a change of the key named, in the order registered.
+func changeHooks(name string) []changeHook {
+	mu.RLock()
+	defer mu.RUnlock()
+	return append([]changeHook(nil), hooks[name]...)
 }
 
 // sameJSON is whether two JSON values are equal as values. Pure.

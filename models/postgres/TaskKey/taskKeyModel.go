@@ -729,6 +729,26 @@ func rowsOrNoType(res sql.Result, err error) error {
 	return nil
 }
 
+// TypedTasks is the ids of project's tasks that have a type other than Task:
+// those of types, or with outside, those of any type but these. One read, on
+// the tasks_type index; plain tasks (no type, or Task) are never listed.
+func TypedTasks(ctx context.Context, projectID uuid.UUID, types []uuid.UUID, outside bool) ([]string, error) {
+	if !connected() {
+		return nil, ErrNoDatabase
+	}
+	if types == nil {
+		types = []uuid.UUID{}
+	}
+	return pgexec.Query(ctx, `
+		SELECT t.id::text FROM tasks t JOIN task_types tt ON tt.id = t.task_type_id
+		WHERE t.project_id = $1 AND t.task_type_id IS NOT NULL AND tt.builtin IS DISTINCT FROM 'task'
+		  AND (t.task_type_id = ANY($2)) <> $3`, func(r pgexec.Row) (string, error) {
+		var id string
+		err := r.Scan(&id)
+		return id, err
+	}, projectID, types, outside)
+}
+
 // SetTaskType gives a task a type, or none (a Task) when typeID is nil: one
 // built in or its project's own, never archived. Answers the type it had and
 // the one it has now (nil for a Task).

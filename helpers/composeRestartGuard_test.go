@@ -72,6 +72,14 @@ var (
 // restartPolicies returns service name -> policy ("" when none is declared) for one compose file.
 func restartPolicies(t *testing.T, path string) map[string]string {
 	t.Helper()
+	return serviceSettings(t, path, composeRestartLine)
+}
+
+// serviceSettings returns service name -> the first value setting captures in that service's block
+// ("" when the service doesn't declare it) for one compose file: every guard here reads a service's
+// settings through it, so each sees the services TestComposeParserHasNoBlindSpots vouches for.
+func serviceSettings(t *testing.T, path string, setting *regexp.Regexp) map[string]string {
+	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("cannot read %s: %v. If a compose file was renamed, update deployedComposeFiles — "+
@@ -101,7 +109,7 @@ func restartPolicies(t *testing.T, path string) map[string]string {
 		if current == "" {
 			continue
 		}
-		if m := composeRestartLine.FindStringSubmatch(line); m != nil && out[current] == "" {
+		if m := setting.FindStringSubmatch(line); m != nil && out[current] == "" {
 			out[current] = m[1]
 		}
 	}

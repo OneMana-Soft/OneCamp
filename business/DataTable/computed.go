@@ -597,9 +597,11 @@ func (c *computed) checkRollup(ctx context.Context, r *rollupField, byID map[str
 // rollupChainProblem is why rollup self can't add up of, a rollup in a table
 // with fields, or "": the rollups it would go through, each adding up the
 // next, go more than maxRollupDepth deep counting self, or come back round to
-// one of them. fieldsOf is a table's fields, none when the reader can't open
-// it; a rollup on the way that can't be worked out says why itself.
-func rollupChainProblem(self uuid.UUID, of *model.Field, fields []*model.Field, fieldsOf func(uuid.UUID) []*model.Field) string {
+// one of them. tableFields is a table's fields, none when the reader can't
+// open it: the caller's read, which reads each table once (computed.open on a
+// read, linkedTables on a save). A rollup on the way that can't be worked out
+// says why itself.
+func rollupChainProblem(self uuid.UUID, of *model.Field, fields []*model.Field, tableFields func(uuid.UUID) []*model.Field) string {
 	seen := map[uuid.UUID]bool{self: true}
 	for depth := 2; ; depth++ {
 		if seen[of.Id] {
@@ -614,7 +616,7 @@ func rollupChainProblem(self uuid.UUID, of *model.Field, fields []*model.Field, 
 		if !ok {
 			return ""
 		}
-		fields = fieldsOf(l.table)
+		fields = tableFields(l.table)
 		if of = resolveField(fields, cfg.Field); of == nil || of.Type != model.FieldRollup {
 			return ""
 		}
