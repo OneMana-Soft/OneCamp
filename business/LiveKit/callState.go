@@ -23,6 +23,7 @@ import (
 	transcriptionBusiness "github.com/akashc777/OneCamp/business/Transcription"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 )
@@ -122,6 +123,18 @@ var callEvent = func(_ context.Context, _ string) (string, error) { return "", n
 // call is.
 func OnCallEvent(fn func(ctx context.Context, room string) (string, error)) {
 	callEvent = fn
+}
+
+// eventCallMember answers whether a member may be in the call of an event's
+// room by the calendar's own rule (gcal-15 head B): whoever may read the
+// details of an event whose room it is. Call State, which this package
+// can't import, says how (OnEventCallMember); until it does, nobody is.
+var eventCallMember = func(_ context.Context, _ string, _ *dgraphStruct.DgraphUser) (bool, error) { return false, nil }
+
+// OnEventCallMember tells this package how to decide who may be in an
+// event's call.
+func OnEventCallMember(fn func(ctx context.Context, room string, u *dgraphStruct.DgraphUser) (bool, error)) {
+	eventCallMember = fn
 }
 
 // keepsTranscript reports whether a call in this room has somewhere to keep a

@@ -62,14 +62,18 @@ func GetDefaultBranch(ctx context.Context, owner, repo string) (string, error) {
 // contents API returns without inline content yield an error the caller can
 // skip over.
 func FetchFileContent(ctx context.Context, owner, repo, path, ref string) (string, error) {
+	// /repos/{o}/{r}/contents/{path}?ref=...: a path that would leave the
+	// repository once resolved is refused before anything is asked.
+	file, err := repoFilePath(path)
+	if err != nil {
+		return "", err
+	}
 	client, err := GitHubHTTPClient(ctx)
 	if err != nil {
 		return "", err
 	}
-	// Build /repos/{o}/{r}/contents/{path}?ref=...; escape each path segment
-	// but keep the slashes between them.
 	u := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s",
-		url.PathEscape(owner), url.PathEscape(repo), escapePath(path))
+		url.PathEscape(owner), url.PathEscape(repo), file)
 	if strings.TrimSpace(ref) != "" {
 		u += "?ref=" + url.QueryEscape(ref)
 	}
@@ -113,11 +117,15 @@ func SearchCode(ctx context.Context, owner, repo, query string, max int) ([]Code
 	if max <= 0 || max > 20 {
 		max = 10
 	}
+	// The query's words alone, in owner/repo alone (RepoSearchQuery).
+	q, err := RepoSearchQuery(query, owner, repo)
+	if err != nil {
+		return nil, err
+	}
 	client, err := GitHubHTTPClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	q := fmt.Sprintf("%s repo:%s/%s", strings.TrimSpace(query), owner, repo)
 	u := fmt.Sprintf("https://api.github.com/search/code?q=%s&per_page=%d", url.QueryEscape(q), max)
 	body, err := githubGet(ctx, client, u)
 	if err != nil {
@@ -354,16 +362,6 @@ func ListRecentCommits(ctx context.Context, owner, repo, branch string, sinceDay
 		}
 	}
 	return out, nil
-}
-
-// escapePath escapes each segment of a repo-relative path while preserving the
-// "/" separators, so "src/pkg/file.go" stays a valid contents-API path.
-func escapePath(p string) string {
-	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
-	for i, s := range segs {
-		segs[i] = url.PathEscape(s)
-	}
-	return strings.Join(segs, "/")
 }
 
 // PRFile is one changed file in a pull request, with its unified-diff patch.

@@ -19,6 +19,7 @@ import (
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	model "github.com/akashc777/OneCamp/models/postgres/TaskField"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/google/uuid"
 )
@@ -87,8 +88,18 @@ func TestCustomFields(t *testing.T) {
 		t.Errorf("someone OneCamp doesn't know: %v", err)
 	}
 
+	// A bare context reads as nobody, an admin of nothing: the money
+	// field's value is kept from it (V-698, fails closed). The server's own
+	// reads (taskread.WithSystem) see every value.
+	bare := []*dgraphStruct.DgraphTask{{Uuid: t1.Uuid}}
+	if err := MergeFieldValues(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	if _, told := bare[0].Fields[budget.ID.String()]; told || len(bare[0].Fields) != 4 {
+		t.Fatalf("a bare context's values: %v", bare[0].Fields)
+	}
 	tasks := []*dgraphStruct.DgraphTask{{Uuid: t1.Uuid}, {Uuid: t2.Uuid}, {Uuid: t3.Uuid}}
-	if err := MergeFieldValues(ctx, tasks); err != nil {
+	if err := MergeFieldValues(taskread.WithSystem(ctx), tasks); err != nil {
 		t.Fatal(err)
 	}
 	if len(tasks[0].Fields) != 5 || string(tasks[0].Fields[budget.ID.String()]) != "125000" || len(tasks[1].Fields) != 1 || tasks[2].Fields != nil {
@@ -180,7 +191,7 @@ func TestCustomFields(t *testing.T) {
 	if err := CopyValues(ctx, uuid.MustParse(t1.Uuid), uuid.MustParse(t3.Uuid), admin); err != nil {
 		t.Fatal(err)
 	}
-	copied, _ := model.ValuesFor(ctx, []uuid.UUID{uuid.MustParse(t3.Uuid)})
+	copied, _, _ := model.ReadValues(ctx, []uuid.UUID{uuid.MustParse(t3.Uuid)})
 	var got []string
 	for id := range copied[t3.Uuid] {
 		got = append(got, id)
@@ -214,7 +225,7 @@ func TestCustomFields(t *testing.T) {
 	if v, _ := model.ValueOf(ctx, uuid.MustParse(t1.Uuid), budget.ID); v != nil {
 		t.Errorf("the deleted field's value reads: %s", v)
 	}
-	if values, _ := model.ValuesFor(ctx, []uuid.UUID{uuid.MustParse(t1.Uuid)}); values[t1.Uuid][budget.ID.String()] != nil {
+	if values, _, _ := model.ReadValues(ctx, []uuid.UUID{uuid.MustParse(t1.Uuid)}); values[t1.Uuid][budget.ID.String()] != nil {
 		t.Errorf("the deleted field's value is listed")
 	}
 	if fields, _ := List(ctx, project); len(fields) != 4 {

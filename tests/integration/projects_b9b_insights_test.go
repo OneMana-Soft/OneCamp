@@ -66,7 +66,7 @@ func TestB9b1InsightsOnAnyViewAndFieldSlices(t *testing.T) {
 	w.dg.Mutate(t, mut)
 
 	// Website's fields: Team (select), Areas (multi-select), Reviewer
-	// (person) and Notes (text, which slices nothing).
+	// (person) and Notes (text, which slices by its values since L32).
 	field := func(in taskFieldBusiness.Input) *taskFieldModel.Field {
 		t.Helper()
 		f, err := taskFieldBusiness.Create(ctx, project, in, w.people["ana"], "")
@@ -170,18 +170,18 @@ func TestB9b1InsightsOnAnyViewAndFieldSlices(t *testing.T) {
 		if names[byTeam+"/"+web] != "Web" || names[byAreas+"/"+site] != "Site" || names[byReviewer+"/"+w.people["ben"].String()] != "ben" {
 			t.Errorf("slices name their option or person: %v", names)
 		}
-		// The fields sliced, named for the picker; text fields slice nothing.
-		want := map[string]string{byTeam: "Team/select", byAreas: "Areas/multi_select", byReviewer: "Reviewer/person"}
+		// The fields sliced, named for the picker.
+		want := map[string]string{byTeam: "Team/select", byAreas: "Areas/multi_select", byReviewer: "Reviewer/person", "field:" + notes.ID.String(): "Notes/text"}
 		if len(r.Data.Insights.Fields) != len(want) {
-			t.Fatalf("fields %+v, want Team, Areas and Reviewer", r.Data.Insights.Fields)
+			t.Fatalf("fields %+v, want Team, Areas, Reviewer and Notes", r.Data.Insights.Fields)
 		}
 		for _, f := range r.Data.Insights.Fields {
 			if want[f.By] != f.Name+"/"+f.Type || f.Project != w.project {
 				t.Errorf("field %+v, want %s in Website", f, want[f.By])
 			}
 		}
-		if _, ok := ageIn(r, "field:"+notes.ID.String(), ""); ok {
-			t.Errorf("a text field made slices: %s", body)
+		if n, ok := ageIn(r, "field:"+notes.ID.String(), "draft"); !ok || n != 1 {
+			t.Errorf("a text field slices by its value: %s", body)
 		}
 	})
 

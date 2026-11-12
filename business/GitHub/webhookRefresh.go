@@ -15,8 +15,14 @@ import (
 )
 
 // StartWebhookRefresh registers each linked repository's webhook again, once,
-// in the background.
+// in the background. Not on the public demo, which writes nothing to GitHub
+// (workspaceWrites): its GitHub story is fixtures, and this was the write it
+// made at every start, on a real repository.
 func StartWebhookRefresh(ctx context.Context) {
+	if helpers.DemoMode() {
+		helpers.MessageLogs.InfoLog.Println("github: the demo writes nothing to GitHub, so no repository's webhook is registered again at start")
+		return
+	}
 	helpers.GoSafeNamed("github.webhook-refresh", func() {
 		links, err := GetAllLinkedRepos(ctx)
 		if err != nil {

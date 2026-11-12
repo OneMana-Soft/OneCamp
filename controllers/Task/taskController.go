@@ -395,8 +395,15 @@ func writeMakeFailure(w http.ResponseWriter, r *http.Request, err error, couldnt
 		helpers.WriteBadRequest(w, "Couldn't save the dates: "+err.Error()+".")
 		return
 	}
+	if errors.Is(err, business.ErrHierarchy) {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": err.Error()})
+		return
+	}
 	helpers.WriteWriteFailure(w, r, err, couldnt, where)
 }
+
+// notAPriority refuses a priority off the one scale (business/TaskPriority).
+const notAPriority = "That isn't a priority. Pick urgent, high, medium, low or none."
 
 func CreateTask(w http.ResponseWriter, r *http.Request) {
 
@@ -454,14 +461,10 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(createTaskInfoInput.Priority) == 0 {
-		createTaskInfoInput.Priority = dgraphStruct.TASK_PRIORITY_MEDIUM
-	}
-
-	if !taskPriority.Is(createTaskInfoInput.Priority) {
+	// None given is none ("No priority"), as Linear makes it.
+	if !taskPriority.IsOrNone(createTaskInfoInput.Priority) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Invalid priority",
-			"err": err,
+			"msg": notAPriority,
 		})
 		return
 	}
@@ -786,7 +789,7 @@ func GetTaskInfo(w http.ResponseWriter, r *http.Request) {
 	// Merge ephemeral GitHub metadata from PostgreSQL into the Dgraph response
 	if dgraphTaskInfo != nil {
 		_ = business.MergeGitHubMetaIntoTask(ctx, taskUUID, dgraphTaskInfo)
-		_ = taskFieldBusiness.MergeFieldValues(ctx, []*dgraphStruct.DgraphTask{dgraphTaskInfo})
+		_ = taskFieldBusiness.MergeFieldValues(helpers.WithZone(ctx, r.URL.Query().Get("tz")), []*dgraphStruct.DgraphTask{dgraphTaskInfo})
 		// What the reader may do with it and in its project, for the panel
 		// (task_access, project_access). Without them the app keeps to the
 		// project's admins changing it, so a failed read of roles is said in
@@ -1575,9 +1578,18 @@ func UpdateTaskPriority(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if len(createTaskInfoInput.Priority) == 0 || len(createTaskInfoInput.Uuid) == 0 || len(createTaskInfoInput.ProjectUuid) == 0 {
+	if len(createTaskInfoInput.Uuid) == 0 || len(createTaskInfoInput.ProjectUuid) == 0 {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "task_priority, task_uuid and task_project_uuid are required",
+			"msg": "task_uuid and task_project_uuid are required",
+		})
+		return
+	}
+
+	// None takes the priority off ("No priority", key 0): "" is a priority
+	// to set, not one left out.
+	if !taskPriority.IsOrNone(createTaskInfoInput.Priority) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+			"msg": notAPriority,
 		})
 		return
 	}
@@ -1612,14 +1624,6 @@ func UpdateTaskPriority(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
-		return
-	}
-
-	// None takes the priority off ("No priority", key 0).
-	if !taskPriority.IsOrNone(createTaskInfoInput.Priority) {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "That isn't a priority. Pick urgent, high, medium, low or none.",
-		})
 		return
 	}
 
@@ -1772,6 +1776,10 @@ func CreateSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, ok := projectaccess.Allow(w, r, dgraphProjectInfo, workAccess.NeedCreateTask, ""); !ok {
+		return
+	}
+	if !taskPriority.IsOrNone(createSubTaskInfoInput.Priority) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": notAPriority})
 		return
 	}
 
@@ -2386,93 +2394,32 @@ func GetGitHubSyncStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// SearchGitHubIssues searches for GitHub issues in the linked repo by title.
+// SearchGitHubIssues searches for GitHub issues in the linked repo by title,
+// for whoever may see the task.
 func SearchGitHubIssues(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
 	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"), workAccess.NeedView)
 	if !ok {
 		return
 	}
-
-	query := r.URL.Query().Get("q")
-	if query == "" {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Query parameter 'q' is required"})
-		return
-	}
-
-	projectID, err := taskDomain.GetTaskProjectID(ctx, taskUUID)
-	if err != nil || projectID == uuid.Nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Task has no project"})
-		return
-	}
-
-	links, err := githubBusiness.GetLinkedRepos(ctx, projectID)
-	if err != nil || len(links) == 0 {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "No linked GitHub repo for project"})
-		return
-	}
-	link := links[0]
-
-	integration, err := integrationDomain.GetIntegration(ctx, "org", uuid.Nil, "github")
-	if err != nil || integration == nil || integration.AccessToken == nil || *integration.AccessToken == "" {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "GitHub not connected"})
-		return
-	}
-
-	client, err := githubBusiness.GitHubHTTPClient(ctx)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "GitHub not connected"})
-		return
-	}
-
-	searchURL := fmt.Sprintf("https://api.github.com/search/issues?q=%s+repo:%s/%s+is:issue&sort=updated&order=desc&per_page=10",
-		url.QueryEscape(query), link.RepoOwner, link.RepoName)
-
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		helpers.WriteJSON(w, resp.StatusCode, helpers.Envolope{"error": string(body)})
-		return
-	}
-
-	var result struct {
-		Items []struct {
-			Number    int    `json:"number"`
-			Title     string `json:"title"`
-			HTMLURL   string `json:"html_url"`
-			State     string `json:"state"`
-			CreatedAt string `json:"created_at"`
-			User      struct {
-				Login string `json:"login"`
-			} `json:"user"`
-		} `json:"items"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"issues": result.Items})
+	searchProjectRepo(w, r, taskUUID, "is:issue", "issues")
 }
 
-// SearchGitHubPRs searches for GitHub PRs in the linked repo by title.
+// SearchGitHubPRs searches for GitHub PRs in the linked repo by title, for
+// whoever may see the task.
 func SearchGitHubPRs(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
 	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"), workAccess.NeedView)
 	if !ok {
 		return
 	}
+	searchProjectRepo(w, r, taskUUID, "is:pr", "prs")
+}
+
+// searchProjectRepo answers a search, for the request's q, of the repository
+// the task's project links on GitHub: the ten items of kind ("is:issue",
+// "is:pr") updated last, under key in the answer. The route has checked the
+// task.
+func searchProjectRepo(w http.ResponseWriter, r *http.Request, taskUUID uuid.UUID, kind, key string) {
+	ctx := r.Context()
 
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -2505,8 +2452,15 @@ func SearchGitHubPRs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	searchURL := fmt.Sprintf("https://api.github.com/search/issues?q=%s+repo:%s/%s+is:pr&sort=updated&order=desc&per_page=10",
-		url.QueryEscape(query), link.RepoOwner, link.RepoName)
+	// The person's words alone, in the project's repository alone: a
+	// qualifier in them (repo:, org:, ...) would widen the search to whatever
+	// else the workspace's GitHub connection reaches.
+	q, err := githubBusiness.RepoSearchQuery(query, link.RepoOwner, link.RepoName, kind)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "The project's repository can't be searched"})
+		return
+	}
+	searchURL := "https://api.github.com/search/issues?q=" + url.QueryEscape(q) + "&sort=updated&order=desc&per_page=10"
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -2541,7 +2495,7 @@ func SearchGitHubPRs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"prs": result.Items})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{key: result.Items})
 }
 
 // BulkUnlinkTasksFromGitHub removes GitHub metadata from multiple tasks, each

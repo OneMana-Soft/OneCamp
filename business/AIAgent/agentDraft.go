@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 
+	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	ai "github.com/akashc777/OneCamp/services/AI"
 )
 
@@ -25,7 +26,6 @@ const (
 )
 
 var draftValidTriggers = map[string]bool{"manual": true, "mention": true, "schedule": true, "event": true}
-var draftValidAutonomy = map[string]bool{"auto": true, "approval": true, "plan": true}
 
 // AgentDraft is a proposed agent configuration the builder prefills. It mirrors
 // the subset of the create form the AI can sensibly fill; everything else keeps
@@ -179,10 +179,8 @@ func sanitizeAgentDraft(d *AgentDraft) *AgentDraft {
 	if !draftValidTriggers[out.TriggerType] {
 		out.TriggerType = "manual"
 	}
-	out.Autonomy = strings.ToLower(strings.TrimSpace(d.Autonomy))
-	if !draftValidAutonomy[out.Autonomy] {
-		out.Autonomy = "auto"
-	}
+	// A draft that names no mode asks first, as a new agent does.
+	out.Autonomy = model.AutonomyOrDefault(strings.ToLower(strings.TrimSpace(d.Autonomy)))
 	out.MaxSteps = d.MaxSteps
 	if out.MaxSteps < 1 || out.MaxSteps > draftMaxSteps {
 		out.MaxSteps = draftDefaultMaxSteps

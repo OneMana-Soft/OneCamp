@@ -33,6 +33,7 @@ import (
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	taskField "github.com/akashc777/OneCamp/business/TaskField"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/currency"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	taskFieldModel "github.com/akashc777/OneCamp/models/postgres/TaskField"
 	"github.com/google/uuid"
@@ -229,7 +230,7 @@ func (pf *projectFields) givenToAnother(ctx context.Context, field uuid.UUID, ke
 // name and type (and, for money, currency). Pure.
 func sameField(f *taskFieldModel.Field, name string, d importProvider.SourceField) bool {
 	return strings.EqualFold(f.Name, name) && f.Type == d.Type &&
-		(d.Type != importProvider.FieldMoney || d.Currency == "" || f.Currency == strings.ToUpper(d.Currency))
+		(d.Type != importProvider.FieldMoney || d.Currency == "" || f.Currency == currency.Code(d.Currency))
 }
 
 // freeName is name, or name with a number after it when the project has a

@@ -11,6 +11,7 @@ import (
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	businessComment "github.com/akashc777/OneCamp/business/Comment"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	domain "github.com/akashc777/OneCamp/domain/Doc"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -711,6 +712,9 @@ func UpdateDocComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *a
 		UpdatedAt: &currentTime,
 	}
 
+	// Who the comment named before this save: only whom it adds is told.
+	mentions, tellMentions := notificationBusiness.SaveOfMentions(ctx, "comment", commentUUID.String(), mentionsDgraphUsersList)
+
 	err = businessComment.UpdateComment(ctx, &dgraphComment, commentUUID, currentTime)
 
 	if err != nil {
@@ -718,6 +722,9 @@ func UpdateDocComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *a
 			"business/UpdateDocComment Failed to update comment on doc err: %+v",
 			err)
 		return
+	}
+	if tellMentions {
+		tellDocCommentMentionsAdded(ctx, notificationBusiness.ActorOf(ctx, rawDgraphCommentInfo.CommentBy.Uuid), rawDgraphCommentInfo.Doc, commentUUID.String(), commentInfo.CommentBody, mentions)
 	}
 
 	mqttDocComment := mqttStruct.MqttDocComment{

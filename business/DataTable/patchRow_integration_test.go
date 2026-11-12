@@ -3,8 +3,7 @@
 package business
 
 // Changing some of a row's cells, against Postgres 12 with every migration:
-// the rest of the row and its place stay as they are, and an AI fill holding
-// an old copy of the row doesn't undo what changed meanwhile.
+// the rest of the row and its place stay as they are.
 // Run: go test -tags=integration ./business/DataTable/ -run TestChangingSomeCells -v
 
 import (
@@ -66,20 +65,16 @@ func TestChangingSomeCellsLeavesTheRest(t *testing.T) {
 		t.Errorf("after setting one cell: %v at %v", v, pos)
 	}
 
-	// An AI fill read the row; then someone changed a cell and moved the row;
-	// then the fill wrote its answer. Both changes stand.
-	stale, err := model.GetRowByID(ctx, table.Id, row.Id)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Someone changed a cell and moved the row; then another person set one
+	// other cell, naming it alone. Both changes stand.
 	if _, err := UpdateRow(ctx, table.Id, row.Id, RowInput{Values: map[string]interface{}{name: "Acme Ltd", stage: "Won"}, Position: at(9)}, actor); err != nil {
 		t.Fatalf("a person's edit: %v", err)
 	}
-	if err := writeCellInto(ctx, table, stale, &model.Field{Id: uuid.MustParse(notes), Name: "Notes", Type: model.FieldText}, "Big account", "", false, uuid.Nil); err != nil {
-		t.Fatalf("the fill: %v", err)
+	if _, err := PatchRow(ctx, table.Id, row.Id, map[string]interface{}{notes: "Big account"}, actor); err != nil {
+		t.Fatalf("the second edit: %v", err)
 	}
 	if v, pos := stored(); v[name] != "Acme Ltd" || v[stage] != "Won" || v[notes] != "Big account" || pos != 9 {
-		t.Errorf("after the fill: %v at %v", v, pos)
+		t.Errorf("after the second edit: %v at %v", v, pos)
 	}
 
 	// A change that would make the row too big is refused, and changes nothing.
@@ -92,7 +87,7 @@ func TestChangingSomeCellsLeavesTheRest(t *testing.T) {
 	}
 
 	// A deleted row isn't brought back by a change.
-	if err := DeleteRow(ctx, table.Id, row.Id, actor); err != nil {
+	if _, err := DeleteRow(ctx, table.Id, row.Id, actor); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := PatchRow(ctx, table.Id, row.Id, map[string]interface{}{stage: "Lost"}, actor); err == nil {

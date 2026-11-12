@@ -92,7 +92,7 @@ var ToolRegistry = []ToolDef{
 			{Name: "task_name", Type: "string", Required: true, Description: "Name/title of the task"},
 			{Name: "project_uuid", Type: "string", Required: true, Description: "UUID of the project to create the task in"},
 			{Name: "description", Type: "string", Required: false, Description: "Task description/details"},
-			{Name: "priority", Type: "string", Required: false, Description: "Priority: low, medium, high, urgent"},
+			{Name: "priority", Type: "string", Required: false, Description: "Priority: low, medium, high, urgent; leave it out unless the user says how urgent it is"},
 			{Name: "assignee_uuid", Type: "string", Required: false, Description: "UUID of the user to assign the task to"},
 		},
 	},

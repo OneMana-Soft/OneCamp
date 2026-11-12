@@ -192,33 +192,62 @@ func Widgets(ctx context.Context, d Dashboard) ([]Widget, error) {
 	return out, nil
 }
 
-// AddWidget puts w on d, as by, while d has room.
+// AddWidget puts w on d, as by, while d has room: over a saved view, one of
+// by's own that fits d (checkView). It is a batch of one (AddWidgets).
 func AddWidget(ctx context.Context, d Dashboard, w Widget, by uuid.UUID) (Widget, error) {
-	w, err := CheckWidget(d, w)
+	made, err := AddWidgets(ctx, d, []Widget{w}, by)
 	if err != nil {
 		return w, err
 	}
-	m, err := widgetRow(d, w)
-	if err != nil {
-		return w, err
-	}
-	m.CreatedBy = by
-	added, err := model.AddWidgetWithin(ctx, &m, MaxWidgets)
-	if err != nil {
-		return w, err
-	}
-	if !added {
-		return w, ErrFull
-	}
-	w.ID = m.ID.String()
-	return w, nil
+	return made[0], nil
 }
 
-// ChangeWidget changes d's widget w.ID to w, as by.
+// AddWidgets puts ws on d at once, as by, while d has room for every one of
+// them: all go on, or none (the first that fails its check, a view that
+// isn't by's own to put on d, or ErrFull). Their views are read in one go.
+func AddWidgets(ctx context.Context, d Dashboard, ws []Widget, by uuid.UUID) ([]Widget, error) {
+	id, err := uuid.Parse(d.ID)
+	if err != nil {
+		return nil, ErrNotFound
+	}
+	out := make([]Widget, len(ws))
+	rows := make([]model.Widget, len(ws))
+	for i, w := range ws {
+		if out[i], err = CheckWidget(d, w); err != nil {
+			return nil, err
+		}
+		if rows[i], err = widgetRow(d, out[i]); err != nil {
+			return nil, err
+		}
+	}
+	if err := checkViews(ctx, d, out, by); err != nil {
+		return nil, err
+	}
+	added, err := model.AddWidgetsWithin(ctx, id, rows, by, MaxWidgets)
+	if err != nil {
+		return nil, err
+	}
+	if !added {
+		return nil, ErrFull
+	}
+	for i := range out {
+		out[i].ID = rows[i].ID.String()
+	}
+	return out, nil
+}
+
+// ChangeWidget changes d's widget w.ID to w, as by. A view it newly reads is
+// one of by's own that fits d (checkView); the view it read already stays,
+// so any keeper may retitle or move a widget over another keeper's view.
 func ChangeWidget(ctx context.Context, d Dashboard, w Widget, by uuid.UUID) (Widget, error) {
 	w, err := CheckWidget(d, w)
 	if err != nil {
 		return w, err
+	}
+	if w.Query.View != "" {
+		if err := checkChangedView(ctx, d, w, by); err != nil {
+			return w, err
+		}
 	}
 	m, err := widgetRow(d, w)
 	if err != nil {
@@ -228,6 +257,28 @@ func ChangeWidget(ctx context.Context, d Dashboard, w Widget, by uuid.UUID) (Wid
 		return w, ErrNotFound
 	}
 	return w, notFound(model.UpdateWidget(ctx, &m, by))
+}
+
+// keptWidgets reads d's widgets as they stand (a seam for tests).
+var keptWidgets = Widgets
+
+// checkChangedView is checkView for w's view, unless d's widget w.ID reads
+// it already.
+func checkChangedView(ctx context.Context, d Dashboard, w Widget, by uuid.UUID) error {
+	kept, err := keptWidgets(ctx, d)
+	if err != nil {
+		return err
+	}
+	id, err := uuid.Parse(w.ID)
+	if err != nil {
+		return ErrNotFound
+	}
+	for _, k := range kept {
+		if k.ID == id.String() && k.Query.View == w.Query.View {
+			return nil
+		}
+	}
+	return checkView(ctx, d, w.Query.View, by)
 }
 
 func widgetRow(d Dashboard, w Widget) (model.Widget, error) {

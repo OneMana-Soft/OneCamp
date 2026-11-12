@@ -25,6 +25,7 @@ package Calendar
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strconv"
 	"time"
@@ -163,12 +164,20 @@ var fallbackWords = map[string]string{
 }
 
 // reminderEmailWhy ends a reminder email. It has no unsubscribe link (an
-// unsubscribe never stops a reminder the person asked for), so it says where.
-const reminderEmailWhy = "You asked for this reminder by email. To stop it, change or remove the reminder on the event."
+// unsubscribe never stops a reminder the person asked for), so it says where
+// to stop it: on the event, or, for one their default reminders gave
+// (fromDefault), in the calendar's Default reminders (V-524). Pure.
+func reminderEmailWhy(fromDefault bool) string {
+	if fromDefault {
+		return "This reminder comes by email from your default reminders. To stop it, change Default reminders on the calendar's menu in Calendar."
+	}
+	return "You asked for this reminder by email. To stop it, change or remove the reminder on the event."
+}
 
 // sendByEmail emails person a reminder, and is whether it went: "" when it
-// did, else why not ("limit" or "unsent").
-func sendByEmail(ctx context.Context, person uuid.UUID, title, body, path, dedup string) string {
+// did, else why not ("limit" or "unsent"). fromDefault is a reminder their
+// default reminders gave.
+func sendByEmail(ctx context.Context, person uuid.UUID, title, body, path, dedup string, fromDefault bool) string {
 	if emailLimitReached(ctx) {
 		return "limit"
 	}
@@ -176,7 +185,7 @@ func sendByEmail(ctx context.Context, person uuid.UUID, title, body, path, dedup
 		Type: notificationBusiness.EventCalendarReminder, SubjectLine: title, Title: title, Body: body,
 		CTAURL: notificationBusiness.AppURL(path), CTAText: "Open in OneCamp",
 		DedupKeyParts: []string{dedup}, Recipients: []notificationBusiness.Recipient{{UserUUID: person}},
-		Requested: true, SkipOnlineCheck: true, Why: reminderEmailWhy,
+		Requested: true, SkipOnlineCheck: true, Why: reminderEmailWhy(fromDefault),
 	})
 	if n > 0 {
 		return ""
@@ -264,11 +273,15 @@ func init() {
 			}
 		}})
 	preferencesBusiness.Register(PrefDefaultReminders, preferencesBusiness.Key{Default: json.RawMessage("{}"), Check: defaultRemindersProblem})
-	// A change of them plans the person's coming events again.
-	preferencesBusiness.OnChange(PrefDefaultReminders, func(ctx context.Context, user uuid.UUID, _ json.RawMessage) {
+	// A change of them plans the person's coming events again, in the same
+	// change (OnChange): a replan that fails keeps the old defaults too, so
+	// their reminders never stay planned under defaults they replaced, and
+	// they are told the save didn't happen (V-532).
+	preferencesBusiness.OnChange(PrefDefaultReminders, func(ctx context.Context, user uuid.UUID, _ json.RawMessage) error {
 		if err := stored.defaultsChanged(ctx, user); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/Calendar: %s's default reminders were kept and their events not planned again: %v", user, err)
+			return fmt.Errorf("business/Calendar: %s's events couldn't be planned again for their new default reminders: %w", user, err)
 		}
+		return nil
 	})
 }
 

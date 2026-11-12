@@ -76,25 +76,14 @@ func ForgetChatSetting(ctx context.Context, userID, grpID string) error {
 	return domain.ForgetChatSetting(ctx, userID, grpID)
 }
 
-// GetEligibleUsersForChatActivity is who hears of something in the DM or group
-// grpId by their setting for it, of those in it now (InConversationNow): a
-// setting can outlive someone's place in a group. When who is in it can't be
-// read, it is an error and nobody is told.
-func GetEligibleUsersForChatActivity(ctx context.Context, grpId string, userId string, mentionsList []string, limitToMentions bool) (userIds []string, err error) {
-	userIds, err = domain.GetEligibleUsersForChatActivity(ctx, grpId, userId, mentionsList, limitToMentions)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetEligibleUsersForChatActivity Failed to get eligible users err: %+v",
-			err)
-		return
+// MembersOnAll is who of the conversation grpId's people on "all" is in it
+// now (InConversationNow): a setting can outlive someone's place in a group.
+func MembersOnAll(ctx context.Context, grpId string) ([]string, error) {
+	ids, err := domain.MembersOnAll(ctx, grpId)
+	if err != nil || len(ids) == 0 {
+		return ids, err
 	}
-	if userIds, err = InConversationNow(ctx, grpId, userIds); err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetEligibleUsersForChatActivity couldn't read who is in %s now, so nobody is told err: %+v",
-			grpId, err)
-		return nil, err
-	}
-	return
+	return InConversationNow(ctx, grpId, ids)
 }
 
 // GetLevelsInConversation is each of userIds' setting for the conversation

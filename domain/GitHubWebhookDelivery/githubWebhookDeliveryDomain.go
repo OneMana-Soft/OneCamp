@@ -13,8 +13,10 @@ import (
 // has already marked it 'completed'.
 //
 // Critically, this differs from RecordGitHubWebhookDelivery in that a
-// previously-failed (or still-processing) row CAN be re-claimed by
-// GitHub's retry — so transient failures stop being permanent.
+// previously-failed row, or one left 'processing' for over 5 minutes (its
+// server stopped mid-run), CAN be re-claimed by GitHub's retry — so
+// transient failures stop being permanent. One still running is a replay,
+// and is skipped.
 func ClaimGitHubWebhookDelivery(ctx context.Context, deliveryID, eventType string) (bool, error) {
 	shouldProcess, err := models.ClaimDelivery(ctx, deliveryID, eventType)
 	if err != nil {

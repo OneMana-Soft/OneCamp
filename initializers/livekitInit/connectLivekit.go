@@ -149,14 +149,23 @@ func callGrant(room string, roomAdmin bool, sources []string) *lka.VideoGrant {
 	return grant
 }
 
-// mintCallToken signs a token for one room, with the person's language when
-// they gave a usable one.
-func (s *LiveKitServiceStruct) mintCallToken(room, identity, name string, roomAdmin bool, language string, sources []string) (string, error) {
-	at := lka.NewAccessToken(s.Config.ApiKey, s.Config.ApiSecret)
-	at.SetVideoGrant(callGrant(room, roomAdmin, sources)).
+// accessToken is a token carrying grant, as identity named name, valid for
+// ttl, signed with this server's LiveKit key: every token the server mints
+// for LiveKit (a call's, the recorder's) starts here.
+func (s *LiveKitServiceStruct) accessToken(grant *lka.VideoGrant, identity, name string, ttl time.Duration) *lka.AccessToken {
+	return lka.NewAccessToken(s.Config.ApiKey, s.Config.ApiSecret).
+		SetVideoGrant(grant).
 		SetIdentity(identity).
 		SetName(name).
-		SetValidFor(CallTokenTTL)
+		SetValidFor(ttl)
+}
+
+// mintCallToken signs a token for one room, with the person's language when
+// they gave a usable one. A companion's never runs the room, and lets it
+// publish no more than CompanionSources (companion.go).
+func (s *LiveKitServiceStruct) mintCallToken(room, identity, name string, roomAdmin bool, language string, sources []string) (string, error) {
+	_, companion := CompanionOf(identity)
+	at := s.accessToken(callGrant(room, roomAdmin && !companion, publishableBy(identity, sources)), identity, name, CallTokenTTL)
 	if lang := CleanLanguage(language); lang != "" {
 		at.SetAttributes(map[string]string{LanguageAttribute: lang})
 	}
@@ -180,7 +189,25 @@ func (s *LiveKitServiceStruct) GenerateGuestToken(room, identity, name, language
 	return s.mintCallToken(room, identity, name, false, language, sources)
 }
 
+// StartRecording records the call in a room as userName (the name people
+// see), drawn by the web's layout page, which the recorder enters through the
+// API's recording stage with a ticket for this recording (stageEntranceURL),
+// when the recorder can reach both; else by LiveKit's grid.
 func (s *LiveKitServiceStruct) StartRecording(ctx context.Context, roomName string, userName string) (*livekit.EgressInfo, string, error) {
+	return s.startRecording(ctx, roomName, userName, true)
+}
+
+// StartGridRecording records the call in a room on LiveKit's grid, whatever
+// the web has: a stage page's recording that failed early goes on there
+// (business/LiveKit's RecordAgainOnGrid).
+func (s *LiveKitServiceStruct) StartGridRecording(ctx context.Context, roomName string, userName string) (*livekit.EgressInfo, string, error) {
+	return s.startRecording(ctx, roomName, userName, false)
+}
+
+// startRecording records the call in a room as userName, drawn by the stage
+// when asked and it can be (stageEntranceURL), else by LiveKit's grid
+// (compositeRequest).
+func (s *LiveKitServiceStruct) startRecording(ctx context.Context, roomName, userName string, stage bool) (*livekit.EgressInfo, string, error) {
 
 	// 1. Check if room exists and has participants
 	// We use a retry loop because LiveKit might take a few seconds to register
@@ -208,15 +235,12 @@ func (s *LiveKitServiceStruct) StartRecording(ctx context.Context, roomName stri
 	}
 
 	// 2. Check if already recording
-	egressList, err := s.EgressClient.ListEgress(ctx, &livekit.ListEgressRequest{
-		RoomName: roomName,
-		Active:   true,
-	})
+	running, err := s.runningEgresses(ctx, roomName)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to check active recordings: %w", err)
 	}
 
-	if len(egressList.Items) > 0 {
+	if len(running) > 0 {
 		return nil, "", fmt.Errorf("recording already in progress for room %s", roomName)
 	}
 
@@ -229,29 +253,36 @@ func (s *LiveKitServiceStruct) StartRecording(ctx context.Context, roomName stri
 
 	filename := fmt.Sprintf("recordings/%s/%s.mp4", roomName, time.Now().Format(time.RFC3339))
 
-	egressInfo, err := s.EgressClient.StartRoomCompositeEgress(ctx, &livekit.RoomCompositeEgressRequest{
-		RoomName: roomName,
-		Layout:   "grid-light",
-		Options: &livekit.RoomCompositeEgressRequest_Preset{
-			Preset: EgressPreset(os.Getenv("EGRESS_PRESET")),
-		},
-		FileOutputs: []*livekit.EncodedFileOutput{
-			{
-				Filepath: filename,
-				Output: &livekit.EncodedFileOutput_S3{
-					S3: &livekit.S3Upload{
-						AccessKey:      s.Config.MinIoConfig.AccessKeyID,
-						Secret:         s.Config.MinIoConfig.SecretAccessKey,
-						Bucket:         s.Config.MinIoConfig.BucketName,
-						Endpoint:       s.Config.MinIoConfig.Endpoint,
-						ForcePathStyle: true,
-					},
-				},
+	// The ticket is kept before the egress starts, since its recorder opens it
+	// at once. A grid recording leaves no ticket of an earlier one behind.
+	layoutURL := ""
+	if stage {
+		layoutURL = stageEntranceURL(ctx, roomName)
+	}
+	if layoutURL == "" {
+		forgetStageTicket(ctx, roomName)
+	}
+
+	egressInfo, err := s.EgressClient.StartRoomCompositeEgress(ctx, compositeRequest(roomName, layoutURL, EgressPreset(os.Getenv("EGRESS_PRESET")), &livekit.EncodedFileOutput{
+		Filepath: filename,
+		Output: &livekit.EncodedFileOutput_S3{
+			S3: &livekit.S3Upload{
+				AccessKey:      s.Config.MinIoConfig.AccessKeyID,
+				Secret:         s.Config.MinIoConfig.SecretAccessKey,
+				Bucket:         s.Config.MinIoConfig.BucketName,
+				Endpoint:       s.Config.MinIoConfig.Endpoint,
+				ForcePathStyle: true,
 			},
 		},
-	})
+	}))
 
 	if err != nil {
+		// No recorder comes for a recording that never started, and the room
+		// doesn't say it records one (V-630): it said so until the call ended.
+		forgetStageTicket(ctx, roomName)
+		if _, cerr := s.ClearStaleRecording(ctx, roomName, ""); cerr != nil {
+			helpers.LogErrorWithContext(ctx, "liveKitInit/StartRecording could not take the refused recording off the metadata of %s: %v", roomName, cerr)
+		}
 		return nil, filename, err
 	}
 
@@ -265,30 +296,41 @@ func (s *LiveKitServiceStruct) StartRecording(ctx context.Context, roomName stri
 	return egressInfo, filename, nil
 }
 
-// ErrNoActiveRecording: a stop found nothing recording the room. Its
-// recording was stopped already (from another tab, by another host) or ended
-// with its room, so the asker's view of the call is behind: never the call
-// server failing.
+// ErrNoActiveRecording: a stop found nothing recording the room, and the
+// room doesn't say anything does. Its recording was stopped already (from
+// another tab, by another host) or ended with its room, so the asker's view
+// of the call is behind: never the call server failing.
 var ErrNoActiveRecording = errors.New("nothing is recording this call")
 
 func (s *LiveKitServiceStruct) StopRecording(ctx context.Context, roomName string) (lastEgress *livekit.EgressInfo, err error) {
-	// Find active egress for the room
-	egressList, err := s.EgressClient.ListEgress(ctx, &livekit.ListEgressRequest{
-		RoomName: roomName,
-		Active:   true,
-	})
+	// A stop admits no recorder any more, whatever it finds running: Redis
+	// alone says a recording's ticket is live (business/LiveKit's
+	// RecorderEntrance).
+	forgetStageTicket(ctx, roomName)
+
+	running, err := s.runningEgresses(ctx, roomName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list egress for room: %w", err)
 	}
 
-	if len(egressList.Items) == 0 {
+	if len(running) == 0 {
+		// The room may still say it records an egress that ended on its own
+		// before its end reached us (V-630): the stop clears that, and is
+		// done. A room that doesn't say it records is the asker's view behind.
+		cleared, cerr := s.ClearStaleRecording(ctx, roomName, "")
+		if cerr != nil && !errors.Is(cerr, ErrRoomNotFound) {
+			helpers.LogErrorWithContext(ctx, "liveKitInit/StopRecording could not take the ended recording off the metadata of %s: %v", roomName, cerr)
+		}
+		if cleared {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("%w (room %s)", ErrNoActiveRecording, roomName)
 	}
 
 	var lastErr error
 
 	// Stop all active egresses for this room (should usually be just one)
-	for _, egress := range egressList.Items {
+	for _, egress := range running {
 		stopReq := &livekit.StopEgressRequest{
 			EgressId: egress.EgressId,
 		}
@@ -336,24 +378,72 @@ var roomMetadataLocks helpers.KeyedLock
 // at a time here, so two features changing it at once can't lose each other's
 // keys. Answers the metadata written.
 func (s *LiveKitServiceStruct) UpdateRoomMetadata(ctx context.Context, room string, set map[string]any) (string, error) {
+	next, _, err := s.editRoomMetadata(ctx, room, func(string) (map[string]any, error) { return set, nil })
+	return next, err
+}
+
+// editRoomMetadata is UpdateRoomMetadata with the keys to write decided on
+// the metadata as it is (change; none leaves it as it is), under the same
+// per-room lock, so nothing this process writes to the room comes between
+// the reading and the writing. Answers the metadata and whether it wrote.
+func (s *LiveKitServiceStruct) editRoomMetadata(ctx context.Context, room string, change func(current string) (map[string]any, error)) (string, bool, error) {
 	roomMetadataLocks.Acquire(room, 0)
 	defer roomMetadataLocks.Release(room)
 
 	current, err := s.GetRoom(ctx, room)
 	if err != nil {
-		return "", err
+		return "", false, err
+	}
+	set, err := change(current.Metadata)
+	if err != nil || len(set) == 0 {
+		return current.Metadata, false, err
 	}
 	next, err := mergeRoomMetadata(current.Metadata, set)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if _, err = s.LiveKitClient.UpdateRoomMetadata(ctx, &livekit.UpdateRoomMetadataRequest{
 		Room:     room,
 		Metadata: next,
 	}); err != nil {
-		return "", err
+		return "", false, err
 	}
-	return next, nil
+	return next, true, nil
+}
+
+// ClearStaleRecording stops a room's metadata saying it records when no
+// recording it names runs (V-630): it names the egress that just ended
+// (ended), or nothing records the room at all. A recording that failed or was
+// aborted on its own, or a start the egress refused, left the room saying
+// "Recording" to everyone in it until its call ended. Decided and written
+// under the room's metadata lock, so a start that names its egress meanwhile
+// is never cleared, and a room that names a running recording keeps it.
+// Answers whether it cleared.
+func (s *LiveKitServiceStruct) ClearStaleRecording(ctx context.Context, room, ended string) (bool, error) {
+	_, cleared, err := s.editRoomMetadata(ctx, room, func(current string) (map[string]any, error) {
+		on, named := recordingOf(current)
+		if !on {
+			return nil, nil
+		}
+		if ended == "" || named != ended {
+			running, err := s.runningEgresses(ctx, room)
+			if err != nil || len(running) > 0 {
+				return nil, err
+			}
+		}
+		return recordingKeys(false, "", ""), nil
+	})
+	return cleared, err
+}
+
+// runningEgresses answers the recordings running in a room: starting, active
+// or ending, as LiveKit lists them.
+func (s *LiveKitServiceStruct) runningEgresses(ctx context.Context, room string) ([]*livekit.EgressInfo, error) {
+	list, err := s.EgressClient.ListEgress(ctx, &livekit.ListEgressRequest{RoomName: room, Active: true})
+	if err != nil {
+		return nil, err
+	}
+	return list.Items, nil
 }
 
 // mergeRoomMetadata writes set's keys into a room's metadata, keeping every
@@ -606,12 +696,14 @@ func IsAgentIdentity(identity string) bool {
 
 // IsPerson is the one rule for whether someone connected to a call is a person
 // in it: not the transcription agent, a recorder (an egress, which LiveKit
-// connects hidden) or a hidden watcher. Only a person keeps a call going and
+// connects hidden), a hidden watcher, or a companion (another device of a
+// person, companion.go: it never starts, keeps or ends a call, nor is counted
+// among who's in it). Only a person keeps a call going and
 // lights its dot, so every "is anyone in this call" asks this: the paths that
 // end a call (business/CallControl), the call's dot and the sidebar's
 // (RoomHasHumanParticipants), and who a call's view lists. Pure.
 func IsPerson(p *livekit.ParticipantInfo) bool {
-	if p == nil || strings.TrimSpace(p.Identity) == "" || isAgentIdentity(p.Identity) {
+	if p == nil || strings.TrimSpace(p.Identity) == "" || isAgentIdentity(p.Identity) || IsCompanion(p) {
 		return false
 	}
 	if p.Permission != nil && p.Permission.Hidden {
@@ -697,4 +789,18 @@ func recordingKeys(on bool, startedBy, egressID string) map[string]any {
 		}
 	}
 	return keys
+}
+
+// recordingOf reads what a room's metadata says of its recording, as
+// recordingKeys writes it: whether one runs, and its egress. Metadata that is
+// empty or unreadable says none runs. Pure.
+func recordingOf(metadata string) (on bool, egressID string) {
+	var keys struct {
+		On     bool   `json:"isRecording"`
+		Egress string `json:"egressID"`
+	}
+	if json.Unmarshal([]byte(metadata), &keys) != nil {
+		return false, ""
+	}
+	return keys.On, keys.Egress
 }

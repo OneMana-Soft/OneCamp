@@ -89,16 +89,9 @@ func EventCallArtefacts(ctx context.Context, events []uuid.UUID) ([]CallArtefact
 	}
 	query := fmt.Sprintf(`{
 		artefacts(func: eq(recording_event, [%s]), orderdesc: recording_stared_at, first: %d)
-			@filter(%s AND %s) {
-			recording_egress_id
-			recording_stared_at
-			recording_ended_at
-			lines: count(recording_transcript)
-			recording_notes_doc
-			recording_recap_chat
-			recording_transcript_only
+			@filter(%s AND %s) {%s
 		}
-	}`, strings.Join(ids, ", "), MaxEventArtefacts, dgraphquery.Deleted("recording_ended_at"), dgraphquery.Live("recording_deleted_at"))
+	}`, strings.Join(ids, ", "), MaxEventArtefacts, dgraphquery.Deleted("recording_ended_at"), dgraphquery.Live("recording_deleted_at"), artefactFields)
 	raw, err := dgraphModels.QueryRecordingsJSON(ctx, query, nil)
 	if err != nil {
 		return nil, err
@@ -106,26 +99,52 @@ func EventCallArtefacts(ctx context.Context, events []uuid.UUID) ([]CallArtefact
 	return parseEventCallArtefacts(raw)
 }
 
+// artefactFields is what a call's artefact is read with, into a rawArtefact.
+const artefactFields = `
+			recording_egress_id
+			recording_stared_at
+			recording_ended_at
+			lines: count(recording_transcript)
+			recording_notes_doc
+			recording_recap_chat
+			recording_transcript_only`
+
+// rawArtefact is one artefact as the graph answers artefactFields.
+type rawArtefact struct {
+	Key       string     `json:"recording_egress_id"`
+	StartedAt *time.Time `json:"recording_stared_at"`
+	EndedAt   *time.Time `json:"recording_ended_at"`
+	Lines     int        `json:"lines"`
+	NotesDoc  string     `json:"recording_notes_doc"`
+	RecapChat string     `json:"recording_recap_chat"`
+	// TranscriptOnly is a call's transcript with no recording.
+	TranscriptOnly bool `json:"recording_transcript_only"`
+}
+
+// artefact is the CallArtefact a rawArtefact says. Pure.
+func (a rawArtefact) artefact() CallArtefact {
+	return CallArtefact{Key: a.Key, StartedAt: a.StartedAt, EndedAt: a.EndedAt, Lines: a.Lines, NotesDoc: a.NotesDoc, RecapChat: a.RecapChat, Recorded: !a.TranscriptOnly}
+}
+
+// startedAt is when it started, the zero time for none. Pure.
+func (a rawArtefact) startedAt() time.Time {
+	if a.StartedAt == nil {
+		return time.Time{}
+	}
+	return *a.StartedAt
+}
+
 // parseEventCallArtefacts reads EventCallArtefacts' answer. Pure.
 func parseEventCallArtefacts(raw []byte) ([]CallArtefact, error) {
 	var resp struct {
-		Artefacts []struct {
-			Key       string     `json:"recording_egress_id"`
-			StartedAt *time.Time `json:"recording_stared_at"`
-			EndedAt   *time.Time `json:"recording_ended_at"`
-			Lines     int        `json:"lines"`
-			NotesDoc  string     `json:"recording_notes_doc"`
-			RecapChat string     `json:"recording_recap_chat"`
-			// TranscriptOnly is a call's transcript with no recording.
-			TranscriptOnly bool `json:"recording_transcript_only"`
-		} `json:"artefacts"`
+		Artefacts []rawArtefact `json:"artefacts"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, err
 	}
 	out := make([]CallArtefact, 0, len(resp.Artefacts))
 	for _, a := range resp.Artefacts {
-		out = append(out, CallArtefact{Key: a.Key, StartedAt: a.StartedAt, EndedAt: a.EndedAt, Lines: a.Lines, NotesDoc: a.NotesDoc, RecapChat: a.RecapChat, Recorded: !a.TranscriptOnly})
+		out = append(out, a.artefact())
 	}
 	return out, nil
 }

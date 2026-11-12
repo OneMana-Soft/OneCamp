@@ -32,8 +32,9 @@ type memLedger struct {
 	subs []models.Subscription
 	// refusals are the changes Google didn't take, with their stamps.
 	refusals []memRefusal
-	// keepCalls and dropCalls count the ledger's ref writes.
-	keepCalls, dropCalls int
+	// keepCalls and dropCalls count the ledger's ref writes; intoCalls its
+	// reads of where calendars come from (origin.go).
+	keepCalls, dropCalls, intoCalls int
 }
 
 // memRefusal is a refusal as calendar_sync_refusals keeps it.
@@ -200,6 +201,25 @@ func (m *memLedger) markReadOnly(_ context.Context, link uuid.UUID, remote strin
 		}
 	}
 	return nil
+}
+
+func (m *memLedger) calendarsInto(_ context.Context, calendars []uuid.UUID) ([]models.SyncCalendar, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.intoCalls++
+	var out []models.SyncCalendar
+	for _, c := range m.calendars {
+		if c.CalendarID == nil || !slices.Contains(calendars, *c.CalendarID) {
+			continue
+		}
+		for _, l := range m.links {
+			if l.ID == c.LinkID {
+				c.Provider = l.Provider
+				out = append(out, c)
+			}
+		}
+	}
+	return out, nil
 }
 
 func (m *memLedger) linkOf(_ context.Context, person uuid.UUID, provider string) (*models.SyncLink, error) {
@@ -436,7 +456,7 @@ func TestMovingFromGoogleBringsEveryCalendar(t *testing.T) {
 	sam := h.member("Sam")
 	g := &fakeGoogle{}
 	ledger := withGoogle(t, h, g, true)
-	st, err := h.s.MoveFromGoogle(context.Background(), sam)
+	st, err := h.s.MoveFrom(context.Background(), sam, "google")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,11 +483,11 @@ func TestMovingFromGoogleBringsEveryCalendar(t *testing.T) {
 	if len(h.tells.tells) != 0 {
 		t.Fatal("a move told people")
 	}
-	again, err := h.s.MoveFromGoogle(context.Background(), sam)
+	again, err := h.s.MoveFrom(context.Background(), sam, "google")
 	if err != nil || again.Moved != 0 || again.Unchanged != 2 {
 		t.Fatalf("again %+v %v", again, err)
 	}
-	read, _ := h.s.SyncStatus(context.Background(), sam)
+	read, _ := h.s.SyncStatus(context.Background(), sam, "google")
 	if read.State != models.SyncSynced || read.Account != "sam@outlook.com" {
 		t.Fatalf("status read %+v", read)
 	}
@@ -477,10 +497,10 @@ func TestAMoveNeedsGoogleConnected(t *testing.T) {
 	h := newHarness(t)
 	sam := h.member("Sam")
 	withGoogle(t, h, &fakeGoogle{}, false)
-	if _, err := h.s.MoveFromGoogle(context.Background(), sam); !errors.Is(err, ErrGoogleNotLinked) {
+	if _, err := h.s.MoveFrom(context.Background(), sam, "google"); !errors.Is(err, ErrGoogleNotLinked) {
 		t.Fatalf("got %v", err)
 	}
-	if st, _ := h.s.SyncStatus(context.Background(), sam); st.State != "none" {
+	if st, _ := h.s.SyncStatus(context.Background(), sam, "google"); st.State != "none" {
 		t.Fatalf("status %+v", st)
 	}
 }

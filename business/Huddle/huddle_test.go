@@ -77,6 +77,7 @@ func fake(t *testing.T, s *callStateBusiness.Session) (*[]written, *[]uuid.UUID)
 		attached = append(attached, post)
 		return won, nil
 	}
+	seams.declined = func(context.Context, string) ([]Face, error) { return nil, nil }
 	published = nil
 	seams.publish = func(_ context.Context, room string) { published = append(published, room) }
 	return &writes, &attached
@@ -266,6 +267,58 @@ func TestTheCallsEndSaysWhoCameAndAMissedCall(t *testing.T) {
 		}
 		if facts.People != c.count || facts.Missed != c.missed {
 			t.Errorf("%s: people %d missed %v, want %d %v", c.name, facts.People, facts.Missed, c.count, c.missed)
+		}
+		// slack-06 H2: the card says who started the call, so a missed card
+		// offers "Call back" to the people it rang and "Call again" to its
+		// starter, never "Call back" to the starter.
+		if facts.By != maya {
+			t.Errorf("%s: by %q, want the starter %q", c.name, facts.By, maya)
+		}
+	}
+}
+
+// slack-06 H2: an ended call's post says who declined it, first declined
+// first, at most FactsFaces, named; a call nobody declined says nothing of it,
+// and one whose declines can't be read still gets its end.
+func TestTheCallsEndSaysWhoDeclined(t *testing.T) {
+	ended := started.Add(time.Minute)
+	ana := Face{UUID: "55555555-5555-4555-8555-555555555555", Name: "Ana"}
+	many := []Face{{UUID: jonas, Name: "Jonas"}}
+	for i := 0; i < 9; i++ {
+		many = append(many, Face{UUID: fmt.Sprintf("66666666-6666-4666-8666-%012d", i), Name: fmt.Sprintf("P%d", i)})
+	}
+	for _, c := range []struct {
+		name     string
+		declined []Face
+		err      error
+		want     []Face
+	}{
+		{"two declined", []Face{{UUID: jonas, Name: "Jonas"}, ana}, nil, []Face{{UUID: jonas, Name: "Jonas"}, ana}},
+		{"nobody declined", nil, nil, nil},
+		{"ten declined", many, nil, many[:FactsFaces]},
+		{"the declines can't be read", nil, errors.New("down"), nil},
+	} {
+		s := callIn("dm", maya+" "+jonas)
+		s.Live, s.EndedAt, s.PostUUID, s.StartedBy = false, &ended, uuid.NewString(), maya
+		s.People = []callStateBusiness.Person{{Identity: "id-maya", UserUUID: maya, Name: "Maya"}}
+		fake(t, s)
+		asked := ""
+		seams.declined = func(_ context.Context, id string) ([]Face, error) { asked = id; return c.declined, c.err }
+		var system string
+		seams.setChatFacts = func(_ context.Context, _, facts string) error { system = facts; return nil }
+		run(context.Background(), resourceEventBusiness.Event{Kind: resourceEventBusiness.CallEnded, Data: map[string]string{"session": session, "kind": "huddle"}})
+		var facts Facts
+		if err := json.Unmarshal([]byte(system), &facts); err != nil || facts.Ended == nil {
+			t.Fatalf("%s: the end wasn't written: %q, %v", c.name, system, err)
+		}
+		if asked != session {
+			t.Errorf("%s: the declines read were call %q's, want %q's", c.name, asked, session)
+		}
+		if fmt.Sprint(facts.Declined) != fmt.Sprint(c.want) {
+			t.Errorf("%s: declined %v, want %v", c.name, facts.Declined, c.want)
+		}
+		if c.want == nil && strings.Contains(system, "declined") {
+			t.Errorf("%s: the facts name declines nobody made: %s", c.name, system)
 		}
 	}
 }

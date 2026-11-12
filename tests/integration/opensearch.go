@@ -152,7 +152,7 @@ var theOpenSearch shared[openSearchServer]
 // startOpenSearch starts the binary's node.
 func startOpenSearch() (*openSearchServer, func(), error) {
 	ctx := context.Background()
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	c, err := StartContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "opensearchproject/opensearch:3.6.0",
 			ExposedPorts: []string{"9200/tcp"},

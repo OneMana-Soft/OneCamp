@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -55,4 +56,32 @@ func GetGitHubTaskActivitiesByTaskID(ctx context.Context, taskID uuid.UUID) ([]*
 		return nil, err
 	}
 	return activities, nil
+}
+
+// madeByPR is the key of a pr_opened line's payload on a task a pull request
+// made; its value is the pull request's address.
+const madeByPR = "made_by_pr"
+
+// MadeByPR is the payload of the pr_opened line of a task the pull request at
+// prURL made (the webhook's task for a pull request that names none, and the
+// importer's): the task is the pull request's own, so it follows the pull
+// request's edits (PRMadeTask).
+func MadeByPR(prURL string) *string {
+	raw, _ := json.Marshal(map[string]string{madeByPR: prURL})
+	payload := string(raw)
+	return &payload
+}
+
+// PRMadeTask is whether the pull request at prURL made the task (MadeByPR). A
+// task a pull request only names, by a key, an address or its branch, is a
+// person's, and a pull request's edits never rewrite it.
+func PRMadeTask(ctx context.Context, taskID uuid.UUID, prURL string) (bool, error) {
+	query := `SELECT EXISTS (SELECT 1 FROM github_task_activities
+		WHERE task_id = $1 AND activity_type = 'pr_opened' AND payload ->> $2 = $3)`
+	made, err := models.AnyGitHubTaskActivity(ctx, query, taskID, madeByPR, prURL)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/PRMadeTask Failed err: %+v", err)
+		return false, err
+	}
+	return made, nil
 }

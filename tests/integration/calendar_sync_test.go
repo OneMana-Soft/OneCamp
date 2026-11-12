@@ -16,6 +16,7 @@ package integration_test
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -173,6 +174,110 @@ func TestCalendarSyncRefusalsMigrationUpDownUp(t *testing.T) {
 		}
 		if got := [3]bool{tableExists(t, env.PG, "calendar_sync_refusals"), columnExists(t, env, "calendar_sync_calendars", "read_only"), broken}; got != [3]bool{step.want, step.want, step.want} {
 			t.Fatalf("step %d: refusals, read_only, broken = %v, want all %v", i, got, step.want)
+		}
+	}
+}
+
+// Migration 577 (calendar B7, CR-B17 M1) clears the cursor of every Google
+// link's calendars, so the next sweep reads each whole and takes the privacy
+// a read from a cursor never brought; an Outlook link's cursor is kept. Its
+// down undoes nothing (a cursor is the provider's to give), and it runs
+// twice as it runs once.
+func TestCalendarGoogleWholeReadMigrationClearsOnlyGooglesCursors(t *testing.T) {
+	up, down := migrationSQL(t, "calendar_google_full_repull", "up"), migrationSQL(t, "calendar_google_full_repull", "down")
+	ctx := context.Background()
+	env := integration.SetupEnv(t)
+	_, calendar, google := syncLedgerOf(t, ctx, env)
+	maya := uuid.New()
+	if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at) VALUES ($1, $2, 'm', 'm', NOW(), NOW())`, maya, maya.String()+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	outlook, _, err := models.StartMove(ctx, uuid.New(), maya, "microsoft", "maya@contoso.com", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []models.SyncCalendar{
+		{LinkID: google.ID, RemoteID: "sam@outlook.com", Primary: true, CalendarID: &calendar, Cursor: "t9"},
+		{LinkID: google.ID, RemoteID: "team@group.calendar.google.com", Cursor: "t4"},
+		{LinkID: outlook.ID, RemoteID: "cal1", Cursor: `{"delta":"d1"}`},
+	} {
+		if err := models.KeepSyncCalendar(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, sql := range []string{up, down, up} {
+		if _, err := env.PG.Exec(sql); err != nil {
+			t.Fatalf("step %d: %v", i, err)
+		}
+		got := map[string]string{}
+		rows, err := env.PG.Query(`SELECT remote_id, cursor FROM calendar_sync_calendars WHERE link_id IN ($1, $2)`, google.ID, outlook.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var remote, cursor string
+			if err := rows.Scan(&remote, &cursor); err != nil {
+				t.Fatal(err)
+			}
+			got[remote] = cursor
+		}
+		rows.Close()
+		if want := map[string]string{"sam@outlook.com": "", "team@group.calendar.google.com": "", "cal1": `{"delta":"d1"}`}; !maps.Equal(got, want) {
+			t.Fatalf("step %d: cursors %v, want %v", i, got, want)
+		}
+	}
+}
+
+// Migration 579 (calendar V-613) clears the cursor of every Google and
+// Outlook link's calendars, so the next sweep reads each whole and an
+// instance that came in with its series' visibility takes its own CLASS; an
+// address subscription's cursor is kept. Its down undoes nothing, and it
+// runs twice as it runs once.
+func TestCalendarInstancePrivacyMigrationClearsGooglesAndOutlooksCursors(t *testing.T) {
+	up, down := migrationSQL(t, "calendar_instance_privacy_repull", "up"), migrationSQL(t, "calendar_instance_privacy_repull", "down")
+	ctx := context.Background()
+	env := integration.SetupEnv(t)
+	_, calendar, google := syncLedgerOf(t, ctx, env)
+	maya := uuid.New()
+	if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at) VALUES ($1, $2, 'm', 'm', NOW(), NOW())`, maya, maya.String()+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	outlook, _, err := models.StartMove(ctx, uuid.New(), maya, "microsoft", "maya@contoso.com", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	address, _, err := models.StartMove(ctx, uuid.New(), maya, "ics", "", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []models.SyncCalendar{
+		{LinkID: google.ID, RemoteID: "sam@outlook.com", Primary: true, CalendarID: &calendar, Cursor: "t9"},
+		{LinkID: outlook.ID, RemoteID: "cal1", Cursor: `{"delta":"d1"}`},
+		{LinkID: address.ID, RemoteID: "holidays", Cursor: "etag-1"},
+	} {
+		if err := models.KeepSyncCalendar(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, sql := range []string{up, down, up} {
+		if _, err := env.PG.Exec(sql); err != nil {
+			t.Fatalf("step %d: %v", i, err)
+		}
+		got := map[string]string{}
+		rows, err := env.PG.Query(`SELECT remote_id, cursor FROM calendar_sync_calendars WHERE link_id IN ($1, $2, $3)`, google.ID, outlook.ID, address.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var remote, cursor string
+			if err := rows.Scan(&remote, &cursor); err != nil {
+				t.Fatal(err)
+			}
+			got[remote] = cursor
+		}
+		rows.Close()
+		if want := map[string]string{"sam@outlook.com": "", "cal1": "", "holidays": "etag-1"}; !maps.Equal(got, want) {
+			t.Fatalf("step %d: cursors %v, want %v", i, got, want)
 		}
 	}
 }

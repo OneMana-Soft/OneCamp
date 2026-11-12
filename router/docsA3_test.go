@@ -36,7 +36,7 @@ func TestA3MountsItsRoutes(t *testing.T) {
 	if got := routes(doc); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("/doc routes:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	if got := routes(member); strings.Join(got, ",") != "DELETE /places,GET /places,POST /places" {
+	if got := routes(member); strings.Join(got, ",") != "DELETE /places,GET /places,GET /places/recent,POST /places" {
 		t.Errorf("member routes: %v", got)
 	}
 }

@@ -13,6 +13,7 @@ package business
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	recordingBusiness "github.com/akashc777/OneCamp/business/Recording"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/livekitInit"
 	model "github.com/akashc777/OneCamp/models/postgres/CallState"
 	"github.com/google/uuid"
 	"github.com/livekit/protocol/livekit"
@@ -42,6 +44,11 @@ var resumeLocks helpers.KeyedLock
 // says so: it isn't a fault. A webhook without its egress is ignored rather
 // than dereferenced.
 //
+// A recording of the web's layout page (meet-17) that recorded nothing of the
+// stage, because the page failed early or never said it started, is recorded
+// again on LiveKit's grid and goes on there (settleRoom): nothing ended,
+// so nothing is stamped. Any other end takes the recording off its room.
+//
 // A recording LiveKit cut short by closing the call's own room while everyone
 // was in its breakout rooms may end after they are back (an upload takes a
 // while): if the room has been made again since, the call records again there
@@ -50,13 +57,21 @@ func OnRecordingEnded(ctx context.Context, info *livekit.EgressInfo) {
 	if info == nil || strings.TrimSpace(info.EgressId) == "" {
 		return
 	}
+	// Its recorder's ticket dies with it, while it is still its room's.
+	livekitInit.RevokeStageTicket(ctx, info)
+	// A stage page that failed early is recorded again on the grid, and the
+	// same recording goes on: nothing ended. Any other end takes the
+	// recording off its room, when the room still says it records it.
+	if settleRoom(ctx, info) {
+		return
+	}
 	status, durationSec, fileSize := recordingBusiness.EndOfEgress(info)
 	// LiveKit's reason goes to the log, never on screen.
 	switch {
 	case recordingBusiness.Failed(status):
-		helpers.LogErrorWithContext(ctx, "business/CallControl recording %s ended %s: %s", info.EgressId, info.Status, info.Error)
+		helpers.LogErrorWithContext(ctx, "business/CallControl recording %s ended %s: %s", info.EgressId, info.Status, livekitInit.EgressReason(info))
 	case recordingBusiness.Empty(status):
-		helpers.LogInfoWithContext(ctx, "business/CallControl recording %s captured nothing (%s: %s)", info.EgressId, info.Status, info.Error)
+		helpers.LogInfoWithContext(ctx, "business/CallControl recording %s captured nothing (%s: %s)", info.EgressId, info.Status, livekitInit.EgressReason(info))
 	}
 	_ = recordingBusiness.UpdateStopRecordingTime(ctx, info.EgressId, durationSec, fileSize, info.StartedAt, status)
 	// The call's record lists it with how it ended.
@@ -72,6 +87,43 @@ func OnRecordingEnded(ctx context.Context, info *livekit.EgressInfo) {
 		defer cancel()
 		resumeWhereMadeAgain(ctx, room, recorded)
 	})
+}
+
+// settleRoom settles what a room says of its recording after one of its
+// egresses ended, and answers whether the recording goes on. A stage page's
+// recording that failed early is recorded again on LiveKit's grid
+// (business/LiveKit's RecordAgainOnGrid), and the room names the grid's
+// egress (true). Any other end, one nobody asked for (failed, aborted, a
+// limit) as much as a stop, leaves the room saying it records only while it
+// names a recording that still runs (livekitInit's ClearStaleRecording,
+// V-630): a recording that failed on its own left "Recording" on everyone's
+// screen until the call ended. Everyone who hears of the call is told.
+//
+// Under the room's resumeLocks, so it never races the call's recording again
+// after its breakout rooms, nor a second copy of this webhook, which then
+// finds no running recording under the failed egress, stamps nothing, and
+// leaves the grid's recording named: the ended egress is compared with the
+// one the room names. Past the webhook's own request: a start half done when
+// LiveKit gives up on the request would leave a recording nobody files.
+func settleRoom(ctx context.Context, info *livekit.EgressInfo) bool {
+	if info.RoomName == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	resumeLocks.Acquire(info.RoomName, 0)
+	defer resumeLocks.Release(info.RoomName)
+	if liveKitBusiness.RecordAgainOnGrid(ctx, info) {
+		return true
+	}
+	cleared, err := livekitInit.LiveKitService.ClearStaleRecording(ctx, info.RoomName, info.EgressId)
+	switch {
+	case err != nil && !errors.Is(err, livekitInit.ErrRoomNotFound):
+		helpers.LogErrorWithContext(ctx, "business/CallControl could not take the ended recording %s off %s: %+v", info.EgressId, info.RoomName, err)
+	case cleared:
+		callStateBusiness.Publish(ctx, info.RoomName)
+	}
+	return false
 }
 
 // resumeWhereMadeAgain is resumeRecording for the call in a room whose

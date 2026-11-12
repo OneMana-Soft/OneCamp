@@ -52,6 +52,8 @@ func (r *Refusal) Words() string {
 		return "Only this project's admins add tasks to it."
 	case NeedEditTask:
 		switch {
+		case s.Archived:
+			return "This project is archived, so its tasks can't change. Restore it first."
 		case reader:
 			return "You can see this task but not change it."
 		case s.Role == RoleMember && s.EditWho == EditAssigned:

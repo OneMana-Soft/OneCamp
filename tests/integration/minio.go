@@ -41,7 +41,7 @@ func minioImage() string {
 func SetupMinio(t *testing.T, bucket string) *minio.Client {
 	t.Helper()
 	ctx := context.Background()
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	c, err := StartContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        minioImage(),
 			Cmd:          []string{"server", "/data"},

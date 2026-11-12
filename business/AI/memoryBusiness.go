@@ -9,6 +9,8 @@ package business
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,72 +27,54 @@ import (
 
 // ListWorkspaceMemory returns memory items visible to the user, filtered
 // by kind/status, plus open-item counts per kind for headline display.
+// Visible means scoped where the user is now (memoryScopes, the one check):
+// owning an item from a place they have left does not show it.
 // When scopeChannelUUID is non-empty, results are narrowed to that channel
 // — but ONLY if the user can access it, so scoping can never widen access.
 func ListWorkspaceMemory(ctx context.Context, userInfo *userModels.UserInfo, kinds, statuses []string, limit int, scopeChannelUUID string) (*adapter.MemoryListResponse, error) {
-	channels, projects := getAccessibleResourceUUIDs(userInfo)
-	grpIDs := accessibleGroupingIDs(userInfo)
-	ownerID := userInfo.UserPostgresInfo.Id
-	ownerItems := true
+	// The scopes go into the query, so the page is cut after the check and
+	// is never short while readable items remain.
+	filter := newMemoryScopes(&userInfo.UserDgraphInfo).filter(memoryModels.QueryFilter{
+		Kinds:    kinds,
+		Statuses: statuses,
+		Limit:    limit,
+	})
 
 	// An agent asked for something by a person other than its sponsor reads
-	// memory as the sponsor, so it would see the sponsor's own notes (the owner
-	// items below) and every scope the sponsor is in. Only scopes both people
-	// share are kept, and owner items are dropped: a person's private memory is
+	// memory as the sponsor, so it would see the sponsor's own notes and every
+	// scope the sponsor is in. Only scopes both people share are kept, and
+	// the sponsor's own notes are dropped: a person's private memory is
 	// theirs alone, whoever is asking.
 	asker, err := askerView(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if asker != nil {
-		channels = keepIn(channels, asker.channels)
-		projects = keepIn(projects, asker.projects)
-		grpIDs = keepIn(grpIDs, asker.grpIDs)
-		ownerItems = false
+		filter.UnscopedOwnedBy = nil
+		filter.AccessibleChannels = keepIn(filter.AccessibleChannels, asker.channels)
+		filter.AccessibleProjects = keepIn(filter.AccessibleProjects, asker.projects)
+		filter.AccessibleGrpIDs = keepIn(filter.AccessibleGrpIDs, asker.grpIDs)
 	}
 
 	// Optional channel scoping: intersect with accessible channels so an
 	// arbitrary ?channel= param can never reveal items outside the user's
 	// access. When the requested channel isn't accessible, we return an
 	// empty result rather than the unscoped list.
-	scoped := false
 	if scopeChannelUUID != "" {
-		scoped = true
-		if !containsStr(channels, scopeChannelUUID) {
+		if !containsStr(filter.AccessibleChannels, scopeChannelUUID) {
 			return &adapter.MemoryListResponse{Items: []adapter.MemoryItemView{}, Counts: map[string]int{}}, nil
 		}
-		channels = []string{scopeChannelUUID}
-	}
-
-	filter := memoryModels.QueryFilter{
-		Kinds:              kinds,
-		Statuses:           statuses,
-		AccessibleChannels: channels,
-		AccessibleProjects: projects,
-		AccessibleGrpIDs:   grpIDs,
-		OwnerID:            &ownerID,
-		Limit:              limit,
-	}
-	countFilter := memoryModels.QueryFilter{
-		AccessibleChannels: channels,
-		AccessibleProjects: projects,
-		AccessibleGrpIDs:   grpIDs,
-		OwnerID:            &ownerID,
-	}
-	// When scoping to a channel, the per-kind counts should reflect that
-	// channel only — drop the broad owner/project/grp dimensions so the
-	// headline matches the filtered list.
-	if scoped {
+		filter.AccessibleChannels = []string{scopeChannelUUID}
 		filter.AccessibleProjects = nil
 		filter.AccessibleGrpIDs = nil
-		filter.OwnerID = nil
-		countFilter.AccessibleProjects = nil
-		countFilter.AccessibleGrpIDs = nil
-		countFilter.OwnerID = nil
+		filter.UnscopedOwnedBy = nil
 	}
-	if !ownerItems {
-		filter.OwnerID = nil
-		countFilter.OwnerID = nil
+	// The per-kind counts count what the list can show: the same scopes.
+	countFilter := memoryModels.QueryFilter{
+		AccessibleChannels: filter.AccessibleChannels,
+		AccessibleProjects: filter.AccessibleProjects,
+		AccessibleGrpIDs:   filter.AccessibleGrpIDs,
+		UnscopedOwnedBy:    filter.UnscopedOwnedBy,
 	}
 
 	items, err := memoryModels.List(ctx, filter)
@@ -423,29 +407,101 @@ func authorizeMemoryAccess(ctx context.Context, userInfo *userModels.UserInfo, i
 // content. So those are deliberately NOT shortcuts here; the user must still be
 // in the scope, in which case the scope checks below return true anyway.
 func memoryItemVisibleTo(item *memoryModels.MemoryItem, userInfo *userModels.UserInfo) bool {
-	if item.ChannelUUID != nil {
-		for _, ch := range userInfo.UserDgraphInfo.Channels {
-			if ch.Uuid == item.ChannelUUID.String() {
-				return true
-			}
+	return newMemoryScopes(&userInfo.UserDgraphInfo).canRead(item)
+}
+
+// memoryScopes is where a person is now, read once from their profile: the
+// channels, projects and DMs whose memory items they may read (the privacy
+// invariant on memoryItemVisibleTo), and who they are, for their own items
+// that live nowhere. The one check every memory reader uses: a request's,
+// the memory list, the briefing, the attention list, the digest and the
+// nudge engine.
+type memoryScopes struct {
+	channels, projects, dms map[string]bool
+	self                    uuid.UUID // uuid.Nil when the profile has none
+}
+
+func newMemoryScopes(who *dgraphStruct.DgraphUser) *memoryScopes {
+	self, _ := uuid.Parse(who.Uuid) // a person's Postgres id is their Dgraph user_uuid
+	s := &memoryScopes{
+		self:     self,
+		channels: make(map[string]bool, len(who.Channels)),
+		projects: make(map[string]bool, len(who.Projects)),
+		dms:      make(map[string]bool, len(who.DMs)),
+	}
+	for _, ch := range who.Channels {
+		if ch != nil && ch.Uuid != "" {
+			s.channels[ch.Uuid] = true
 		}
 	}
-	if item.ProjectUUID != nil {
-		for _, pr := range userInfo.UserDgraphInfo.Projects {
-			if pr.Uuid == item.ProjectUUID.String() {
-				return true
-			}
+	for _, pr := range who.Projects {
+		if pr != nil && pr.Uuid != "" {
+			s.projects[pr.Uuid] = true
 		}
 	}
 	// DM / group-chat scope: visible to any participant of that grouping.
-	if item.ChatGrpID != "" {
-		for _, dm := range userInfo.UserDgraphInfo.DMs {
-			if dm.GroupingId == item.ChatGrpID {
-				return true
-			}
+	for _, dm := range who.DMs {
+		if dm != nil && dm.GroupingId != "" {
+			s.dms[dm.GroupingId] = true
 		}
 	}
-	return false
+	return s
+}
+
+// canRead says whether the item lives where the person is now, or lives
+// nowhere and is their own (no place to have left).
+func (s *memoryScopes) canRead(it *memoryModels.MemoryItem) bool {
+	if it == nil {
+		return false
+	}
+	if it.ChannelUUID == nil && it.ProjectUUID == nil && it.ChatGrpID == "" {
+		return s.self != uuid.Nil && it.OwnerID != nil && *it.OwnerID == s.self
+	}
+	return (it.ChannelUUID != nil && s.channels[it.ChannelUUID.String()]) ||
+		(it.ProjectUUID != nil && s.projects[it.ProjectUUID.String()]) ||
+		(it.ChatGrpID != "" && s.dms[it.ChatGrpID])
+}
+
+// filter puts where the person is now into a memory query: the channels,
+// projects and DMs it may match. The query then keeps only what they can
+// read before its page is cut, so a page is never short while readable items
+// remain. Every memory list reads through it; ownership never widens it.
+func (s *memoryScopes) filter(f memoryModels.QueryFilter) memoryModels.QueryFilter {
+	f.AccessibleChannels = slices.Sorted(maps.Keys(s.channels))
+	f.AccessibleProjects = slices.Sorted(maps.Keys(s.projects))
+	f.AccessibleGrpIDs = slices.Sorted(maps.Keys(s.dms))
+	f.UnscopedOwnedBy = nil
+	if s.self != uuid.Nil {
+		self := s.self
+		f.UnscopedOwnedBy = &self
+	}
+	return f
+}
+
+// ownOpenItems is a person's own open memory items of these kinds (any kind
+// when none), newest first, from where they are now only (filter). The
+// briefing, the home's attention list and meeting prep read through it.
+func ownOpenItems(ctx context.Context, userInfo *userModels.UserInfo, kinds []string, limit int) ([]*memoryModels.MemoryItem, error) {
+	owner := userInfo.UserPostgresInfo.Id
+	return memoryModels.List(ctx, newMemoryScopes(&userInfo.UserDgraphInfo).filter(memoryModels.QueryFilter{
+		Kinds:    kinds,
+		Statuses: []string{memoryModels.StatusOpen},
+		OwnedBy:  &owner,
+		Limit:    limit,
+	}))
+}
+
+// readable is canRead for many items at once: those of items the person may
+// read now, in their order. The home's attention list and the memory digest
+// use it.
+func (s *memoryScopes) readable(items []*memoryModels.MemoryItem) []*memoryModels.MemoryItem {
+	out := make([]*memoryModels.MemoryItem, 0, len(items))
+	for _, it := range items {
+		if s.canRead(it) {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 func toMemoryView(it *memoryModels.MemoryItem) adapter.MemoryItemView {
@@ -467,6 +523,9 @@ func toMemoryView(it *memoryModels.MemoryItem) adapter.MemoryItemView {
 	if it.DueAt != nil {
 		v.DueAt = it.DueAt.Format("2006-01-02")
 	}
+	// A commitment overdue past needing its person now: the memory page asks
+	// "Still relevant?" of it (commitmentIsStale).
+	v.Stale = commitmentIsStale(it, time.Now())
 	if it.ChannelUUID != nil {
 		v.ChannelUUID = it.ChannelUUID.String()
 	}

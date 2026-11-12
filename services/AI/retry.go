@@ -106,6 +106,12 @@ func backoffWait(ctx context.Context, attempt int, cfg retryConfig, suggested ti
 // and waiting does not (V-157).
 var errProviderTooLarge = errors.New("ai: the provider refused the request as too large")
 
+// errEmptyJSONAnswer marks a host in JSON mode refusing an answer the model left empty (emptyJSONAnswer): a
+// model that thinks spent its whole output budget thinking and wrote nothing. The same request at the least
+// thinking its family takes can answer, so ChatJSONWithRetry asks once more with LeastThinking (V-811b). A
+// chat call marks the refusal so only when that call is another request (chatStatusError).
+var errEmptyJSONAnswer = errors.New("ai: the model wrote no answer for the host's JSON mode")
+
 // ProviderError is an error built from text a provider or a remote agent wrote: a reply's status and body, an error
 // it reported inside a 200 reply or a stream, or a reply that broke off or couldn't be read. That text can name the
 // provider's account, hosts and limits (Groq's 413 carried the organization id), and a reply that couldn't be read is
@@ -138,6 +144,20 @@ func providerStatusError(label string, code int, body []byte) error {
 		return FromProvider(fmt.Errorf("%s status %d: %s: %w", label, code, string(body), errProviderTooLarge))
 	}
 	return FromProvider(fmt.Errorf("%s status %d: %s", label, code, string(body)))
+}
+
+// chatStatusError builds the error for a chat call's non-2xx response: providerStatusError's, except that a
+// 400 refusing an answer the model left empty (emptyJSONAnswer) is errEmptyJSONAnswer when canThinkLess says
+// so, the one sign ChatJSONWithRetry asks once more at the least thinking. canThinkLess is the provider's
+// answer to whether that call would be another request: a call at the least thinking the model's family takes
+// differs from the one sent. It is asked only for that refusal. When it wouldn't be (thinking already least, or
+// a family that takes no effort), the retry would send the same bytes for the same refusal: a second wait, a
+// second spend of the asker's rate limit and a second breaker failure (V-811c), so the refusal is a plain 400.
+func chatStatusError(label string, code int, body []byte, canThinkLess func() bool) error {
+	if code == http.StatusBadRequest && emptyJSONAnswer(body) && canThinkLess() {
+		return FromProvider(fmt.Errorf("%s status %d: %s: %w", label, code, string(body), errEmptyJSONAnswer))
+	}
+	return providerStatusError(label, code, body)
 }
 
 // doHTTPWithRetry sends a request built fresh on each attempt (newReq must

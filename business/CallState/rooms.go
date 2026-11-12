@@ -111,8 +111,12 @@ func BelongsHere(ctx context.Context, room string) bool {
 	}
 	switch ref.Kind {
 	case KindMeeting:
-		exists, err := guestModel.ResourceExists(ctx, room)
-		return err == nil && exists
+		if exists, err := guestModel.ResourceExists(ctx, room); err == nil && exists {
+			return true
+		}
+		// An event's own room has its meeting before any link (gcal-15 head B).
+		m, err := meetingOf(ctx, ref.ID)
+		return err == nil && m != nil
 	case conversationBusiness.KindChannel:
 		id, err := uuid.Parse(ref.ID)
 		if err != nil {

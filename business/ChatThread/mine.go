@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/google/uuid"
+
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	domain "github.com/akashc777/OneCamp/domain/Message"
 	models "github.com/akashc777/OneCamp/models/postgres/Thread"
@@ -52,8 +54,9 @@ type Page struct {
 const shownLatest = 2
 
 // Mine is a page of the threads who follows, unread first and each group
-// newest reply first, from offset. A thread whose conversation they can no
-// longer read, or whose root is gone, is left out.
+// newest reply first, from offset, and how many of them are unread. A thread
+// whose conversation they can no longer read, or whose root is gone, is left
+// out of both (shown): the count is the list's.
 func Mine(ctx context.Context, who *userModels.UserInfo, offset int) (Page, error) {
 	user, ok := userOf(who)
 	if !ok {
@@ -73,17 +76,25 @@ func Mine(ctx context.Context, who *userModels.UserInfo, offset int) (Page, erro
 			page.Next = next
 		}
 	}
-	if page.Unread, err = unreadCount(ctx, user, Kinds); err != nil {
-		return Page{}, err
-	}
-	rows, err = readableRows(ctx, who, rows)
+	unread, err := unreadOf(ctx, user, Kinds, MaxThreads)
 	if err != nil {
 		return Page{}, err
 	}
+	// The page's threads and the unread ones are asked about together: one
+	// ask of who may read their conversations, one read of each kind's roots.
+	kept, err := shown(ctx, who, append(append([]models.Mine{}, rows...), unread...))
+	if err != nil {
+		return Page{}, err
+	}
+	page.Unread = countKept(unread, kept)
 	// A channel's roots and replies are posts' and their comments'; a DM's or
-	// group's, messages' and theirs: one read of each kind.
+	// group's, messages' and theirs: one read of each kind, of the page's
+	// threads that are kept.
 	var posts, chats []string
 	for _, r := range rows {
+		if !kept[r.ThreadID] {
+			continue
+		}
 		if r.Kind == conversationBusiness.KindChannel {
 			posts = append(posts, r.ThreadID.String())
 		} else {
@@ -100,9 +111,12 @@ func Mine(ctx context.Context, who *userModels.UserInfo, offset int) (Page, erro
 	}
 	me := user.String()
 	for _, r := range rows {
+		if !kept[r.ThreadID] {
+			continue
+		}
 		root := r.ThreadID.String()
 		m, ok := roots[root]
-		if !ok || (m.DeletedAt != nil && m.DeletedAt.Year() > 1970) {
+		if !ok || !live(m) {
 			continue
 		}
 		rs := replies[root]
@@ -123,6 +137,76 @@ func Mine(ctx context.Context, who *userModels.UserInfo, offset int) (Page, erro
 		page.Threads = append(page.Threads, item)
 	}
 	return page, nil
+}
+
+// unreadCountOf is how many threads user (who) follows are unread, of those
+// the Threads list shows them (shown): at most MaxThreads, as many as the
+// list can hold.
+func unreadCountOf(ctx context.Context, who *userModels.UserInfo, user uuid.UUID) (int, error) {
+	unread, err := unreadOf(ctx, user, Kinds, MaxThreads)
+	if err != nil || len(unread) == 0 {
+		return 0, err
+	}
+	kept, err := shown(ctx, who, unread)
+	if err != nil {
+		return 0, err
+	}
+	return countKept(unread, kept), nil
+}
+
+// countKept is how many of rows are kept. Pure.
+func countKept(rows []models.Mine, kept map[uuid.UUID]bool) int {
+	n := 0
+	for _, r := range rows {
+		if kept[r.ThreadID] {
+			n++
+		}
+	}
+	return n
+}
+
+// shown is the Threads list's one rule, which its count keeps too: of rows,
+// the threads whose conversation who may still read and whose root is there
+// and not deleted. It asks about every conversation once and which roots are
+// live once, both kinds in one read of the graph (liveOf: however many, where
+// a full read of roots takes 100). rows is left as given: readableRows keeps in place, so it is
+// handed a copy. NOTIF-H4: the count counted every followed thread, so a
+// thread in a conversation they left or lost, or whose root was deleted, kept
+// the count up while the list left it out.
+func shown(ctx context.Context, who *userModels.UserInfo, rows []models.Mine) (map[uuid.UUID]bool, error) {
+	kept := map[uuid.UUID]bool{}
+	rows, err := readableRows(ctx, who, append([]models.Mine(nil), rows...))
+	if err != nil || len(rows) == 0 {
+		return kept, err
+	}
+	var posts, chats []string
+	seen := map[uuid.UUID]bool{}
+	for _, r := range rows {
+		if seen[r.ThreadID] {
+			continue
+		}
+		seen[r.ThreadID] = true
+		if r.Kind == conversationBusiness.KindChannel {
+			posts = append(posts, r.ThreadID.String())
+		} else {
+			chats = append(chats, r.ThreadID.String())
+		}
+	}
+	alive, err := liveOf(ctx, posts, chats)
+	if err != nil {
+		return nil, err
+	}
+	for id := range seen {
+		if alive[id.String()] {
+			kept[id] = true
+		}
+	}
+	return kept, nil
+}
+
+// live is whether a thread's root is still there: not deleted. Pure.
+func live(m domain.Message) bool {
+	return m.DeletedAt == nil || m.DeletedAt.Year() <= 1970
 }
 
 // readThreads reads the roots and the latest replies of one kind's threads

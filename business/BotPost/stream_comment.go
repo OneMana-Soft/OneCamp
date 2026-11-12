@@ -13,7 +13,10 @@ package botpost
 //     TYPE_UPDATE edit (throttled) — the same live-edit path the FE already
 //     renders for an edited comment (updateChannelCommentByCommentUUID);
 //   - Finalize writes the final text to Dgraph (upsert on the same
-//     comment_uuid) and OpenSearch so a reload shows the complete answer.
+//     comment_uuid) and OpenSearch so a reload shows the complete answer;
+//   - and Finalize alone tells the thread's people of the reply (TellReply),
+//     once, with its final text: never per Push, and never for a stream that
+//     is aborted, so a dropped reply is in nobody's Inbox or Threads.
 //
 // Loop-safe: like every botpost write it emits NO post.created / comment
 // workspace event, so a streamed reply can never re-trigger the coworker or an
@@ -27,9 +30,9 @@ import (
 	"sync"
 	"time"
 
+	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
-	threadIndex "github.com/akashc777/OneCamp/business/ThreadIndex"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	commentDomain "github.com/akashc777/OneCamp/domain/Comment"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
@@ -69,7 +72,7 @@ type PostCommentStream struct {
 	postAuthorUID string // Dgraph uid of the parent post's author (ContentAddedBy)
 	channelUUID   string
 	channelName   string
-	thread        threadIndex.Thread // the thread, for its index
+	post          *dgraphStruct.DgraphPost // the thread's post (its author and channel), to tell it
 
 	mu          sync.Mutex
 	commentUUID uuid.UUID // zero until the first Push creates the comment
@@ -77,6 +80,7 @@ type PostCommentStream struct {
 	finalized   bool
 	lastPublish time.Time
 	lastHTML    string
+	at          time.Time // when the comment was last written: its created_at
 }
 
 // BeginPostCommentStream prepares a streamed in-thread reply — a comment on
@@ -110,7 +114,7 @@ func BeginPostCommentStream(ctx context.Context, postUUID uuid.UUID, bot *userBu
 		postAuthorUID: postInfo.PostBy.Uid,
 		channelUUID:   postInfo.Channel.Uuid,
 		channelName:   postInfo.Channel.Name,
-		thread:        threadIndex.OfPost(postInfo),
+		post:          postInfo,
 	}, nil
 }
 
@@ -147,8 +151,8 @@ func (s *PostCommentStream) Push(ctx context.Context, runningText string) {
 // Finalize writes the complete answer as the comment's final text (persisted to
 // Dgraph + OpenSearch) and publishes the last edit. If no comment was created
 // yet (single-shot answer, or Push never called), it creates the comment now
-// with the final text. Returns the identifiers. A finalized stream ignores
-// further Push/Finalize.
+// with the final text. Then it tells the thread of the reply, once (TellReply).
+// Returns the identifiers. A finalized stream ignores further Push/Finalize.
 func (s *PostCommentStream) Finalize(ctx context.Context, finalText string) (*Result, error) {
 	finalText = strings.TrimSpace(finalText)
 	s.mu.Lock()
@@ -168,17 +172,15 @@ func (s *PostCommentStream) Finalize(ctx context.Context, finalText string) (*Re
 			return nil, err
 		}
 		s.publishCreate(finalHTML)
-		refsBusiness.Saved(ctx, refsBusiness.Comment, s.commentUUID.String(), finalHTML, true)
-		s.indexFinal(finalText)
-		return s.result(finalHTML), nil
+	} else {
+		if err := s.writeComment(ctx, finalHTML, false); err != nil {
+			return nil, err
+		}
+		s.publishEdit(finalHTML, true)
 	}
-
-	if err := s.writeComment(ctx, finalHTML, false); err != nil {
-		return nil, err
-	}
-	s.publishEdit(finalHTML, true)
 	refsBusiness.Saved(ctx, refsBusiness.Comment, s.commentUUID.String(), finalHTML, true)
 	s.indexFinal(finalText)
+	TellReply(s.bot, s.displayName, s.post, s.commentUUID.String(), finalHTML, helpers.HTMLToPlainText(finalHTML), s.at)
 	return s.result(finalHTML), nil
 }
 
@@ -194,8 +196,18 @@ func (s *PostCommentStream) Abort(ctx context.Context) {
 		return
 	}
 	s.finalized = true
-	if err := commentDomain.HardDeleteCommentByUUID(ctx, s.commentUUID); err != nil {
+	// A dropped reply is deleted as a person's is, through the comment's soft
+	// delete: both stores mark it, so no reload brings it back (V-578). It runs
+	// past the run's own end. A streamed reply has no files and is never sent
+	// to the channel too, so DeleteCommentOnPost's mirror has nothing to take.
+	ctx = context.WithoutCancel(ctx)
+	now := time.Now()
+	deleted := &dgraphStruct.DgraphComment{Uid: "uid(co)", Uuid: s.commentUUID.String(), DeletedAt: &now, DType: []string{"Comment"}}
+	if err := commentBusiness.DeleteComment(ctx, deleted, now, s.commentUUID, &dgraphStruct.DgraphComment{}); err != nil {
+		// Still there for a reload, so screens keep it too, as after a
+		// person's delete that failed.
 		helpers.LogErrorWithContext(ctx, "botpost comment stream: abort delete failed: %+v", err)
+		return
 	}
 	mqttBusiness.PublishPostComment(&mqttStruct.MqttPostComment{
 		Type:        mqttStruct.TYPE_DELETE,
@@ -261,6 +273,7 @@ func (s *PostCommentStream) writeComment(ctx context.Context, htmlText string, c
 		}
 		return err
 	}
+	s.at = now
 	return nil
 }
 
@@ -278,9 +291,6 @@ func (s *PostCommentStream) publishCreate(htmlText string) {
 	// broadcast.
 	s.lastHTML = htmlText
 	now := time.Now()
-	// The thread's index: the reply is there from its first words.
-	reply := threadIndex.Reply{Thread: s.thread, By: s.bot.UUID, At: now}
-	helpers.GoSafeNamed("threadIndex.recordReply", func() { recordReply(context.Background(), reply) })
 	mqttBusiness.PublishPostComment(&mqttStruct.MqttPostComment{
 		Type:           mqttStruct.TYPE_CREATE,
 		CommentUuid:    s.commentUUID.String(),

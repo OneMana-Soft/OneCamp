@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	redisInit "github.com/akashc777/OneCamp/initializers/redis"
+	"github.com/akashc777/OneCamp/models/redis/registry"
+	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -31,10 +31,6 @@ const (
 var ErrBusy = errors.New("tree: another change to these pages is still going; try again")
 
 var local sync.Map // kind -> *sync.Mutex
-
-// Release lets the lock go only when this holder still has it, so a holder
-// that outlived its TTL can't free the next one's lock.
-var release = redis.NewScript(`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) end return 0`)
 
 // Lock takes the tree's lock for kind and returns what lets it go, which
 // may be called more than once (a caller that lets go early and defers it).
@@ -55,24 +51,20 @@ func lock(ctx context.Context, kind string) (func(), error) {
 	if !lockWithin(ctx, m, lockWait) {
 		return nil, ErrBusy
 	}
-	rdb := redisInit.RedisClient
-	if rdb == nil {
+	if !redisStore.IsAvailable() {
 		return m.Unlock, nil
 	}
-	key := "tree:lock:" + kind
+	args := []string{kind}
 	token := uuid.NewString()
 	deadline := time.Now().Add(lockWait)
 	for {
-		ok, err := rdb.SetNX(ctx, key, token, lockTTL).Result()
+		ok, err := redisStore.SetStringIfAbsent(ctx, registry.TreeLock, args, token, lockTTL)
 		if err != nil {
 			// Redis can't be asked: this instance's lock is what there is.
 			return m.Unlock, nil
 		}
 		if ok {
-			return func() {
-				_ = release.Run(context.Background(), rdb, []string{key}, token).Err()
-				m.Unlock()
-			}, nil
+			break
 		}
 		if time.Now().After(deadline) {
 			m.Unlock()
@@ -85,6 +77,12 @@ func lock(ctx context.Context, kind string) (func(), error) {
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
+	return func() {
+		// Only while this holder still has it: one that outlived lockTTL
+		// can't free the next one's lock.
+		_, _ = redisStore.DeleteIfHeld(context.Background(), registry.TreeLock, args, token)
+		m.Unlock()
+	}, nil
 }
 
 func lockWithin(ctx context.Context, m *sync.Mutex, wait time.Duration) bool {

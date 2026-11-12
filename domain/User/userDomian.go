@@ -1320,7 +1320,7 @@ var userTaskCardFields = `
 							user_name
 							user_profile_object_key
 						}
-						task_sub_task_count: count(task_sub_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` @@hidden_tasks@@))
+						` + taskread.SubTaskCounts + `
 						task_comment_count: count(task_comments @filter(` + dgraphquery.Live("comment_deleted_at") + `))
 						` + dgraphStruct.TASK_BLOCKED_OPEN + `
 						task_team {
@@ -1433,6 +1433,7 @@ func GetDgraphUserTaskList(ctx context.Context, userUUID string, userDgraphUID s
 						task_label
 						task_description
 						task_priority
+						task_estimate_minutes
 						task_project {
 							uid
 							project_uuid
@@ -1446,7 +1447,7 @@ func GetDgraphUserTaskList(ctx context.Context, userUUID string, userDgraphUID s
 							user_name
 							user_profile_object_key
 						}
-						task_sub_task_count: count(task_sub_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` @@hidden_tasks@@))
+						`+taskread.SubTaskCounts+`
 						task_comment_count: count(task_comments @filter(`+dgraphquery.Live("comment_deleted_at")+`))
 						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {

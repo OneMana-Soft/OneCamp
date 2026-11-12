@@ -1,6 +1,7 @@
 package business
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -57,5 +58,48 @@ func TestALiveMessageNamesEachRowsFields(t *testing.T) {
 		if strings.Contains(fmt.Sprint(msg), v) {
 			t.Errorf("the message carries a value: %v", msg)
 		}
+	}
+}
+
+// ?fields= is field ids, each once, in order; anything else is refused
+// (Live Rows, tables L1).
+func TestFieldIDsAreParsed(t *testing.T) {
+	a, b := uuid.New(), uuid.New()
+	got, err := ParseFieldIDs(" " + a.String() + "," + b.String() + ",," + a.String())
+	if err != nil || !reflect.DeepEqual(got, []uuid.UUID{a, b}) {
+		t.Errorf("got %v, %v", got, err)
+	}
+	many := make([]string, MaxRowsByID+1)
+	for i := range many {
+		many[i] = uuid.NewString()
+	}
+	for _, bad := range []string{"", " , ", a.String() + ",Amount", strings.Join(many, ",")} {
+		if _, err := ParseFieldIDs(bad); !errors.Is(err, ErrBadFieldIDs) {
+			t.Errorf("%.40q: %v", bad, err)
+		}
+	}
+}
+
+// A read of the cells a live message named keeps each row's named cells and
+// those every read works out, which may follow from them (a formula, a
+// stamp), an empty one as null so the reader clears it where it holds the
+// row. Every other cell stays out, and a field the table hasn't got is never
+// named back.
+func TestACellsReadKeepsTheNamedCellsAndThoseWorkedOut(t *testing.T) {
+	name := &model.Field{Id: uuid.New(), Type: model.FieldText}
+	amount := &model.Field{Id: uuid.New(), Type: model.FieldNumber}
+	note := &model.Field{Id: uuid.New(), Type: model.FieldText}
+	double := &model.Field{Id: uuid.New(), Type: model.FieldFormula}
+	changed := &model.Field{Id: uuid.New(), Type: model.FieldModifiedTime}
+	fields := []*model.Field{name, amount, note, double, changed}
+	row := &model.Row{Id: uuid.New(), Values: fmt.Sprintf(`{%q:"Line 1",%q:7,%q:14,%q:"2026-11-05T08:00:00Z"}`, name.Id, amount.Id, double.Id, changed.Id)}
+	got := narrowCells(fields, []*model.Row{row}, []uuid.UUID{amount.Id, note.Id, uuid.New()})
+	var cells map[string]any
+	if len(got) != 1 || json.Unmarshal([]byte(got[0].Values), &cells) != nil {
+		t.Fatalf("got %v", got)
+	}
+	want := map[string]any{amount.Id.String(): 7.0, note.Id.String(): nil, double.Id.String(): 14.0, changed.Id.String(): "2026-11-05T08:00:00Z"}
+	if !reflect.DeepEqual(cells, want) {
+		t.Errorf("cells %v, want %v", cells, want)
 	}
 }

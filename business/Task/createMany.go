@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	"github.com/akashc777/OneCamp/models/pgexec"
+	taskKeyModel "github.com/akashc777/OneCamp/models/postgres/TaskKey"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
@@ -33,6 +35,9 @@ type NewTask struct {
 	Input  adapter.CreateOrUpdateTaskInput
 	Parent int
 	Under  *dgraphStruct.DgraphTask
+	// Epic makes it an epic (the built-in type): it sits at the top and
+	// holds tasks, which hold sub-tasks (domain/Task MayParent).
+	Epic bool
 }
 
 // CreateTasks makes many tasks in a project at once (the BE audit's #30: a
@@ -57,6 +62,11 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 	if project == nil || project.Team == nil {
 		return nil, fmt.Errorf("business/CreateTasks: project %s has no team", projectUUID)
 	}
+	// Each task sits where the hierarchy lets it (domain/Task MayParent),
+	// and a project holds at most MaxEpics epics.
+	if err := mayNest(ctx, projectUUID.String(), tasks); err != nil {
+		return nil, err
+	}
 	// A copy of a restricted task is kept to that one's people one by one.
 	if workAccess.CopiesRestricted(ctx) {
 		return createOneByOne(ctx, projectUUID, user, project, tasks)
@@ -77,15 +87,25 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 	// in one transaction. A batch with no task below one made before is its
 	// rows' one statement, as it always was, so it opens no transaction.
 	below, above, open := madeBefore(tasks, ids)
+	var epics []uuid.UUID
+	for i, t := range tasks {
+		if t.Epic {
+			epics = append(epics, ids[i])
+		}
+	}
 	var numbers map[uuid.UUID]int
 	write := func(ctx context.Context) error {
 		var err error
 		if numbers, err = domain.CreateTasks(ctx, ids, projectUUID, user.UserPostgresInfo.Id, now); err != nil {
 			return err
 		}
+		if err := taskKeyModel.SetEpics(ctx, epics); err != nil {
+			return err
+		}
 		return workAccess.SettleRestrictions(ctx, below, above, user.UserPostgresInfo.Id, now)
 	}
-	if len(below) > 0 {
+	// An epic's type is set with its row, so its tasks are never sub-tasks.
+	if len(below) > 0 || len(epics) > 0 {
 		err = pgexec.InTx(ctx, write)
 	} else {
 		err = write(ctx)
@@ -132,7 +152,9 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 	}
 	// The notice is the request's too (its id, its trace), sent after it answers.
 	tellCtx := context.WithoutCancel(ctx)
-	helpers.GoSafeNamed("Task.CreateTasks:tell", func() { tellOfNewTasks(tellCtx, project.Uuid, top, me) })
+	if !helpers.Quiet(ctx) { // a move of data tells nobody (QuietMove)
+		helpers.GoSafeNamed("Task.CreateTasks:tell", func() { tellOfNewTasks(tellCtx, project.Uuid, top, me) })
+	}
 	// Those made outside any task made before (a copy of a restricted one went
 	// one by one, above) are open: their entries read no restriction of
 	// theirs, while one below a task made before reads its own. Each task's
@@ -151,6 +173,73 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 	}
 	logChange(eventCtx, &me, made...)
 	return ids, nil
+}
+
+// nestBatch is nil when every task of the batch sits where the hierarchy
+// lets it (domain/Task MayParent), each under one before it in the batch or
+// under one made before, whose places are made (by uuid; one that isn't
+// there is ErrTaskNotVisible). Pure.
+func nestBatch(project string, made map[string]domain.Place, tasks []NewTask) error {
+	places := make([]domain.Place, len(tasks))
+	for i, t := range tasks {
+		p := domain.Place{UUID: "new:" + strconv.Itoa(i), Project: project, Epic: t.Epic}
+		var parent *domain.Place
+		switch {
+		case t.Parent >= 0 && t.Parent < i:
+			parent = &places[t.Parent]
+		case t.Under != nil:
+			u, ok := made[t.Under.Uuid]
+			if !ok {
+				return ErrTaskNotVisible
+			}
+			parent = &u
+		}
+		if parent != nil {
+			if err := domain.MayParent(p, parent); err != nil {
+				return err
+			}
+			p.Parent, p.ParentEpic = parent.UUID, parent.Epic
+		}
+		places[i] = p
+	}
+	return nil
+}
+
+// mayNest is nil when the batch nests as the hierarchy lets it (nestBatch,
+// reading the places of the tasks made before it sits under) and its epics
+// keep the project within domain/Task MaxEpics.
+func mayNest(ctx context.Context, project string, tasks []NewTask) error {
+	var under []string
+	epics := 0
+	for _, t := range tasks {
+		if t.Under != nil {
+			under = append(under, t.Under.Uuid)
+		}
+		if t.Epic {
+			epics++
+		}
+	}
+	made := map[string]domain.Place{}
+	if len(under) > 0 {
+		var err error
+		if made, err = readPlaces(ctx, under...); err != nil {
+			return err
+		}
+	}
+	if err := nestBatch(project, made, tasks); err != nil {
+		return err
+	}
+	if epics == 0 {
+		return nil
+	}
+	have, err := epicsIn(ctx, project)
+	if err != nil {
+		return err
+	}
+	if len(have)+epics > domain.MaxEpics {
+		return domain.Refusal(fmt.Sprintf("A project holds at most %d epics.", domain.MaxEpics))
+	}
+	return nil
 }
 
 // madeBefore pairs each task of the batch that sits under a task made before
@@ -213,10 +302,6 @@ func newTaskNodes(ctx context.Context, projectUUID uuid.UUID, user *model.UserIn
 			}
 			statuses[key] = st
 		}
-		priority := in.Priority
-		if priority == "" {
-			priority = dgraphStruct.TASK_PRIORITY_MEDIUM
-		}
 		label := helpers.NormaliseTags(in.Label)
 		desc := in.TaskDescription
 		// A millisecond apart, as tasks made one after another are.
@@ -233,7 +318,7 @@ func newTaskNodes(ctx context.Context, projectUUID uuid.UUID, user *model.UserIn
 			Description: &desc,
 			Status:      st.Category,
 			StatusSince: &at,
-			Priority:    priority,
+			Priority:    in.Priority,
 			Label:       &label,
 			CreatedBy:   me,
 			Activity: []*dgraphStruct.DgraphTaskActivity{{
@@ -301,17 +386,30 @@ func newTaskNodes(ctx context.Context, projectUUID uuid.UUID, user *model.UserIn
 // copy that may have to be kept to another task's people.
 func createOneByOne(ctx context.Context, projectUUID uuid.UUID, user *model.UserInfo, project *dgraphStruct.DgraphProject, tasks []NewTask) ([]uuid.UUID, error) {
 	ids := make([]uuid.UUID, 0, len(tasks))
+	// The epics made are typed in one write, after the loop or as it stops.
+	var epics []uuid.UUID
+	typed := func(err error) ([]uuid.UUID, error) {
+		if len(epics) > 0 {
+			if terr := taskKeyModel.SetEpics(ctx, epics); err == nil {
+				err = terr
+			}
+		}
+		return ids, err
+	}
 	for _, t := range tasks {
 		if t.Parent >= 0 || t.Under != nil {
-			return ids, fmt.Errorf("business/CreateTasks: a copy's sub-tasks are made with CreateSubTask")
+			return typed(fmt.Errorf("business/CreateTasks: a copy's sub-tasks are made with CreateSubTask"))
 		}
 		id, err := CreateTask(ctx, projectUUID, user, project, nil, t.Input, nil)
 		if err != nil {
-			return ids, err
+			return typed(err)
 		}
 		ids = append(ids, id)
+		if t.Epic {
+			epics = append(epics, id)
+		}
 	}
-	return ids, nil
+	return typed(nil)
 }
 
 // tellOfNewTasks tells the project's people who hear of new tasks, once for

@@ -11,8 +11,10 @@ package integration_test
 // times at once (the reaction key's @upsert). Taking one back takes back
 // every copy of it (adds from before this made a node each time), and only
 // theirs. An app from before several reactions still changes its one
-// reaction. The caps refuse in words. A DM's author hears of someone's
-// reactions once. Replies in a thread, in a DM's thread and on a task are
+// reaction. The caps refuse in words. A DM's author is pushed nothing for
+// someone's reactions: since A4 H2 (design D2) a reaction reaches its author's
+// Inbox alone (TestADirectMessageReactionReachesItsAuthor and the One Door
+// tests hold that side). Replies in a thread, in a DM's thread and on a task are
 // reacted to and taken back the same way.
 //
 // Pins: whoever posts in a conversation pins and unpins there, once; the pin
@@ -332,7 +334,7 @@ func TestReactionsLikeSlacks(t *testing.T) {
 		}
 	})
 
-	t.Run("a DM's author hears of someone's reactions once", func(t *testing.T) {
+	t.Run("a DM's author is pushed nothing for someone's reactions", func(t *testing.T) {
 		_, data, _ := w.call(t, "jonas", chatController.CreateChat, http.MethodPost, chatAdapter.ChatInfo{ToUuid: w.people["maya"].String(), TextHtml: "<p>Lunch?</p>"})
 		var created struct {
 			UUID string `json:"uuid"`
@@ -363,10 +365,12 @@ func TestReactionsLikeSlacks(t *testing.T) {
 			}
 			return n
 		}
-		waitFor(t, "the reaction's push", func() bool { return reactionPushes() > 0 })
-		time.Sleep(time.Second) // a second push would be on its way by now
-		if n := reactionPushes(); n != 1 {
-			t.Fatalf("Jonas was pushed %d times for Maya's reactions, want once", n)
+		// Every push and notice handed off has gone, or never will (before A4 H2 one went to Jonas).
+		if busy := helpers.SettleBackground(10 * time.Second); len(busy) > 0 {
+			t.Fatalf("still at work: %v", busy)
+		}
+		if n := reactionPushes(); n != 0 {
+			t.Fatalf("Jonas was pushed %d times for Maya's reactions, want none: a reaction never pushes (A4 H2, D2)", n)
 		}
 	})
 

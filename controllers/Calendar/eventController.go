@@ -239,6 +239,7 @@ func GetEventController(w http.ResponseWriter, r *http.Request) {
 // even a guest trying to edit.
 func writeEventError(w http.ResponseWriter, err error) {
 	var input *business.EventInputError
+	var refused *business.EventRefusal
 	var stale *business.StaleError
 	switch {
 	case errors.As(err, &stale):
@@ -249,6 +250,8 @@ func writeEventError(w http.ResponseWriter, err error) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": err.Error()})
 	case errors.Is(err, business.ErrOnlyCreatorChanges), errors.Is(err, business.ErrNotEventCreator), errors.Is(err, business.ErrCreatorCannotLeave):
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": err.Error()})
+	case errors.As(err, &refused):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": refused.Error()})
 	case errors.As(err, &input):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": input.Error()})
 	default:

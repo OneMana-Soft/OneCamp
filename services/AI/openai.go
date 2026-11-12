@@ -27,10 +27,10 @@ type OpenAIProvider struct {
 	kind           ProviderType // ProviderOpenAI or ProviderOpenAICompatible
 	streamOpts     ProviderOptions
 	// reasoning is the admin "thinking" mode. When false (the default) we ask
-	// reasoning-capable models to skip their chain-of-thought, so the answer
-	// (and any tool_call) isn't truncated by the output-token budget and the
-	// trace never leaks. Honored for qwen3 via its "/no_think" soft switch;
-	// other models ignore it.
+	// reasoning-capable models to think least, so the answer (and any
+	// tool_call) isn't truncated by the output-token budget and the trace
+	// never leaks: the reasoning effort their family takes (reasoningOffParam),
+	// and qwen3's "/no_think" soft switch.
 	reasoning bool
 	// maxOutput is the ceiling an admin recorded for this model (migration 140), or 0 when
 	// unstated. A property of the model this client serves, so the clamp lives here and
@@ -64,21 +64,67 @@ func (o *OpenAIProvider) clampOutput(want int) int {
 	return want
 }
 
-// reasoningOffParam returns the value for the request's reasoning_effort field
-// when the model's thinking should be disabled. Groq-hosted qwen3 ignores the
-// prompt-level /no_think switch and only respects reasoning_effort:"none", so
-// we send it there. Empty means "don't set the field" (leave the endpoint
-// default) - used for every other provider/model to avoid an unsupported-param
-// 400.
-func (o *OpenAIProvider) reasoningOffParam(model string) string {
-	if o.reasoning {
+// thinksInBudget reports whether a call to model thinks out of its output budget, by the one rule
+// (callThinks): OpenAI's own reasoning family and the families that always think, and a family that can
+// think while the admin has thinking on. Qwen3 with thinking off (Groq's reasoning_effort "none", elsewhere
+// "/no_think") and a model that doesn't think, whatever the switch says, don't.
+func (o *OpenAIProvider) thinksInBudget(model string) bool {
+	return callThinks(o.kind, model, o.reasoning, modelSupportsThinking(model))
+}
+
+// setSampling puts a chat call's sampling options on its request, the same for
+// every chat call (plain, tools, stream): the least thinking where the model
+// takes an effort (reasoningOffParam), the output budget (outputBudget), the seed, and
+// temperature/top_p except for OpenAI's reasoning family, which rejects them,
+// so a model-agnostic selection of o1/o3/o4/gpt-5 doesn't 400 every call.
+func (o *OpenAIProvider) setSampling(req *openaiChatRequest, model string, opts ChatOptions) {
+	if eff := o.reasoningOffParam(model, opts.LeastThinking); eff != "" {
+		req.ReasoningEffort = &eff
+	}
+	reasoning := o.isReasoningModel(model)
+	if opts.Temperature > 0 && !reasoning {
+		req.Temperature = &opts.Temperature
+	}
+	if n := o.outputBudget(model, opts.MaxTokens); n > 0 {
+		req.MaxTokens = &n
+	}
+	if opts.TopP > 0 && !reasoning {
+		req.TopP = &opts.TopP
+	}
+	if opts.Seed != 0 {
+		req.Seed = &opts.Seed
+	}
+}
+
+// outputBudget is the max_completion_tokens every call to model sends: the
+// caller's ask, plus the room a call that thinks gets (withThinkingRoom),
+// capped by the ceiling an admin recorded (clampOutput). No ask stays no ask,
+// so the field is omitted and the endpoint's own default applies.
+func (o *OpenAIProvider) outputBudget(model string, want int) int {
+	return o.clampOutput(withThinkingRoom(want, o.thinksInBudget(model)))
+}
+
+// reasoningOffParam returns the value for the request's reasoning_effort field:
+// with the admin's thinking switch off, or when the call asks to think least
+// (ChatOptions.LeastThinking), the effort that makes the model's family think
+// least on this host, from the family table (leastEffort): gpt-oss "low", since
+// it can't stop thinking and at its default spends the whole budget on it
+// (V-811b); Groq's qwen3 "none", since it ignores /no_think there. Empty means
+// "don't set the field" (leave the endpoint default): thinking on, and every
+// family that takes no effort, so no host gets an unsupported-param 400.
+func (o *OpenAIProvider) reasoningOffParam(model string, least bool) string {
+	if o.reasoning && !least {
 		return ""
 	}
-	m := strings.ToLower(model)
-	if strings.Contains(m, "qwen") && strings.Contains(strings.ToLower(o.baseURL), "groq") {
-		return "none"
-	}
-	return ""
+	return leastEffort(model, o.baseURL)
+}
+
+// canThinkLess reports whether a call to model at the least thinking (LeastThinking) is another request than
+// one with opts: the one field LeastThinking changes is reasoning_effort (setSampling), so it is another request
+// exactly when that effort differs. It doesn't with thinking off (the call already went at the least) or for a
+// family that takes no effort on this host (chatStatusError).
+func (o *OpenAIProvider) canThinkLess(model string, opts ChatOptions) bool {
+	return o.reasoningOffParam(model, true) != o.reasoningOffParam(model, opts.LeastThinking)
 }
 
 // applyReasoningDirective appends qwen3's "/no_think" soft switch to the last
@@ -167,11 +213,11 @@ type openaiChatRequest struct {
 	MaxTokens     *int                `json:"max_completion_tokens,omitempty"`
 	TopP          *float64            `json:"top_p,omitempty"`
 	Seed          *int                `json:"seed,omitempty"`
-	// ReasoningEffort is a Groq/OpenAI extension. For Groq-hosted qwen3 we send
-	// "none" to fully disable the model's thinking (the prompt-level /no_think
-	// switch is not honored by Groq), so the answer + tool_call come back in
-	// one fast pass instead of a 30-40s reasoning trace. omitempty keeps it off
-	// every other endpoint.
+	// ReasoningEffort is the least thinking the model's family takes, while
+	// thinking is off (reasoningOffParam): gpt-oss "low", Groq-hosted qwen3
+	// "none" (the prompt-level /no_think switch is not honored by Groq), so the
+	// answer + tool_call fit the budget instead of a long reasoning trace.
+	// omitempty keeps it off every other request.
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
 
 	// ResponseFormat constrains the output (e.g. JSON object) when JSONMode is
@@ -275,7 +321,13 @@ type openaiEmbedResponse struct {
 // first-party OpenAI provider; openai_compatible endpoints (vLLM, Groq, …)
 // follow standard chat semantics and keep temperature.
 func (o *OpenAIProvider) isReasoningModel(model string) bool {
-	if o.kind != ProviderOpenAI {
+	return isOpenAIReasoningModel(o.kind, model)
+}
+
+// isOpenAIReasoningModel is isReasoningModel for a provider of kind, for a
+// caller that holds the kind rather than the client (the room-to-think rule).
+func isOpenAIReasoningModel(kind ProviderType, model string) bool {
+	if kind != ProviderOpenAI {
 		return false
 	}
 	m := strings.ToLower(strings.TrimSpace(model))
@@ -314,28 +366,10 @@ func (o *OpenAIProvider) Chat(ctx context.Context, messages []ChatMessage, opts 
 		Messages: oaiMessages,
 		Stream:   false,
 	}
-	if eff := o.reasoningOffParam(model); eff != "" {
-		reqBody.ReasoningEffort = &eff
-	}
 	if opts.JSONMode {
 		reqBody.ResponseFormat = &openaiResponseFormat{Type: "json_object"}
 	}
-
-	// Reasoning models reject temperature/top_p — omit them so a
-	// model-agnostic selection of o1/o3/o4/gpt-5 doesn't 400 every call.
-	reasoning := o.isReasoningModel(model)
-	if opts.Temperature > 0 && !reasoning {
-		reqBody.Temperature = &opts.Temperature
-	}
-	if n := o.clampOutput(opts.MaxTokens); n > 0 {
-		reqBody.MaxTokens = &n
-	}
-	if opts.TopP > 0 && !reasoning {
-		reqBody.TopP = &opts.TopP
-	}
-	if opts.Seed != 0 {
-		reqBody.Seed = &opts.Seed
-	}
+	o.setSampling(&reqBody, model, opts)
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -358,7 +392,7 @@ func (o *OpenAIProvider) Chat(ctx context.Context, messages []ChatMessage, opts 
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", providerStatusError("openai: API returned", resp.StatusCode, respBody)
+		return "", chatStatusError("openai: API returned", resp.StatusCode, respBody, func() bool { return o.canThinkLess(model, opts) })
 	}
 
 	var chatResp openaiChatResponse
@@ -439,22 +473,7 @@ func (o *OpenAIProvider) ChatWithTools(ctx context.Context, messages []ChatMessa
 		}
 		reqBody.ToolChoice = "auto"
 	}
-	if eff := o.reasoningOffParam(model); eff != "" {
-		reqBody.ReasoningEffort = &eff
-	}
-	reasoning := o.isReasoningModel(model)
-	if opts.Temperature > 0 && !reasoning {
-		reqBody.Temperature = &opts.Temperature
-	}
-	if n := o.clampOutput(opts.MaxTokens); n > 0 {
-		reqBody.MaxTokens = &n
-	}
-	if opts.TopP > 0 && !reasoning {
-		reqBody.TopP = &opts.TopP
-	}
-	if opts.Seed != 0 {
-		reqBody.Seed = &opts.Seed
-	}
+	o.setSampling(&reqBody, model, opts)
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -571,25 +590,7 @@ func (o *OpenAIProvider) ChatStream(ctx context.Context, messages []ChatMessage,
 		Stream:        true,
 		StreamOptions: &openaiStreamOpts{IncludeUsage: true},
 	}
-	if eff := o.reasoningOffParam(model); eff != "" {
-		reqBody.ReasoningEffort = &eff
-	}
-
-	// Reasoning models (o1/o3/o4/gpt-5) reject temperature/top_p — omit them
-	// so a model-agnostic selection doesn't 400 every streamed call.
-	reasoning := o.isReasoningModel(model)
-	if opts.Temperature > 0 && !reasoning {
-		reqBody.Temperature = &opts.Temperature
-	}
-	if n := o.clampOutput(opts.MaxTokens); n > 0 {
-		reqBody.MaxTokens = &n
-	}
-	if opts.TopP > 0 && !reasoning {
-		reqBody.TopP = &opts.TopP
-	}
-	if opts.Seed != 0 {
-		reqBody.Seed = &opts.Seed
-	}
+	o.setSampling(&reqBody, model, opts)
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -830,8 +831,9 @@ func (o *OpenAIProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
 // They are pure and provider-agnostic (a no-op on providers that never emit
 // this error), and unit-tested against the real shapes seen in production.
 
-// groqToolFailure mirrors the relevant subset of the 400 error envelope.
-type groqToolFailure struct {
+// groqFailure mirrors the relevant subset of the 400 error envelope: its code
+// and what the model generated.
+type groqFailure struct {
 	Error struct {
 		Code             string `json:"code"`
 		FailedGeneration string `json:"failed_generation"`
@@ -843,7 +845,7 @@ type groqToolFailure struct {
 // call whose name is one the caller actually offered (allowed), so we never
 // invent or execute a tool the run didn't advertise.
 func recoverToolCallFromFailedGeneration(body []byte, allowed map[string]bool) (ToolCall, bool) {
-	var f groqToolFailure
+	var f groqFailure
 	if err := json.Unmarshal(body, &f); err != nil {
 		return ToolCall{}, false
 	}
@@ -855,6 +857,15 @@ func recoverToolCallFromFailedGeneration(body []byte, allowed map[string]bool) (
 		return ToolCall{}, false
 	}
 	return ToolCall{ID: "recovered_" + name, Name: name, Arguments: args}, true
+}
+
+// emptyJSONAnswer reports whether a 400's body is a host in JSON mode refusing an
+// answer the model left empty: Groq's json_validate_failed with nothing in
+// failed_generation (V-811b). One with a generation is a model that answered
+// badly, which the same request at less thinking would not fix.
+func emptyJSONAnswer(body []byte) bool {
+	var f groqFailure
+	return json.Unmarshal(body, &f) == nil && f.Error.Code == "json_validate_failed" && strings.TrimSpace(f.Error.FailedGeneration) == ""
 }
 
 // parseTagFunctionCall extracts (name, argsJSON) from a Llama "python tag" tool

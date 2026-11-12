@@ -19,14 +19,17 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/business/Tree/position"
+	"github.com/akashc777/OneCamp/helpers/pagefill"
 	model "github.com/akashc777/OneCamp/models/postgres/Places"
 	"github.com/google/uuid"
 )
 
-// Kinds of place.
+// Kinds of place. Opened is no place the person keeps: it is what a list of
+// what they opened lately (RecentItems) calls its items.
 const (
-	Star = "star"
-	Pin  = "pin"
+	Star   = "star"
+	Pin    = "pin"
+	Opened = "recent"
 )
 
 // Person is whom places are read for: their uuid (places are theirs), and
@@ -45,6 +48,9 @@ type Item struct {
 	Title        string `json:"title"`
 	Icon         string `json:"icon,omitempty"`
 	Href         string `json:"href"`
+	// ViewedAt is when the person last opened it, in a list of what they
+	// opened lately (RecentItems).
+	ViewedAt *time.Time `json:"viewed_at,omitempty"`
 }
 
 // Seen is what a resolver says of one thing the person may open.
@@ -244,11 +250,67 @@ func IDs(ctx context.Context, personUUID, kind, resourceKind string) ([]string, 
 	return out, nil
 }
 
+// recentScanPages bounds how far RecentItems reads back through the view log
+// to fill its list past what the person can no longer open: at most five
+// pages of limit views (250 views and five Resolves at the largest limit,
+// 50), so a log of mostly lost things answers short rather than being read
+// whole.
+const recentScanPages = 5
+
+// recentViews reads the view log: at most limit views after the view after
+// (nil: from the newest). A seam for tests.
+var recentViews = model.RecentViews
+
+// RecentItems is what the person opened lately of a kind that keeps a view
+// log (resource_views: docs and boards), newest first, at most limit, each
+// named by its kind's resolver: what they can no longer open is left out. A
+// kind no resolver knows is ErrResource.
+//
+// What is left out is made up from older views (V-616): the log is read a
+// page of limit views at a time after the last view read, with one Resolve a
+// page, until limit are named or recentScanPages pages have been read, so a
+// person who lost a few boards still sees limit of them.
+func RecentItems(ctx context.Context, who Person, resourceKind string, since time.Time, limit int) ([]Item, error) {
+	r, ok := resolverFor(resourceKind)
+	if !ok {
+		return nil, ErrResource
+	}
+	read := func(ctx context.Context, after *model.View, size int) ([]model.View, *model.View, error) {
+		views, err := recentViews(ctx, who.UUID, resourceKind, since, after, size)
+		if err != nil || len(views) == 0 {
+			return nil, nil, err
+		}
+		last := views[len(views)-1]
+		return views, &last, nil
+	}
+	name := func(ctx context.Context, views []model.View) ([]Item, error) {
+		ids := make([]string, len(views))
+		for i, v := range views {
+			ids[i] = v.ResourceUUID
+		}
+		seen, err := r.Resolve(ctx, who, ids)
+		if err != nil {
+			return nil, err
+		}
+		items := make([]Item, 0, len(views))
+		for _, v := range views {
+			s, ok := seen[v.ResourceUUID]
+			if !ok {
+				continue
+			}
+			at := v.LastViewedAt
+			items = append(items, Item{Kind: Opened, ResourceKind: resourceKind, ResourceUUID: v.ResourceUUID, Title: s.Title, Icon: s.Icon, Href: s.Href, ViewedAt: &at})
+		}
+		return items, nil
+	}
+	return pagefill.Fill(ctx, read, name, limit, limit, recentScanPages)
+}
+
 // Recent is what the person opened lately of a kind that keeps a view log
 // (resource_views: "doc" and "board"), newest first: since a moment, at most
 // limit. Unresolved, as IDs.
 func Recent(ctx context.Context, personUUID, resourceKind string, since time.Time, limit int) ([]model.View, error) {
-	return model.RecentViews(ctx, personUUID, resourceKind, since, limit)
+	return model.RecentViews(ctx, personUUID, resourceKind, since, nil, limit)
 }
 
 // Forget takes everyone's places on things gone for good.

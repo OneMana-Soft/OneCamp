@@ -38,14 +38,15 @@ var (
 	ErrDependencyKind    = errors.New("not a kind of dependency, or too long a lag")
 )
 
-// mayChangeInTxn is whether user may change task, as read inside the
-// dependency's transaction for them, by the rule (Work Access).
+// mayChangeInTxn is whether user may take a dependency or a parent off task,
+// as read inside the change's transaction for them, by the rule (Work
+// Access's MayUnlink: an archived project's tasks are read-only).
 func mayChangeInTxn(ctx context.Context, task *dgraphStruct.DgraphTask, user *dgraphStruct.DgraphUser) error {
 	s, f, err := workAccess.OfTask(ctx, user.Uuid, user.Uid, task)
 	if err != nil {
 		return err
 	}
-	return s.CheckTask(workAccess.NeedEditTask, f)
+	return workAccess.MayUnlink(workAccess.VerdictOf(s, f))
 }
 
 // mayLinkInTxn is whether user may make task wait on blocker, as read inside
@@ -112,8 +113,15 @@ func AddTaskDependency(ctx context.Context, taskUUID, blockerUUID, kind string, 
 		if !live(pair.Task) || !live(pair.Blocker) {
 			return ErrDependencyMissing
 		}
+		// A task in an epic takes dependencies; a sub-task doesn't.
 		if pair.Task.ParentTask != nil || pair.Blocker.ParentTask != nil {
-			return ErrDependencySubtask
+			sub, err := anySubTask(ctx, taskUUID, blockerUUID)
+			if err != nil {
+				return err
+			}
+			if sub {
+				return ErrDependencySubtask
+			}
 		}
 		if pair.Task.Project == nil || pair.Blocker.Project == nil || pair.Task.Project.Uuid == "" || pair.Blocker.Project.Uuid == "" {
 			return ErrDependencyProject

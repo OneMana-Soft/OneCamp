@@ -3,10 +3,13 @@ package business
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
 	"time"
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	domain "github.com/akashc777/OneCamp/domain/Team"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -224,6 +227,25 @@ func BecomeAdmin(ctx context.Context, teamUUID uuid.UUID, userDgraphUID string, 
 	}
 	userDomain.InvalidateUserMemberships(ctx, userUUID)
 	return nil
+}
+
+// TeamsForNewProject is the teams the person (their graph uid) may start
+// projects in, by the workspace's "Who can make projects" (Work Access's
+// CanMakeProjectsIn, one read of the rule): the ones they admin, or every
+// one they are in when members may. By name, each
+// as the list of teams they admin carries it: what New project picks a team
+// from (PROJECTS-19), which listed the teams they admin whatever the rule.
+func TeamsForNewProject(ctx context.Context, userDgraphUID string) ([]*dgraphStruct.DgraphTeam, error) {
+	teams, err := domain.GetDgraphTeamsOf(ctx, userDgraphUID)
+	if err != nil {
+		return nil, err
+	}
+	out := []*dgraphStruct.DgraphTeam{}
+	for _, t := range workAccess.CanMakeProjectsIn(ctx, teams) {
+		out = append(out, &dgraphStruct.DgraphTeam{Uid: t.Uid, Uuid: t.Uuid, Name: t.Name})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
+	return out, nil
 }
 
 func GetDgraphTeamListByAdminDgraphUID(ctx context.Context, userDgraphUID string) (dgraphTeamList []*dgraphStruct.DgraphTeam, err error) {

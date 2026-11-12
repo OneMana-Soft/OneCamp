@@ -23,36 +23,18 @@ import (
 	"github.com/google/uuid"
 )
 
-type zoneKey struct{}
-
-// WithZone carries the time zone the request's reader is in (an IANA name,
-// such as "Asia/Kolkata"), where a formula's TODAY() is. An empty or unknown
-// zone leaves it at UTC, as Airtable's formulas default to.
+// WithZone carries the time zone the request's reader is in, where a
+// formula's TODAY() is (helpers.WithZone, as task fields' formulas read it).
 func WithZone(ctx context.Context, tz string) context.Context {
-	if tz == "" {
-		return ctx
-	}
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		return ctx
-	}
-	return context.WithValue(ctx, zoneKey{}, loc)
+	return helpers.WithZone(ctx, tz)
 }
 
-func zoneFrom(ctx context.Context) *time.Location {
-	if loc, ok := ctx.Value(zoneKey{}).(*time.Location); ok {
-		return loc
-	}
-	return time.UTC
-}
+func zoneFrom(ctx context.Context) *time.Location { return helpers.ZoneOf(ctx) }
 
 // kindOf is how a field's cells read in a formula: as its kind says
 // (business/FieldTypes), text for one nothing knows.
 func kindOf(fieldType string) formula.Kind {
-	if k, ok := fieldTypes.Kinds.Lookup(fieldType); ok {
-		return k.FormulaKind
-	}
-	return formula.KindText
+	return fieldTypes.FormulaKindOf(fieldType)
 }
 
 // kindOfField is how a field's cells read in a formula: a rollup by what it
@@ -68,46 +50,6 @@ func kindOfField(f *model.Field) formula.Kind {
 		return formula.KindText
 	}
 	return kindOf(f.Type)
-}
-
-// cellValue reads a cell for a formula, with the same helpers totals and
-// filters use: a number field as a number, a date as a date, a checkbox as
-// yes or no, and anything else as its labels ("Design, Launch" for a
-// multi-select, a person's or a linked item's name).
-func cellValue(fieldType string, raw interface{}) formula.Value {
-	// By what its kind reads as (business/FieldTypes): a duration, a rating
-	// and a row's number are numbers; when a row was made or changed, dates.
-	switch kindOf(fieldType) {
-	case formula.KindNumber:
-		if f, ok := cellNumber(raw); ok {
-			return formula.Number(f)
-		}
-		return formula.Blank()
-	case formula.KindBool:
-		b, _ := raw.(bool)
-		return formula.Bool(b)
-	case formula.KindDate:
-		if s, ok := raw.(string); ok {
-			if v, ok := formula.ParseDate(s); ok {
-				return v
-			}
-		}
-		return formula.Blank()
-	default:
-		// A number in a list reads as a number cell does (1e+21 from 1e21).
-		labels := fieldTypes.LabelsWith(raw, formula.FormatNumber)
-		if _, isList := raw.([]interface{}); !isList {
-			return formula.Text(strings.Join(labels, ", "))
-		}
-		// A list (a multi-select's options, people, linked items) is its
-		// labels joined, as before, and its items for the ARRAY functions.
-		// Every label is kept, a blank one too, so the text is as it was.
-		items := make([]formula.Value, len(labels))
-		for i, l := range labels {
-			items[i] = formula.Text(l)
-		}
-		return formula.List(items)
-	}
 }
 
 // withLinked gives each link field among in the fields of the table it
@@ -386,21 +328,32 @@ func keepCells(s string, keep map[string]bool) string {
 	return s
 }
 
+// listFields reads a table's fields for the rows a read works out: a seam,
+// so a test can count those reads (one per read of cells, CR-228 F1).
+var listFields = model.ListFields
+
 // readWithComputed loads a table's fields and works out its computed cells
 // for rows, which the rows API loads on its own. Without the fields no row
 // goes out: it would go as stored, its deleted fields' cells and all
 // (errRowsUnavailable).
 func readWithComputed(ctx context.Context, tableID uuid.UUID, rows []*model.Row) ([]*model.Row, error) {
+	rows, _, err := readWorkedOut(ctx, tableID, rows)
+	return rows, err
+}
+
+// readWorkedOut is readWithComputed that also gives the fields it read (none
+// when there are no rows), so a caller that needs them reads them once.
+func readWorkedOut(ctx context.Context, tableID uuid.UUID, rows []*model.Row) ([]*model.Row, []*model.Field, error) {
 	if len(rows) == 0 {
-		return rows, nil
+		return rows, nil, nil
 	}
-	fields, err := model.ListFields(ctx, tableID)
+	fields, err := listFields(ctx, tableID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/DataTable readWithComputed: %v", err)
-		return nil, errRowsUnavailable
+		return nil, nil, errRowsUnavailable
 	}
 	withComputed(ctx, fields, rows)
-	return rows, nil
+	return rows, fields, nil
 }
 
 // stripComputed takes what each read works out out of a row being written,
@@ -411,11 +364,19 @@ func readWithComputed(ctx context.Context, tableID uuid.UUID, rows []*model.Row)
 // writes.
 func stripComputed(fields []*model.Field, values map[string]interface{}) map[string]interface{} {
 	for _, f := range fields {
-		if _, isLink := linkOf(f); isLink || f.Type == model.FieldFormula || f.Type == model.FieldRollup || rowStamp(f) != nil {
+		if readsWorkOut(f) {
 			delete(values, f.Id.String())
 		}
 	}
 	return values
+}
+
+// readsWorkOut is whether f's cells are worked out on every read rather than
+// stored in a row's values: a formula, a rollup, a link to a table, or what
+// is read from the row itself. Pure.
+func readsWorkOut(f *model.Field) bool {
+	_, isLink := linkOf(f)
+	return isLink || f.Type == model.FieldFormula || f.Type == model.FieldRollup || rowStamp(f) != nil
 }
 
 // How many fields a table can have of each kind worked out on every read,
@@ -544,12 +505,8 @@ func formulasInOrder(fis []FieldInput) []FieldInput {
 
 // FormulaPreview is a formula being written, checked against the table's
 // fields: what it gives and its values in the first rows, or why it can't be
-// read.
-type FormulaPreview struct {
-	Result string        `json:"result"`
-	Error  string        `json:"error,omitempty"`
-	Values []interface{} `json:"values"`
-}
+// read (formula.Preview, as task fields answer theirs).
+type FormulaPreview = formula.Preview
 
 // previewRows is how many rows a preview works out.
 const previewRows = 5

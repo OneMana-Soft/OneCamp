@@ -26,8 +26,8 @@ import (
 // Service is every read and write of an event, for the person asking; the
 // rules (who may see, change or answer an event) are its own, and so are the
 // errors (ErrEventNotFound, ErrOnlyCreatorChanges, ErrNotEventCreator,
-// ErrCreatorCannotLeave, *EventInputError, *StaleError, ErrStoreOff,
-// ErrMoving).
+// ErrCreatorCannotLeave, *EventInputError, *EventRefusal, *StaleError,
+// ErrStoreOff, ErrMoving).
 type Service interface {
 	// Get is one event the person is on: an event, a series by its own id,
 	// or one instance of a series by the instance's ("<series id>_<start>").
@@ -46,8 +46,8 @@ type Service interface {
 	Delete(ctx context.Context, who *model.UserInfo, id, scope string, sequence *int) error
 	// Restore brings one back from the trash.
 	Restore(ctx context.Context, who *model.UserInfo, id string) (*Event, error)
-	// Trash is the person's deleted events, newest first.
-	Trash(ctx context.Context, who *model.UserInfo, before *time.Time) ([]Event, error)
+	// Trash is the person's deleted events, newest first, from after.
+	Trash(ctx context.Context, who *model.UserInfo, after *TrashAfter) ([]Event, error)
 	// Respond is a guest's answer to an event they are on, for all of it.
 	Respond(ctx context.Context, who *model.UserInfo, id string, answer Answer) error
 	// Answer is a guest's answer with a note, and another time proposed, for
@@ -65,9 +65,18 @@ type Service interface {
 	// Both for whoever may change the event (calendar B11, eventCall.go).
 	AddCall(ctx context.Context, who *model.UserInfo, id string) (*dgraphStruct.EventCall, error)
 	RemoveCall(ctx context.Context, who *model.UserInfo, id string) error
+	// AddFile puts a OneCamp doc or board on an event (a series, from any of
+	// its instances), by reference; RemoveFile takes it off. Both for whoever
+	// may change the event, and AddFile for someone who may open the thing
+	// (eventFiles.go).
+	AddFile(ctx context.Context, who *model.UserInfo, id string, ref FileRef) (*Event, error)
+	RemoveFile(ctx context.Context, who *model.UserInfo, id string, ref FileRef) (*Event, error)
 	// SetCallLobby makes the event's invitees knock at its call, or come in by
 	// their own invitation again, for whoever may change the event (meet-02).
 	SetCallLobby(ctx context.Context, who *model.UserInfo, id string, inviteesWait bool) (*dgraphStruct.EventCall, error)
+	// JoinRoom is the event's call room for whoever may read its details,
+	// made ready for its first join when ready (gcal-15 head B, eventRoom.go).
+	JoinRoom(ctx context.Context, who *model.UserInfo, id string, ready bool) (*Joining, error)
 	// CallArtefactKeys is what the event's call files what it makes under,
 	// for whoever may read the event (meet-02, callPeople.go).
 	CallArtefactKeys(ctx context.Context, who *model.UserInfo, id string) (CallKeys, error)
@@ -85,9 +94,10 @@ type Service interface {
 	// Export writes every event the person is on as one iCalendar file, and
 	// says how many events it holds.
 	Export(ctx context.Context, who *model.UserInfo, to io.Writer) (int, error)
-	// MoveFromGoogle starts moving every calendar of the person's Google link
-	// into OneCamp, and SyncStatus says where it stands.
-	MoveFromGoogle(ctx context.Context, who *model.UserInfo) (*SyncStatus, error)
+	// MoveFrom starts moving every calendar of the person's own link at a
+	// provider ("google", "microsoft") into OneCamp, and SyncStatus says where
+	// it stands.
+	MoveFrom(ctx context.Context, who *model.UserInfo, provider string) (*SyncStatus, error)
 	// ProjectCalendarFor is a project's own calendar, made the first time,
 	// for someone who may see the project.
 	ProjectCalendarFor(ctx context.Context, who *model.UserInfo, projectUUID string) (uuid.UUID, error)
@@ -114,7 +124,7 @@ type Service interface {
 	Subscribe(ctx context.Context, who *model.UserInfo, address, name, hue string) (*SubscriptionView, error)
 	RefreshSubscription(ctx context.Context, who *model.UserInfo, calendarID string) (*SubscriptionView, error)
 	Unsubscribe(ctx context.Context, who *model.UserInfo, calendarID string) error
-	SyncStatus(ctx context.Context, who *model.UserInfo) (*SyncStatus, error)
+	SyncStatus(ctx context.Context, who *model.UserInfo, provider string) (*SyncStatus, error)
 }
 
 // DontSendIf is ctx for a write whose writer answered "Tell guests?" with

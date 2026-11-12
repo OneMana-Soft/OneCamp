@@ -1,6 +1,7 @@
 package business
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -106,9 +107,41 @@ func TestMemoryItemVisibleTo_OwnershipDoesNotBypassScope(t *testing.T) {
 		t.Error("owner who is still a channel member must see their item")
 	}
 
-	// Unscoped + not in any scope → not visible (fail-closed).
-	if memoryItemVisibleTo(&memoryModels.MemoryItem{OwnerID: ptrUUID(pgID)}, user) {
-		t.Error("unscoped item must be hidden (fail-closed)")
+	// Unscoped and someone else's (or no one's) → not visible (fail-closed).
+	if memoryItemVisibleTo(&memoryModels.MemoryItem{OwnerID: ptrUUID(uuid.New())}, user) {
+		t.Error("someone else's unscoped item must be hidden (fail-closed)")
+	}
+	if memoryItemVisibleTo(&memoryModels.MemoryItem{}, user) {
+		t.Error("an unscoped item with no owner must be hidden (fail-closed)")
+	}
+	// Unscoped and their own → visible to them alone: it lives nowhere, so
+	// there is no place they could have left (V-586).
+	if !memoryItemVisibleTo(&memoryModels.MemoryItem{OwnerID: ptrUUID(pgID)}, user) {
+		t.Error("a person's own unscoped item must be visible to them")
+	}
+	if memoryItemVisibleTo(&memoryModels.MemoryItem{OwnerID: ptrUUID(pgID)}, makeUser(uuid.New(), nil, nil, nil)) {
+		t.Error("a person's own unscoped item must be hidden from everyone else")
+	}
+}
+
+// V-586: every memory list reads where its person is now into the query, so
+// the page is cut after the check; ownership never widens it.
+func TestMemoryScopesFilterIsWhereThePersonIsNow(t *testing.T) {
+	pgID := uuid.New()
+	user := makeUser(pgID, []string{"c2", "c1"}, []string{"p1"}, []string{"g1"})
+	f := newMemoryScopes(&user.UserDgraphInfo).filter(memoryModels.QueryFilter{Limit: 7, Kinds: []string{"commitment"}})
+	if !slices.Equal(f.AccessibleChannels, []string{"c1", "c2"}) || !slices.Equal(f.AccessibleProjects, []string{"p1"}) || !slices.Equal(f.AccessibleGrpIDs, []string{"g1"}) {
+		t.Errorf("filter scopes = %v %v %v; want where the person is now", f.AccessibleChannels, f.AccessibleProjects, f.AccessibleGrpIDs)
+	}
+	if f.UnscopedOwnedBy == nil || *f.UnscopedOwnedBy != pgID || f.OwnedBy != nil {
+		t.Errorf("filter owners = %v %v; want only their own unscoped items, never a widening owner", f.UnscopedOwnedBy, f.OwnedBy)
+	}
+	if f.Limit != 7 || !slices.Equal(f.Kinds, []string{"commitment"}) {
+		t.Errorf("filter dropped the caller's own fields: %+v", f)
+	}
+	nobody := newMemoryScopes(&dgraphStruct.DgraphUser{}).filter(memoryModels.QueryFilter{})
+	if nobody.UnscopedOwnedBy != nil || len(nobody.AccessibleChannels)+len(nobody.AccessibleProjects)+len(nobody.AccessibleGrpIDs) != 0 {
+		t.Errorf("a profile with no id or places reads nothing: %+v", nobody)
 	}
 }
 

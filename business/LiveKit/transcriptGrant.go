@@ -29,6 +29,9 @@ import (
 // Cached per (room, participant) for the grant's TTL, because this runs once
 // per utterance. The cache holds only a decision the server already made, so a
 // cold cache costs correctness nothing and a warm one costs LiveKit nothing.
+// It is for filing a person's OWN lines only: it outlives their leaving, a
+// host putting them out and the room's call (registry.CallTranscriptGrant),
+// so whatever reads other people's lines asks connectedNow instead.
 func ResolveTranscriptSession(ctx context.Context, roomName, identity string) (string, error) {
 	roomName = strings.TrimSpace(roomName)
 	identity = strings.TrimSpace(identity)
@@ -40,6 +43,27 @@ func ResolveTranscriptSession(ctx context.Context, roomName, identity string) (s
 		return key, nil
 	}
 
+	key, err := connectedNow(ctx, roomName, identity)
+	if err != nil {
+		return "", err
+	}
+	// Best-effort: a cache write failing costs a LiveKit call next time, not
+	// correctness.
+	_ = redisStore.SetString(ctx, registry.CallTranscriptGrant, []string{roomName, identity}, key)
+	return key, nil
+}
+
+// connectedNow answers the key of the call going on in room when identity is
+// connected to it now, asked of LiveKit and never of a cache: this call (its
+// room sid) and this person, so someone who left, whom a host put out, or who
+// was in the room's previous call is not connected. An error otherwise,
+// including when LiveKit doesn't answer.
+func connectedNow(ctx context.Context, roomName, identity string) (string, error) {
+	roomName = strings.TrimSpace(roomName)
+	identity = strings.TrimSpace(identity)
+	if roomName == "" || identity == "" {
+		return "", fmt.Errorf("room and participant are required")
+	}
 	sid, present, err := roomSessionForParticipant(ctx, roomName, identity)
 	if err != nil {
 		return "", err
@@ -50,12 +74,7 @@ func ResolveTranscriptSession(ctx context.Context, roomName, identity string) (s
 	if sid == "" {
 		return "", fmt.Errorf("call has no session")
 	}
-
-	key := helpers.CallSessionKeyFor(sid)
-	// Best-effort: a cache write failing costs a LiveKit call next time, not
-	// correctness.
-	_ = redisStore.SetString(ctx, registry.CallTranscriptGrant, []string{roomName, identity}, key)
-	return key, nil
+	return helpers.CallSessionKeyFor(sid), nil
 }
 
 // roomSessionForParticipant asks LiveKit for the room's session id and whether

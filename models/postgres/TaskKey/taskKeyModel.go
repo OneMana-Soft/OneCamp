@@ -749,6 +749,22 @@ func TypedTasks(ctx context.Context, projectID uuid.UUID, types []uuid.UUID, out
 	}, projectID, types, outside)
 }
 
+// Epics is the ids of the epics in projects (the built-in type "epic",
+// migration 582), in one read on the tasks_type index. A project holds at
+// most business/WorkTaxonomy MaxEpics, so the answer is bounded.
+func Epics(ctx context.Context, projects []uuid.UUID) ([]string, error) {
+	if len(projects) == 0 || !connected() {
+		return nil, nil
+	}
+	return pgexec.Query(ctx, `
+		SELECT t.id::text FROM tasks t JOIN task_types tt ON tt.id = t.task_type_id
+		WHERE t.project_id = ANY($1) AND t.task_type_id IS NOT NULL AND tt.builtin = 'epic'`, func(r pgexec.Row) (string, error) {
+		var id string
+		err := r.Scan(&id)
+		return id, err
+	}, projects)
+}
+
 // SetTaskType gives a task a type, or none (a Task) when typeID is nil: one
 // built in or its project's own, never archived. Answers the type it had and
 // the one it has now (nil for a Task).

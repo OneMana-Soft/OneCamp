@@ -29,12 +29,14 @@ package business
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	integrationDomain "github.com/akashc777/OneCamp/domain/Integration"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/oauth"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/google/uuid"
@@ -48,6 +50,9 @@ const (
 	ProviderGmail    = "gmail"
 	ProviderCalendar = "google_calendar"  // shares the existing calendar integration row
 	ProviderGitHub   = "github_connector" // per-user GitHub (distinct from the GitHub App)
+	// ProviderOutlookCalendar is Outlook and Microsoft 365 for calendar sync
+	// (calendar B7), on the admin's own Microsoft app.
+	ProviderOutlookCalendar = "microsoft_calendar"
 )
 
 // entityTypeUser is the integrations.entity_type for per-user connector tokens.
@@ -91,8 +96,48 @@ type Provider struct {
 	Scopes      []string    `json:"-"`
 	Permissions []ScopeInfo `json:"permissions"`
 	// reuseClient names which admin OAuth client this provider borrows:
-	// "google" or "github". Connectors don't need their own client creds.
+	// "google", "github" or "microsoft". Connectors don't need their own
+	// client creds.
 	reuseClient string
+	// hideUnconfigured keeps a provider out of the list until the admin
+	// has set its client up (Outlook: each install brings its own app).
+	hideUnconfigured bool
+}
+
+// Configured is whether the admin's OAuth client a provider borrows is set.
+func Configured(providerID string) bool {
+	p, ok := providerRegistry[providerID]
+	return ok && oauth.ConfiguredClients()[p.reuseClient]
+}
+
+// Offered are the providers people may connect now: every one, but one
+// whose client the admin hasn't set while it hides until then.
+func Offered() []Provider {
+	var out []Provider
+	ready := oauth.ConfiguredClients() // read once, not per provider
+	for _, p := range Providers() {
+		if p.hideUnconfigured && !ready[p.reuseClient] {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// LinkedAccount is the address of the account a person linked at a provider
+// (kept when they connected it), and whether they have a live link.
+func LinkedAccount(ctx context.Context, userUUID uuid.UUID, providerID string) (string, bool, error) {
+	rec, err := integrationDomain.GetIntegration(ctx, entityTypeUser, userUUID, providerID)
+	if err != nil || rec == nil || rec.AccessToken == nil || *rec.AccessToken == "" {
+		return "", false, err
+	}
+	var meta struct {
+		AccountEmail string `json:"account_email"`
+	}
+	if rec.Metadata != nil {
+		_ = json.Unmarshal([]byte(*rec.Metadata), &meta)
+	}
+	return meta.AccountEmail, true, nil
 }
 
 // providerRegistry holds the known connector providers. Populated by init() in

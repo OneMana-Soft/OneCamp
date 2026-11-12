@@ -46,10 +46,11 @@ type openaiVisionMessage struct {
 }
 
 type openaiVisionRequest struct {
-	Model       string                `json:"model"`
-	Messages    []openaiVisionMessage `json:"messages"`
-	MaxTokens   *int                  `json:"max_completion_tokens,omitempty"`
-	Temperature *float64              `json:"temperature,omitempty"`
+	Model           string                `json:"model"`
+	Messages        []openaiVisionMessage `json:"messages"`
+	MaxTokens       *int                  `json:"max_completion_tokens,omitempty"`
+	Temperature     *float64              `json:"temperature,omitempty"`
+	ReasoningEffort *string               `json:"reasoning_effort,omitempty"` // as on every chat call (reasoningOffParam)
 }
 
 // DescribeImages implements VisionProvider for OpenAI / OpenAI-compatible
@@ -84,7 +85,7 @@ func (o *OpenAIProvider) DescribeImages(ctx context.Context, images []ImageInput
 		})
 	}
 
-	maxTok := visionMaxTokens(opts)
+	maxTok := o.outputBudget(model, visionMaxTokens(opts))
 	reqBody := openaiVisionRequest{
 		Model:     model,
 		Messages:  []openaiVisionMessage{{Role: "user", Content: content}},
@@ -93,6 +94,9 @@ func (o *OpenAIProvider) DescribeImages(ctx context.Context, images []ImageInput
 	if opts.Temperature > 0 && !o.isReasoningModel(model) {
 		t := opts.Temperature
 		reqBody.Temperature = &t
+	}
+	if eff := o.reasoningOffParam(model, opts.LeastThinking); eff != "" {
+		reqBody.ReasoningEffort = &eff
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -283,10 +287,14 @@ func (o *OllamaProvider) DescribeImages(ctx context.Context, images []ImageInput
 		b64 = append(b64, base64.StdEncoding.EncodeToString(img.Data))
 	}
 
+	// The same think flag and room as every other Ollama call, so a picture's call follows the vision
+	// client's thinking switch, and a model that thinks there has room to think and answer.
+	think, numPredict := o.thinking(model, opts, visionMaxTokens(opts))
 	reqBody := ollamaChatRequest{
 		Model:     model,
 		Stream:    false,
 		KeepAlive: o.keepAlive,
+		Think:     think,
 		Messages: []ollamaChatMessage{{
 			Role:    "user",
 			Content: prompt,
@@ -294,7 +302,7 @@ func (o *OllamaProvider) DescribeImages(ctx context.Context, images []ImageInput
 		}},
 		Options: &ollamaOptions{
 			Temperature: opts.Temperature,
-			NumPredict:  visionMaxTokens(opts),
+			NumPredict:  numPredict,
 			NumThread:   o.numThread,
 			NumCtx:      o.numCtx,
 		},

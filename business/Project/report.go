@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	estimateScale "github.com/akashc777/OneCamp/business/EstimateScale"
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
@@ -24,6 +25,7 @@ import (
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	cycleModel "github.com/akashc777/OneCamp/models/postgres/Cycle"
 	taskFieldModel "github.com/akashc777/OneCamp/models/postgres/TaskField"
 	taskStatusModels "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
 	timeModels "github.com/akashc777/OneCamp/models/postgres/TimeEntry"
@@ -111,12 +113,19 @@ func weekStart(t time.Time, loc *time.Location) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day()-(int(t.Weekday())+6)%7, 0, 0, 0, 0, loc)
 }
 
+// dayStart is the midnight, in loc, that begins the day t falls in there:
+// a task due before it is overdue.
+func dayStart(t time.Time, loc *time.Location) time.Time {
+	t = t.In(loc)
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
+}
+
 // BuildReport works the report out of what was read: projects and the hours
 // logged on them (nil when they couldn't be read), as of now in loc, for the
 // weeks up to this one. only, when not empty, keeps to those projects. Pure.
 func BuildReport(projects []domain.ReportProject, hours []timeModels.WeekSeconds, now time.Time, loc *time.Location, weeks int, only map[string]bool) *Report {
 	first := weekStart(now, loc).AddDate(0, 0, -7*(weeks-1))
-	today := time.Date(now.In(loc).Year(), now.In(loc).Month(), now.In(loc).Day(), 0, 0, 0, 0, loc)
+	today := dayStart(now, loc)
 	r := &Report{Weeks: make([]string, weeks), Done: make([]int, weeks), Added: make([]int, weeks),
 		Projects: []ReportProjectRow{}, People: []ReportPersonRow{}, Priorities: []ReportPriorityRow{}, All: []ReportProjectRef{}}
 	for i := range r.Weeks {
@@ -336,6 +345,13 @@ type ReportAsk struct {
 	// Dashboard), whose projects someone else chose. Without it a choice
 	// that has gone narrows nothing, as the report page's remembered one.
 	Exact bool
+	// Reader is the reader's user uuid: their standing says which money
+	// fields they may slice by (those of projects they are an admin of:
+	// money is for project admins only). Empty slices by none.
+	Reader string
+	// Fields are the field ways ("field:<id>") a widget draws: sliced even
+	// past insightFieldsCap.
+	Fields []string
 }
 
 // ReportFor is the report the reader asked for, the one path the report page
@@ -357,16 +373,19 @@ func ReportFor(ctx context.Context, readerUID string, now time.Time, loc *time.L
 	if err != nil {
 		return nil, err
 	}
-	return getReport(ctx, readerUID, now, loc, a.Weeks, a.Only, filter, a.Exact)
+	return getReport(ctx, readerUID, now, loc, filter, a)
 }
 
 // getReport reads and works out the report of the reader's live projects
-// (only those in only, if any) for the weeks up to now's, in loc, of the
+// (only those in a.Only, if any) for a.Weeks up to now's, in loc, of the
 // tasks filter matches ("" for all: a view's filters, ListFilter's Clause).
 // The hours are left out, not the report, if the time logged can't be
-// read; the custom-field slices, if the fields can't be.
-// With exact, projects asked for that are none of the reader's keep none.
-func getReport(ctx context.Context, readerUID string, now time.Time, loc *time.Location, weeks int, only []string, filter string, exact bool) (*Report, error) {
+// read; the custom-field slices, if the fields can't be; and a status's,
+// cycle's or scale's names and keys, if those can't be. Each is one read for
+// all the report's projects. With a.Exact, projects asked for that are none
+// of the reader's keep none.
+func getReport(ctx context.Context, readerUID string, now time.Time, loc *time.Location, filter string, a ReportAsk) (*Report, error) {
+	weeks := a.Weeks
 	if weeks < 1 || weeks > MaxReportWeeks {
 		weeks = ReportWeeks
 	}
@@ -375,7 +394,7 @@ func getReport(ctx context.Context, readerUID string, now time.Time, loc *time.L
 	if err != nil {
 		return nil, err
 	}
-	keep, none := narrowFor(projects, only, exact)
+	keep, none := narrowFor(projects, a.Only, a.Exact)
 	if none {
 		// None of the projects asked for is the reader's: an empty report,
 		// never the reader's others.
@@ -393,7 +412,7 @@ func getReport(ctx context.Context, readerUID string, now time.Time, loc *time.L
 		hours = nil
 	}
 	r := BuildReport(projects, hours, now, loc, weeks, keep)
-	own := ownStatuses(ctx, ids)
+	own, statuses := ownStatuses(ctx, ids)
 	r.Flow = buildFlow(projects, own, first, now, weeks, keep)
 	// The insights slice by type: the tasks' types live in Postgres.
 	var tasks []*dgraphStruct.DgraphTask
@@ -403,41 +422,88 @@ func getReport(ctx context.Context, readerUID string, now time.Time, loc *time.L
 		}
 	}
 	taskKeys.Lay(ctx, tasks...)
-	fields, capped := reportFields(ctx, ids, tasks)
-	r.Insights = buildInsights(projects, own, first, now, keep, fields...)
+	in := insightIn{own: own, first: first, now: now, today: dayStart(now, loc), only: keep, statuses: statuses,
+		cycles: reportCycles(ctx, ids), scales: reportScales(ctx, ids)}
+	var capped bool
+	in.fields, capped = reportFields(ctx, readerUID, a, ids, projects, tasks)
+	r.Insights = buildInsights(projects, in)
 	r.Insights.FieldsCapped = capped
 	return r, nil
 }
 
+// reportCycles is the live cycle of each task in one, of the projects, by
+// task uuid: one read. A failed read costs the cycle slices' names, not the
+// report: every task reads as in none.
+func reportCycles(ctx context.Context, projects []uuid.UUID) map[string]cycleModel.Cycle {
+	cycles, err := cycleModel.ByTaskIn(ctx, projects)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetReport cycles err: %+v", err)
+	}
+	return cycles
+}
+
+// reportScales is the estimate scale of each of the projects that has one,
+// by project uuid: one read. A failed read reads them all as hours.
+func reportScales(ctx context.Context, projects []uuid.UUID) map[string]*estimateScale.Scale {
+	out := map[string]*estimateScale.Scale{}
+	scales, err := estimateScale.OfMany(ctx, projects)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetReport scales err: %+v", err)
+	}
+	for id, s := range scales {
+		out[id.String()] = s
+	}
+	return out
+}
+
 // reportFields are the ways to slice the report's tasks by its projects'
-// custom fields (fieldDims), with the tasks' values laid on them and the
-// people their person fields name read, each in one read. Only the projects
-// the report kept are read, all of them the reader's. A failed read costs the
-// fields' slices, not the report.
-func reportFields(ctx context.Context, projects []uuid.UUID, tasks []*dgraphStruct.DgraphTask) ([]insightDim, bool) {
+// custom fields (fieldDims), with the tasks' values laid on them, the
+// people their person fields name read, and, when a money field is among
+// them, the projects of those the reader is an admin of: each in one read.
+// Only the projects the report kept are read, all of them the reader's, and
+// only the tasks it kept (restricted ones the reader can't read are never
+// among them) give a field's values. A failed read costs the fields'
+// slices (a money field's: fails closed), not the report.
+func reportFields(ctx context.Context, readerUID string, a ReportAsk, projects []uuid.UUID, work []domain.ReportProject, tasks []*dgraphStruct.DgraphTask) ([]insightDim, bool) {
+	reader := taskFieldBusiness.Reader{UUID: a.Reader, UID: readerUID}
 	fields, err := taskFieldModel.ListForProjects(ctx, projects)
 	if err == nil && len(fields) > 0 {
-		err = taskFieldBusiness.MergeFieldValues(ctx, tasks)
+		err = taskFieldBusiness.MergeFieldValuesFor(ctx, reader, tasks)
 	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetReport fields err: %+v", err)
 		return nil, false
 	}
-	var ids []string
-	seen := map[string]bool{}
+	ask := fieldAsk{fields: fields, names: map[string]string{}, always: map[string]bool{}}
+	for _, by := range a.Fields {
+		ask.always[by] = true
+	}
+	var ids, money []string
+	seen, inMoney := map[string]bool{}, map[string]bool{}
 	for _, f := range fields {
-		if f.Type != taskFieldModel.TypePerson {
-			continue
-		}
-		for _, t := range tasks {
-			var id string
-			if json.Unmarshal(t.Fields[f.ID.String()], &id) == nil && id != "" && !seen[id] {
-				seen[id] = true
-				ids = append(ids, id)
+		switch f.Type {
+		case taskFieldModel.TypeMoney:
+			if !inMoney[f.ProjectID.String()] {
+				inMoney[f.ProjectID.String()] = true
+				money = append(money, f.ProjectID.String())
+			}
+		case taskFieldModel.TypePerson:
+			for _, t := range tasks {
+				var id string
+				if json.Unmarshal(t.Fields[f.ID.String()], &id) == nil && id != "" && !seen[id] {
+					seen[id] = true
+					ids = append(ids, id)
+				}
 			}
 		}
 	}
-	names := map[string]string{}
+	if len(money) > 0 {
+		admin, err := taskFieldBusiness.MoneyProjects(ctx, reader, money)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "business/GetReport money admins err: %+v", err)
+		}
+		ask.admin = admin
+	}
 	if len(ids) > 0 {
 		people, err := userDomain.GetUserDisplayMapByUUIDs(ctx, ids)
 		if err != nil {
@@ -445,32 +511,34 @@ func reportFields(ctx context.Context, projects []uuid.UUID, tasks []*dgraphStru
 		}
 		for id, u := range people {
 			if u != nil {
-				names[id] = u.DisplayName()
+				ask.names[id] = u.DisplayName()
 			}
 		}
 	}
-	return fieldDims(fields, names)
+	return fieldDims(ask, work)
 }
 
 // ownStatuses is each project's own statuses, lower-cased name → category,
-// by project uuid: how a task's history names them. Without them, a history
-// naming one reads as the status before it (flow.go), so a failure to read
-// them costs precision, not the report.
-func ownStatuses(ctx context.Context, ids []uuid.UUID) map[string]map[string]string {
-	out := map[string]map[string]string{}
+// by project uuid: how a task's history names them; and their names by id,
+// as a board names its columns. Without them, a history naming one reads as
+// the status before it (flow.go), and a task in one as its category, so a
+// failure to read them costs precision, not the report.
+func ownStatuses(ctx context.Context, ids []uuid.UUID) (map[string]map[string]string, map[string]string) {
+	out, names := map[string]map[string]string{}, map[string]string{}
 	byProject, err := taskStatusModels.ListForProjects(ctx, ids)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetReport statuses err: %+v", err)
-		return out
+		return out, names
 	}
 	for id, statuses := range byProject {
-		names := map[string]string{}
+		own := map[string]string{}
 		for _, st := range statuses {
-			names[strings.ToLower(strings.TrimSpace(st.Name))] = st.Category
+			own[strings.ToLower(strings.TrimSpace(st.Name))] = st.Category
+			names[st.ID.String()] = st.Name
 		}
-		out[id.String()] = names
+		out[id.String()] = own
 	}
-	return out
+	return out, names
 }
 
 // dated says a task's date is set: the graph keeps an unset one as its zero.

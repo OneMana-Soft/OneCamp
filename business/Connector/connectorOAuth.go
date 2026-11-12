@@ -43,6 +43,12 @@ func clientCreds(p Provider) (string, string, error) {
 			return "", "", fmt.Errorf("github oauth client is not configured")
 		}
 		return id, secret, nil
+	case "microsoft":
+		id, secret := oauth.MicrosoftClientCreds()
+		if id == "" || secret == "" {
+			return "", "", fmt.Errorf("microsoft oauth client is not configured")
+		}
+		return id, secret, nil
 	default:
 		return "", "", fmt.Errorf("connector %q has no client configured", p.ID)
 	}
@@ -109,6 +115,11 @@ func BuildAuthURL(ctx context.Context, userUUID uuid.UUID, providerID, returnPag
 		q.Set("access_type", "offline")
 		q.Set("prompt", "consent")
 		q.Set("include_granted_scopes", "true")
+	}
+	// Microsoft returns a refresh token for offline_access; asking which
+	// account lets someone signed in to two pick the right one.
+	if p.reuseClient == "microsoft" {
+		q.Set("prompt", "select_account")
 	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
@@ -179,8 +190,12 @@ func HandleCallback(ctx context.Context, state, code string) (CallbackResult, er
 	// The calendar shows which Google account it is linked to.
 	var account string
 	var metadata *string
-	if providerID == ProviderCalendar {
+	switch providerID {
+	case ProviderCalendar:
 		email, m := calendarAccountMetadata(ctx, tok.AccessToken)
+		account, metadata = email, &m
+	case ProviderOutlookCalendar:
+		email, m := microsoftAccountMetadata(ctx, tok.AccessToken)
 		account, metadata = email, &m
 	}
 	if err := saveUserToken(ctx, userUUID, providerID, st, metadata); err != nil {
@@ -188,13 +203,23 @@ func HandleCallback(ctx context.Context, state, code string) (CallbackResult, er
 	}
 	// Two-way calendar sync, stopped when Google stopped answering for the
 	// account, carries on now that that account is connected again.
-	if providerID == ProviderCalendar {
+	switch providerID {
+	case ProviderCalendar:
 		_ = calendarModel.ReconnectSyncLinks(ctx, userUUID, "google", account)
+	case ProviderOutlookCalendar:
+		_ = calendarModel.ReconnectSyncLinks(ctx, userUUID, "microsoft", account)
 	}
 	// Bust the briefing "Your day" cache so the newly-connected account shows
 	// up immediately rather than after the TTL.
 	invalidateBriefingDayCache(ctx, userUUID)
 	return res, nil
+}
+
+// AccessToken is a person's access token for a provider, refreshed when it
+// has expired: "" when they haven't connected it. Calendar sync's Microsoft
+// adapter reads Graph with it (business/CalendarSync/microsoft).
+func AccessToken(ctx context.Context, userUUID uuid.UUID, providerID string) (string, error) {
+	return validAccessToken(ctx, userUUID, providerID)
 }
 
 // validAccessToken returns a non-expired access token for the user+provider,

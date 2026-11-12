@@ -144,31 +144,41 @@ func sortAttention(items []adapter.AttentionItem) {
 }
 
 // gatherApprovalItems pulls the member's open write approvals (the highest-
-// urgency tier — something is waiting on an explicit yes/no).
+// urgency tier — something is waiting on an explicit yes/no). A row says
+// which agent is waiting ("Release Captain is waiting for you"), named for the
+// rows shown only, in one read and none when no agent asked.
 func gatherApprovalItems(ctx context.Context, userInfo *userModels.UserInfo) []adapter.AttentionItem {
 	uid, perr := uuid.Parse(userInfo.UserDgraphInfo.Uuid)
 	if perr != nil {
 		return nil
 	}
-	actions, err := ListOpenPendingActions(ctx, uid)
+	actions, err := listOpenActions(ctx, uid)
 	if err != nil {
 		helpers.LogInfoWithContext(ctx, "attention: approvals failed: %v", err)
 		return nil
 	}
+	if len(actions) > attentionMaxApprovals {
+		actions = actions[:attentionMaxApprovals]
+	}
+	nameAgents(ctx, actions...)
 	out := make([]adapter.AttentionItem, 0, len(actions))
 	for _, a := range actions {
-		if len(out) >= attentionMaxApprovals {
-			break
+		if a == nil {
+			continue
 		}
 		title := strings.TrimSpace(a.Description)
 		if title == "" {
 			title = a.ToolName
 		}
+		sub := "Waiting for you to approve or deny"
+		if a.AgentName != "" {
+			sub = a.AgentName + " is waiting for you"
+		}
 		out = append(out, adapter.AttentionItem{
 			Source:   "approval",
 			Kind:     "Needs your approval",
 			Title:    trimOneLine(title, 200),
-			Subtitle: "Waiting for you to approve or deny",
+			Subtitle: trimOneLine(sub, 200),
 			Priority: prApproval,
 			RefID:    a.Id.String(),
 		})
@@ -266,18 +276,15 @@ func taskToAttentionItem(t *dgraphStruct.DgraphTask, now time.Time) adapter.Atte
 // ones are urgent) and open questions from the workspace memory layer. Reuses
 // the same owner-scoped query + scope enrichment as the briefing.
 func gatherMemoryAttentionItems(ctx context.Context, userInfo *userModels.UserInfo) []adapter.AttentionItem {
-	ownerID := userInfo.UserPostgresInfo.Id
-	items, err := memoryModels.List(ctx, memoryModels.QueryFilter{
-		Statuses: []string{memoryModels.StatusOpen},
-		Kinds:    []string{memoryModels.KindCommitment, memoryModels.KindQuestion},
-		OwnerID:  &ownerID,
-		Limit:    attentionMaxMemory,
-	})
+	// Their own items, but only those they can still read where they live
+	// (NOTIF-H5, V-586): one they own from a channel, project or DM they have
+	// left is not theirs to see. The check is in the query, before the page.
+	items, err := ownOpenItems(ctx, userInfo, []string{memoryModels.KindCommitment, memoryModels.KindQuestion}, attentionMaxMemory)
 	if err != nil {
 		helpers.LogInfoWithContext(ctx, "attention: memory items failed: %v", err)
 		return nil
 	}
-	today := time.Now().Format("2006-01-02")
+	now := time.Now()
 	resolver := newScopeResolver(userInfo)
 	out := make([]adapter.AttentionItem, 0, len(items))
 	for _, m := range items {
@@ -294,9 +301,11 @@ func gatherMemoryAttentionItems(ctx context.Context, userInfo *userModels.UserIn
 		}
 		switch v.Kind {
 		case memoryModels.KindCommitment:
-			// Only OVERDUE commitments belong in "needs me now"; upcoming ones
-			// live in the briefing. Undated commitments are treated as pending.
-			if v.DueAt != "" && v.DueAt >= today {
+			// Only a commitment that needs its person now (commitmentNeedsMeNow:
+			// dated, due before today, overdue for at most 14 days) belongs
+			// here. Upcoming ones live in the briefing, undated ones are
+			// pending, and older ones are stale, asked about on the memory page.
+			if !commitmentNeedsMeNow(m, now) {
 				continue
 			}
 			item.Kind = "Overdue commitment"

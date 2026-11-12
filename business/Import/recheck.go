@@ -1354,7 +1354,7 @@ func undoChange(ctx context.Context, ch, kept *reviewModel.AccessChange, who tas
 		if helpers.IsSoftDeleted(dg.DeletedAt) {
 			return true, taskBusiness.AssignInTrash(ctx, dg, person, admin)
 		}
-		return true, taskBusiness.UpdateTaskAssigneeByTaskUUID(taskBusiness.DataMove(ctx), ch.Entity, person, "", dg.Uid, dg, admin)
+		return true, taskBusiness.UpdateTaskAssigneeByTaskUUID(taskBusiness.QuietMove(ctx), ch.Entity, person, "", dg.Uid, dg, admin)
 	case reviewModel.ChangeCommentHidden:
 		var after struct {
 			HiddenAt time.Time `json:"hidden_at"`

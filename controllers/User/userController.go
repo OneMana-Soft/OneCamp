@@ -302,6 +302,7 @@ func GetDgraphUserTaskList(w http.ResponseWriter, r *http.Request) {
 	if dueBy, e := time.Parse(time.RFC3339, queryParams.Get("dueBy")); e == nil {
 		listFilter.DueBy = &dueBy
 	}
+	listFilter.Open = queryParams.Get("open") == "1"
 	filterQuery, err := listFilter.Clause()
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "search string is too long or invalid"})

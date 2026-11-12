@@ -4,18 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"path"
 	"testing"
 	"time"
 
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
-	"github.com/akashc777/OneCamp/initializers/livekitInit"
-	"github.com/livekit/protocol/livekit"
-	lksdk "github.com/livekit/server-sdk-go/v2"
-	"google.golang.org/protobuf/proto"
+	"github.com/akashc777/OneCamp/tests/livekitfake"
 )
 
 // A call keeps a transcript only where it has a home to keep it in: a
@@ -167,45 +160,10 @@ func TestRepairCallTranscriptsIsIdempotent(t *testing.T) {
 }
 
 // fakeLiveKit answers the room service calls these rules make: one room with
-// a session, and the participants given.
+// a session, and the participants given (the tests' one fake).
 func fakeLiveKit(t *testing.T, room, sid string, participants ...string) {
 	t.Helper()
-	const key, secret = "test-key", "test-secret-long-enough-to-sign-with"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/protobuf")
-		var out proto.Message
-		switch path.Base(r.URL.Path) {
-		case "ListRooms":
-			var req livekit.ListRoomsRequest
-			_ = proto.Unmarshal(body, &req)
-			resp := &livekit.ListRoomsResponse{}
-			for _, name := range req.Names {
-				if name == room {
-					resp.Rooms = append(resp.Rooms, &livekit.Room{Name: room, Sid: sid})
-				}
-			}
-			out = resp
-		case "ListParticipants":
-			resp := &livekit.ListParticipantsResponse{}
-			for _, id := range participants {
-				resp.Participants = append(resp.Participants, &livekit.ParticipantInfo{Identity: id, State: livekit.ParticipantInfo_ACTIVE})
-			}
-			out = resp
-		default:
-			out = &livekit.Room{}
-		}
-		b, _ := proto.Marshal(out)
-		_, _ = w.Write(b)
-	}))
-	t.Cleanup(server.Close)
-	saved := livekitInit.LiveKitService
-	t.Cleanup(func() { livekitInit.LiveKitService = saved })
-	livekitInit.LiveKitService = livekitInit.LiveKitServiceStruct{
-		LiveKitClient: lksdk.NewRoomServiceClient(server.URL, key, secret),
-		EgressClient:  lksdk.NewEgressClient(server.URL, key, secret),
-		Config:        &livekitInit.LiveKitConfigStruct{HostURL: server.URL, ApiKey: key, ApiSecret: secret},
-	}
+	livekitfake.Serve(t, room, sid, participants...)
 }
 
 // CALL-BUG-2. A line is kept only while somebody in the call has turned its

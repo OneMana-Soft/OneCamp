@@ -84,6 +84,11 @@ type PendingAction struct {
 	// coworker, an MCP server), which is most of them.
 	AgentID *uuid.UUID `json:"agent_id,omitempty"`
 	RunID   *uuid.UUID `json:"run_id,omitempty"`
+	// AgentName is that agent's name, so the card can say who is asking.
+	// DERIVED, not a stored column: the business layer fills it for a list
+	// with one read of ai_agents (nameAgents). Empty when no agent asked, or
+	// the agent has since been deleted; the card then says OneCamp AI.
+	AgentName string `json:"agent_name,omitempty"`
 
 	// AskedBy and ToolBinding are what the approval is bound to beyond the call
 	// itself (Binding). Server-side only: the approval decides with them, and no

@@ -70,7 +70,7 @@ func extractFromText(t *testing.T, text string) *ExtractTasksResult {
 
 // Each item becomes a proposed task: an item with no title is dropped, the
 // owner is resolved to a member (or kept as written), the due date is the end
-// of that working day and the priority one of three.
+// of that working day and the priority the words name, or none (UX-PROJECTS-H1-BE).
 func TestTheModelsItemsBecomeProposedTasks(t *testing.T) {
 	fakeExtraction(t, "```json\n"+`[
       {"title": "Draft the pricing doc", "assignee": "Priya", "due": "2026-07-03", "priority": "high", "details": "for the launch"},
@@ -87,7 +87,7 @@ func TestTheModelsItemsBecomeProposedTasks(t *testing.T) {
 	}
 	want := []ProposedTask{
 		{Title: "Draft the pricing doc", Description: "for the launch", AssigneeName: "Priya Nair", AssigneeUUID: "u-priya", Due: "2026-07-03T17:00:00Z", Priority: dgraphStruct.TASK_PRIORITY_HIGH},
-		{Title: "Follow up on vendor contract", AssigneeName: "Alice", Priority: dgraphStruct.TASK_PRIORITY_MEDIUM},
+		{Title: "Follow up on vendor contract", AssigneeName: "Alice"},
 	}
 	for i := range want {
 		if res.Tasks[i] != want[i] {

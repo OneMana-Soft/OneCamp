@@ -36,6 +36,8 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/akashc777/OneCamp/tests/integration"
 )
 
 func TestAnUpdateKeepsEveryoneSignedIn(t *testing.T) {
@@ -93,7 +95,7 @@ type redisOnVolume struct {
 func startRedisOn(t *testing.T, image string, command []string, volume, password string) *redisOnVolume {
 	t.Helper()
 	ctx := context.Background()
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	c, err := integration.StartContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        image,
 			Cmd:          command,

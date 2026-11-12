@@ -18,10 +18,13 @@ import (
 // from whom to whom) and as search has it, with the task's deletion time
 // written as deletedAt: the zero time for a live task, so a late write never
 // leaves one deleted (UpdateTaskAssigneeByTaskUUID refuses a deleted one), or
-// the time it went to the trash, where it stays (AssignInTrash). Pure.
+// the time it went to the trash, where it stays (AssignInTrash). by nil (or
+// with no node) is nobody here: the activity names no one. Pure.
 func assigneeWrite(taskUUID string, from, to, by *dgraphStruct.DgraphUser, at, deletedAt time.Time) (*dgraphStruct.DgraphTask, *openSearchStruct.OpenSearchTask) {
-	activity := &dgraphStruct.DgraphTaskActivity{Uuid: uuid.NewString(), Type: dgraphStruct.ACTIVITY_TYPE_ASSIGNEE,
-		CreatedBy: &dgraphStruct.DgraphUser{Uid: by.Uid}, LogTime: &at}
+	activity := &dgraphStruct.DgraphTaskActivity{Uuid: uuid.NewString(), Type: dgraphStruct.ACTIVITY_TYPE_ASSIGNEE, LogTime: &at}
+	if by != nil && by.Uid != "" {
+		activity.CreatedBy = &dgraphStruct.DgraphUser{Uid: by.Uid}
+	}
 	write := &dgraphStruct.DgraphTask{Uid: "uid(task)", Uuid: taskUUID, UpdatedAt: &at, DeletedAt: &deletedAt,
 		Activity: []*dgraphStruct.DgraphTaskActivity{activity}}
 	none := ""

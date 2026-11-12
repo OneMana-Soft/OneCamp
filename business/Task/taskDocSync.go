@@ -127,8 +127,8 @@ func TodoToTask(ctx context.Context, user *model.UserInfo, docUUID, projectUUID,
 	if err := s.Check(workAccess.NeedCreateTask); err != nil {
 		return uuid.Nil, err
 	}
-	// As "Add task" makes it: medium priority, in To do.
-	in := adapter.CreateOrUpdateTaskInput{TaskName: title, ProjectUuid: project.String(), Priority: dgraphStruct.TASK_PRIORITY_MEDIUM}
+	// As "Add task" makes it: no priority, in To do.
+	in := adapter.CreateOrUpdateTaskInput{TaskName: title, ProjectUuid: project.String()}
 	task, err := makeTask(ctx, project, user, p, nil, in, nil)
 	if err != nil {
 		return uuid.Nil, err

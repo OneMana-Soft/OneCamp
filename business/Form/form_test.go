@@ -29,7 +29,8 @@ func TestCheckForm(t *testing.T) {
 	f, err := CheckForm(Input{Title: " Design  requests ", Fields: []Field{
 		{Label: "What", Type: ShortText}, {Label: "Team", Type: Select, Options: []string{" A ", "", "B"}},
 	}})
-	if err != nil || f.Title != "Design requests" || f.TitleField != "q1" || f.Priority != "medium" {
+	// No priority picked is none (UX-PROJECTS-H1-BE); it was medium.
+	if err != nil || f.Title != "Design requests" || f.TitleField != "q1" || f.Priority != "" {
 		t.Fatalf("got %+v %v", f, err)
 	}
 	var stored []Field

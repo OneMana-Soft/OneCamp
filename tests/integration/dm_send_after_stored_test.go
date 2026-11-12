@@ -27,7 +27,7 @@ import (
 
 	chatAdapter "github.com/akashc777/OneCamp/adapter/Chat"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
-	chatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
+	notifyBusiness "github.com/akashc777/OneCamp/business/Notify"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -87,11 +87,12 @@ func TestADMStoredIsSentEvenWhenItsReadMarksCantBeWritten(t *testing.T) {
 	// And sent on: Jonas is notified of it (a first DM writes his
 	// notification row, which every later push depends on).
 	grouping := helpers.GetGroupingId(maya.String(), jonas.String())
-	eligible, err := chatNotificationBusiness.GetEligibleUsersForChatActivity(ctx, grouping, maya.String(), nil, false)
+	ds, err := notifyBusiness.Notices.Plan(ctx, notifyBusiness.Event{Cause: notifyBusiness.CauseMessage, Actor: maya.String(),
+		Place: notifyBusiness.Place{Kind: notifyBusiness.PlaceDM, ID: grouping}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(eligible, jonas.String()) {
+	if eligible := notifyBusiness.By(ds, notifyBusiness.ToPush); !slices.Contains(eligible, jonas.String()) {
 		t.Fatalf("Jonas isn't told of Maya's DM: eligible %v", eligible)
 	}
 	var stored int

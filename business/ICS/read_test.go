@@ -196,13 +196,13 @@ func TestWhatIsWrittenReadsBackTheSame(t *testing.T) {
 		{UID: "s1", Sequence: 4, Stamp: stamp, Start: time.Date(2026, 10, 6, 8, 15, 0, 0, time.UTC), End: time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC), Zone: "Europe/London",
 			RRule: "FREQ=WEEKLY;BYDAY=TU;COUNT=10", ExDates: []time.Time{time.Date(2026, 10, 20, 8, 15, 0, 0, time.UTC)}, RDates: []time.Time{time.Date(2026, 12, 31, 10, 0, 0, 0, time.UTC)},
 			Summary: "Review; a, b\nc", Description: "Line one\nLine two", Location: "Room 4", Status: "CONFIRMED",
-			Organizer:  Address{Name: "Jonas", Email: "jonas@example.com"},
-			Attendees:  []Attendee{{Address: Address{Name: "Maya", Email: "maya@example.com"}, PartStat: Accepted}, {Address: Address{Name: "Sam", Email: "sam@example.com"}, PartStat: NeedsAction, Optional: true, RSVP: true}},
-			Alarms:     []Alarm{{Before: 10 * time.Minute}, {Before: 24 * time.Hour, Email: true}},
-			Conference: "https://meet.google.com/abc-defg-hij", Attachments: []Attachment{{Name: "Deck; v2", URL: "https://example.com/deck"}, {URL: "https://example.com/notes"}}},
+			Organizer: Address{Name: "Jonas", Email: "jonas@example.com"},
+			Attendees: []Attendee{{Address: Address{Name: "Maya", Email: "maya@example.com"}, PartStat: Accepted}, {Address: Address{Name: "Sam", Email: "sam@example.com"}, PartStat: NeedsAction, Optional: true, RSVP: true}},
+			Alarms:    []Alarm{{Before: 10 * time.Minute}, {Before: 24 * time.Hour, Email: true}},
+			Class:     "PRIVATE", Conference: "https://meet.google.com/abc-defg-hij", Attachments: []Attachment{{Name: "Deck; v2", URL: "https://example.com/deck"}, {URL: "https://example.com/notes"}}},
 		{UID: "s1", Sequence: 5, Stamp: stamp, Start: time.Date(2026, 10, 28, 14, 0, 0, 0, time.UTC), End: time.Date(2026, 10, 28, 14, 45, 0, 0, time.UTC), Zone: "Europe/London",
 			RecurrenceID: &moved, Summary: "Review (moved)", Status: "CONFIRMED", Organizer: Address{Name: "Jonas", Email: "jonas@example.com"}},
-		{UID: "h1", Stamp: stamp, StartDate: "2026-12-24", EndDate: "2026-12-27", Summary: "Office closed", Transparent: true, Status: "CONFIRMED", Organizer: Address{Email: "jonas@example.com"}},
+		{UID: "h1", Stamp: stamp, StartDate: "2026-12-24", EndDate: "2026-12-27", Summary: "Office closed", Transparent: true, Class: "CONFIDENTIAL", Status: "CONFIRMED", Organizer: Address{Email: "jonas@example.com"}},
 	}
 	out := WriteMessage(Message{Method: "PUBLISH", Events: evs})
 	cal, err := Read(bytes.NewReader(out))

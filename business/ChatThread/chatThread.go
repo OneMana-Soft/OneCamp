@@ -62,12 +62,13 @@ var (
 	markUnread  = models.MarkUnread
 	markAllRead = models.MarkAllRead
 	mineOf      = models.MineOf
-	unreadCount = models.UnreadCount
+	unreadOf    = models.UnreadOf
 	choiceOf    = models.ChoiceOf
 	getThread   = models.Get
 	resolve     = conversationBusiness.Resolve
 	resolveAll  = conversationBusiness.ResolveAll
 	readRoots   = domain.Messages
+	liveOf      = domain.Live
 	readReplies = domain.RepliesOf
 	allowWrite  = func(ctx context.Context, user uuid.UUID) bool {
 		return redisStore.AllowFixedWindow(ctx, registry.ThreadWriteRate, []string{user.String()}, WritesPerMinute).Allowed
@@ -262,11 +263,12 @@ func ReadAll(ctx context.Context, who *userModels.UserInfo) (int, error) {
 }
 
 // UnreadCount is how many threads who follows had a reply since they last
-// read them.
+// read them, of those their Threads list shows (shown, mine.go): the list's
+// own count.
 func UnreadCount(ctx context.Context, who *userModels.UserInfo) (int, error) {
 	user, ok := userOf(who)
 	if !ok {
 		return 0, conversationBusiness.ErrNotFound
 	}
-	return unreadCount(ctx, user, Kinds)
+	return unreadCountOf(ctx, who, user)
 }

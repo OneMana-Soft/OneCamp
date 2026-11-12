@@ -24,7 +24,7 @@ func TestDeliverFromSendsVIPsThroughTheGate(t *testing.T) {
 		return map[string]bool{"b0000000-0000-0000-0000-00000000000b": true}, nil
 	}
 	data := map[string]string{"title": "x"}
-	DeliverFrom(context.Background(), "S", []string{"a", "B0000000-0000-0000-0000-00000000000B", "c"}, data, "n")
+	deliverFrom(context.Background(), "S", []string{"a", "B0000000-0000-0000-0000-00000000000B", "c"}, data, "n", deliverNow)
 	if len(through) != 1 || through[0] != "B0000000-0000-0000-0000-00000000000B" {
 		t.Fatalf("through the gate: %v", through)
 	}
@@ -46,7 +46,7 @@ func TestDeliverFromTellsEveryoneAsUsualWhenVIPsCantBeRead(t *testing.T) {
 		return nil
 	}
 	whoseVIP = func(context.Context, string, []string) (map[string]bool, error) { return nil, errors.New("down") }
-	DeliverFrom(context.Background(), "S", []string{"a", "b"}, map[string]string{}, "n")
+	deliverFrom(context.Background(), "S", []string{"a", "b"}, map[string]string{}, "n", deliverNow)
 	if len(now) != 2 {
 		t.Fatalf("told %v", now)
 	}

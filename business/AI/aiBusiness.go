@@ -511,7 +511,7 @@ func AnswerChannelQuestion(ctx context.Context, userInfo *userModels.UserInfo, c
 		{Role: "user", Content: fmt.Sprintf("Recent messages in #%s:\n%s\n\nQuestion: %s", channelName, formatted, question)},
 	}
 	opts := ai.ChatOptions{
-		MaxTokens:   limits.ResponseReserve(1024),
+		MaxTokens:   limits.AnswerTokens(1024),
 		Temperature: 0.3,
 		Seed:        int(time.Now().UnixNano() % 1000000),
 	}
@@ -627,7 +627,7 @@ func AnswerChannelQuestionStream(ctx context.Context, userInfo *userModels.UserI
 		{Role: "user", Content: fmt.Sprintf("Recent messages in #%s:\n%s\n\nQuestion: %s", channelName, formatted, question)},
 	}
 	opts := ai.ChatOptions{
-		MaxTokens:   limits.ResponseReserve(1024),
+		MaxTokens:   limits.AnswerTokens(1024),
 		Temperature: 0.3,
 		Seed:        int(time.Now().UnixNano() % 1000000),
 	}

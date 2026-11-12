@@ -28,6 +28,13 @@ func TestAnEventReadsEachTaskItNamesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	integration.StubMqttClient(t)
+	// Its tasks live in Postgres only, so the integration's bot can't read
+	// them in the graph (codeTask asks botReads). What the bot may read is
+	// tests/integration/github_code_refs_test.go's, through the signed
+	// webhook; this test counts reads, so every task is one the bot reads.
+	realBotReads := botReads
+	t.Cleanup(func() { botReads = realBotReads })
+	botReads = func(context.Context, uuid.UUID) bool { return true }
 
 	// Website links acme/reads and holds two tasks; Billing doesn't link it.
 	user, website, billing := uuid.New(), uuid.New(), uuid.New()

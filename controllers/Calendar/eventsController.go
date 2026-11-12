@@ -33,14 +33,20 @@ const eventBodyLimit = 1 << 20
 func writeCalendarError(w http.ResponseWriter, r *http.Request, where string, err error) {
 	var stale *business.StaleError
 	var input *business.EventInputError
+	var refused *business.EventRefusal
+	var readOnly *business.CalendarReadOnlyError
 	switch {
 	case errors.As(err, &stale):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": stale.Error(), "data": stale.Current})
+	case errors.As(err, &readOnly):
+		// A calendar its provider lets OneCamp only read (V-594): the code
+		// lets the web offer another calendar.
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": readOnly.Error(), "code": "calendar_read_only"})
 	case errors.Is(err, business.ErrMoving), errors.Is(err, business.ErrStoreOff):
 		writeCalendarUnavailable(w, err)
 	case errors.Is(err, business.ErrUnavailable):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That answer isn't available yet."})
-	case errors.As(err, &input), errors.Is(err, business.ErrEventNotFound),
+	case errors.As(err, &input), errors.As(err, &refused), errors.Is(err, business.ErrEventNotFound),
 		errors.Is(err, business.ErrOnlyCreatorChanges), errors.Is(err, business.ErrNotEventCreator),
 		errors.Is(err, business.ErrCreatorCannotLeave):
 		writeEventError(w, err)
@@ -198,7 +204,9 @@ func RestoreCalendarEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 // CalendarTrash is the asker's deleted events, newest first, 50 at a time.
-// GET /calendar/events/trash?before=… (RFC 3339: the oldest deletion seen)
+// GET /calendar/events/trash?before=…&before_id=… (the last event a page gave:
+// its deleted_at, RFC 3339, and its id; before alone, as an older client
+// sends it, goes on from what was deleted before then)
 func CalendarTrash(w http.ResponseWriter, r *http.Request) {
 	who, ok := member(w, r)
 	if !ok {
@@ -209,7 +217,16 @@ func CalendarTrash(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Say before when, as a time like 2026-10-16T00:00:00Z."})
 		return
 	}
-	events, err := business.Events.Trash(r.Context(), who, before)
+	beforeID := r.URL.Query().Get("before_id")
+	if beforeID != "" && before == nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Say before when, as well as before which event."})
+		return
+	}
+	var after *business.TrashAfter
+	if before != nil {
+		after = &business.TrashAfter{DeletedAt: *before, ID: beforeID}
+	}
+	events, err := business.Events.Trash(r.Context(), who, after)
 	if err != nil {
 		writeCalendarError(w, r, "CalendarTrash", err)
 		return
@@ -238,32 +255,34 @@ func ExportCalendar(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(buf.Bytes())
 }
 
-// GoogleSyncStatus is where the asker's move from Google Calendar stands.
-// GET /calendar/sync/google → 200 {data: SyncStatus}
-func GoogleSyncStatus(w http.ResponseWriter, r *http.Request) {
+// SyncStatus is where the asker's own move from a provider stands (google
+// or microsoft; /calendar/sync/google answers as it did).
+// GET /calendar/sync/{provider} → 200 {data: SyncStatus}
+func SyncStatus(w http.ResponseWriter, r *http.Request) {
 	who, ok := member(w, r)
 	if !ok {
 		return
 	}
-	st, err := business.Events.SyncStatus(r.Context(), who)
+	st, err := business.Events.SyncStatus(r.Context(), who, chi.URLParam(r, "provider"))
 	if err != nil {
-		writeCalendarError(w, r, "GoogleSyncStatus", err)
+		writeCalendarError(w, r, "SyncStatus", err)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": st})
 }
 
-// MoveFromGoogle starts moving every calendar of the asker's Google link
-// into OneCamp (calendar B6), and answers where it stands.
-// POST /calendar/sync/google/move → 202 {data: SyncStatus}
-func MoveFromGoogle(w http.ResponseWriter, r *http.Request) {
+// MoveFrom starts moving every calendar of the asker's own link at a
+// provider into OneCamp (calendar B6 Google, B7 Outlook), and answers where
+// it stands.
+// POST /calendar/sync/{provider}/move → 202 {data: SyncStatus}
+func MoveFrom(w http.ResponseWriter, r *http.Request) {
 	who, ok := member(w, r)
 	if !ok {
 		return
 	}
-	st, err := business.Events.MoveFromGoogle(r.Context(), who)
+	st, err := business.Events.MoveFrom(r.Context(), who, chi.URLParam(r, "provider"))
 	if err != nil {
-		writeCalendarError(w, r, "MoveFromGoogle", err)
+		writeCalendarError(w, r, "MoveFrom", err)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"data": st})

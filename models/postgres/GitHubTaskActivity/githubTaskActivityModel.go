@@ -7,6 +7,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -121,4 +122,43 @@ func GetGitHubTaskActivitiesByTaskID(query string, taskID uuid.UUID) ([]*GitHubT
 		return nil, err
 	}
 	return activities, nil
+}
+
+// AnyGitHubTaskActivity is whether the query, a SELECT EXISTS, finds a line.
+func AnyGitHubTaskActivity(ctx context.Context, query string, args ...any) (bool, error) {
+	return pgexec.Scalar[bool](ctx, query, args...)
+}
+
+// prTitlesMost is the most pull request titles PRTitles answers for a task.
+const prTitlesMost = 3
+
+// PRTitles is the titles of the pull requests each of tasks was opened or
+// merged from, newest first and each once, at most prTitlesMost a task, in
+// one read however many tasks: the read itself stops at prTitlesMost a task.
+func PRTitles(ctx context.Context, tasks []uuid.UUID) (map[uuid.UUID][]string, error) {
+	out := make(map[uuid.UUID][]string, len(tasks))
+	if len(tasks) == 0 {
+		return out, nil
+	}
+	type row struct {
+		task  uuid.UUID
+		title string
+	}
+	rows, err := pgexec.Query(ctx, `SELECT task_id, title FROM (
+			SELECT task_id, title, row_number() OVER (PARTITION BY task_id ORDER BY max(created_at) DESC, title) AS n
+			FROM github_task_activities
+			WHERE task_id = ANY($1::uuid[]) AND activity_type IN ('pr_opened', 'pr_merged') AND COALESCE(title, '') <> ''
+			GROUP BY task_id, title) t
+		WHERE n <= $2 ORDER BY task_id, n`, func(r pgexec.Row) (row, error) {
+		var x row
+		err := r.Scan(&x.task, &x.title)
+		return x, err
+	}, pq.Array(tasks), prTitlesMost)
+	if err != nil {
+		return nil, err
+	}
+	for _, x := range rows {
+		out[x.task] = append(out[x.task], x.title)
+	}
+	return out, nil
 }

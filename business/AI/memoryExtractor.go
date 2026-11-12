@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -174,21 +175,41 @@ func parseExtractedItems(raw string) []rawExtractedItem {
 			kind != memoryModels.KindQuestion {
 			continue
 		}
+		// A commitment is kept only when its words make one, whatever the
+		// model says of them: keyboard noise from a DM was stored as one
+		// (V-581).
+		if kind == memoryModels.KindCommitment && !makesACommitment(content) {
+			continue
+		}
 		// Bound content length defensively.
 		if len(content) > 1000 {
 			content = helpers.TruncateRunes(content, 1000)
 		}
 		it.Kind = kind
 		it.Content = content
-		if it.Confidence < 0 || it.Confidence > 100 {
-			it.Confidence = 70
-		}
+		// The model's own score, held to 0-100: never one made up for it.
+		it.Confidence = min(max(it.Confidence, 0), 100)
 		out = append(out, it)
 		if len(out) >= maxMemoryItemsPerRun {
 			break
 		}
 	}
 	return out
+}
+
+// promiseRe finds what makes words a commitment: a promise or undertaking
+// ("will", "I'll", "going to", "agreed to", "Alice to send ..."), or when it
+// is due ("by Friday", "tomorrow", "Alice ships Friday").
+var promiseRe = regexp.MustCompile(`(?i)(\b(will|shall|gonna|going to|promise[sd]?|commit(?:s|ted)?|agree[sd]?|plan(?:s|ned)?|owes?|responsible for|by|before|until|today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|eod|eow|next week|this week|end of)\b|['’]ll\b|\bto\s+\p{L}{2,})`)
+
+// wordRe is a word: two letters or more.
+var wordRe = regexp.MustCompile(`\p{L}{2,}`)
+
+// makesACommitment says whether the words make a commitment: a promise or a
+// due time, in three words or more (who, the promise, what). Noise, a single
+// token and text without words never do.
+func makesACommitment(content string) bool {
+	return promiseRe.MatchString(content) && len(wordRe.FindAllString(content, -1)) >= 3
 }
 
 // extractJSONArray returns the first top-level JSON array substring, or ""
@@ -378,18 +399,18 @@ func isMemoryIntent(question string) bool {
 }
 
 // fetchMemoryItems returns recent OPEN memory items the user can see,
-// bounded to maxMemoryContextItems. Permission-scoped by accessible
-// channels/projects/DM-grouping-ids plus ownership. Best-effort.
+// bounded to maxMemoryContextItems. Permission-scoped by where the user is
+// now (memoryScopes), within the channels/projects the caller passes;
+// ownership alone adds nothing. Best-effort.
 func fetchMemoryItems(ctx context.Context, userInfo *userModels.UserInfo, channels, projects []string) []*memoryModels.MemoryItem {
-	ownerID := userInfo.UserPostgresInfo.Id
-	items, err := memoryModels.List(ctx, memoryModels.QueryFilter{
-		Statuses:           []string{memoryModels.StatusOpen},
-		AccessibleChannels: channels,
-		AccessibleProjects: projects,
-		AccessibleGrpIDs:   accessibleGroupingIDs(userInfo),
-		OwnerID:            &ownerID,
-		Limit:              maxMemoryContextItems,
+	scopes := newMemoryScopes(&userInfo.UserDgraphInfo)
+	f := scopes.filter(memoryModels.QueryFilter{
+		Statuses: []string{memoryModels.StatusOpen},
+		Limit:    maxMemoryContextItems,
 	})
+	f.AccessibleChannels = keepIn(channels, scopes.channels)
+	f.AccessibleProjects = keepIn(projects, scopes.projects)
+	items, err := memoryModels.List(ctx, f)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "AI memory fetch failed: %v", err)
 		return nil

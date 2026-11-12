@@ -86,7 +86,7 @@ func Assemble(cycles []cycleModel.Cycle, members map[uuid.UUID][]string, read *p
 	progress := make(map[string]TaskProgress, len(read.Planned))
 	for _, t := range read.Planned {
 		byID[t.Uuid] = t
-		progress[t.Uuid] = progressOf(t)
+		progress[t.Uuid] = ProgressOf(t)
 	}
 	b := Backlog{Cycles: []PlanCycle{}, Tasks: read.Backlog, Count: read.Count, EstimateMinutes: read.Minutes}
 	if b.Tasks == nil {
@@ -120,7 +120,7 @@ func Assemble(cycles []cycleModel.Cycle, members map[uuid.UUID][]string, read *p
 		}
 		// Open work first, then done; each oldest first.
 		sort.SliceStable(pc.Tasks, func(i, j int) bool {
-			oi, oj := isOpen(pc.Tasks[i].Status), isOpen(pc.Tasks[j].Status)
+			oi, oj := IsOpen(pc.Tasks[i].Status), IsOpen(pc.Tasks[j].Status)
 			if oi != oj {
 				return oi
 			}

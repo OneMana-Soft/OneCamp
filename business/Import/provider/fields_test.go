@@ -22,8 +22,20 @@ func TestPaletteColor(t *testing.T) {
 	}
 }
 
+// A currency a source names by code is one only when ISO 4217 has it: three
+// letters that aren't a currency ("hrs", "xyz") name none.
+func TestCurrencyCode(t *testing.T) {
+	cases := map[string]string{"EUR": "EUR", "eur": "EUR", " gbp ": "GBP", "DKK": "DKK", "TOP": "TOP", "$": "USD", "€": "EUR", "xyz": "", "hrs": "", "": "", "euro": ""}
+	for in, want := range cases {
+		if got := CurrencyCode(in); got != want {
+			t.Errorf("CurrencyCode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestCurrencyOf(t *testing.T) {
-	cases := map[string]string{"$": "USD", "€": "EUR", "₹": "INR", " £ ": "GBP", "eur": "EUR", "USD": "USD", "dollars": "", "": "", "e1": "", "hrs": "", "pcs": ""}
+	cases := map[string]string{"$": "USD", "€": "EUR", "₹": "INR", " £ ": "GBP", "eur": "EUR", "USD": "USD", "dollars": "", "": "", "e1": "", "hrs": "", "pcs": "",
+		"Rs.": "INR", "A$": "AUD", "chf": "CHF", "kr": "SEK", "top": "", "all": "", "cup": ""}
 	for in, want := range cases {
 		if got := CurrencyOf(in); got != want {
 			t.Errorf("CurrencyOf(%q) = %q, want %q", in, got, want)

@@ -37,9 +37,12 @@ const (
 	ScopeMessagesRead  = "messages:read"
 	ScopeMessagesWrite = "messages:write"
 	ScopeCalendarWrite = "calendar:write"
-	ScopeTablesRead    = "tables:read"
-	ScopeTablesWrite   = "tables:write"
-	ScopeSearchRead    = "search:read"
+	// ScopeCalendarRead reads the calendars and events the token's member may
+	// see, as the calendar shows them (GET /v1/calendars, /v1/events).
+	ScopeCalendarRead = "calendar:read"
+	ScopeTablesRead   = "tables:read"
+	ScopeTablesWrite  = "tables:write"
+	ScopeSearchRead   = "search:read"
 	// ScopeDataSourcesRead is distinct from tables:read on purpose: reaching an
 	// external, connected database is a materially broader grant than reading
 	// native tables, so a token must opt into it explicitly.
@@ -56,7 +59,7 @@ var AllScopes = []string{
 	ScopeProjectsRead, ScopeProjectsWrite,
 	ScopeDocsRead, ScopeDocsWrite,
 	ScopeMessagesRead, ScopeMessagesWrite,
-	ScopeCalendarWrite,
+	ScopeCalendarRead, ScopeCalendarWrite,
 	ScopeTablesRead, ScopeTablesWrite,
 	ScopeSearchRead,
 	ScopeDataSourcesRead,

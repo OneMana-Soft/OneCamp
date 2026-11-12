@@ -7,9 +7,7 @@ package business
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -80,7 +78,9 @@ func Count(statuses []string) Progress {
 	return p
 }
 
-func isOpen(status string) bool {
+// IsOpen is whether a task with status is still to do: neither done nor
+// cancelled, as burndown, Complete and a release's move count it. Pure.
+func IsOpen(status string) bool {
 	return status != dgraphStruct.TASK_STATUS_DONE && status != dgraphStruct.TASK_STATUS_CANCELED
 }
 
@@ -202,7 +202,7 @@ func Complete(ctx context.Context, c *cycleModel.Cycle, carry bool, by uuid.UUID
 	var open []string
 	done := 0
 	for _, t := range statuses {
-		if isOpen(t.Status) {
+		if IsOpen(t.Status) {
 			open = append(open, t.Uuid)
 		} else {
 			done++
@@ -275,9 +275,5 @@ func FilterClause(project string, ids []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(tasks) == 0 {
-		return `eq(task_uuid, "00000000-0000-0000-0000-000000000000")`, nil
-	}
-	b, _ := json.Marshal(tasks)
-	return fmt.Sprintf(`eq(task_uuid, %s)`, b), nil
+	return taskDomain.TasksClause(tasks, false), nil
 }

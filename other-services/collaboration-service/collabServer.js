@@ -33,6 +33,7 @@ import { createLegacyContentTransform } from './transforms/legacyContent.js' // 
 import { closeWhenLinkEnds } from './live/ops/reauth.js'
 import { trackGuestStrokes } from './live/ops/guestStrokes.js'
 import { trackProtected } from './live/ops/protect.js'
+import { guardElementTypes } from './live/ops/elementTypes.js'
 import { guardFacilitation } from './live/ops/facilitationGuard.js'
 
 // Docs connect with the bare doc uuid as the document name. Boards connect with
@@ -466,12 +467,18 @@ export function createCollabServer({
             }
         },
 
-        // A board starts keeping who of a call's guests drew what, and its
-        // protected objects as they are. A doc whose blocks have no ids gets
+        // A board is held to the element types it draws, and starts keeping
+        // who of a call's guests drew what, and its protected objects as they
+        // are. A doc whose blocks have no ids gets
         // them, as one edit, before anyone syncs (transforms/blockIds.js).
         // Never throws: a doc without ids opens as it always did.
         async afterLoadDocument(data) {
             if (parseDocumentName(data.documentName).kind === 'board') {
+                // Only the element types a board draws (live/ops/elementTypes.js;
+                // V-547), first: a board stored with another is cleaned before
+                // the other guards watch it.
+                const out = guardElementTypes(data.document)
+                if (out > 0) log.log(`[Collab] ${data.documentName}: took out ${out} element(s) of a type a board doesn't draw`)
                 // Who of a call's guests drew what (live/ops/guestStrokes.js).
                 trackGuestStrokes(data.document)
                 // Its protected objects stay as they are (live/ops/protect.js).

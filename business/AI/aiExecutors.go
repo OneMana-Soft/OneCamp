@@ -424,7 +424,7 @@ func executeCreateTask(ctx context.Context, action ai.ProposedAction, userUUID s
 		projectName = projectUUID
 	}
 
-	msg := fmt.Sprintf("✅ Task %s created in project %s (priority: %s)", called, projectName, priority)
+	msg := fmt.Sprintf("✅ Task %s created in project %s", called, projectName) + taskPriority.Noted(priority)
 	if assigneeDgraph != nil {
 		msg += ", assigned to " + assigneeDgraph.UserName
 	}
@@ -432,14 +432,12 @@ func executeCreateTask(ctx context.Context, action ai.ProposedAction, userUUID s
 }
 
 // normalizeTaskPriority maps whatever the model emits for a task priority onto
-// a priority a task can have (dgraphStruct.TaskPriorityFromWords), so a
-// hallucinated priority can never reach the task layer. Unknown and empty
-// values are medium.
+// a priority a task can have (taskPriority.FromWords), so a hallucinated
+// priority can never reach the task layer. Unknown and empty values are none,
+// as a task made in the app without one is.
 func normalizeTaskPriority(p string) string {
-	if got, ok := taskPriority.FromWords(p); ok && got != "" {
-		return got
-	}
-	return dgraphStruct.TASK_PRIORITY_MEDIUM
+	got, _ := taskPriority.FromWords(p)
+	return got
 }
 
 // resolveAssigneeRef turns an assignee reference the model supplied - a user

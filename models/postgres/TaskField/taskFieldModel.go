@@ -40,6 +40,9 @@ const (
 	TypePerson      = "person"
 	TypeCheckbox    = "checkbox"
 	TypeURL         = "url"
+	// TypeFormula is worked out from the task's other fields on each read
+	// (business/TaskField, migration 583): it has no stored values.
+	TypeFormula = "formula"
 )
 
 // Field is one of a project's custom fields.
@@ -51,6 +54,9 @@ type Field struct {
 	Options   []Option  `json:"options"`
 	Currency  string    `json:"currency,omitempty"`
 	OnCard    bool      `json:"on_card"`
+	// Formula is a formula field's formula as stored, its fields by id
+	// ({#<id>}); the app is given it by name (business/TaskField's View).
+	Formula   string    `json:"-"`
 	Position  int       `json:"position"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -61,7 +67,7 @@ var (
 	ErrNameTaken = errors.New("a field with that name already exists in this project")
 )
 
-const columns = `id, project_id, name, type, options, COALESCE(currency, ''), on_card, position, created_at, updated_at`
+const columns = `id, project_id, name, type, options, COALESCE(currency, ''), on_card, COALESCE(formula, ''), position, created_at, updated_at`
 
 func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
@@ -70,7 +76,7 @@ func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 func scan(row interface{ Scan(...any) error }) (*Field, error) {
 	var f Field
 	var options []byte
-	if err := row.Scan(&f.ID, &f.ProjectID, &f.Name, &f.Type, &options, &f.Currency, &f.OnCard, &f.Position, &f.CreatedAt, &f.UpdatedAt); err != nil {
+	if err := row.Scan(&f.ID, &f.ProjectID, &f.Name, &f.Type, &options, &f.Currency, &f.OnCard, &f.Formula, &f.Position, &f.CreatedAt, &f.UpdatedAt); err != nil {
 		return nil, err
 	}
 	f.Options = []Option{}
@@ -90,6 +96,15 @@ func isUniqueViolation(err error) bool {
 	}
 	var pqErr *pq.Error
 	return errors.As(err, &pqErr) && pqErr.Code == "23505"
+}
+
+// nullFormula is a field's formula as stored: a formula field's own, none
+// for any other.
+func nullFormula(f *Field) any {
+	if f.Type != TypeFormula {
+		return nil
+	}
+	return f.Formula
 }
 
 func nullCurrency(c string) any {
@@ -157,10 +172,10 @@ func Create(ctx context.Context, f *Field, createdBy uuid.UUID) (*Field, error) 
 		return nil, err
 	}
 	out, _, err := pgexec.QueryOne(ctx, `
-		INSERT INTO task_fields (id, project_id, name, type, options, currency, on_card, position, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE((SELECT MAX(position) + 1 FROM task_fields WHERE project_id = $2), 0), $8)
+		INSERT INTO task_fields (id, project_id, name, type, options, currency, on_card, formula, position, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE((SELECT MAX(position) + 1 FROM task_fields WHERE project_id = $2), 0), $9)
 		RETURNING `+columns, func(r pgexec.Row) (*Field, error) { return scan(r) },
-		uuid.New(), f.ProjectID, f.Name, f.Type, options, nullCurrency(f.Currency), f.OnCard, createdBy)
+		uuid.New(), f.ProjectID, f.Name, f.Type, options, nullCurrency(f.Currency), f.OnCard, nullFormula(f), createdBy)
 	if isUniqueViolation(err) {
 		return nil, ErrNameTaken
 	}
@@ -215,8 +230,8 @@ func Update(ctx context.Context, f *Field, removed []string) (*Field, []string, 
 		return nil, nil, err
 	}
 	saved, err := scan(tx.QueryRowContext(c, `
-		UPDATE task_fields SET name = $3, options = $4, currency = $5, on_card = $6, updated_at = NOW()
-		WHERE id = $1 AND project_id = $2 RETURNING `+columns, f.ID, f.ProjectID, f.Name, options, nullCurrency(f.Currency), f.OnCard))
+		UPDATE task_fields SET name = $3, options = $4, currency = $5, on_card = $6, formula = CASE WHEN type = $8 THEN $7::text END, updated_at = NOW()
+		WHERE id = $1 AND project_id = $2 RETURNING `+columns, f.ID, f.ProjectID, f.Name, options, nullCurrency(f.Currency), f.OnCard, f.Formula, TypeFormula))
 	if isUniqueViolation(err) {
 		return nil, nil, ErrNameTaken
 	}
@@ -359,35 +374,67 @@ func dropOptionValues(c context.Context, tx *sql.Tx, fieldID uuid.UUID, removed 
 // Values is each task's values: task id, then field id, then the value.
 type Values map[string]map[string]json.RawMessage
 
-// ValuesFor reads the values of the tasks listed.
-func ValuesFor(ctx context.Context, taskIDs []uuid.UUID) (Values, error) {
-	out := Values{}
+// ReadValues reads the values of the tasks listed and, in the same read, the
+// money fields among those they hold: field id, then its project's id, so a
+// reader can keep money from whoever may not read it (business/TaskField).
+func ReadValues(ctx context.Context, taskIDs []uuid.UUID) (Values, map[string]string, error) {
+	out, money := Values{}, map[string]string{}
 	if len(taskIDs) == 0 {
-		return out, nil
+		return out, money, nil
 	}
 	c, cancel := withTimeout(ctx)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
-		`SELECT v.task_uuid, v.field_id, v.value FROM task_field_values v JOIN task_fields f ON f.id = v.field_id AND `+softDelete.Live("f")+`
-		WHERE v.task_uuid = ANY($1)`, pq.Array(taskIDs))
+		`SELECT v.task_uuid, v.field_id, v.value, f.type = $2, f.project_id FROM task_field_values v JOIN task_fields f ON f.id = v.field_id AND `+softDelete.Live("f")+`
+		WHERE v.task_uuid = ANY($1)`, pq.Array(taskIDs), TypeMoney)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/TaskField ValuesFor err: %+v", err)
-		return nil, err
+		helpers.LogErrorWithContext(ctx, "models/TaskField ReadValues err: %+v", err)
+		return nil, nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var task, field uuid.UUID
+		var task, field, project uuid.UUID
 		var value []byte
-		if err := rows.Scan(&task, &field, &value); err != nil {
-			return nil, err
+		var isMoney bool
+		if err := rows.Scan(&task, &field, &value, &isMoney, &project); err != nil {
+			return nil, nil, err
 		}
 		t := task.String()
 		if out[t] == nil {
 			out[t] = map[string]json.RawMessage{}
 		}
 		out[t][field.String()] = value
+		if isMoney {
+			money[field.String()] = project.String()
+		}
 	}
-	return out, rows.Err()
+	return out, money, rows.Err()
+}
+
+// FormulaProjects is, of the tasks listed, those whose project has a live
+// formula field: task id, then its project's id. None, in one cheap read,
+// for a project without one.
+func FormulaProjects(ctx context.Context, taskIDs []uuid.UUID) (map[string]string, error) {
+	out := map[string]string{}
+	if len(taskIDs) == 0 {
+		return out, nil
+	}
+	pairs, err := pgexec.Query(ctx,
+		`SELECT t.id, t.project_id FROM tasks t WHERE t.id = ANY($1) AND EXISTS (
+			SELECT 1 FROM task_fields f WHERE f.project_id = t.project_id AND f.type = $2 AND `+softDelete.Live("f")+`)`,
+		func(r pgexec.Row) ([2]uuid.UUID, error) {
+			var pair [2]uuid.UUID
+			return pair, r.Scan(&pair[0], &pair[1])
+		},
+		pq.Array(taskIDs), TypeFormula)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/TaskField FormulaProjects err: %+v", err)
+		return nil, err
+	}
+	for _, pair := range pairs {
+		out[pair[0].String()] = pair[1].String()
+	}
+	return out, nil
 }
 
 // ValueOf is a task's value of a field, or nil when it has none.

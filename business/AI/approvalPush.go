@@ -10,6 +10,11 @@ package business
 // silently does not happen. So a new approval also goes to the person's
 // devices. Firebase only shows it when OneCamp is not in focus, so someone
 // already looking at the card is not told twice.
+//
+// The push names the approval (type_id), so a click opens that request in the
+// Inbox rather than a page to search, and says an agent sent it (sender_kind),
+// so the toast wears the agent square. Its agent's name is the one the
+// approval was given when it was made (nameAgents).
 
 import (
 	"context"
@@ -18,31 +23,18 @@ import (
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
-	agentModel "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	pendingModels "github.com/akashc777/OneCamp/models/postgres/PendingAction"
 )
 
 const approvalPushBodyMax = 140
 
-// Seams, so the rule is tested without Firebase or a database.
-var (
-	approvalAgentName = func(ctx context.Context, a *pendingModels.PendingAction) string {
-		if a.AgentID == nil {
-			return ""
-		}
-		ag, err := agentModel.GetAgentByID(ctx, *a.AgentID)
-		if err != nil || ag == nil {
-			return ""
-		}
-		return ag.Name
-	}
-	// To their devices and the desktop app (business/Notification Deliver),
-	// named by the approval's own tag so two never stand for each other.
-	sendApprovalPush = func(ctx context.Context, userUUID string, data map[string]string) error {
-		notificationBusiness.Deliver(ctx, []string{userUUID}, data, data[firebaseInit.FIREBASE_PUSH_DATA_TAG])
-		return nil
-	}
-)
+// A seam, so the rule is tested without Firebase. To their devices and the
+// desktop app (business/Notification Deliver), named by the approval's own tag
+// so two never stand for each other.
+var sendApprovalPush = func(ctx context.Context, userUUID string, data map[string]string) error {
+	notificationBusiness.Deliver(ctx, []string{userUUID}, data, data[firebaseInit.FIREBASE_PUSH_DATA_TAG])
+	return nil
+}
 
 // approvalPushData is what the notification says. Pure.
 func approvalPushData(a *pendingModels.PendingAction, agentName string) map[string]string {
@@ -62,6 +54,10 @@ func approvalPushData(a *pendingModels.PendingAction, agentName string) map[stri
 		firebaseInit.FIREBASE_PUSH_DATA_TITLE: who + " needs your approval",
 		firebaseInit.FIREBASE_PUSH_DATA_BODY:  body,
 		firebaseInit.FIREBASE_PUSH_DATA_TAG:   "approval_" + a.Id.String(),
+		// The approval itself, so the click opens it (For you's row).
+		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID: a.Id.String(),
+		// OneCamp AI and agents both wear the agent square.
+		firebaseInit.FIREBASE_PUSH_DATA_SENDER_KIND: firebaseInit.FIREBASE_PUSH_SENDER_AGENT,
 	}
 }
 
@@ -79,7 +75,7 @@ func notifyApprovalNeeded(a *pendingModels.PendingAction) {
 			}
 		}()
 		ctx := context.Background()
-		data := approvalPushData(a, approvalAgentName(ctx, a))
+		data := approvalPushData(a, a.AgentName)
 		if err := sendApprovalPush(ctx, a.RequestedBy.String(), data); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/AI/notifyApprovalNeeded push failed err: %v", err)
 		}

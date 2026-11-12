@@ -68,9 +68,13 @@ const (
 	FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT           = "doc_comment"
 	FIREBASE_PUSH_DATA_TYPE_REMINDER              = "reminder"
 	FIREBASE_PUSH_DATA_TYPE_LATER                 = "later"
-	// An agent is waiting for a decision; the click opens Home, where
-	// "Needs your approval" leads the list.
+	// An agent is waiting for a decision; type_id is the approval's id, so the
+	// click opens that request in the Inbox (For you's Approvals).
 	FIREBASE_PUSH_DATA_TYPE_APPROVAL = "approval"
+	// Who sent it, when that isn't a person: "agent" (an agent or OneCamp AI),
+	// so the toast wears the agent square rather than initials.
+	FIREBASE_PUSH_DATA_SENDER_KIND = "sender_kind"
+	FIREBASE_PUSH_SENDER_AGENT     = "agent"
 	// A guest booked or cancelled time through a booking page; type_id is the
 	// event's id, and the click opens the calendar.
 	FIREBASE_PUSH_DATA_TYPE_CALENDAR = "calendar"
@@ -78,6 +82,9 @@ const (
 	// type_id is the table's id and thread_id the row's, and the click opens
 	// the row in its table.
 	FIREBASE_PUSH_DATA_TYPE_TABLE_ROW = "table_row"
+	// A test notice the person sent themselves (business/Notify Test): a
+	// title and no body; the click opens Settings > Notifications.
+	FIREBASE_PUSH_DATA_TYPE_TEST = "notify_test"
 	// The notification tag; one per approval so two do not replace each other.
 	FIREBASE_PUSH_DATA_TAG         = "tag"
 	FIREBASE_PUSH_DATA_TITLE       = "title"

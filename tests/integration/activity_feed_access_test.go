@@ -104,7 +104,7 @@ func TestTheFeedShowsCommentsOnlyOnWhatTheReaderMayRead(t *testing.T) {
 			byText[text] = parent
 		}
 		var feed, tab []string
-		p, err := activityBusiness.GetUnifiedActivity(ctx, people[who], uids[who], time.Now().Add(time.Minute), 50)
+		p, err := activityBusiness.GetUnifiedActivity(ctx, activityBusiness.FeedQuery{User: people[who], DgraphID: uids[who], Before: time.Now().Add(time.Minute), Limit: 50})
 		if err != nil {
 			t.Fatalf("%s's feed: %v", who, err)
 		}

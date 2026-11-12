@@ -22,7 +22,10 @@ package business
 //     — "off" recipients are skipped; "weekly" only fires on the configured
 //     weekday.
 //   - One DB query for ALL actionable items, grouped in-memory by owner, so
-//     a large workspace costs O(1) queries, not O(users).
+//     a large workspace costs O(1) item queries, not O(users).
+//   - Private at send time: each recipient gets only the items they can still
+//     read where they live (readableDigestItems), by their profile as it is
+//     now: one cached profile read per recipient, and none on failure.
 //   - Bounded: per-recipient item count is capped; the body is plain text
 //     (the email template renders Body as text).
 //   - Runs at a configurable local hour; a per-day Redis lock makes the
@@ -128,6 +131,27 @@ func maybeRunDigest(ctx context.Context) {
 	runDigest(ctx, now)
 }
 
+// sendMemoryDigest queues a person's daily digest; sendMemoryDigestNow sends
+// the test one at once and answers how many it reached. Variables, so a test
+// reads what a digest says.
+var (
+	sendMemoryDigest    = notification.DispatchMemoryDigest
+	sendMemoryDigestNow = notification.DispatchMemoryDigestTestNow
+)
+
+// readableDigestItems is those of a person's items they can read now
+// (NOTIF-H5): a digest's items are gathered by owner, so at send time it asks
+// again where each one lives, by the person's profile as it is now
+// (ownerScopesNow, memoryScopes: the check every memory reader uses). ok is
+// false when the profile can't be read: then nothing is sent.
+func readableDigestItems(ctx context.Context, ownerID uuid.UUID, items []*memoryModels.MemoryItem) ([]*memoryModels.MemoryItem, bool) {
+	scopes := ownerScopesNow(ctx, ownerID)
+	if scopes == nil {
+		return nil, false
+	}
+	return scopes.readable(items), true
+}
+
 // runDigest builds and dispatches per-user digests for the current day.
 func runDigest(ctx context.Context, now time.Time) {
 	overdueBefore := now
@@ -167,11 +191,16 @@ func runDigest(ctx context.Context, now time.Time) {
 		if !digestWantedToday(pref, weekday) {
 			continue
 		}
+		list, ok := readableDigestItems(ctx, ownerID, list)
+		if !ok {
+			helpers.LogErrorWithContext(ctx, "memory digest: could not read what %s can read now; no digest for them today", ownerID)
+			continue
+		}
 		subject, body := buildDigest(list)
 		if body == "" {
 			continue
 		}
-		notification.DispatchMemoryDigest(ownerID.String(), subject, body)
+		sendMemoryDigest(ownerID.String(), subject, body)
 		sent++
 	}
 	helpers.LogInfoWithContext(ctx, "memory digest: dispatched to %d user(s)", sent)
@@ -313,6 +342,11 @@ func SendTestMemoryDigest(ctx context.Context, userUUID string) error {
 		}
 	}
 
+	mine, ok := readableDigestItems(ctx, uid, mine)
+	if !ok {
+		return fmt.Errorf("could not check what you can read right now; try again")
+	}
+
 	subject, body := buildDigest(mine)
 	if body == "" {
 		subject = "OneCamp digest - test"
@@ -323,7 +357,7 @@ func SendTestMemoryDigest(ctx context.Context, userUUID string) error {
 	// Synchronous, and the result is CHECKED. This is a test button: reporting
 	// success without knowing is how a broken email queue looked like a working
 	// one for as long as nobody read the server log.
-	if sent := notification.DispatchMemoryDigestTestNow(ctx, uid.String(), subject, body); sent == 0 {
+	if sent := sendMemoryDigestNow(ctx, uid.String(), subject, body); sent == 0 {
 		return fmt.Errorf("the digest could not be sent. Check that email is configured for this workspace, " +
 			"that your account has an email address, and that email notifications are enabled in your settings")
 	}

@@ -109,7 +109,7 @@ func startBroker() (*BrokerEnv, func(), error) {
 	_, _ = rand.Read(raw)
 	password := "test-" + hex.EncodeToString(raw)
 
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	c, err := StartContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "emqx/emqx:6.0.0",
 			ExposedPorts: []string{"1883/tcp", "18083/tcp"},

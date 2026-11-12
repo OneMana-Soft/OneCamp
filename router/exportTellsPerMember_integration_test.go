@@ -12,6 +12,11 @@ package router
 // request, as VerifyAuth does. The doc's pipeline is the recording one
 // (docsContentIO_test.go), so the doc's own access check stays out of it.
 //
+// A tell the budget holds back leaves the admin log one row (miro-44 (a)): the
+// first refusal in a member's window on a surface writes "<surface>.export_held"
+// under that surface's category, naming the member, and later refusals in the
+// same window write none, so a member who keeps pressing can't flood the chain.
+//
 // Run: PKGS=./router/ (go test -tags=integration ./router/ -run TestAnExportsTellsAreCountedPerMemberBehindOneAddress -v)
 
 import (
@@ -90,6 +95,24 @@ func TestAnExportsTellsAreCountedPerMemberBehindOneAddress(t *testing.T) {
 			t.Fatalf("over the budget answered %d %v (Retry-After %q), want 429 with the export's words", w.Code, out, w.Header().Get("Retry-After"))
 		}
 	}
+	// held is the admin log's export_held rows for action, as their actor ids.
+	held := func(t *testing.T, action string) []string {
+		t.Helper()
+		rows, err := env.PG.Query(`SELECT coalesce(actor_id::text, ''), category FROM admin_audit_log WHERE action = $1 ORDER BY seq`, action)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var id, category string
+			if err := rows.Scan(&id, &category); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, id+" "+category)
+		}
+		return out
+	}
 	boardTell := `{"board_uuid":"` + board + `","format":"pdf"}`
 	docTell := `{"doc_uuid":"33333333-3333-3333-3333-333333333333","format":"md"}`
 
@@ -100,6 +123,13 @@ func TestAnExportsTellsAreCountedPerMemberBehindOneAddress(t *testing.T) {
 			}
 		}
 		refusedInWords(t, tell(boards, "ana", boardTell))
+		if got, want := held(t, "board.export_held"), []string{people["ana"].String() + " boards"}; strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("Ana's held board export left the admin log %v, want one row naming her under boards %v", got, want)
+		}
+		refusedInWords(t, tell(boards, "ana", boardTell))
+		if got := held(t, "board.export_held"); len(got) != 1 {
+			t.Fatalf("Ana's second held board export in the window left %d export_held rows, want still 1: %v", len(got), got)
+		}
 		if w := tell(boards, "ben", boardTell); w.Code != http.StatusOK {
 			t.Fatalf("Ben's tell from Ana's address, after her 61st, answered %d %s", w.Code, w.Body)
 		}
@@ -112,6 +142,10 @@ func TestAnExportsTellsAreCountedPerMemberBehindOneAddress(t *testing.T) {
 			}
 		}
 		refusedInWords(t, tell(doc, "ana", docTell))
+		refusedInWords(t, tell(doc, "ana", docTell))
+		if got, want := held(t, "doc.export_held"), []string{people["ana"].String() + " docs"}; strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("Ana's two held doc exports left the admin log %v, want one row naming her under docs %v", got, want)
+		}
 		if w := tell(doc, "ben", docTell); w.Code != http.StatusNoContent {
 			t.Fatalf("Ben's tell of the doc from Ana's address answered %d %s", w.Code, w.Body)
 		}

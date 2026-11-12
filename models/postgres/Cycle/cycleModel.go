@@ -443,6 +443,35 @@ func RunningIn(ctx context.Context, projects []uuid.UUID, at time.Time) ([]Cycle
 		ORDER BY ends_at, project_uuid`, scanRow, pq.Array(projects), at)
 }
 
+// ByTaskIn is the live cycle each task in one of the projects' cycles is in,
+// by task uuid, in one statement however many projects: a report slicing
+// its work by cycle (business/Project insights).
+func ByTaskIn(ctx context.Context, projects []uuid.UUID) (map[string]Cycle, error) {
+	out := map[string]Cycle{}
+	if len(projects) == 0 {
+		return out, nil
+	}
+	type member struct {
+		task  uuid.UUID
+		cycle Cycle
+	}
+	rows, err := pgexec.Query(ctx, `SELECT tc.task_uuid, `+prefixed+` FROM task_cycles tc
+		JOIN project_cycles c ON c.id = tc.cycle_id AND `+softDelete.Live("c")+`
+		WHERE c.project_uuid = ANY($1::uuid[])`, func(r pgexec.Row) (member, error) {
+		var m member
+		c := &m.cycle
+		err := r.Scan(&m.task, &c.Id, &c.ProjectUUID, &c.Number, &c.Name, &c.StartsAt, &c.EndsAt, &c.CompletedAt, &c.DoneCount, &c.CarriedCount, &c.CapacityMinutes, &c.CapacityPoints)
+		return m, err
+	}, pq.Array(projects))
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range rows {
+		out[m.task.String()] = m.cycle
+	}
+	return out, nil
+}
+
 // MembersOfMany maps each of the cycles to its tasks, in one statement.
 func MembersOfMany(ctx context.Context, cycles []uuid.UUID) (map[uuid.UUID][]string, error) {
 	out := make(map[uuid.UUID][]string, len(cycles))

@@ -18,5 +18,6 @@ func init() {
 	resourceEventBusiness.Sinks.Register(resourceEventBusiness.Sink{Name: "webhooks", Wants: isWebhook, Run: sendWebhook})
 	resourceEventBusiness.Sinks.Register(resourceEventBusiness.Sink{Name: "purge.forget", Wants: isPurge, Run: forgetPurged, InBulk: true})
 	activityBusiness.NoticeSource = feedNotices
+	activityBusiness.NoticeTimes = noticeTimes
 	lastSeenActivityBusiness.UnreadNotices = unreadNotices
 }

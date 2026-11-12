@@ -2,8 +2,10 @@ package business
 
 import (
 	"context"
+	"encoding/json"
 
 	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
@@ -31,7 +33,14 @@ var (
 // workspace's, an account that may be given work (Principal's
 // CanBeAssigned), which each project's make then checks against its people.
 // Anyone else is left out, and the chip says Assignee.
+//
+// A project's template shows the reader of ctx no preset of a field whose
+// values are hidden from them (a money field, to anyone not the project's
+// admin: business/TaskField Hidden); the task it makes still takes it.
 func Show(ctx context.Context, t Template, project uuid.UUID) Shown {
+	if project != uuid.Nil && len(t.Shape.Fields) > 0 {
+		t.Shape.Fields = readablePresets(ctx, project, t.Shape.Fields)
+	}
 	out := Shown{Template: t}
 	id := t.Shape.Assignee
 	if id == "" {
@@ -46,6 +55,20 @@ func Show(ctx context.Context, t Template, project uuid.UUID) Shown {
 	if u != nil && u.Uuid != "" {
 		// Only what a chip draws: never the account's email or graph uid.
 		out.AssigneeWho = &dgraphStruct.DgraphUser{Uuid: u.Uuid, UserName: u.UserName, UserFullName: u.UserFullName, ProfileKey: u.ProfileKey, IsBot: u.IsBot, BotKind: u.BotKind}
+	}
+	return out
+}
+
+// readablePresets is presets less those of fields hidden from the reader of
+// ctx; none when the project's fields can't be read (fails closed).
+func readablePresets(ctx context.Context, project uuid.UUID, presets map[string]json.RawMessage) map[string]json.RawMessage {
+	fields, err := projectFields(ctx, project)
+	hidden := taskFieldBusiness.Hidden(ctx, taskFieldBusiness.ReaderOf(ctx), fields)
+	out := make(map[string]json.RawMessage, len(presets))
+	for id, v := range presets {
+		if !hidden[id] && err == nil {
+			out[id] = v
+		}
 	}
 	return out
 }

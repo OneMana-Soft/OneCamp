@@ -40,11 +40,12 @@ func (s *LiveKitServiceStruct) MuteTrack(ctx context.Context, room, identity, tr
 }
 
 // SetPublishSources changes what someone already in a call may publish
-// (some of CallPublishSources), as a token minted now would grant it. The
-// call server unpublishes a live track whose source is taken away.
+// (some of CallPublishSources), as a token minted now would grant it: a
+// companion never more than CompanionSources. The call server unpublishes a
+// live track whose source is taken away.
 func (s *LiveKitServiceStruct) SetPublishSources(ctx context.Context, room, identity string, sources []string) error {
 	_, err := s.LiveKitClient.UpdateParticipant(ctx, &livekit.UpdateParticipantRequest{
-		Room: room, Identity: identity, Permission: callGrant(room, false, sources).ToPermission(),
+		Room: room, Identity: identity, Permission: callGrant(room, false, publishableBy(identity, sources)).ToPermission(),
 	})
 	if err != nil && isRoomNotFoundErr(err) {
 		return nil
@@ -56,7 +57,7 @@ func (s *LiveKitServiceStruct) SetPublishSources(ctx context.Context, room, iden
 // sources, as SetPublishSources would leave them. Pure.
 func PublishesOnly(p *livekit.ParticipantInfo, sources []string) bool {
 	// The room plays no part in a permission.
-	return p != nil && callGrant("", false, sources).MatchesPermission(p.Permission)
+	return p != nil && callGrant("", false, publishableBy(p.Identity, sources)).MatchesPermission(p.Permission)
 }
 
 // SetAttributes sets some of a participant's attributes, which everyone in the

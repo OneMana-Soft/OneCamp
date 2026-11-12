@@ -82,10 +82,11 @@ type CredentialMinter func(ctx context.Context, task Task, repo RepoRef) (Creden
 // JudgeChangeScope) so tests can force verdicts.
 type JudgeFunc func(ctx context.Context, task, diff string) (Verdict, error)
 
-// PROpener opens a PR and returns its URL. Injected (wired to
-// githubBusiness.CreatePullRequest + the PR builders). Returns
+// PROpener opens a PR with cred, the run's own credential (the one its branch
+// was pushed with), and returns its URL. Injected (wired to
+// githubBusiness.CreatePullRequestWithToken + the PR builders). Returns
 // ErrPullRequestExists when one already exists.
-type PROpener func(ctx context.Context, repo RepoRef, head, base, title, body string, draft bool) (string, error)
+type PROpener func(ctx context.Context, cred Credential, repo RepoRef, head, base, title, body string, draft bool) (string, error)
 
 // RunRecorder persists the audit/usage row. Best-effort (a failure never blocks
 // the outcome). Injected (wired to aiModels.RecordCodePRRun).
@@ -277,7 +278,7 @@ func (o *Orchestrator) Run(ctx context.Context, task Task) (outcome Outcome) {
 			// for it would only fail as a duplicate.
 			return o.continuedOutcome(task, *prior, prNumber, result, Verdict{InScope: true}, result.Status)
 		}
-		return o.mapNonOK(task, result)
+		return o.mapNonOK(cred, task, result)
 	}
 
 	// 8. Scope judge (fails open on error).
@@ -309,17 +310,17 @@ func (o *Orchestrator) Run(ctx context.Context, task Task) (outcome Outcome) {
 		return o.continuedOutcome(task, *prior, prNumber, result, verdict, StatusOK)
 	}
 	o.stage(StageOpening, task.Repo, &result)
-	return o.openPR(ctx, task, result, verdict, false)
+	return o.openPR(ctx, cred, task, result, verdict, false)
 }
 
 // mapNonOK turns a non-ok runner result into an honest outcome. A no-green run
 // may still open a DRAFT PR when the admin policy allows and a branch was pushed.
-func (o *Orchestrator) mapNonOK(task Task, result CodingResult) Outcome {
+func (o *Orchestrator) mapNonOK(cred Credential, task Task, result CodingResult) Outcome {
 	msg := strings.TrimSpace(Sanitize(result.Message))
 	switch result.Status {
 	case StatusNoGreen:
 		if o.DraftOnRed && strings.TrimSpace(result.HeadBranch) != "" {
-			return o.openPRFromResult(task, result, Verdict{InScope: true}, true)
+			return o.openPRFromResult(cred, task, result, Verdict{InScope: true}, true)
 		}
 		if msg == "" {
 			msg = "I couldn't get the change to a passing build/tests, so I didn't open a PR."
@@ -341,7 +342,7 @@ func (o *Orchestrator) mapNonOK(task Task, result CodingResult) Outcome {
 		// mean "your work was thrown away".
 		if strings.TrimSpace(result.HeadBranch) != "" {
 			if o.DraftOnRed {
-				return o.openPRFromResult(task, result, Verdict{InScope: true}, true)
+				return o.openPRFromResult(cred, task, result, Verdict{InScope: true}, true)
 			}
 			if msg == "" {
 				msg = "I ran out of time before finishing, so I pushed the work I had instead of opening a PR."
@@ -396,13 +397,13 @@ func (o *Orchestrator) finalNonOK(task Task, result CodingResult, msg string) Ou
 }
 
 // openPR opens the PR for a successful (or flagged) run.
-func (o *Orchestrator) openPR(ctx context.Context, task Task, result CodingResult, verdict Verdict, draft bool) Outcome {
-	return o.openPRFromResult(task, result, verdict, draft)
+func (o *Orchestrator) openPR(ctx context.Context, cred Credential, task Task, result CodingResult, verdict Verdict, draft bool) Outcome {
+	return o.openPRFromResult(cred, task, result, verdict, draft)
 }
 
 // openPRFromResult builds the title/body and opens the PR, mapping the result to
 // an outcome. Records the run (best-effort) regardless of PR success.
-func (o *Orchestrator) openPRFromResult(task Task, result CodingResult, verdict Verdict, draft bool) Outcome {
+func (o *Orchestrator) openPRFromResult(cred Credential, task Task, result CodingResult, verdict Verdict, draft bool) Outcome {
 	ctx := context.Background()
 	title := BuildPRTitle(task.Instruction)
 	body := BuildPRBody(PRProvenance{
@@ -440,7 +441,7 @@ func (o *Orchestrator) openPRFromResult(task Task, result CodingResult, verdict 
 	// the user without a way to see/open the change.
 	out.BranchURL = task.Repo.BranchURL(result.HeadBranch)
 	out.PRCreateURL = task.Repo.PRCreateURL(base, result.HeadBranch)
-	url, err := o.OpenPR(ctx, task.Repo, result.HeadBranch, base, title, body, draft)
+	url, err := o.OpenPR(ctx, cred, task.Repo, result.HeadBranch, base, title, body, draft)
 	if err != nil {
 		if errors.Is(err, ErrPullRequestExists) {
 			out.Message = "A pull request already exists for this change on " + task.Repo.FullName() + "."

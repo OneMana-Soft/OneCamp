@@ -26,6 +26,7 @@ import (
 	"time"
 
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	postDelete "github.com/akashc777/OneCamp/business/PostDelete"
 	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
@@ -176,15 +177,13 @@ func (s *ChannelStream) Abort(ctx context.Context) {
 		return
 	}
 	s.finalized = true
-	if err := postDomain.HardDeletePostByUUIUD(ctx, s.postUUID); err != nil {
+	// A dropped post is deleted as a person's is, through the post's soft
+	// delete: both stores mark it, so no reload brings it back, and it
+	// publishes the delete (V-578). It runs past the run's own end.
+	dropped := &dgraphStruct.DgraphPost{Uuid: s.postUUID.String(), PostBy: &dgraphStruct.DgraphUser{Uuid: s.bot.UUID}}
+	if err := postDelete.Delete(context.WithoutCancel(ctx), dropped, s.channelUUID.String()); err != nil {
 		helpers.LogErrorWithContext(ctx, "botpost stream: abort delete failed: %+v", err)
 	}
-	mqttBusiness.PublishPost(&mqttStruct.MqttPost{
-		Type:            mqttStruct.TYPE_DELETE,
-		PostUuid:        s.postUUID.String(),
-		PostChannelUuid: s.channelUUID.String(),
-		PostByUserUuid:  s.bot.UUID,
-	}, s.channelUUID.String())
 }
 
 // create persists the post (Postgres + Dgraph) with the first streamed text and

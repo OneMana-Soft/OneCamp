@@ -113,6 +113,8 @@ type SyncCalendar struct {
 	Cursor     string
 	// ReadOnly is a calendar the link may only read: nothing is sent to it.
 	ReadOnly bool
+	// Provider is its link's, read with it (never written from here).
+	Provider string
 }
 
 // KeepSyncCalendar records a link's calendar, the OneCamp calendar it came
@@ -247,23 +249,46 @@ func ReconnectSyncLinks(ctx context.Context, person uuid.UUID, provider, account
 	return err
 }
 
+// syncCalendarColumns are a link's calendar with its link's provider, from
+// syncCalendarFrom, as scanSyncCalendar reads them.
+const (
+	syncCalendarColumns = `c.link_id, c.remote_id, c.name, c.is_primary, c.calendar_id, c.cursor, c.read_only, l.provider`
+	syncCalendarFrom    = `calendar_sync_calendars c JOIN calendar_sync_links l ON l.id = c.link_id`
+)
+
+func scanSyncCalendar(r pgexec.Row) (SyncCalendar, error) {
+	var c SyncCalendar
+	var cal uuid.NullUUID
+	if err := r.Scan(&c.LinkID, &c.RemoteID, &c.Name, &c.Primary, &cal, &c.Cursor, &c.ReadOnly, &c.Provider); err != nil {
+		return c, err
+	}
+	if cal.Valid {
+		id := cal.UUID
+		c.CalendarID = &id
+	}
+	return c, nil
+}
+
 // SyncCalendarsOf are a link's calendars.
 func SyncCalendarsOf(ctx context.Context, link uuid.UUID) ([]SyncCalendar, error) {
-	out, err := pgexec.Query(ctx, `SELECT link_id, remote_id, name, is_primary, calendar_id, cursor, read_only FROM calendar_sync_calendars WHERE link_id = $1 ORDER BY is_primary DESC, remote_id`,
-		func(r pgexec.Row) (SyncCalendar, error) {
-			var c SyncCalendar
-			var cal uuid.NullUUID
-			if err := r.Scan(&c.LinkID, &c.RemoteID, &c.Name, &c.Primary, &cal, &c.Cursor, &c.ReadOnly); err != nil {
-				return c, err
-			}
-			if cal.Valid {
-				id := cal.UUID
-				c.CalendarID = &id
-			}
-			return c, nil
-		}, link)
+	out, err := pgexec.Query(ctx, `SELECT `+syncCalendarColumns+` FROM `+syncCalendarFrom+` WHERE c.link_id = $1 ORDER BY c.is_primary DESC, c.remote_id`,
+		scanSyncCalendar, link)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.SyncCalendarsOf err: %+v", err)
+	}
+	return out, err
+}
+
+// SyncCalendarsInto are the links' calendars that come into any of calendars,
+// each with its link's provider: one statement for a whole list.
+func SyncCalendarsInto(ctx context.Context, calendars []uuid.UUID) ([]SyncCalendar, error) {
+	if len(calendars) == 0 {
+		return nil, nil
+	}
+	out, err := pgexec.Query(ctx, `SELECT `+syncCalendarColumns+` FROM `+syncCalendarFrom+`
+		WHERE c.calendar_id = ANY($1::uuid[]) ORDER BY l.provider, c.remote_id`, scanSyncCalendar, uuidArray(calendars))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CalendarV2.SyncCalendarsInto err: %+v", err)
 	}
 	return out, err
 }

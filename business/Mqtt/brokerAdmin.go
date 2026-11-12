@@ -266,8 +266,9 @@ func redactURLError(err error) error {
 
 // brokerClient is one client in a listing.
 type brokerClient struct {
-	ClientID string `json:"clientid"`
-	Username string `json:"username"`
+	ClientID  string `json:"clientid"`
+	Username  string `json:"username"`
+	Connected bool   `json:"connected"`
 }
 
 // clients lists clients, page by page, for a query (username=, clientid=).
@@ -360,6 +361,46 @@ func (a *brokerAdmin) subscribersOf(ctx context.Context, topic string) ([]string
 		}
 	}
 	return ids, nil
+}
+
+// AppsOpen is how many of a person's apps (desktop or browser) are connected
+// to the broker now, each of which shows a desktop notice (business/Notify
+// Test), and whether the broker could be asked: not with no admin login, nor
+// when it doesn't answer within appsOpenWait. It reads that one person's
+// clients alone.
+func AppsOpen(ctx context.Context, userUUID string) (int, bool) {
+	a := theBrokerAdmin()
+	if a == nil {
+		return 0, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, appsOpenWait)
+	defer cancel()
+	n, err := a.appsOpen(ctx, userUUID)
+	if err != nil {
+		helpers.LogWarnWithContext(ctx, "business/Mqtt AppsOpen: the broker didn't say: %v", err)
+		return 0, false
+	}
+	return n, true
+}
+
+// appsOpenWait is how long a test waits for the broker to say.
+const appsOpenWait = 3 * time.Second
+
+// appsOpen counts the person's clients connected now, never a session held
+// for one to resume.
+func (a *brokerAdmin) appsOpen(ctx context.Context, userUUID string) (int, error) {
+	username := "user_" + userUUID
+	found, err := a.clients(ctx, url.Values{"username": {username}, "conn_state": {"connected"}})
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, c := range found {
+		if c.Username == username && c.Connected {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // cutFromTopics takes topics off every client of the person's.

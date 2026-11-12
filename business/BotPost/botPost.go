@@ -20,9 +20,9 @@ import (
 	"time"
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
+	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
-	threadIndex "github.com/akashc777/OneCamp/business/ThreadIndex"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	commentDomain "github.com/akashc777/OneCamp/domain/Comment"
@@ -113,9 +113,6 @@ func PostToChannelAsBot(ctx context.Context, channelUUID uuid.UUID, text string,
 	return postBotMessage(ctx, bot, channelUUID, badgeHTML(trimmed, ""), bot.Name)
 }
 
-// recordReply records a reply in its thread's index: a seam for tests.
-var recordReply = threadIndex.Replied
-
 // PostCommentToPostAsBot adds an in-thread reply — a Comment on an existing
 // post — authored by a SPECIFIC bot principal (e.g. an AI agent's own
 // principal). This is the Slack-style "reply in thread" path: an agent that is
@@ -126,10 +123,39 @@ var recordReply = threadIndex.Replied
 // It mirrors postBotMessage's guarantees and shape: it writes the Postgres
 // comment row, the Dgraph comment node under the target post, indexes the
 // comment in OpenSearch, and emits the live MQTT comment event — but NO
-// workspace event, so it can never re-trigger an agent (loop-safe). A hard
-// failure to persist rolls back the orphan row and returns an error so the
-// caller can fall back to a top-level post.
+// workspace event, so it can never re-trigger an agent (loop-safe). And it
+// tells the thread's people of the reply as a person's reply is told
+// (TellReply), so its author's Inbox badge rises at once. A hard failure to
+// persist rolls back the orphan row and returns an error so the caller can
+// fall back to a top-level post.
 func PostCommentToPostAsBot(ctx context.Context, postUUID uuid.UUID, text string, bot *userBusiness.BotIdentity) (*Result, error) {
+	return postCommentAsBot(ctx, postUUID, text, bot, true)
+}
+
+// WriteCommentToPostAsBot is PostCommentToPostAsBot for a caller that tells
+// the thread itself, through TellReply: a guest's reply (business/Guest), told
+// under the guest's name and at most once in a while.
+func WriteCommentToPostAsBot(ctx context.Context, postUUID uuid.UUID, text string, bot *userBusiness.BotIdentity) (*Result, error) {
+	return postCommentAsBot(ctx, postUUID, text, bot, false)
+}
+
+// TellReply tells the thread's people of a reply a bot wrote in it, under name
+// (its own, or whom it wrote for), the way a person's reply is told: through
+// business/Comment NotifyThreadReply, the one notifier, which records it in the
+// thread's index and tells the channel's members in the thread by push, email
+// (by each one's settings) and the live Activity item. A bot's reply mentions
+// nobody: botHTMLPolicy keeps no mention's data-id, and no mention is stored
+// for it. It returns at once; the telling runs on its own goroutine.
+func TellReply(bot *userBusiness.BotIdentity, name string, post *dgraphStruct.DgraphPost, commentUUID, htmlText, plainText string, at time.Time) {
+	if bot == nil || post == nil || post.PostBy == nil || post.Channel == nil {
+		return
+	}
+	reply := commentBusiness.ThreadReply{By: bot.Principal(name), Post: post, CommentUUID: commentUUID,
+		HTML: htmlText, PlainText: plainText, At: at}
+	helpers.GoSafeNamed("commentBusiness.NotifyThreadReply", func() { commentBusiness.NotifyThreadReply(reply) })
+}
+
+func postCommentAsBot(ctx context.Context, postUUID uuid.UUID, text string, bot *userBusiness.BotIdentity, tell bool) (*Result, error) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return nil, fmt.Errorf("text is required")
@@ -219,10 +245,12 @@ func PostCommentToPostAsBot(ctx context.Context, postUUID uuid.UUID, text string
 	}
 	helpers.GoSafeNamed("mqttBusiness.PublishPostComment", func() { mqttBusiness.PublishPostComment(&mqttComment, postInfo.Channel.Uuid) })
 
-	// The thread's index (business/ThreadIndex): an agent's reply makes the
-	// thread unread for those who follow it, as anyone's does.
-	reply, detached := threadIndex.Reply{Thread: threadIndex.OfPost(postInfo), By: bot.UUID, At: now}, context.WithoutCancel(ctx)
-	helpers.GoSafeNamed("threadIndex.recordReply", func() { recordReply(detached, reply) })
+	// The thread's index, push, email and the live Activity items, as for
+	// anyone's reply: an agent's reply makes the thread unread for those who
+	// follow it, and raises its author's badge.
+	if tell {
+		TellReply(bot, bot.Name, postInfo, commentUUID.String(), formatted, helpers.HTMLToPlainText(formatted), now)
+	}
 
 	// 4. OpenSearch index (plain text), scoped to the post's channel so the
 	//    comment is discoverable by the same permission model as a human one.
@@ -264,6 +292,35 @@ func PostCommentToPostAsBot(ctx context.Context, postUUID uuid.UUID, text string
 // error the caller falls back to a fresh comment, so a leftover status comment
 // is at worst cosmetic.
 func EditCommentToPostAsBot(ctx context.Context, postUUID, commentUUID uuid.UUID, text string, bot *userBusiness.BotIdentity) (*Result, error) {
+	return editCommentAsBot(ctx, postUUID, commentUUID, text, bot, false)
+}
+
+// TellEditedCommentToPostAsBot is EditCommentToPostAsBot for a reply first
+// written untold (WriteCommentToPostAsBot): its edit is the word the thread's
+// people are told of, through TellReply, as a person's reply is. A durable
+// agent run's "On it" ack tells nobody; its answer, written over it, does.
+func TellEditedCommentToPostAsBot(ctx context.Context, postUUID, commentUUID uuid.UUID, text string, bot *userBusiness.BotIdentity) (*Result, error) {
+	return editCommentAsBot(ctx, postUUID, commentUUID, text, bot, true)
+}
+
+// InboxOfTold says whether a reply bot tells in postUUID's thread lands in
+// who's Inbox, counted, as a person's reply does: who is the post's author
+// and the thread's rules tell them (business/Comment InThreadInbox). A run
+// whose answer was told there leaves its own "replied" notice to them out:
+// one answer is one step of their badge. False when it can't be worked out,
+// so the notice is kept rather than lost.
+func InboxOfTold(ctx context.Context, postUUID uuid.UUID, bot *userBusiness.BotIdentity, who string) bool {
+	if bot == nil || bot.DgraphUID == "" || who == "" {
+		return false
+	}
+	post, err := postDomain.GetDgraphPostByUUID(ctx, postUUID.String(), bot.DgraphUID)
+	if err != nil || post == nil || post.PostBy == nil || post.Channel == nil {
+		return false
+	}
+	return commentBusiness.InThreadInbox(ctx, commentBusiness.ThreadReply{By: bot.Principal(bot.Name), Post: post}, who)
+}
+
+func editCommentAsBot(ctx context.Context, postUUID, commentUUID uuid.UUID, text string, bot *userBusiness.BotIdentity, tell bool) (*Result, error) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return nil, fmt.Errorf("text is required")
@@ -346,6 +403,11 @@ func EditCommentToPostAsBot(ctx context.Context, postUUID, commentUUID uuid.UUID
 			IsBot:          true,
 		}, postInfo.Channel.Uuid)
 	})
+
+	// 5. Told, when this edit is the reply's word (TellEditedCommentToPostAsBot).
+	if tell {
+		TellReply(bot, bot.Name, postInfo, commentUUID.String(), formatted, helpers.HTMLToPlainText(formatted), now)
+	}
 
 	return &Result{
 		PostUUID:    postUUID.String(),

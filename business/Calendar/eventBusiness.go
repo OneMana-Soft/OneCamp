@@ -147,6 +147,12 @@ type EventInputError struct{ msg string }
 
 func (e *EventInputError) Error() string { return e.msg }
 
+// EventRefusal is a request its asker may not make, said in words: a
+// refusal (403), never a fault to try again.
+type EventRefusal struct{ msg string }
+
+func (e *EventRefusal) Error() string { return e.msg }
+
 // parseEventTime reads an event's start or end as the app sends it (RFC 3339).
 func parseEventTime(value, which string) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339Nano, value)

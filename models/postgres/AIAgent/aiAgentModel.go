@@ -103,6 +103,16 @@ func ValidAutonomy(a string) bool {
 	return a == AutonomyAuto || a == AutonomyApproval || a == AutonomyPlan
 }
 
+// AutonomyOrDefault is a, or Approval when a is no mode at all: an agent
+// nobody chose a mode for asks first (ADMIN-16; the column's default since
+// migration 589). Pure.
+func AutonomyOrDefault(a string) string {
+	if ValidAutonomy(a) {
+		return a
+	}
+	return AutonomyApproval
+}
+
 // AiAgent mirrors a row of the ai_agents table. JSON columns are kept raw and
 // EnabledToolList is the agent's declared toolset, parsed from the raw JSON column.
 //
@@ -397,9 +407,7 @@ func CreateAgent(ctx context.Context, a *AiAgent) (uuid.UUID, error) {
 	if strings.TrimSpace(a.Scope) == "" {
 		a.Scope = "{}"
 	}
-	if !ValidAutonomy(a.Autonomy) {
-		a.Autonomy = AutonomyAuto
-	}
+	a.Autonomy = AutonomyOrDefault(a.Autonomy)
 	if strings.TrimSpace(a.Knowledge) == "" {
 		a.Knowledge = "[]"
 	}
@@ -442,9 +450,7 @@ func UpdateAgent(ctx context.Context, a *AiAgent) error {
 	if strings.TrimSpace(a.Scope) == "" {
 		a.Scope = "{}"
 	}
-	if !ValidAutonomy(a.Autonomy) {
-		a.Autonomy = AutonomyAuto
-	}
+	a.Autonomy = AutonomyOrDefault(a.Autonomy)
 	if strings.TrimSpace(a.Knowledge) == "" {
 		a.Knowledge = "[]"
 	}

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"time"
 
+	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	recordingDgraph "github.com/akashc777/OneCamp/models/dgraph/Recording"
@@ -142,7 +143,7 @@ func buildCallTranscriptQuery(limit int) string {
 			}`, limit)
 
 	const live = `not gt(recording_deleted_at, "1970-01-01T00:00:00Z")`
-	const during = live + ` AND NOT eq(recording_transcript_only, true) AND ge(recording_stared_at, $from) AND le(recording_stared_at, $to)`
+	during := live + " AND " + recordingDomain.RecordedDuring("$from", "$to")
 
 	return fmt.Sprintf(`query CallTranscript($key: string, $room: string, $from: string, $to: string){
 		session(func: eq(recording_egress_id, $key)) @filter(%s) {

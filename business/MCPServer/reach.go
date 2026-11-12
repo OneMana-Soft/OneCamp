@@ -52,6 +52,7 @@ import (
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	tableAccess "github.com/akashc777/OneCamp/business/TableAccess"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -131,7 +132,7 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 	}
 
 	// The principal's graph node is needed by every membership query.
-	dgraphUser, err := userDomain.GetDgraphUserInfoByUUID(ctx, principal)
+	dgraphUser, err := principalNode(ctx, principal)
 	if err != nil {
 		return ReachDecision{Reason: "the originating person could not be resolved"}
 	}
@@ -211,9 +212,15 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 		return ReachDecision{Allow: true, Reason: "channel member", PrincipalDgraphUID: uid}
 
 	case ResourceTask:
+		// A task is named by its id or by its key (Q4-12), as REST names it
+		// (business/TaskKeys Ref); a key that names no task is no task.
+		taskID, kerr := taskKeys.Ref(ctx, strings.TrimSpace(ref.ID))
+		if kerr != nil || taskID == uuid.Nil {
+			return ReachDecision{Reason: "task or its project could not be read"}
+		}
 		// Project membership is what grants sight of a task, exactly as the work
 		// feed and the delegation guard decide it.
-		info, terr := taskBusiness.GetDgraphTaskInfo(ctx, strings.TrimSpace(ref.ID), uid)
+		info, terr := taskBusiness.GetDgraphTaskInfo(ctx, taskID.String(), uid)
 		if terr != nil || info == nil || info.Project == nil {
 			return ReachDecision{Reason: "task or its project could not be read"}
 		}
@@ -508,6 +515,34 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 		// (docReach): only someone the doc was there for is told it was deleted.
 		return docReach(d, uid, ref.Access.IsRead())
 
+	case ResourceEvent:
+		// Whether the calendar shows the event to the originating person
+		// (business/Calendar access.go, through the Access Resolver), as a
+		// member: no admin power is lent to it, through a token or not. Hidden
+		// and missing are the same refusal.
+		//
+		// A write is asked the same question. What it may change is the
+		// calendar's own rule, which the op asks as the person when it runs:
+		// mayEdit for a change (a guest the organiser lets change the event
+		// changes it, as over PATCH /v1), and the organiser alone for cancel
+		// and restore. One write rule, so MCP and /v1 can't answer
+		// differently; a second copy here refused that guest over MCP.
+		//
+		// The decision carries the event's deletion: one in the trash is
+		// level none to everyone, so no read reaches it, and a write reaches it
+		// only for someone it was shown to (Was), for restore_event. The
+		// calendar's own load refuses a trashed event to every other write,
+		// and its Restore to anyone but the organiser.
+		d, derr := accessBusiness.Rules.Resolve(ctx, accessBusiness.Subject{UserUID: uid, UserUUID: principal},
+			accessBusiness.Resource{Kind: string(ResourceEvent), UUID: strings.TrimSpace(ref.ID)})
+		if derr != nil {
+			return ReachDecision{Reason: "the event could not be read"}
+		}
+		if d.Level >= accessBusiness.LevelView || !ref.Access.IsRead() && d.Deleted && d.Was >= accessBusiness.LevelView {
+			return ReachDecision{Allow: true, Reason: "the calendar shows the originating person this event", PrincipalDgraphUID: uid}
+		}
+		return ReachDecision{Reason: "this event isn't there, or the originating person can't see it"}
+
 	case ResourceWorkItem:
 		// The work graph's rule for a kind with none of its own here: what
 		// business/EntityLink ReadMany says the person may see, as a member (no
@@ -534,6 +569,10 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 		return ReachDecision{Reason: "unsupported resource kind"}
 	}
 }
+
+// principalNode is how the originating person's graph node is read (a seam
+// for tests).
+var principalNode = userDomain.GetDgraphUserInfoByUUID
 
 // readWorkItems is how a work-graph item is read as a person (a seam for
 // tests): the work graph's own reader.

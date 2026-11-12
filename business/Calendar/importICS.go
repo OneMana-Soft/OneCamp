@@ -489,19 +489,9 @@ func (s *service) importGroup(ctx context.Context, me, calendar uuid.UUID, zone,
 			if why != "" || row.AllDay() != series.AllDay() {
 				continue
 			}
-			inst := madeInstance(series, rid)
-			row.Kind, row.Visibility, row.Hue = series.Kind, series.Visibility, series.Hue
-			row.GuestsCanModify, row.GuestsCanInvite, row.GuestsCanSeeGuests = series.GuestsCanModify, series.GuestsCanInvite, series.GuestsCanSeeGuests
-			s.newOverride(row, inst, now)
-			row.Source, row.Sequence, row.UpdatedAt = series.Source, 0, now
-			if subscribed {
-				row.Transparency = transparencyTransparent
+			if s.overrideFromRemote(row, series, rid, now) {
+				b.inserts = append(b.inserts, row)
 			}
-			row.Changed = changesOf(inst.Event, row)
-			if len(row.Changed) == 0 {
-				continue
-			}
-			b.inserts = append(b.inserts, row)
 		}
 	}
 	if err := s.store.apply(ctx, b); err != nil {
@@ -525,6 +515,7 @@ func importedRow(ev ics.Event, zone string) (*models.Event, string) {
 	if ev.Transparent {
 		e.Transparency = transparencyTransparent
 	}
+	e.Visibility = visibilityOfClass(ev.Class)
 	var start, end When
 	if ev.StartDate != "" {
 		start, end = When{Date: ev.StartDate}, When{Date: ev.EndDate}
@@ -638,4 +629,57 @@ func (s *service) importAlarms(ctx context.Context, me uuid.UUID, e *models.Even
 	if err := s.planReminders(ctx, e.ID, []uuid.UUID{me}); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Calendar: an imported event's reminders couldn't be planned: %v", err)
 	}
+}
+
+// visibilityOfClass is who may see an event, as its CLASS says (RFC 5545):
+// private or confidential is private here, so who may only see its
+// calendar sees it as busy (hiddenFrom). Pure.
+func visibilityOfClass(class string) string {
+	switch class {
+	case "PRIVATE", "CONFIDENTIAL":
+		return visibilityPrivate
+	case "PUBLIC":
+		return visibilityPublic
+	}
+	return visibilityDefault
+}
+
+// classOf is an event's visibility as CLASS, "" for the default. Pure.
+func classOf(visibility string) string {
+	switch visibility {
+	case visibilityPrivate:
+		return "PRIVATE"
+	case visibilityPublic:
+		return "PUBLIC"
+	}
+	return ""
+}
+
+// overrideFromRemote makes row, a provider's or a file's version of one
+// instance of series with no override here yet (importedRow), that
+// instance's first override, and says whether it is one: an instance no
+// different from what its series makes isn't. What an instance doesn't say
+// on its own is its series': what it is, its colour and what guests may do.
+// Who may see it is the series' too, and private when the instance's own
+// CLASS is: private wins, as for a whole event (applyPulled), so an
+// instance private at its provider while its series isn't is never shown
+// here to who may only see its calendar. The one way a remote instance
+// becomes an override, for every provider: a file's or a new series'
+// (importGroup), and a sync's or an address's of a series already here
+// (takeRemoteInstance).
+func (s *service) overrideFromRemote(row, series *models.Event, rid, now time.Time) bool {
+	own := row.Visibility
+	inst := madeInstance(series, rid)
+	row.Kind, row.Visibility, row.Hue = series.Kind, series.Visibility, series.Hue
+	if own == visibilityPrivate {
+		row.Visibility = visibilityPrivate
+	}
+	row.GuestsCanModify, row.GuestsCanInvite, row.GuestsCanSeeGuests = series.GuestsCanModify, series.GuestsCanInvite, series.GuestsCanSeeGuests
+	s.newOverride(row, inst, now)
+	row.Source, row.Sequence, row.UpdatedAt = sourceICS, 0, now
+	if series.Source == sourceSubscribed {
+		row.Source, row.Transparency = sourceSubscribed, transparencyTransparent // never busy (calendar B8)
+	}
+	row.Changed = changesOf(inst.Event, row)
+	return len(row.Changed) > 0
 }

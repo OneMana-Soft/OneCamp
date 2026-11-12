@@ -21,7 +21,7 @@ func baseOrch(runner CodingRunner) (*Orchestrator, *[]Outcome) {
 			return Credential{Token: "tok", Kind: CredentialUserConnector}, nil
 		},
 		Judge: func(_ context.Context, _, _ string) (Verdict, error) { return Verdict{InScope: true}, nil },
-		OpenPR: func(_ context.Context, _ RepoRef, _, _, _, _ string, _ bool) (string, error) {
+		OpenPR: func(_ context.Context, _ Credential, _ RepoRef, _, _, _, _ string, _ bool) (string, error) {
 			return "https://github.com/o/r/pull/1", nil
 		},
 		Record: func(_ context.Context, _ Task, out Outcome, _ int) { recorded = append(recorded, out) },
@@ -205,7 +205,7 @@ func TestRun_RunnerErrorIsHonest(t *testing.T) {
 
 func TestRun_PRAlreadyExists(t *testing.T) {
 	o, _ := baseOrch(&mockCodingRunner{Result: okResult()})
-	o.OpenPR = func(_ context.Context, _ RepoRef, _, _, _, _ string, _ bool) (string, error) {
+	o.OpenPR = func(_ context.Context, _ Credential, _ RepoRef, _, _, _, _ string, _ bool) (string, error) {
 		return "", ErrPullRequestExists
 	}
 	out := o.Run(context.Background(), task())

@@ -569,6 +569,18 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 			postAgentReply(ctx, agent, resolveAgentBot(ctx, agent), surface.ChannelID, surface.PostID, text)
 		}
 	}
+	// postAckNow writes the run's "On it" ack: told to nobody where the
+	// poster tells the thread only of the run's word (statusAcker), and as
+	// any status elsewhere.
+	postAckNow := func(text string) {
+		if a, ok := status.(statusAcker); ok {
+			if !leaseHold.Lost() {
+				a.Ack(ctx, text)
+			}
+			return
+		}
+		postStatusNow(text)
+	}
 
 	// notifyTrigger pings the person who asked (the @mention author) when the
 	// run reaches a moment they should know about — blocked awaiting their
@@ -579,7 +591,9 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 	if t.TriggeredBy != nil {
 		triggeredBy = t.TriggeredBy.String()
 	}
-	notifyTrigger := func(text string) {
+	// Each moment is an Inbox notice of its kind: blocked on them, or any
+	// other word from the run (its answer, a stop, a pause).
+	notifyTriggerAs := func(kind, text string) {
 		if leaseHold.Lost() {
 			return
 		}
@@ -587,8 +601,9 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 			notifyTaskDelegator(agent, t.SourceId, triggeredBy, text)
 			return
 		}
-		notifyTriggerer(ctx, agent, surface, triggeredBy, text)
+		notifyRunMoment(ctx, agent, surface, status, triggeredBy, kind, text)
 	}
+	notifyTrigger := func(text string) { notifyTriggerAs(NoticeAgentReplied, text) }
 
 	// Slow ack. A durable run announces itself ("On it…") so nobody is left
 	// wondering whether the agent heard them — but announcing INSTANTLY means a
@@ -623,7 +638,8 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 		// posted immediately rather than on the slow-ack delay: the thread should
 		// know a PR is coming before minutes of silence.
 		if !codePRAlreadyAcked(t) {
-			postStatus("On it — I'll open a pull request here when it's ready.")
+			ack.Cancel()
+			postAckNow("On it — I'll open a pull request here when it's ready.")
 			commitAgentTaskState(ctx, t.Id, "checkpoint code_pr ack", func(c context.Context) error {
 				return model.SaveAgentTaskMessages(c, t.Id, lease, codePRAckMarker)
 			})
@@ -651,7 +667,7 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 	// of the answer.
 	if !alreadyRan(t) && status != nil {
 		ack = startSlowAck(agentAckDelay(), func() {
-			postStatusNow("On it — I'll work on this and post back here when I'm done.")
+			postAckNow("On it — I'll work on this and post back here when I'm done.")
 			// Work that takes long enough to say "On it" has started, so the
 			// task says so on the board too. A fast answer or question fires
 			// no ack, and leaves the task where it was.
@@ -828,7 +844,7 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 			}
 			postStatus("I'm blocked and need your input to continue:\n\n" + asked + replyHint)
 			// Ping the person who asked so a blocked run doesn't wait unseen.
-			notifyTrigger("I'm blocked and need your input to continue: " + asked)
+			notifyTriggerAs(NoticeAgentBlocked, "I'm blocked and need your input to continue: "+asked)
 			// Long park; a human reply on the task re-queues it immediately, so
 			// this is just a safety floor, not the resume mechanism.
 			//

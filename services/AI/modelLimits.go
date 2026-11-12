@@ -52,6 +52,11 @@ type ModelLimits struct {
 	// reserve far too much of it.
 	MaxOutput int
 
+	// Reasoning is the admin's thinking switch (AIConfig.ReasoningEnabled) the client for this model runs
+	// with. With the model's family it decides whether a call thinks (callThinks), and so the room the call
+	// sends on top of its ask, which ResponseReserve holds back from the window too.
+	Reasoning bool
+
 	// Source records where ContextWindow came from ("model", "workspace", "default"),
 	// for admin-facing diagnostics. Cheap to carry and the first thing worth knowing
 	// when a budget looks wrong.
@@ -83,6 +88,7 @@ func limitsForEndpoint(ep Endpoint, cfg *AIConfig) ModelLimits {
 		Provider:      string(ep.Kind),
 		Model:         ep.Model,
 		ContextWindow: window,
+		Reasoning:     cfg != nil && cfg.ReasoningEnabled,
 		Source:        source,
 	}
 }
@@ -98,6 +104,7 @@ func workspaceLimits() ModelLimits {
 	if cfg := GetConfig(); cfg != nil {
 		lim.Provider = string(cfg.Provider())
 		lim.Model = cfg.ActiveModel()
+		lim.Reasoning = cfg.ReasoningEnabled
 		if cfg.ContextWindowTokens <= 0 && cfg.OllamaNumCtx <= 0 {
 			lim.Source = limitSourceDefault
 		}
@@ -124,6 +131,9 @@ func LimitsForModel(provider, model string, rowWindow, rowOutput int) ModelLimit
 		Provider:  strings.TrimSpace(provider),
 		Model:     strings.TrimSpace(model),
 		MaxOutput: rowOutput,
+	}
+	if cfg := GetConfig(); cfg != nil {
+		lim.Reasoning = cfg.ReasoningEnabled // every chat client is built with it (buildLLM)
 	}
 	if rowWindow > 0 {
 		lim.ContextWindow, lim.Source = rowWindow, limitSourceModel
@@ -170,7 +180,21 @@ func (l ModelLimits) EstimateTokens(s string) int {
 // --- budgets ------------------------------------------------------------------
 
 // ResponseReserve is the tokens to hold back for the model's output, given what the
-// caller asked for.
+// caller asked for: what the call sends, which is the ask plus the room a call that
+// thinks gets (withThinkingRoom), capped by a smaller stated ceiling as the provider caps
+// it. A host that checks prompt + max_completion_tokens against the window (OpenAI, vLLM,
+// Groq) refuses a prompt fitted around less than that, so the fitter (PromptParts.Fit),
+// the conversation and document budgets and the rescue after a refusal all hold back
+// this, not the bare ask. No ask holds back the default share and sends no cap, so it
+// gets no room.
+func (l ModelLimits) ResponseReserve(want int) int {
+	thinks := callThinks(ProviderType(l.Provider), l.Model, l.Reasoning, modelSupportsThinking(l.Model))
+	return l.AnswerTokens(withThinkingRoom(want, thinks))
+}
+
+// AnswerTokens is the output a caller asks this model for: want (responseTokenReserve
+// when it names none), capped by a smaller stated ceiling. It is an ask; what the ask
+// holds back from the window is ResponseReserve.
 //
 // A stated ceiling wins only when it is SMALLER. Asking a model for more than it will
 // produce does not get more output; it reserves window that could have held context. A
@@ -178,7 +202,7 @@ func (l ModelLimits) EstimateTokens(s string) int {
 // knows what it needs, and the provider clients already handle the per-request field
 // correctly and differently from each other (OpenAI sends max_completion_tokens so
 // reasoning models accept it; Anthropic's API requires it and has a documented default).
-func (l ModelLimits) ResponseReserve(want int) int {
+func (l ModelLimits) AnswerTokens(want int) int {
 	if want <= 0 {
 		want = responseTokenReserve
 	}

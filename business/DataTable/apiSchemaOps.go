@@ -278,6 +278,9 @@ type fieldsRead struct {
 	fields []*model.Field
 	linked *linkedTables
 	held   map[uuid.UUID]bool
+	// trashed: which of its deletes are in the trash, read only when a send
+	// of the batch came before (a delete it made whose record missed it).
+	trashed map[uuid.UUID]bool
 }
 
 func serveFieldsBatch(ctx context.Context, call v1api.Call) (any, error) {
@@ -295,6 +298,9 @@ func serveFieldsBatch(ctx context.Context, call v1api.Call) (any, error) {
 		}
 		if r.held, err = model.HeldFields(ctx, table, keys.createIDs(len(creates))); err != nil {
 			return nil, storeFailed("failed to read the table")
+		}
+		if r.trashed, err = trashedOnResend(ctx, keys, table, deletes, model.FieldsInTrash); err != nil {
+			return nil, err
 		}
 		var steps []batchStep
 		for i, c := range creates {
@@ -367,6 +373,8 @@ type viewsRead struct {
 	t     *model.DataTable
 	views map[uuid.UUID]*model.View
 	held  map[uuid.UUID]bool
+	// trashed is fieldsRead's, for views.
+	trashed map[uuid.UUID]bool
 }
 
 func serveViewsBatch(ctx context.Context, call v1api.Call) (any, error) {
@@ -393,6 +401,9 @@ func serveViewsBatch(ctx context.Context, call v1api.Call) (any, error) {
 		}
 		if r.held, err = model.HeldViews(ctx, table, keys.createIDs(len(creates))); err != nil {
 			return nil, storeFailed("failed to read the table")
+		}
+		if r.trashed, err = trashedOnResend(ctx, keys, table, deletes, model.ViewsInTrash); err != nil {
+			return nil, err
 		}
 		var steps []batchStep
 		for i, c := range creates {
@@ -447,6 +458,34 @@ func fieldOf(fields []*model.Field, id uuid.UUID) *model.Field {
 func madeBefore(held map[uuid.UUID]bool, id uuid.UUID) func(context.Context) (bool, error) {
 	made := held[id]
 	return func(context.Context) (bool, error) { return made, nil }
+}
+
+// trashedOnResend is which of a batch's deletes are in the trash (inTrash),
+// read only when a send of the batch came before: a delete such a send
+// applied but whose record missed it (the record's write failed after the
+// item's commit) is done, and answered so (deletedBefore), never refused as
+// not found. A first send reads none: what it finds in the trash is refused
+// as before.
+func trashedOnResend(ctx context.Context, keys batchKeys, table uuid.UUID, deletes []uuid.UUID,
+	inTrash func(context.Context, uuid.UUID, []uuid.UUID) (map[uuid.UUID]bool, error)) (map[uuid.UUID]bool, error) {
+	if !keys.again || len(deletes) == 0 {
+		return nil, nil
+	}
+	trashed, err := inTrash(ctx, table, deletes)
+	if err != nil {
+		return nil, storeFailed("failed to read the table")
+	}
+	return trashed, nil
+}
+
+// deletedBefore marks s, a delete, done before when trashed holds its
+// target: answered as deleted, by a send before.
+func deletedBefore(s batchStep, trashed map[uuid.UUID]bool, id uuid.UUID) batchStep {
+	if trashed[id] {
+		s.made = madeBefore(trashed, id)
+		s.madeAnswer = apiDeleted{ID: id, Deleted: true, DeletedBefore: true}
+	}
+	return s
 }
 
 // fieldWrite is a field item's write, run at its turn by applyItem, in the
@@ -583,7 +622,7 @@ func fieldUpdate(actor Actor, table uuid.UUID, r *fieldsRead, item map[string]an
 // checks it against the batch's read r, applied through DeleteField.
 func fieldDelete(actor Actor, table uuid.UUID, r *fieldsRead, id uuid.UUID, i int) batchStep {
 	w := fieldWrite{actor: actor, table: table, id: id}
-	return batchStep{
+	s := batchStep{
 		item: batchItem{List: "delete", Index: i, ID: id.String()}, action: "table.field.deleted",
 		check: func(context.Context) error {
 			f := fieldOf(r.fields, id)
@@ -597,6 +636,10 @@ func fieldDelete(actor Actor, table uuid.UUID, r *fieldsRead, id uuid.UUID, i in
 		},
 		apply: w.applyFieldDelete,
 	}
+	if r != nil {
+		s = deletedBefore(s, r.trashed, id)
+	}
+	return s
 }
 
 // viewWrite is a view item's write, run at its turn by applyItem, in the
@@ -765,7 +808,7 @@ func viewUpdate(actor Actor, table uuid.UUID, r *viewsRead, item map[string]any,
 // it against the batch's read r, applied through DeleteView.
 func viewDelete(actor Actor, table uuid.UUID, r *viewsRead, id uuid.UUID, i int) batchStep {
 	w := viewWrite{actor: actor, table: table, id: id}
-	return batchStep{
+	s := batchStep{
 		item: batchItem{List: "delete", Index: i, ID: id.String()}, action: "table.view.deleted",
 		check: func(context.Context) error {
 			v, err := changeable(r.t, r.views[id], actor)
@@ -776,6 +819,10 @@ func viewDelete(actor Actor, table uuid.UUID, r *viewsRead, id uuid.UUID, i int)
 		},
 		apply: w.applyViewDelete,
 	}
+	if r != nil {
+		s = deletedBefore(s, r.trashed, id)
+	}
+	return s
 }
 
 // fieldFacts are an audit row's facts of a field as stored.

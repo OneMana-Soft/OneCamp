@@ -333,8 +333,34 @@ func TestA8KTaskKeysAndTypes(t *testing.T) {
 		})
 		code, body := call("ben", projectController.Report, nil, "", nil)
 		expect("the report", code, body, http.StatusOK, `"by":"type","key":"`+workTaxonomy.TypeBug.String()+`","name":"Bug","cycle"`)
-		if strings.Contains(body, `"by":"type","key":"","name":""`) {
-			t.Errorf("the report reads WEB-1 as a plain task: %s", body)
+		// WEB-1 is the one dated task, so its age lands in the Bug slice and
+		// in no other type's. The seed's other open task (no type, no
+		// creation date) has counted as open in the "" slice since L32, with
+		// no age, so a "" slice alone is no sign of WEB-1.
+		var rep struct {
+			Data struct {
+				Insights struct {
+					Slices []struct {
+						By  string `json:"by"`
+						Key string `json:"key"`
+						Age struct {
+							N int `json:"n"`
+						} `json:"age"`
+					} `json:"slices"`
+				} `json:"insights"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(body), &rep); err != nil {
+			t.Fatalf("the report: %v", err)
+		}
+		aged := map[string]int{}
+		for _, s := range rep.Data.Insights.Slices {
+			if s.By == "type" && s.Age.N > 0 {
+				aged[s.Key] = s.Age.N
+			}
+		}
+		if len(aged) != 1 || aged[workTaxonomy.TypeBug.String()] != 1 {
+			t.Errorf("WEB-1's age sits in the type slices %v, want the Bug slice alone: %s", aged, body)
 		}
 	})
 }

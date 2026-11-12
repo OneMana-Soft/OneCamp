@@ -3,17 +3,18 @@ package business
 // Proactive notification to the person who triggered a durable agent run
 // (async-mentions: "tag the human when it's blocked or done"). When a background
 // run pauses awaiting a human decision — or finishes — the person who @mentioned
-// the agent gets an in-app activity ping (the same MQTT activity + push channel a
-// human @mention uses), so they aren't left refreshing a thread. This complements
-// the evolving in-thread status comment: the comment is the record, this is the
-// nudge to the right individual.
+// the agent gets an Inbox notice, so they aren't left refreshing a thread. This
+// complements the evolving in-thread status comment: the comment is the record,
+// this is the nudge to the right individual.
 //
-// It reuses the SAME low-level primitive as the human mention path
-// (activityBusiness.PublishActivityToUser), so priority scoring, MQTT fan-out,
-// and the activity feed all behave identically — no parallel notification path.
-// Surface-agnostic: it builds the right activity item from the run's Surface, so
-// a new surface is a new case here, not a new pipeline. Best-effort and
-// fire-and-forget: a delivery miss never blocks the run's state machine.
+// The notice goes through the one way an Inbox notice is told
+// (notificationBusiness.Tell): stored, so the Inbox lists it and its badge
+// counts it, and published live as the same item. It was a live activity item
+// alone, which no list held: the badge counted it until a reload and the Inbox
+// never showed it (C2). Surface-agnostic: it names the place from the run's
+// Surface, so a new surface is a new case here, not a new pipeline.
+// Best-effort and fire-and-forget: a delivery miss never blocks the run's
+// state machine.
 
 import (
 	"context"
@@ -21,43 +22,44 @@ import (
 	"strings"
 	"time"
 
-	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
+	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	chatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
+	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
-	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 )
 
-// notifyTriggerer sends an in-app activity ping to the person who triggered a
-// durable run, for a block/finish moment. triggeredBy is their app user uuid
-// (empty → no-op, e.g. a scheduled job with no human trigger). text is the
-// short, human message (the block reason or the final summary). Best-effort.
+// notifyTriggerer tells the person who triggered a durable run of one of its
+// moments, by an Inbox notice of kind (NoticeAgentBlocked, NoticeAgentReplied).
+// triggeredBy is their app user uuid (empty → no-op, e.g. a scheduled job with
+// no human trigger). text is the short, human message (the block reason or
+// the final summary). Best-effort.
 //
 // The agent's own badged principal is the "from" so the ping reads as coming
 // from the teammate. If the triggerer IS the agent's principal (shouldn't
 // happen — an agent can't @mention itself into a durable run), it is skipped.
 // Only someone who can still see where they asked (reach.seesWhereAsked) is
 // pinged: the moment carries the agent's words from there.
-func notifyTriggerer(ctx context.Context, agent *model.AiAgent, surface Surface, triggeredBy, text string) {
+func notifyTriggerer(ctx context.Context, agent *model.AiAgent, surface Surface, triggeredBy, kind, text string) {
 	triggeredBy = strings.TrimSpace(triggeredBy)
 	text = strings.TrimSpace(text)
 	if agent == nil || triggeredBy == "" || text == "" {
 		return
 	}
-	bot := resolveAgentBot(ctx, agent)
+	bot := agentBotOf(ctx, agent)
 	if bot == nil {
 		return
 	}
 	if triggeredBy == bot.UUID || triggeredBy == bot.DgraphUID {
 		return // never notify the agent about itself
 	}
-	item := buildTriggererActivity(agent, bot, surface, text)
-	if item == nil {
+	n := triggererNotice(agent, bot, surface, kind, text)
+	if n == nil {
 		return
 	}
 	sees, err := reach.seesWhereAsked(ctx, triggeredBy, surface)
@@ -68,66 +70,95 @@ func notifyTriggerer(ctx context.Context, agent *model.AiAgent, surface Surface,
 	if !sees {
 		return
 	}
-	activityBusiness.PublishActivityToUser(triggeredBy, item)
+	if n.ResourceKind == noticeChannel {
+		if names, err := channelNames(ctx, []string{n.ResourceUUID}); err == nil {
+			n.ResourceTitle = names[n.ResourceUUID]
+		}
+	}
+	// In the Inbox alone, as the ping always was: no push, no email.
+	tellTriggerer(ctx, *n, []notificationBusiness.NoticeRecipient{{UserUUID: triggeredBy, Reason: "subject", InboxOnly: true}})
 }
 
-// buildTriggererActivity constructs the MENTION activity item for a surface,
-// mirroring the shapes the human mention path publishes (post-comment mention
-// for channel posts; chat mention for group/DM), so the FE renders + deep-links
-// it with the existing handler. Returns nil for a surface with no notifiable
-// target (e.g. the legacy task surface, which has its own task-comment path).
-func buildTriggererActivity(agent *model.AiAgent, bot *userBusiness.BotIdentity, surface Surface, text string) *dgraphModels.UnifiedActivityItem {
-	now := time.Now()
-	from := &dgraphStruct.DgraphUser{Uuid: bot.UUID, UserName: agent.Name}
+// notifyRunMoment tells a run's triggerer of one of its moments, which the
+// run has just shown through status. One answer is one step of their Inbox
+// badge: when status told the thread of the answer and that put it in the
+// triggerer's Inbox (they wrote the post), the run's "replied" notice to them
+// adds nothing and is left out. A blocked moment keeps its notice: it asks
+// them for something.
+func notifyRunMoment(ctx context.Context, agent *model.AiAgent, surface Surface, status StatusPoster, triggeredBy, kind, text string) {
+	if kind == NoticeAgentReplied {
+		if t, ok := status.(wordTeller); ok && t.lastWordInInbox(ctx, triggeredBy) {
+			return
+		}
+	}
+	notifyTriggerer(ctx, agent, surface, triggeredBy, kind, text)
+}
 
+// The Inbox notice kinds of a run's moments: blocked on its triggerer's
+// input, or any other word from it (its answer, a stop, a pause).
+const (
+	NoticeAgentReplied = "agent.replied"
+	NoticeAgentBlocked = "agent.blocked"
+)
+
+// Seams for tests: writing a moment as its triggerer's Inbox notice, and the
+// agent's own principal.
+var (
+	tellTriggerer = notificationBusiness.Tell
+	agentBotOf    = resolveAgentBot
+)
+
+// The notices' resource kinds: the place a run was asked in. Each kind's own
+// package registers how the Inbox titles and opens it (both editions).
+const (
+	noticeChannel      = channelBusiness.NoticeKind
+	noticeConversation = chatNotificationBusiness.NoticeKind
+)
+
+// noticeWordsMax is how much of the agent's words a notice keeps: a line, as
+// a push says it.
+const noticeWordsMax = 280
+
+// triggererNotice is a run's moment as its triggerer's Inbox notice: from the
+// agent, about the channel or the conversation they asked in (the post or the
+// message it answers in its data), with the agent's words on one line, which
+// the Inbox shows only while they can still open that place (NoticeWords).
+// Each moment is a notice of its own. Nil for a surface with no place: the
+// task surface has its own path (notifyTaskDelegator). Pure but for the time
+// in its key.
+func triggererNotice(agent *model.AiAgent, bot *userBusiness.BotIdentity, surface Surface, kind, text string) *notificationBusiness.Notice {
+	words := strings.Join(strings.Fields(text), " ")
+	if r := []rune(words); len(r) > noticeWordsMax {
+		words = strings.TrimSpace(string(r[:noticeWordsMax-1])) + "…"
+	}
+	n := &notificationBusiness.Notice{
+		Kind:  kind,
+		Agent: &dgraphStruct.DgraphUser{Uuid: bot.UUID, UserName: agent.Name},
+		Data:  map[string]string{notificationBusiness.NoticeWords: words},
+	}
+	var at string
 	switch surface.Kind {
 	case SurfaceChannelPost:
-		if surface.PostID == "" {
+		if surface.ChannelID == "" || surface.PostID == "" {
 			return nil
 		}
-		return &dgraphModels.UnifiedActivityItem{
-			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
-			Time:         now.UTC().Format(time.RFC3339Nano),
-			Mention: &dgraphStruct.DgraphMentions{
-				PostUuid: surface.PostID,
-				Post: &dgraphStruct.DgraphPost{
-					Uuid:    surface.PostID,
-					Channel: &dgraphStruct.DgraphChannel{Uuid: surface.ChannelID},
-				},
-				Comment: &dgraphStruct.DgraphComment{
-					Text:      text,
-					CommentBy: from,
-					Post: &dgraphStruct.DgraphPost{
-						Uuid:    surface.PostID,
-						Channel: &dgraphStruct.DgraphChannel{Uuid: surface.ChannelID},
-					},
-					CreatedAt: &now,
-				},
-				CreatedAt: &now,
-			},
-		}
+		n.ResourceKind, n.ResourceUUID, at = noticeChannel, surface.ChannelID, surface.PostID
+		n.Data["post_id"] = surface.PostID
 	case SurfaceGroupChat, SurfaceDM:
-		if surface.MessageID == "" {
+		if surface.GroupID == "" || surface.MessageID == "" {
 			return nil
 		}
-		return &dgraphModels.UnifiedActivityItem{
-			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
-			Time:         now.UTC().Format(time.RFC3339Nano),
-			Mention: &dgraphStruct.DgraphMentions{
-				ChatUuid: surface.MessageID,
-				Chat: &dgraphStruct.DgraphChat{
-					Uuid: surface.MessageID,
-					Body: text,
-					From: from,
-					DM:   &dgraphStruct.DgraphDm{GroupingId: surface.GroupID},
-				},
-				CreatedAt: &now,
-			},
-		}
+		n.ResourceKind, n.ResourceUUID, at = noticeConversation, surface.GroupID, surface.MessageID
+		n.Data["message_id"] = surface.MessageID
 	default:
-		return nil // SurfaceTask uses the task-comment notification path
+		return nil
 	}
+	n.DedupKey = fmt.Sprintf("%s|%s|%s|%d", kind, bot.UUID, at, time.Now().UnixNano())
+	return n
 }
+
+// channelNames names channels for a notice: a seam for tests.
+var channelNames = channelDomain.GetChannelNamesByUUIDs
 
 // ---------------------------------------------------------------------------
 // A delegated task: telling the person who handed it over.

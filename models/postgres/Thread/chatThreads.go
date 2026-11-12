@@ -202,23 +202,30 @@ func MineOf(ctx context.Context, user uuid.UUID, kinds []string, limit, offset i
 		FROM thread_participants p JOIN threads t ON t.id = p.thread_id
 		WHERE p.user_uuid = $1 AND t.resource_kind = ANY($2) AND t.last_reply_at IS NOT NULL AND `+following+`
 		ORDER BY unread DESC, t.last_reply_at DESC, t.id
-		LIMIT $3 OFFSET $4`, func(r pgexec.Row) (m Mine, err error) {
-		var reply, read sql.NullTime
-		if err = r.Scan(&m.ThreadID, &m.Kind, &m.Conversation, &reply, &read, &m.Follow, &m.Role, &m.Unread); err != nil {
-			return m, err
-		}
-		m.LastReplyAt, m.LastReadAt = timeOrNil(reply), timeOrNil(read)
-		return m, nil
-	}, user, pq.Array(kinds), limit, offset)
+		LIMIT $3 OFFSET $4`, scanMine, user, pq.Array(kinds), limit, offset)
 }
 
-// UnreadCount is how many threads user follows of kinds had a reply since
-// they last read them.
-func UnreadCount(ctx context.Context, user uuid.UUID, kinds []string) (int, error) {
-	return pgexec.Scalar[int](ctx, `
-		SELECT count(*) FROM thread_participants p JOIN threads t ON t.id = p.thread_id
-		WHERE p.user_uuid = $1 AND t.resource_kind = ANY($2) AND `+following+` AND `+unreadFor,
-		user, pq.Array(kinds))
+// scanMine reads one of user's threads as MineOf and UnreadOf select it.
+func scanMine(r pgexec.Row) (m Mine, err error) {
+	var reply, read sql.NullTime
+	if err = r.Scan(&m.ThreadID, &m.Kind, &m.Conversation, &reply, &read, &m.Follow, &m.Role, &m.Unread); err != nil {
+		return m, err
+	}
+	m.LastReplyAt, m.LastReadAt = timeOrNil(reply), timeOrNil(read)
+	return m, nil
+}
+
+// UnreadOf is the threads user follows of kinds that had a reply since they
+// last read them, newest reply first, at most limit of them: what the Threads
+// count counts, once its list's rule has kept those it shows
+// (business/ChatThread shown).
+func UnreadOf(ctx context.Context, user uuid.UUID, kinds []string, limit int) ([]Mine, error) {
+	return pgexec.Query(ctx, `
+		SELECT t.id, t.resource_kind, t.resource_uuid, t.last_reply_at, p.last_read_at, p.follow, p.role, true
+		FROM thread_participants p JOIN threads t ON t.id = p.thread_id
+		WHERE p.user_uuid = $1 AND t.resource_kind = ANY($2) AND `+following+` AND `+unreadFor+`
+		ORDER BY t.last_reply_at DESC, t.id
+		LIMIT $3`, scanMine, user, pq.Array(kinds), limit)
 }
 
 // ChoiceOf is user's own choice for thread id, and how far they've read it:

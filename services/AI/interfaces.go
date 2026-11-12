@@ -173,6 +173,13 @@ type ChatOptions struct {
 	// instruct the model to produce JSON. Providers that do not support it
 	// ignore the field.
 	JSONMode bool `json:"json_mode,omitempty"`
+
+	// LeastThinking asks a model that thinks to think as little as its family
+	// can (the effort on its row of thinkingFamilies), whatever the admin's
+	// thinking switch says. ChatJSONWithRetry sets it on its one retry after a
+	// host refused an answer the model left empty, its budget spent thinking
+	// (errEmptyJSONAnswer). A model whose family takes no effort ignores it.
+	LeastThinking bool `json:"least_thinking,omitempty"`
 }
 
 // StreamChunk is a single piece of a streamed LLM response.

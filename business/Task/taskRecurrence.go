@@ -62,8 +62,16 @@ func SetTaskRecurrence(ctx context.Context, task *dgraphStruct.DgraphTask, rule,
 	if rule == "" {
 		return nil, recurrenceModel.Delete(taskUUID)
 	}
-	if task.ParentTask != nil && task.ParentTask.Uuid != "" {
-		return nil, &RecurrenceError{"Subtasks can't repeat. Make the parent task repeat instead."}
+	if task.ParentTask != nil {
+		// A task in an epic repeats; a sub-task doesn't. (A parent the
+		// reader may not see is a stub without its id: still a parent.)
+		sub, err := anySubTask(ctx, task.Uuid)
+		if err != nil {
+			return nil, err
+		}
+		if sub {
+			return nil, &RecurrenceError{"Subtasks can't repeat. Make the parent task repeat instead."}
+		}
 	}
 	rule, mode, err = CheckRecurrence(rule, mode)
 	if err != nil {
@@ -210,9 +218,6 @@ func repeatIfRecurring(ctx context.Context, taskUUID uuid.UUID, by *dgraphStruct
 	}
 	if start != nil {
 		in.StartDate = start.Format(time.RFC3339)
-	}
-	if in.Priority == "" {
-		in.Priority = dgraphStruct.TASK_PRIORITY_MEDIUM
 	}
 	actor := &model.UserInfo{UserPostgresInfo: model.User{Id: actorID}, UserDgraphInfo: *by}
 	// The next copy of a restricted task is kept to the same people (WA2).

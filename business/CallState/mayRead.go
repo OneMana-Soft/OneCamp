@@ -23,13 +23,64 @@ func MayRead(ctx context.Context, who *userModels.UserInfo, ref Ref) (allowed, i
 		if err != nil || host {
 			return host, false, err
 		}
+		// An event's call: whoever may read the event's details (gcal-15 head B).
+		if in, err := memberOfEventCall(ctx, room, &who.UserDgraphInfo); err != nil || in {
+			return in, false, err
+		}
 	}
-	d, err := conversationBusiness.Resolve(ctx, who, conversationBusiness.Ref{Kind: conversationBusiness.KindCall, ID: room})
+	d, err := conversationBusiness.Resolve(ctx, who, callConversation(ref))
 	if errors.Is(err, conversationBusiness.ErrNotFound) {
 		return false, false, nil
 	}
 	if err != nil {
 		return false, false, err
 	}
-	return true, slices.Contains(d.Reasons, conversationBusiness.ReasonCallInvite), nil
+	return true, onlyInvited(d.Reasons), nil
+}
+
+// Reading is how someone may see the calls of what a call belongs to
+// (MayReadAll): Invitee when only by a link to the call going on, so what it
+// belongs to stays out of their reach.
+type Reading struct {
+	Invitee bool
+}
+
+// MayReadAll is MayRead for the calls of many conversations at once, in as
+// few reads as the Access Resolver can (conversationBusiness.ResolveAll): the
+// refs whose calls who may see, each with how; one they may not is left out.
+// An instant meeting is left out too: its host's rule is MayRead's, one read
+// each.
+func MayReadAll(ctx context.Context, who *userModels.UserInfo, refs []Ref) (map[Ref]Reading, error) {
+	out := make(map[Ref]Reading, len(refs))
+	asked := make([]conversationBusiness.Ref, 0, len(refs))
+	of := make(map[conversationBusiness.Ref]Ref, len(refs))
+	for _, ref := range refs {
+		c := callConversation(ref)
+		if _, dup := of[c]; dup || ref.Kind == KindMeeting {
+			continue
+		}
+		of[c] = ref
+		asked = append(asked, c)
+	}
+	got, err := conversationBusiness.ResolveAll(ctx, who, asked)
+	if err != nil {
+		return nil, err
+	}
+	for c, d := range got {
+		if ref, ok := of[c]; ok {
+			out[ref] = Reading{Invitee: onlyInvited(d.Reasons)}
+		}
+	}
+	return out, nil
+}
+
+// callConversation is what the Access Resolver decides a call's readers by:
+// the call kind, at the room of what it belongs to. Pure.
+func callConversation(ref Ref) conversationBusiness.Ref {
+	return conversationBusiness.Ref{Kind: conversationBusiness.KindCall, ID: RoomOf(ref)}
+}
+
+// onlyInvited is a decision that came of a link to the call alone (HU13). Pure.
+func onlyInvited(reasons []string) bool {
+	return slices.Contains(reasons, conversationBusiness.ReasonCallInvite)
 }

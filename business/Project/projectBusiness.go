@@ -3,6 +3,8 @@ package business
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Project"
@@ -13,6 +15,7 @@ import (
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	domain "github.com/akashc777/OneCamp/domain/Project"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -27,6 +30,7 @@ import (
 	roleModel "github.com/akashc777/OneCamp/models/postgres/ProjectRole"
 	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	taskStatusModel "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	memoryModels "github.com/akashc777/OneCamp/models/postgres/WorkspaceMemory"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/akashc777/OneCamp/services/collab"
@@ -494,6 +498,43 @@ func GetDgraphProjectMemberInfo(ctx context.Context, projectUUID string, userDgr
 	dgraphProject.Admins = nil
 
 	return
+}
+
+// ProjectsForNewTask is the projects the person may add tasks to, by name:
+// what New task picks from (PROJECTS-20). A member's are there as well as an
+// admin's; each carries its people, so the one picked has someone to give
+// the task to, and its key.
+func ProjectsForNewTask(ctx context.Context, who *userModels.UserInfo) ([]*dgraphStruct.DgraphProject, error) {
+	projects, err := domain.GetDgraphProjectsForNewTask(ctx, who.UserDgraphInfo.Uid)
+	if err != nil {
+		return nil, err
+	}
+	standings, err := workAccess.OfMany(ctx, who.UserDgraphInfo.Uuid, projects)
+	if err != nil {
+		return nil, err
+	}
+	out := TasksGoIn(projects, standings)
+	taskKeys.LayProjects(ctx, out...)
+	return out, nil
+}
+
+// TasksGoIn is the projects among ps the person may add tasks to, by their
+// standings (Work Access, by lower-case project id; Standing.AddsTasks): not
+// an archived one, nor one where they only read or comment, nor one whose
+// tasks only its admins change when they aren't one. Ordered by name,
+// whatever its case. Pure.
+func TasksGoIn(ps []*dgraphStruct.DgraphProject, standings map[string]workAccess.Standing) []*dgraphStruct.DgraphProject {
+	out := []*dgraphStruct.DgraphProject{}
+	for _, p := range ps {
+		if p == nil {
+			continue
+		}
+		if standings[strings.ToLower(p.Uuid)].AddsTasks() {
+			out = append(out, p)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
+	return out
 }
 
 func GetDgraphProjectListByAdminDgraphUID(ctx context.Context, userDgraphUID string) (dgraphProject []*dgraphStruct.DgraphProject, err error) {

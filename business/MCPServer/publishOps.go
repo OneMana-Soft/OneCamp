@@ -28,13 +28,15 @@ import (
 // opKinds is the authority each Reach kind of a published op is checked under.
 // Closed: an op whose Reach names a kind missing here fails startup, as a
 // bridged tool without a rule does. A table's ops act on its rows, and Serve
-// holds any op that changes the table itself to CanManage, as on REST.
+// holds any op that changes the table itself to CanManage, as on REST. A
+// task's ops (its links) are checked by the task's rule, membership of its
+// project to read, and Serve reads as that member (business/Task Links).
 //
 // An op that acts on no existing place (v1api.Op Unplaced) is checked as a
 // bridged tool of that kind is: "self" makes something the caller will own
 // (a table), "workspace" reads only what the caller may see, and neither
 // names an object.
-var opKinds = map[string]ResourceKind{"table": ResourceTableRows, "self": ResourceSelfOwned, "workspace": ResourceWorkspace}
+var opKinds = map[string]ResourceKind{"table": ResourceTableRows, "task": ResourceTask, "event": ResourceEvent, "self": ResourceSelfOwned, "workspace": ResourceWorkspace}
 
 // published are the tools PublishOps registered, in the API's order: tools/list
 // lists them beside ai.ToolRegistry's (controllers/MCP listToolsForScopes).

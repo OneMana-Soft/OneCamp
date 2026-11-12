@@ -74,6 +74,14 @@ func hiddenFrom(e *models.Event, guests []models.Attendee, person uuid.UUID, cal
 	return busyOnly(calendar) || e.Visibility == visibilityPrivate && calendar.Level < accessBusiness.LevelEdit
 }
 
+// freeTimeHidden is whether an event isn't shown at all to someone who
+// isn't on it, given what they may do with its calendar: free time on a
+// calendar they see only as busy, as free time isn't busy. The one rule for
+// the grid (CalendarEvents) and the webhooks (webhookSees). Pure.
+func freeTimeHidden(e *models.Event, calendar accessBusiness.Decision) bool {
+	return busyOnly(calendar) && e.Transparency == transparencyTransparent
+}
+
 func init() {
 	accessBusiness.RegisterKind(KindCalendar, calendarRules{})
 	entityLinkBusiness.RegisterKind(KindCalendar, func(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]entityLinkBusiness.Entity, error) {
@@ -408,6 +416,9 @@ func (s *service) writableCalendar(ctx context.Context, who *model.UserInfo, id 
 	if decided[cal.String()].Level < accessBusiness.LevelEdit {
 		return uuid.Nil, inputError("You can't add events to that calendar.")
 	}
+	if err := s.mayAddTo(ctx, cal); err != nil {
+		return uuid.Nil, err
+	}
 	return cal, nil
 }
 
@@ -423,6 +434,13 @@ type CalendarView struct {
 	Access string `json:"access"`
 	// Mine marks the asker's own: theirs and those an import made them.
 	Mine bool `json:"mine,omitempty"`
+	// Source is where its events come from: "google" or "microsoft" (moved
+	// from there and kept in step), "ics" (read from an address) or
+	// "onecamp" (origin.go).
+	Source string `json:"source"`
+	// ReadOnly marks one its provider lets OneCamp only read (see-only
+	// there, or read from an address): no new event goes on it.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 // maxListedContainers is how many container calendars a list reads.
@@ -449,9 +467,14 @@ func (s *service) Calendars(ctx context.Context, who *model.UserInfo) ([]Calenda
 	if err != nil {
 		return nil, err
 	}
+	origins, err := s.originsOf(ctx, seen)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]CalendarView, 0, len(seen))
 	for _, c := range seen {
-		v := CalendarView{ID: c.ID.String(), Name: names[c.ID], Kind: c.Kind, Hue: c.Hue, ContainerKind: c.ContainerKind, ContainerID: c.ContainerID, Mine: decided[c.ID.String()].Owner}
+		v := CalendarView{ID: c.ID.String(), Name: names[c.ID], Kind: c.Kind, Hue: c.Hue, ContainerKind: c.ContainerKind, ContainerID: c.ContainerID, Mine: decided[c.ID.String()].Owner,
+			Source: origins[c.ID].Source, ReadOnly: origins[c.ID].ReadOnly}
 		switch d := decided[c.ID.String()]; {
 		case c.Kind == kindSubscribed:
 			v.Access = "view" // its events change where it's published
@@ -556,8 +579,8 @@ func (s *service) CalendarEvents(ctx context.Context, who *model.UserInfo, ids [
 		cal := onCalendar[row.CalendarID]
 		switch {
 		case !hiddenFrom(row, guests[row.ID], me, cal):
-		case busyOnly(cal) && inst[i].Transparency == transparencyTransparent:
-			continue // free time isn't shown to someone who sees only busy
+		case freeTimeHidden(inst[i].Event, cal):
+			continue
 		default:
 			v = busyView(v)
 		}
@@ -567,10 +590,11 @@ func (s *service) CalendarEvents(ctx context.Context, who *model.UserInfo, ids [
 }
 
 // busyView is an event as someone who may see only that its owner is busy
-// sees it: "Busy", when, and nothing else. Free time isn't shown. Pure.
+// sees it: "Busy", when, and nothing else (no notes, no files). Free time
+// isn't shown. Pure.
 func busyView(e Event) Event {
 	return Event{ID: e.ID, CalendarID: e.CalendarID, SeriesID: e.SeriesID, RecurrenceID: e.RecurrenceID, Kind: EventPlain, Title: "Busy",
-		Start: e.Start, End: e.End, AllDay: e.AllDay, Transparency: e.Transparency, Visibility: visibilityPrivate, Status: e.Status,
+		Files: []FileRef{}, Start: e.Start, End: e.End, AllDay: e.AllDay, Transparency: e.Transparency, Visibility: visibilityPrivate, Status: e.Status,
 		Organiser: Person{}, Attendees: []Attendee{}}
 }
 

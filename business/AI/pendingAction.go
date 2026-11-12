@@ -33,6 +33,7 @@ import (
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	"github.com/akashc777/OneCamp/helpers"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
+	agentModel "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	pendingModels "github.com/akashc777/OneCamp/models/postgres/PendingAction"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -84,30 +85,28 @@ func CreatePendingAction(ctx context.Context, requestedBy uuid.UUID, surfaceType
 		return nil, err
 	}
 
-	action, err := pendingModels.CreatePendingAction(ctx, requestedBy, surfaceType, surfaceID, toolName, params, description, idempotencyKey, time.Now().Add(pendingActionTTL), attr, bind)
+	action, err := createActionRow(ctx, requestedBy, surfaceType, surfaceID, toolName, params, description, idempotencyKey, time.Now().Add(pendingActionTTL), attr, bind)
 	if err != nil {
 		return nil, err
 	}
 	if action == nil {
 		return nil, fmt.Errorf("failed to create pending action")
 	}
+	announceCreated(ctx, action)
+	return action, nil
+}
 
+// announceCreated is how every new approval, one action or an agent's plan,
+// reaches the person it waits on: the live card, named and with its deadline,
+// and on its first creation a push to their devices. A retried proposal (same
+// idempotency key, Fresh false) redraws the card but is not pushed twice.
+func announceCreated(ctx context.Context, action *pendingModels.PendingAction) {
 	enrichRisk(action)
-	publishPendingAction(action.RequestedBy.String(), &mqttStruct.MqttPendingAction{
-		Action:      "created",
-		ID:          action.Id.String(),
-		SurfaceType: action.SurfaceType,
-		SurfaceID:   action.SurfaceID,
-		ToolName:    action.ToolName,
-		Description: action.Description,
-		Destructive: action.Destructive,
-		Status:      action.Status,
-		CreatedAt:   action.CreatedAt.Format(time.RFC3339),
-	})
+	nameAgents(ctx, action)
+	publishPendingAction(action.RequestedBy.String(), createdMsg(action))
 	if action.Fresh {
 		notifyApprovalNeeded(action)
 	}
-	return action, nil
 }
 
 // enrichRisk annotates an action with derived, non-persisted risk metadata so
@@ -128,15 +127,65 @@ func enrichRisk(actions ...*pendingModels.PendingAction) {
 	}
 }
 
+// Seams, so naming and announcing are tested without a database.
+var (
+	createActionRow = pendingModels.CreatePendingAction
+	listOpenActions = pendingModels.ListOpenByUser
+	// agentNamesByID is the live agents' names, by id, in one read of
+	// ai_agents however many ids. A deleted agent is absent.
+	agentNamesByID = func(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+		agents, err := agentModel.GetAgentsByIDs(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		names := make(map[uuid.UUID]string, len(agents))
+		for id, a := range agents {
+			names[id] = a.Name
+		}
+		return names, nil
+	}
+)
+
+// nameAgents fills each action's AgentName, so a card can say who is asking
+// ("Release Captain wants to…"), with one read for all of them and none when
+// no agent asked. The name is a courtesy: a failed read leaves them unnamed
+// (the card says OneCamp AI) and never fails the path that called it.
+func nameAgents(ctx context.Context, actions ...*pendingModels.PendingAction) {
+	var ids []uuid.UUID
+	seen := map[uuid.UUID]bool{}
+	for _, a := range actions {
+		if a != nil && a.AgentID != nil && !seen[*a.AgentID] {
+			seen[*a.AgentID] = true
+			ids = append(ids, *a.AgentID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	names, err := agentNamesByID(ctx, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/AI/nameAgents read err: %+v", err)
+		return
+	}
+	for _, a := range actions {
+		if a != nil && a.AgentID != nil {
+			a.AgentName = names[*a.AgentID]
+		}
+	}
+}
+
 // ListOpenPendingActions returns the caller's open (pending, unexpired)
-// approvals, newest first. The FE calls this on load to re-render any card that
-// outlived the tab that created it.
+// approvals, newest first, each naming the agent that asked. The FE calls this
+// on load to re-render any card that outlived the tab that created it. An
+// approve or reject answer is not named: the card it answers already is, and
+// is removed by that answer.
 func ListOpenPendingActions(ctx context.Context, userUUID uuid.UUID) ([]*pendingModels.PendingAction, error) {
-	actions, err := pendingModels.ListOpenByUser(ctx, userUUID)
+	actions, err := listOpenActions(ctx, userUUID)
 	if err != nil {
 		return nil, err
 	}
 	enrichRisk(actions...)
+	nameAgents(ctx, actions...)
 	return actions, nil
 }
 
@@ -304,6 +353,24 @@ func RejectPendingAction(ctx context.Context, approverInfo *userModels.UserInfo,
 	return final, nil
 }
 
+// createdMsg builds the live "created" payload: everything a listed card
+// carries that the live one draws, so it is never read again to be drawn.
+func createdMsg(a *pendingModels.PendingAction) *mqttStruct.MqttPendingAction {
+	return &mqttStruct.MqttPendingAction{
+		Action:      "created",
+		ID:          a.Id.String(),
+		SurfaceType: a.SurfaceType,
+		SurfaceID:   a.SurfaceID,
+		ToolName:    a.ToolName,
+		Description: a.Description,
+		Destructive: a.Destructive,
+		Status:      a.Status,
+		CreatedAt:   a.CreatedAt.Format(time.RFC3339),
+		AgentName:   a.AgentName,
+		ExpiresAt:   a.ExpiresAt.Format(time.RFC3339),
+	}
+}
+
 // resolvedMsg builds the live "resolved" payload for a terminal action.
 func resolvedMsg(a *pendingModels.PendingAction) *mqttStruct.MqttPendingAction {
 	msg := &mqttStruct.MqttPendingAction{
@@ -325,6 +392,7 @@ func resolvedMsg(a *pendingModels.PendingAction) *mqttStruct.MqttPendingAction {
 	return msg
 }
 
-func publishPendingAction(userUUID string, msg *mqttStruct.MqttPendingAction) {
+// A seam, so what a card is sent live is tested without a broker.
+var publishPendingAction = func(userUUID string, msg *mqttStruct.MqttPendingAction) {
 	mqttBusiness.PublishMessageToUser(userUUID, mqttStruct.MESSAGE_AI_PENDING_ACTION, msg)
 }

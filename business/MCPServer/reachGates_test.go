@@ -116,6 +116,17 @@ func TestEveryResourceBranchChecksLiveness(t *testing.T) {
 			"carries the doc's deletion (invariant I9): a doc in the trash answers Deleted and " +
 			"level none to everyone, and the branch refuses it on Deleted. The resolver reads " +
 			"the deletion with the grants, so it is never a second lookup that could disagree",
+		"ResourceEvent": "delegates to the Access Resolver, whose calendar rule " +
+			"(business/Calendar/access.go:153 in eventRules: deleted_at set -> Deleted, " +
+			"LevelNone) reads the event's deleted_at with the row it decides on: an event " +
+			"in the trash answers Deleted and level none to everyone, so no read reaches it. " +
+			"A write still reaches it for someone it was shown to (Was), because " +
+			"restore_event is how it comes back, and the calendar's Restore lets only the " +
+			"organiser bring it back; every other write (update_event, cancel_event) " +
+			"answers not found through the calendar's own load " +
+			"(business/Calendar/service.go:189, which refuses a row with DeletedAt). These " +
+			"two layers stand in for IsSoftDeleted here. An inline check would be a second read of " +
+			"the row the resolver has just read",
 		"ResourceWorkItem": "delegates to business/EntityLink ReadMany, the work graph's " +
 			"reader, which leaves out what is deleted kind by kind: a channel post and a " +
 			"comment once deleted (or in a deleted channel), a whiteboard by " +

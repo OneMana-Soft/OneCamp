@@ -172,6 +172,12 @@ const (
 	//
 	// READ ONLY. Nothing writes through it.
 	ResourceWorkItem ResourceKind = "work_item"
+	// ResourceEvent — a calendar event (gcal-15), by its id or an instance's.
+	// Authority is the calendar's own rule for the event (business/Calendar,
+	// through the Access Resolver): to read, someone it shows to; to change
+	// or cancel, someone who may edit it (one in the trash, who could). The
+	// calendar's service checks again as it serves, as the person.
+	ResourceEvent ResourceKind = "event"
 )
 
 // IdentifiesNoObject reports whether this kind names a single object at all.

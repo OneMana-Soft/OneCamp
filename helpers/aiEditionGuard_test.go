@@ -1,10 +1,13 @@
 package helpers
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -73,6 +76,7 @@ var aiEditionBoundary = map[string]bool{
 	"business/Doc":          true,
 	"business/Marketplace":  true,
 	"business/Post":         true,
+	"business/PostDelete":   true, // a post's shared soft delete (V-578): its AI embedding and memory go with it, as from business/Post before
 	"business/Project":      true,
 	"business/Task":         true,
 	"business/Workflow":     true,
@@ -401,5 +405,305 @@ func TestSharedAIEnvKeysReallyHaveANonAIReader(t *testing.T) {
 		}
 		sort.Strings(readers[key])
 		t.Logf("%s is read outside the AI surface by: %s", key, strings.Join(readers[key], ", "))
+	}
+}
+
+// The package boundary above can't see the other half of the carve: AI files that sit
+// inside shared packages (business/DataTable's AI columns, router's doc AI), which v1
+// leaves out file by file. Whatever a shared file of the same package uses from one of
+// them, v1 has to supply on its own: a stub (a no-op, a nil, a 501) or, worse, a copy.
+//
+// aiOnlyFileName is how a file in a shared package says it's AI: "ai" or "AI" opening its
+// name as a word (ai.go, aiFillJob.go), or "AI" as a camel-case word in it
+// (tableAIColumn.go, docsAI.go).
+var aiOnlyFileName = regexp.MustCompile(`^(ai|AI)[A-Z_.]|[a-z]AI[A-Z_.]`)
+
+// aiOnlyFilesNotNamedAI are AI-only files in shared packages whose names don't say so.
+var aiOnlyFilesNotNamedAI = map[string]bool{
+	"business/DataTable/tableDraft.go": true, // a table drafted from a sentence, by the model
+}
+
+// aiNamedFilesBothShip are AI-named files that v1 ships as they are, so they're shared.
+var aiNamedFilesBothShip = map[string]bool{
+	"models/postgres/DataTable/aiFills.go":             true, // the fills' store: undo and purge read it
+	"initializers/opensearchInit/aiEmbeddingsIndex.go": true, // the index's setup, kept so a v1 upgrade finds it
+}
+
+// aiFileHooks is every declaration of an AI-only file that a shared file of the same
+// package uses, keyed "package.Name", with the file declaring it: each is a hook the
+// AI-free edition has to stub.
+//
+// As with aiEditionBoundary, A FAILURE HERE IS A BILL, and a stale entry is progress to
+// remove. Before recording a new one, ask whether it is AI at all. Shared logic that
+// merely lives in an AI file belongs in a shared file: V-548 found the schema API's
+// change diff calling tableAIColumn.go's sameJSON, so v1 had to carry its own copy of it.
+var aiFileHooks = map[string]string{
+	"business/DataTable.AutofillRowOnWrite": "tableAIColumn.go", // v1: a no-op
+	"business/DataTable.aiColumns":          "tableAIColumn.go", // v1: nil, no cell is an AI column's
+	"business/DataTable.broadcastFill":      "tableAIColumn.go", // undoing an AI fill tells open views it stopped
+	"business/Command.oneCampAIAppSlug":     "ai.go",            // the marketplace's OneCamp AI app: v1 lists none
+	"router.mountDocAI":                     "docsAI.go",        // v1 ships its own docsAI.go, each route a 501
+}
+
+// aiFileUse is a declaration of an AI-only file and the shared files that use it.
+type aiFileUse struct {
+	file  string   // the AI-only file declaring it, by base name
+	users []string // the shared files using it, repo-relative and sorted
+}
+
+// aiFileUses walks the shared packages that hold AI-only files and returns, keyed
+// "package.Name", each top-level declaration of those files (funcs, types, vars and
+// consts; methods are reached through their types) that another file of the same
+// package uses. Not seen: an exported declaration reached from another package (the
+// package boundary sees only imports of AI packages), and an AI-only file named neither
+// by the rule nor in aiOnlyFilesNotNamedAI.
+func aiFileUses(t *testing.T) map[string]*aiFileUse {
+	t.Helper()
+
+	dirs := map[string][]string{} // shared package dir -> its .go files, repo-relative
+	err := filepath.Walk("..", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			// Hidden directories (.git, a checkout's .claude worktrees) hold no
+			// package of this tree.
+			switch name := info.Name(); {
+			case name == "vendor", name == "node_modules", name == "data", name == "sdk", name == "other-services",
+				strings.HasPrefix(name, ".") && path != "..":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		rel := strings.TrimPrefix(filepath.ToSlash(path), "../")
+		if dir := filepath.ToSlash(filepath.Dir(rel)); dir != "." && !isAIPackage(dir) {
+			dirs[dir] = append(dirs[dir], rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the repository: %v", err)
+	}
+
+	aiOnly := func(rel string) bool {
+		return aiOnlyFileName.MatchString(filepath.Base(rel)) && !aiNamedFilesBothShip[rel] || aiOnlyFilesNotNamedAI[rel]
+	}
+	uses := map[string]*aiFileUse{}
+	fset := token.NewFileSet()
+	for dir, paths := range dirs {
+		if !slices.ContainsFunc(paths, aiOnly) {
+			continue
+		}
+		// A directory's package and its external _test package are told apart by name.
+		byPkg := map[string]map[string]*ast.File{}
+		for _, rel := range paths {
+			f, perr := parser.ParseFile(fset, "../"+rel, nil, parser.SkipObjectResolution)
+			if perr != nil {
+				continue // a compile error the build reports better
+			}
+			if byPkg[f.Name.Name] == nil {
+				byPkg[f.Name.Name] = map[string]*ast.File{}
+			}
+			byPkg[f.Name.Name][rel] = f
+		}
+		for _, files := range byPkg {
+			declared := map[string]string{} // name -> the AI-only file declaring it
+			for rel, f := range files {
+				if aiOnly(rel) {
+					for _, name := range topLevelNames(f) {
+						declared[name] = filepath.Base(rel)
+					}
+				}
+			}
+			for rel, f := range files {
+				if aiOnly(rel) {
+					continue
+				}
+				for name := range usedNames(f) {
+					file, ok := declared[name]
+					// A test file's declarations reach only test files.
+					if !ok || strings.HasSuffix(file, "_test.go") && !strings.HasSuffix(rel, "_test.go") {
+						continue
+					}
+					key := dir + "." + name
+					if uses[key] == nil {
+						uses[key] = &aiFileUse{file: file}
+					}
+					uses[key].users = append(uses[key].users, rel)
+				}
+			}
+		}
+	}
+	for _, u := range uses {
+		sort.Strings(u.users)
+	}
+	return uses
+}
+
+// topLevelNames is a file's package-level declarations: its funcs (init aside), types,
+// vars and consts. Methods are left to their types.
+func topLevelNames(f *ast.File) []string {
+	var names []string
+	for _, d := range f.Decls {
+		switch d := d.(type) {
+		case *ast.FuncDecl:
+			if d.Recv == nil && d.Name.Name != "init" {
+				names = append(names, d.Name.Name)
+			}
+		case *ast.GenDecl:
+			for _, s := range d.Specs {
+				switch s := s.(type) {
+				case *ast.TypeSpec:
+					names = append(names, s.Name.Name)
+				case *ast.ValueSpec:
+					for _, n := range s.Names {
+						names = append(names, n.Name)
+					}
+				}
+			}
+		}
+	}
+	return slices.DeleteFunc(names, func(n string) bool { return n == "_" })
+}
+
+// usedNames is the names a file uses that it doesn't declare itself, which is how it
+// reaches its own package's declarations. A selector's right-hand side (x.Name,
+// pkg.Name), a composite literal's field key and a label are not such uses, and a name
+// the file declares in a scope of its own (a local, a parameter) is left out entirely:
+// read from syntax alone, a local can't be told from the package-level name it shadows.
+func usedNames(f *ast.File) map[string]bool {
+	notUse := map[*ast.Ident]bool{f.Name: true}
+	local := map[string]bool{}
+	skip := func(ids ...*ast.Ident) {
+		for _, id := range ids {
+			if id != nil {
+				notUse[id] = true
+			}
+		}
+	}
+	declare := func(ids ...*ast.Ident) {
+		for _, id := range ids {
+			if id != nil {
+				notUse[id] = true
+				local[id.Name] = true
+			}
+		}
+	}
+	declareFields := func(l *ast.FieldList) {
+		if l != nil {
+			for _, fd := range l.List {
+				declare(fd.Names...)
+			}
+		}
+	}
+	skipFields := func(l *ast.FieldList) {
+		if l != nil {
+			for _, fd := range l.List {
+				skip(fd.Names...)
+			}
+		}
+	}
+	declareExprs := func(xs ...ast.Expr) {
+		for _, x := range xs {
+			if id, ok := x.(*ast.Ident); ok {
+				declare(id)
+			}
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.SelectorExpr:
+			skip(n.Sel)
+		case *ast.KeyValueExpr:
+			if id, ok := n.Key.(*ast.Ident); ok {
+				skip(id)
+			}
+		case *ast.StructType:
+			skipFields(n.Fields)
+		case *ast.InterfaceType:
+			skipFields(n.Methods)
+		case *ast.FuncType:
+			declareFields(n.TypeParams)
+			declareFields(n.Params)
+			declareFields(n.Results)
+		case *ast.FuncDecl:
+			skip(n.Name)
+			declareFields(n.Recv)
+		case *ast.TypeSpec:
+			declare(n.Name)
+			declareFields(n.TypeParams)
+		case *ast.ValueSpec:
+			declare(n.Names...)
+		case *ast.AssignStmt:
+			if n.Tok == token.DEFINE {
+				declareExprs(n.Lhs...)
+			}
+		case *ast.RangeStmt:
+			if n.Tok == token.DEFINE {
+				declareExprs(n.Key, n.Value)
+			}
+		case *ast.ImportSpec:
+			skip(n.Name)
+		case *ast.LabeledStmt:
+			skip(n.Label)
+		case *ast.BranchStmt:
+			skip(n.Label)
+		}
+		return true
+	})
+	used := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && !notUse[id] && !local[id.Name] {
+			used[id.Name] = true
+		}
+		return true
+	})
+	return used
+}
+
+// TestAIOnlyFilesAreReachedOnlyThroughRecordedHooks fails when a shared file starts or
+// stops using a declaration of an AI-only file without aiFileHooks being updated.
+func TestAIOnlyFilesAreReachedOnlyThroughRecordedHooks(t *testing.T) {
+	uses := aiFileUses(t)
+
+	if len(uses) == 0 {
+		t.Fatal("found no shared file using an AI-only file at all. The tables' AI " +
+			"columns alone are reached from three shared files, so the walk or the " +
+			"file-name rule is wrong rather than the carve being free.")
+	}
+
+	var unrecorded []string
+	for key, u := range uses {
+		if aiFileHooks[key] != u.file {
+			unrecorded = append(unrecorded, key+" ("+u.file+") <- "+strings.Join(u.users, ", "))
+		}
+	}
+	sort.Strings(unrecorded)
+
+	if len(unrecorded) > 0 {
+		t.Errorf("%d declaration(s) of AI-only files are used by shared files but are not "+
+			"recorded in aiFileHooks:\n  %s\n\nThe AI-free v1 edition leaves those files "+
+			"out, so each is a stub or a copy it has to carry. If the declaration isn't AI "+
+			"(a JSON comparison, a diff), move it to a shared file; if it is an AI hook, "+
+			"record it in aiFileHooks.",
+			len(unrecorded), strings.Join(unrecorded, "\n  "))
+	}
+
+	var departed []string
+	for key, file := range aiFileHooks {
+		if u := uses[key]; u == nil || u.file != file {
+			departed = append(departed, key+" ("+file+")")
+		}
+	}
+	sort.Strings(departed)
+
+	if len(departed) > 0 {
+		t.Errorf("%d hook(s) are recorded in aiFileHooks but no shared file uses them "+
+			"from that AI-only file any more:\n  %s\n\nThat is progress: remove them so "+
+			"the list keeps describing what v1 has to stub.",
+			len(departed), strings.Join(departed, "\n  "))
 	}
 }

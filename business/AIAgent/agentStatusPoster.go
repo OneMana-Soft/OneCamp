@@ -39,6 +39,20 @@ type StatusPoster interface {
 	Progress(ctx context.Context, tools []string)
 }
 
+// statusAcker is a StatusPoster that writes the run's "On it" ack apart from
+// its word, telling nobody of it (postCommentStatusPoster). Any other poster
+// writes the ack with Set.
+type statusAcker interface {
+	Ack(ctx context.Context, text string)
+}
+
+// wordTeller is a StatusPoster whose word is told to the thread's people as a
+// person's reply is, so it may already be in someone's Inbox
+// (postCommentStatusPoster).
+type wordTeller interface {
+	lastWordInInbox(ctx context.Context, who string) bool
+}
+
 // chatStatusPosterFactory builds a StatusPoster for a group/DM chat message. It
 // is injected by the coworker package (which owns chat transport) so AIAgent
 // stays chat-dependency-free. nil until registered → chat surfaces fall back to
@@ -104,18 +118,41 @@ type postCommentStatusPoster struct {
 	mu           sync.Mutex
 	commentUUID  uuid.UUID // zero until the comment is created
 	lastProgress time.Time
+	told         bool // the thread was told of the run's word (once)
+	lastTold     bool // the last write was that telling
 }
 
-// Set creates the status comment (first call) or edits it to text (the "On it"
-// ack and the final result). Plain text — botpost badges/sanitizes it.
+// Set creates the status comment (first call) or edits it to text: the run's
+// word, its answer or its question. The thread's people are told of the
+// first one, once, as of a person's reply (V-574 M1); later words are edits
+// nobody is told of. Plain text — botpost badges/sanitizes it.
 func (p *postCommentStatusPoster) Set(ctx context.Context, text string) {
+	p.write(ctx, text, true)
+}
+
+// Ack writes the run's "On it" acknowledgement as the status comment, told
+// to nobody: it is not the run's word, and its answer, written over it, is
+// what the thread's people are told of.
+func (p *postCommentStatusPoster) Ack(ctx context.Context, text string) {
+	p.write(ctx, text, false)
+}
+
+// write creates or edits the status comment to text, telling the thread of
+// it when word says it is the run's word and none was told before.
+func (p *postCommentStatusPoster) write(ctx context.Context, text string, word bool) {
 	if p == nil || strings.TrimSpace(text) == "" {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	tell := word && !p.told
+	p.lastTold = false
 	if p.commentUUID == uuid.Nil {
-		res, err := botpost.PostCommentToPostAsBot(ctx, p.postUUID, text, p.bot)
+		create := botpost.WriteCommentToPostAsBot
+		if tell {
+			create = botpost.PostCommentToPostAsBot
+		}
+		res, err := create(ctx, p.postUUID, text, p.bot)
 		if err != nil || res == nil {
 			helpers.LogErrorWithContext(ctx, "agent status: create post comment failed (post=%s): %v", p.postUUID, err)
 			return
@@ -123,11 +160,30 @@ func (p *postCommentStatusPoster) Set(ctx context.Context, text string) {
 		if id, perr := uuid.Parse(res.CommentUUID); perr == nil {
 			p.commentUUID = id
 		}
+		p.told, p.lastTold = p.told || tell, tell
 		return
 	}
-	if _, err := botpost.EditCommentToPostAsBot(ctx, p.postUUID, p.commentUUID, text, p.bot); err != nil {
-		helpers.LogErrorWithContext(ctx, "agent status: edit post comment failed (post=%s): %v", p.postUUID, err)
+	edit := botpost.EditCommentToPostAsBot
+	if tell {
+		edit = botpost.TellEditedCommentToPostAsBot
 	}
+	if _, err := edit(ctx, p.postUUID, p.commentUUID, text, p.bot); err != nil {
+		helpers.LogErrorWithContext(ctx, "agent status: edit post comment failed (post=%s): %v", p.postUUID, err)
+		return
+	}
+	p.told, p.lastTold = p.told || tell, tell
+}
+
+// lastWordInInbox says whether the run's last word, told to the thread, is
+// in who's Inbox, counted, as a person's reply is (botpost.InboxOfTold).
+func (p *postCommentStatusPoster) lastWordInInbox(ctx context.Context, who string) bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	told := p.lastTold
+	p.mu.Unlock()
+	return told && botpost.InboxOfTold(ctx, p.postUUID, p.bot, who)
 }
 
 // Progress edits the status comment to a throttled "working…" line. No-op until

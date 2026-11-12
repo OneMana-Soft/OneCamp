@@ -45,12 +45,9 @@ func repairTaskLinks(ctx context.Context, project uuid.UUID) ([]taskModels.TaskG
 	if err != nil {
 		return nil, err
 	}
-	var links []*githubLinkModel.GitHubLink
-	if project == uuid.Nil {
-		links, err = GetAllLinkedRepos(ctx)
-	} else {
-		links, err = GetLinkedRepos(ctx, project)
-	}
+	// Offline links included (the demo's fixture, V-841): every other read
+	// of links leaves them out.
+	links, err := githubLinkModel.GetLinksForRepair(ctx, project)
 	if err != nil {
 		return nil, err
 	}

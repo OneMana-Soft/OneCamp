@@ -528,6 +528,32 @@ func GetDgraphTeamListByUserDgraphUID(ctx context.Context, userDgraphUID string)
 	return
 }
 
+// GetDgraphTeamsOf reads the teams the person (their graph uid) is a member or
+// an admin of, each with their member and admin counts and when it
+// was deleted: what Work Access's "Who can make projects" asks of a team.
+func GetDgraphTeamsOf(ctx context.Context, userDgraphUID string) ([]*dgraphStruct.DgraphTeam, error) {
+	variables := map[string]string{"$user_id": userDgraphUID}
+	query := `query TeamsOf($user_id: string){
+				var(func: uid($user_id)) {
+					member as ~team_members
+					admin as ~team_admins
+				}
+				teamInfo(func: uid(member, admin)) @filter(has(team_uuid)) {
+					uid
+					team_uuid
+					team_name
+					team_deleted_at
+					team_is_admin: count(team_admins @filter(uid($user_id)))
+					team_is_member: count(team_members @filter(uid($user_id)))
+				}
+			}`
+	teams, err := dgraphModels.GetDgraphTeamList(ctx, query, variables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetDgraphTeamsOf couldn't read the teams err: %+v", err)
+	}
+	return teams, err
+}
+
 func GetDgraphTeamListByAdminDgraphUID(ctx context.Context, userDgraphUID string) (dgraphTeamList []*dgraphStruct.DgraphTeam, err error) {
 	variables := make(map[string]string)
 	variables["$user_id"] = userDgraphUID

@@ -50,6 +50,10 @@ type Kind struct {
 	// sent, before its options are planned, and gives it back as kept. Nil
 	// for a kind with no settings of its own.
 	Config func(cfg map[string]any) (map[string]any, error)
+	// OnTasks is a kind a project's task field may be (business/TaskField),
+	// by the same id; TasksOnly is one only a task field may be (money,
+	// kept in whole cents), which a table's field can't (Valid).
+	OnTasks, TasksOnly bool
 	// FromRow is, for a kind worked out from the row itself and never stored
 	// (its number, when it was made and changed, and by whom), the cell a
 	// row shows: a number, a time (RFC 3339), or a person as a link
@@ -148,12 +152,25 @@ func (r *Registry) Lookup(id string) (Kind, bool) {
 	return k, ok
 }
 
-// Valid is whether a field may be of kind id: a kind someone built and
-// registered. The database takes more (migration 300 makes room for the kinds
-// the programme builds), and nothing can read a field of a kind not here.
+// Valid is whether a table's field may be of kind id: a kind someone built
+// and registered, not one only task fields are (TasksOnly). The database
+// takes more (migration 300 makes room for the kinds the programme builds),
+// and nothing can read a field of a kind not here.
 func (r *Registry) Valid(id string) bool {
-	_, ok := r.Lookup(id)
-	return ok
+	k, ok := r.Lookup(id)
+	return ok && !k.TasksOnly
+}
+
+// ForTasks is the kinds a task field may be (OnTasks), in the order they
+// registered.
+func (r *Registry) ForTasks() []Kind {
+	var out []Kind
+	for _, k := range r.All() {
+		if k.OnTasks {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // All is every kind, in the order they registered.

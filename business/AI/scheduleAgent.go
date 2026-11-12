@@ -63,7 +63,10 @@ func overlaps(aStart, aEnd, bStart, bEnd time.Time) bool {
 // readBusy is the calendar's one busy engine (business/Calendar.ReadBusy):
 // OneCamp events and Google calendars, the same answer Find a time and
 // booking pages give. A seam for tests.
-var readBusy = calendarBusiness.ReadBusy
+var (
+	readBusy     = calendarBusiness.ReadBusy
+	peopleSeenBy = calendarBusiness.PeopleSeenBy
+)
 
 // gatherFreeBusy reads each user's busy windows in [from,to) through the
 // calendar's engine, keeping only start and end, never an event's content.
@@ -71,11 +74,24 @@ var readBusy = calendarBusiness.ReadBusy
 // read for a free one. Now someone whose calendar can't be read, wholly or in
 // part, is in unread: their time is unknown, and no slot counts them free.
 // except, when set, is the event being moved, which is no clash with itself.
-// Shared by propose and reschedule.
-func gatherFreeBusy(ctx context.Context, userIDs []string, from, to time.Time, except *dgraphStruct.DgraphEvent) (map[string][]busyInterval, map[string]bool) {
+// Only those whose busy times asker (the person asking) may see are read: the
+// calendar's one rule (PeopleSeenBy: the workspace's policy, then whether
+// they are a member now), the one Find a time asks. The rest are not counted
+// at all, as Find a time counts them: counted is who the slots count, and
+// when the rule can't be read nobody's time counts as free. Shared by
+// propose and reschedule.
+func gatherFreeBusy(ctx context.Context, asker string, userIDs []string, from, to time.Time, except *dgraphStruct.DgraphEvent) (map[string][]busyInterval, map[string]bool, []string) {
 	busyByUser := make(map[string][]busyInterval, len(userIDs))
 	unread := map[string]bool{}
-	for _, uid := range userIDs {
+	seen, _, err := peopleSeenBy(ctx, asker, userIDs)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/AI/gatherFreeBusy: whose busy times show couldn't be read: %v", err)
+		for _, uid := range userIDs {
+			unread[uid] = true
+		}
+		return busyByUser, unread, userIDs
+	}
+	for _, uid := range seen {
 		b, err := readBusy(ctx, uid, from, to, calendarBusiness.BusyOptions{Except: except})
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/AI/gatherFreeBusy: a calendar couldn't be read: %v", err)
@@ -91,7 +107,7 @@ func gatherFreeBusy(ctx context.Context, userIDs []string, from, to time.Time, e
 		}
 		busyByUser[uid] = intervals
 	}
-	return busyByUser, unread
+	return busyByUser, unread, seen
 }
 
 // scheduleZone is the zone business hours are read in: the request's IANA
@@ -120,6 +136,15 @@ func unreadNote(names []string) string {
 		out = append(out, fmt.Sprintf("Couldn't read %s's calendar, so no time counts as free for %s.", n, n))
 	}
 	return strings.Join(out, " ")
+}
+
+// uncountedNote says the slots leave out someone whose busy times the asker
+// may not see (counted is fewer than people), naming nobody. Pure.
+func uncountedNote(counted, people []string) string {
+	if len(counted) < len(people) {
+		return "These times count only the calendars you may see."
+	}
+	return ""
 }
 
 // joinNotes joins the sentences an answer's note carries.
@@ -201,17 +226,17 @@ func ProposeSchedule(ctx context.Context, userInfo *userModels.UserInfo, req ada
 		resp.Participants = append(resp.Participants, adapter.ScheduleParticipant{UUID: u.Uuid, Name: name})
 	}
 
-	proposeSlots(ctx, resp, userIDs, time.Now().UTC(), windowDays, duration, scheduleZone(ctx, req.Timezone, req.UTCOffsetMins), bhStart, bhEnd)
+	proposeSlots(ctx, resp, requesterUUID, userIDs, time.Now().UTC(), windowDays, duration, scheduleZone(ctx, req.Timezone, req.UTCOffsetMins), bhStart, bhEnd)
 	return resp, nil
 }
 
 // proposeSlots fills an answer's candidates and note for the people in
-// resp.Participants (userIDs, in the same order), from their busy times over
-// the next windowDays.
-func proposeSlots(ctx context.Context, resp *adapter.ScheduleProposeResponse, userIDs []string, now time.Time, windowDays, duration int, loc *time.Location, bhStart, bhEnd int) {
-	busyByUser, unread := gatherFreeBusy(ctx, userIDs, now, now.AddDate(0, 0, windowDays), nil)
+// resp.Participants (userIDs, in the same order), from the busy times over the
+// next windowDays of those asker (the person asking) may see.
+func proposeSlots(ctx context.Context, resp *adapter.ScheduleProposeResponse, asker string, userIDs []string, now time.Time, windowDays, duration int, loc *time.Location, bhStart, bhEnd int) {
+	busyByUser, unread, counted := gatherFreeBusy(ctx, asker, userIDs, now, now.AddDate(0, 0, windowDays), nil)
 
-	resp.Candidates = computeCandidateSlots(now, windowDays, duration, loc, bhStart, bhEnd, scheduleMaxCandidates, busyByUser, unread, userIDs)
+	resp.Candidates = computeCandidateSlots(now, windowDays, duration, loc, bhStart, bhEnd, scheduleMaxCandidates, busyByUser, unread, counted)
 	noSlots := ""
 	if len(resp.Candidates) == 0 {
 		noSlots = fmt.Sprintf("No open slots in the next %d days during business hours. Try a longer window or a shorter meeting.", windowDays)
@@ -222,7 +247,7 @@ func proposeSlots(ctx context.Context, resp *adapter.ScheduleProposeResponse, us
 			unreadNames = append(unreadNames, p.Name)
 		}
 	}
-	resp.Note = joinNotes(noSlots, unreadNote(unreadNames))
+	resp.Note = joinNotes(noSlots, unreadNote(unreadNames), uncountedNote(counted, userIDs))
 }
 
 // computeCandidateSlots is the pure scheduling core: it walks the search window
@@ -416,6 +441,15 @@ func RescheduleOptions(ctx context.Context, userInfo *userModels.UserInfo, req a
 		bhEnd = scheduleDefaultBHEnd
 	}
 
+	rescheduleSlots(ctx, resp, me, event, time.Now().UTC(), windowDays, duration, scheduleZone(ctx, req.Timezone, req.UTCOffsetMins), bhStart, bhEnd)
+	return resp, nil
+}
+
+// rescheduleSlots fills a reschedule answer's participants, the conflicts at
+// the event's current time, its candidates and its note, from the busy times
+// over the next windowDays of those me (the person asking) may see.
+func rescheduleSlots(ctx context.Context, resp *adapter.ScheduleRescheduleResponse, me string, event *dgraphStruct.DgraphEvent, now time.Time, windowDays, duration int, loc *time.Location, bhStart, bhEnd int) {
+	curStart, curEnd := event.StartTime.UTC(), event.EndTime.UTC()
 	// Build the invitee set (creator + participants) and a name lookup.
 	userIDs := make([]string, 0, len(event.Participants)+1)
 	nameByID := map[string]string{}
@@ -444,11 +478,10 @@ func RescheduleOptions(ctx context.Context, userInfo *userModels.UserInfo, req a
 		}
 	}
 
-	now := time.Now().UTC()
 	windowEnd := now.AddDate(0, 0, windowDays)
 	// Free/busy EXCLUDING this event, so its own slot is never a conflict and
 	// the current time can be re-proposed if everyone is actually free.
-	busyByUser, unread := gatherFreeBusy(ctx, userIDs, minTime(now, curStart), windowEnd, event)
+	busyByUser, unread, counted := gatherFreeBusy(ctx, me, userIDs, minTime(now, curStart), windowEnd, event)
 
 	// Conflict detection at the CURRENT time. Someone whose calendar couldn't
 	// be read has no known conflict; the note names them.
@@ -458,7 +491,7 @@ func RescheduleOptions(ctx context.Context, userInfo *userModels.UserInfo, req a
 			unreadNames = append(unreadNames, p.Name)
 		}
 	}
-	for _, uid := range userIDs {
+	for _, uid := range counted {
 		for _, iv := range busyByUser[uid] {
 			if overlaps(curStart, curEnd, iv.start, iv.end) {
 				name := nameByID[uid]
@@ -475,13 +508,12 @@ func RescheduleOptions(ctx context.Context, userInfo *userModels.UserInfo, req a
 	}
 	resp.ConflictCount = len(resp.Conflicts)
 
-	resp.Candidates = computeCandidateSlots(now, windowDays, duration, scheduleZone(ctx, req.Timezone, req.UTCOffsetMins), bhStart, bhEnd, scheduleMaxCandidates, busyByUser, unread, userIDs)
+	resp.Candidates = computeCandidateSlots(now, windowDays, duration, loc, bhStart, bhEnd, scheduleMaxCandidates, busyByUser, unread, counted)
 	noSlots := ""
 	if len(resp.Candidates) == 0 {
 		noSlots = fmt.Sprintf("No open slots in the next %d days during business hours.", windowDays)
 	}
-	resp.Note = joinNotes(noSlots, unreadNote(unreadNames))
-	return resp, nil
+	resp.Note = joinNotes(noSlots, unreadNote(unreadNames), uncountedNote(counted, userIDs))
 }
 
 // ConfirmReschedule moves the event to the chosen slot through the normal

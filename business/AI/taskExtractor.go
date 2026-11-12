@@ -31,6 +31,7 @@ import (
 	taskAdapter "github.com/akashc777/OneCamp/adapter/Task"
 	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
@@ -59,7 +60,7 @@ type ProposedTask struct {
 	AssigneeName string `json:"assignee_name,omitempty"` // display name (resolved or as-stated)
 	AssigneeUUID string `json:"assignee_uuid,omitempty"` // resolved user UUID, else empty
 	Due          string `json:"due,omitempty"`           // RFC3339, else empty
-	Priority     string `json:"priority,omitempty"`      // urgent|high|medium|low
+	Priority     string `json:"priority,omitempty"`      // urgent|high|medium|low, or none ("")
 }
 
 // ExtractTasksResult is the proposal returned to the batch-approve UI.
@@ -83,7 +84,7 @@ Return ONLY a JSON object (no prose, no markdown fences) of this shape:
     "title": "<short imperative task title>",
     "assignee": "<person name if a specific owner is stated, else empty>",
     "due": "<YYYY-MM-DD if a deadline is stated, else empty>",
-    "priority": "urgent" | "high" | "medium" | "low",
+    "priority": "urgent" | "high" | "medium" | "low" | "" (empty unless the text says how urgent it is),
     "details": "<one short line of context, optional>"
   }
 ]}
@@ -327,7 +328,9 @@ func gatherExtractionSource(ctx context.Context, userInfo *userModels.UserInfo, 
 // as "nothing to extract".
 func gatherMeetingTranscript(ctx context.Context, userInfo *userModels.UserInfo, roomName string) (string, int) {
 	roomName = strings.TrimSpace(roomName)
-	if roomName == "" || !meetingRoomAccessible(userInfo, roomName) {
+	// A live call's transcript is for the people connected to it (V-860).
+	if roomName == "" || !meetingRoomAccessible(userInfo, roomName) ||
+		!liveKitBusiness.NewestTranscriptOpenTo(ctx, roomName, userInfo.UserDgraphInfo.Uid) {
 		return "", 0
 	}
 	lines, _, err := transcriptDomain.GetTranscriptLinesByRoom(ctx, roomName, maxRecapLines)

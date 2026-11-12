@@ -1,7 +1,8 @@
 // Package controller (TaskField) serves a project's custom task fields and
-// each task's values of them. Any member reads them; the project's admins,
-// who also edit its tasks, make and change fields and set values. See
-// business/TaskField.
+// each task's values of them. Any member reads them, and sets values of the
+// tasks they may edit; the project's admins make and change fields. A money
+// field's values are its project's admins' only, to read and to set
+// (V-698): anyone else sees it listed as hidden. See business/TaskField.
 package controller
 
 import (
@@ -38,6 +39,8 @@ func fail(w http.ResponseWriter, r *http.Request, where string, err error) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That field no longer exists."})
 	case errors.Is(err, business.ErrTaskDeleted):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+	case errors.Is(err, business.ErrMoneyAdminsOnly):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": business.MoneyAdminsOnly})
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/TaskField/%s err: %+v", where, err)
 		helpers.WriteRetryLater(w, "That couldn't be saved just now.")
@@ -82,16 +85,19 @@ func ListFields(w http.ResponseWriter, r *http.Request) {
 // Fields is a project's custom fields as GET /project/{p}/fields answers them,
 // for a reader who may see the project; the task panel's
 // ?include=project_meta reads the same. can_edit tells the app whether to
-// offer making fields and setting values.
+// offer making fields; a field hidden from the reader of ctx says so
+// (business.Hidden); builtins is the task's own facts a formula may read
+// ({Due date}), so the app keeps no list of its own.
 func Fields(ctx context.Context, project uuid.UUID, standing workAccess.Standing) (map[string]any, error) {
 	fields, err := business.List(ctx, project)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"fields": business.Views(fields...), "can_edit": standing.Can(workAccess.NeedManage)}, nil
+	hidden := business.Hidden(ctx, business.ReaderOf(ctx), fields)
+	return map[string]any{"fields": business.Views(hidden, fields...), "can_edit": standing.Can(workAccess.NeedManage), "builtins": business.Builtins()}, nil
 }
 
-// CreateField adds one. POST /project/{p}/fields {name, type, options, currency, on_card}
+// CreateField adds one. POST /project/{p}/fields {name, type, options, currency, on_card, formula}
 func CreateField(w http.ResponseWriter, r *http.Request) {
 	id, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
 	if !ok {
@@ -110,7 +116,45 @@ func CreateField(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, "CreateField", err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.Views(f)[0]})
+	view, err := business.ViewOf(r.Context(), f)
+	if err != nil {
+		fail(w, r, "CreateField", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
+}
+
+// PreviewField checks a formula as a project admin writes it, without
+// saving it: what it gives, or why it can't be read; its values show on
+// the tasks once it's saved (values is empty). POST
+// /project/{p}/fields/preview {formula, field_id (none for a new field)}
+func PreviewField(w http.ResponseWriter, r *http.Request) {
+	id, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
+	if !ok {
+		return
+	}
+	var in struct {
+		Formula string `json:"formula"`
+		FieldID string `json:"field_id"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	fid := uuid.Nil
+	if in.FieldID != "" {
+		parsed, err := uuid.Parse(in.FieldID)
+		if err != nil {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That field no longer exists."})
+			return
+		}
+		fid = parsed
+	}
+	out, err := business.Preview(r.Context(), id, fid, in.Formula)
+	if err != nil {
+		fail(w, r, "PreviewField", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": out})
 }
 
 // UpdateField renames a field, changes its options or currency, or whether
@@ -133,8 +177,13 @@ func UpdateField(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, "UpdateField", err)
 		return
 	}
+	view, err := business.ViewOf(r.Context(), f)
+	if err != nil {
+		fail(w, r, "UpdateField", err)
+		return
+	}
 	// changed: the tasks an option taken away came off, for the app to refresh.
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"field": business.Views(f)[0], "changed": len(changed)}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"field": view, "changed": len(changed)}})
 }
 
 // ReorderFields puts the fields in the order given. POST /project/{p}/fields/reorder {ids}
@@ -216,6 +265,9 @@ func SetTaskField(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f, err := fieldModel.Get(ctx, projectID, fid)
+	if err == nil {
+		err = business.MaySet(ctx, business.ReaderOf(ctx), f)
+	}
 	if err != nil {
 		fail(w, r, "SetTaskField", err)
 		return
@@ -225,6 +277,14 @@ func SetTaskField(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, "SetTaskField", err)
 		return
 	}
-	mqttBusiness.PublishTaskField(&mqttStruct.MqttTaskField{TaskUuid: task.Uuid, ProjectUuid: task.Project.Uuid, FieldID: f.ID.String(), Value: value, By: user.UserDgraphInfo.Uuid})
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"task_uuid": task.Uuid, "field_id": f.ID, "value": value}})
+	told, refetch := business.ForEveryone(f, value)
+	// A formula reading the field changes with it: each app reads the task
+	// again, as itself, for the formulas' new values (refetch).
+	formulas := business.FormulasRead(ctx, f)
+	mqttBusiness.PublishTaskField(&mqttStruct.MqttTaskField{TaskUuid: task.Uuid, ProjectUuid: task.Project.Uuid, FieldID: f.ID.String(), Value: told, Refetch: refetch || formulas, By: user.UserDgraphInfo.Uuid})
+	data := map[string]any{"task_uuid": task.Uuid, "field_id": f.ID, "value": value}
+	if formulas {
+		data["refetch"] = true
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": data})
 }

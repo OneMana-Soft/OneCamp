@@ -29,6 +29,16 @@ func Rank(p string) int {
 	return len(dgraphStruct.VALID_TASK_PRIORITIES)
 }
 
+// Noted is how an answer about a task says its priority: " (priority:
+// high)", or nothing for a task with none, so no answer reads "(priority: )".
+// The API's and the agents' "Task X created in project P" both end with it.
+func Noted(p string) string {
+	if p == "" {
+		return ""
+	}
+	return " (priority: " + p + ")"
+}
+
 // FromWords is the priority someone or something else means by
 // words (an importer's "Highest", a model's "P1"), and whether the words
 // name one at all.

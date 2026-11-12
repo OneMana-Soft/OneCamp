@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	model "github.com/akashc777/OneCamp/models/postgres/TaskKey"
 	"github.com/google/uuid"
@@ -21,23 +22,28 @@ func swap[T any](t *testing.T, p *T, v T) {
 	t.Cleanup(func() { *p = old })
 }
 
-// The six built-in ids here are the ones the task_keys_and_types migration
-// writes: a type the migration made that this package doesn't know, or the
-// other way round, would be a type nobody can pick. Found by its name, not
-// its number, which is given at landing.
+// The built-in ids here are the ones the migrations write: the first six from
+// task_keys_and_types, Epic from task_type_epic. A type a migration made that
+// this package doesn't know, or the other way round, would be a type nobody
+// can pick. Each is found by its name, not its number, which is given at
+// landing.
 func TestTheBuiltInTypesAreTheMigrationsOwn(t *testing.T) {
-	files, err := filepath.Glob("../../migrations/*_task_keys_and_types.up.sql")
-	if err != nil || len(files) != 1 {
-		t.Fatalf("want one task_keys_and_types migration, found %v (%v)", files, err)
-	}
-	sql, err := os.ReadFile(files[0])
-	if err != nil {
-		t.Fatal(err)
+	var sql []byte
+	for _, name := range []string{"task_keys_and_types", "task_type_epic"} {
+		files, err := filepath.Glob("../../migrations/*_" + name + ".up.sql")
+		if err != nil || len(files) != 1 {
+			t.Fatalf("want one %s migration, found %v (%v)", name, files, err)
+		}
+		b, err := os.ReadFile(files[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		sql = append(sql, b...)
 	}
 	rows := regexp.MustCompile(`\('([0-9a-f-]{36})', '(\w+)',`).FindAllStringSubmatch(string(sql), -1)
-	want := map[string]uuid.UUID{"task": TypeTask, "bug": TypeBug, "feature": TypeFeature, "milestone": TypeMilestone, "approval": TypeApproval, "request": TypeRequest}
-	if len(rows) != len(want) {
-		t.Fatalf("the migration has %d built-in types, want %d", len(rows), len(want))
+	want := map[string]uuid.UUID{"task": TypeTask, "bug": TypeBug, "feature": TypeFeature, "milestone": TypeMilestone, "approval": TypeApproval, "request": TypeRequest, "epic": TypeEpic}
+	if len(rows) != len(want) || len(Builtins()) != len(want) {
+		t.Fatalf("the migrations have %d built-in types and Builtins %d, want %d", len(rows), len(Builtins()), len(want))
 	}
 	for _, r := range rows {
 		if id, ok := want[r[2]]; !ok || id.String() != r[1] {
@@ -142,6 +148,40 @@ func TestATypeChangeIsWrittenIntoTheTasksHistory(t *testing.T) {
 	}
 	if l := lines[1]; l.PrevState != "Bug" || l.NextState != "Task" {
 		t.Errorf("the second line: %+v", l)
+	}
+}
+
+// A project holds at most MaxEpics epics (CR-B36 F2): a task made an epic
+// with its project at the cap is refused in words and keeps its type; one
+// made an epic below the cap becomes one.
+func TestAnEpicPastTheProjectsCapIsRefused(t *testing.T) {
+	task := &dgraphStruct.DgraphTask{Uuid: uuid.NewString()}
+	by := &dgraphStruct.DgraphUser{Uid: "0x9"}
+	project := uuid.New()
+	swap(t, &factsFor, func(context.Context, []uuid.UUID) (map[uuid.UUID]model.Facts, error) { return nil, nil })
+	swap(t, &placeOf, func(_ context.Context, id string) (taskDomain.Place, error) {
+		return taskDomain.Place{UUID: id, Project: project.String()}, nil
+	})
+	held := 0
+	swap(t, &epicsIn, func(_ context.Context, projects []uuid.UUID) ([]string, error) {
+		if len(projects) != 1 || projects[0] != project {
+			t.Errorf("read the epics of %v, want the task's project", projects)
+		}
+		return make([]string, held), nil
+	})
+	stored := 0
+	swap(t, &setTaskType, func(_ context.Context, _ uuid.UUID, id *uuid.UUID) (*model.Type, *model.Type, error) {
+		stored++
+		return nil, &model.Type{ID: *id, Builtin: "epic", Name: "Epic", Icon: "epic"}, nil
+	})
+	swap(t, &writeLine, func(context.Context, *dgraphStruct.DgraphTask, []string) error { return nil })
+	held = MaxEpics
+	if _, err := SetTaskType(context.Background(), task, &TypeEpic, by); !errors.Is(err, ErrBadType) || !strings.Contains(err.Error(), "at most") || stored != 0 {
+		t.Errorf("at the cap: %v, %d stored; want refused in words, nothing stored", err, stored)
+	}
+	held = MaxEpics - 1
+	if _, err := SetTaskType(context.Background(), task, &TypeEpic, by); err != nil || stored != 1 {
+		t.Errorf("below the cap: %v, %d stored; want it made an epic", err, stored)
 	}
 }
 

@@ -289,9 +289,9 @@ func validateActions(actions []WorkflowAction, triggerType string, mode int) err
 				return fmt.Errorf("create_task action requires a task name for this trigger")
 			}
 			act.Priority = strings.ToLower(strings.TrimSpace(act.Priority))
-			// Empty → the engine defaults to medium.
+			// Empty: the task has no priority.
 			if !taskPriority.IsOrNone(act.Priority) {
-				return fmt.Errorf("create_task priority must be urgent, high, medium or low")
+				return fmt.Errorf("create_task priority must be urgent, high, medium or low, or none")
 			}
 		case ActionWarnUser:
 			act.Text = strings.TrimSpace(act.Text)

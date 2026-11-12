@@ -106,6 +106,10 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	// Guests by email have their links sealed with the server's key.
 	t.Setenv("APP_SECRET_KEK", "calendar-unit-tests")
+	// Guest links off, as on a default workspace, whatever the environment says.
+	wasLinks := guestLinksOn
+	guestLinksOn = func() bool { return false }
+	t.Cleanup(func() { guestLinksOn = wasLinks })
 	h := &harness{t: t, store: newMemStore(), effects: &recordedEffects{}, tells: &recordedTells{},
 		clock:  time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC),
 		people: map[string]*dgraphStruct.DgraphUser{}, active: map[string]bool{}}
@@ -139,6 +143,9 @@ func newHarness(t *testing.T) *harness {
 	s.ready = func(context.Context) error { return nil }
 	// Reminders in memory too (reminders_test.go).
 	s.rem = newMemReminders()
+	// Calendar sync's ledger in memory (moveFromGoogle_test.go): what a
+	// calendar's list reads of where each calendar comes from (origin.go).
+	s.ledger = newMemLedger(h.store, func() time.Time { return h.clock })
 	h.s = s
 	prev, prevNodes := upcomingBookings, nodesChanged
 	upcomingBookings = func(uuid.UUID, time.Time) ([]bookingModel.BookedEvent, error) { return nil, nil }
@@ -530,7 +537,7 @@ func TestAReadSaysWhenItWasCut(t *testing.T) {
 	for i := 0; i <= maxInstances; i++ {
 		s := start.Add(time.Duration(i) * time.Minute)
 		st, en := timed(s, 1, "UTC")
-		if _, _, err := h.s.create(context.Background(), sam, eventAt(st, en), nil, false); err != nil {
+		if _, _, err := h.s.create(context.Background(), sam, eventAt(st, en), nil, nil, false); err != nil {
 			t.Fatal(err)
 		}
 	}

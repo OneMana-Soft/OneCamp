@@ -198,18 +198,36 @@ func countWidgets(ctx context.Context, dashboard uuid.UUID) (int, error) {
 
 func widgetKey(dashboard uuid.UUID) string { return "dashboard_widgets:" + dashboard.String() }
 
-// AddWidgetWithin keeps a new widget, and fills in its id and times, while
-// its dashboard has fewer than limit live ones (under the dashboard's lock).
-func AddWidgetWithin(ctx context.Context, w *Widget, limit int) (added bool, err error) {
-	return pgexec.Capped(ctx, widgetKey(w.DashboardID), limit,
-		func(ctx context.Context) (int, error) { return countWidgets(ctx, w.DashboardID) },
+// AddWidgetsWithin keeps the new widgets ws, all on dashboard, in one
+// statement, and fills in their ids, while the dashboard has room for every
+// one of them under limit live ones (under its lock): all are kept, or none.
+func AddWidgetsWithin(ctx context.Context, dashboard uuid.UUID, ws []Widget, by uuid.UUID, limit int) (added bool, err error) {
+	if len(ws) == 0 {
+		return true, nil
+	}
+	if len(ws) > limit {
+		return false, nil
+	}
+	n := len(ws)
+	ids, kinds, titles, queries := make([]string, n), make([]string, n), make([]string, n), make([]string, n)
+	xs, ys, wd, hs := make([]int64, n), make([]int64, n), make([]int64, n), make([]int64, n)
+	for i := range ws {
+		ws[i].ID, ws[i].DashboardID, ws[i].CreatedBy = uuid.New(), dashboard, by
+		w := ws[i]
+		ids[i], kinds[i], titles[i], queries[i] = w.ID.String(), w.Kind, w.Title, string(w.Query)
+		xs[i], ys[i], wd[i], hs[i] = int64(w.X), int64(w.Y), int64(w.W), int64(w.H)
+	}
+	// Room for n more: fewer than limit-n+1 there now.
+	return pgexec.Capped(ctx, widgetKey(dashboard), limit-n+1,
+		func(ctx context.Context) (int, error) { return countWidgets(ctx, dashboard) },
 		func(ctx context.Context) error {
-			w.ID = uuid.New()
-			_, _, err := pgexec.QueryOne(ctx, `
+			_, err := pgexec.Exec(ctx, `
 				INSERT INTO dashboard_widgets (id, dashboard_id, kind, title, query, x, y, w, h, created_by)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING created_at, updated_at`,
-				func(r pgexec.Row) (bool, error) { return true, r.Scan(&w.CreatedAt, &w.UpdatedAt) },
-				w.ID, w.DashboardID, w.Kind, w.Title, w.Query, w.X, w.Y, w.W, w.H, w.CreatedBy)
+				SELECT n.id, $1, n.kind, n.title, n.query, n.x, n.y, n.w, n.h, $2
+				  FROM unnest($3::uuid[], $4::text[], $5::text[], $6::jsonb[], $7::int[], $8::int[], $9::int[], $10::int[])
+				    AS n(id, kind, title, query, x, y, w, h)`,
+				dashboard, by, pq.Array(ids), pq.Array(kinds), pq.Array(titles), pq.Array(queries),
+				pq.Array(xs), pq.Array(ys), pq.Array(wd), pq.Array(hs))
 			return err
 		})
 }

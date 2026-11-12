@@ -39,6 +39,7 @@ type CallView struct {
 type roomMetaView struct {
 	IsRecording        bool                 `json:"isRecording"`
 	RecordingStartedBy string               `json:"recordingStartedBy"`
+	EgressID           string               `json:"egressID"`
 	Transcription      *TranscriptionSwitch `json:"transcription"`
 }
 

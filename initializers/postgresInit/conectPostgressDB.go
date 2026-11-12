@@ -69,6 +69,9 @@ func ConnectPostgres(ctx context.Context, dsn string) error {
 // analytical queries the app doesn't send. A table's three sums over 100k
 // rows spent 1.5-1.8 s of their 3-4.7 s compiling on a half-CPU Postgres,
 // past their 2 s budget (V-114). A DSN that sets jit keeps its own.
+//
+// Every session also names, in the log, each statement Postgres refuses for
+// space (spaceTracer).
 func sessionConfig(dsn string) (*pgx.ConnConfig, error) {
 	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
@@ -77,6 +80,7 @@ func sessionConfig(dsn string) (*pgx.ConnConfig, error) {
 	if _, set := cfg.RuntimeParams["jit"]; !set {
 		cfg.RuntimeParams["jit"] = "off"
 	}
+	cfg.Tracer = spaceTracer{}
 	return cfg, nil
 }
 

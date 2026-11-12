@@ -17,7 +17,6 @@ import (
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/AI"
-	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	pendingModels "github.com/akashc777/OneCamp/models/postgres/PendingAction"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -76,8 +75,8 @@ func decodePlanSteps(s string) ([]PlanStep, error) {
 // CreatePlanAction persists an agent's proposed plan as a SINGLE durable
 // approval. Each step is validated against the executor registry up front (so a
 // plan that could never run is rejected at creation, like CreatePendingAction),
-// then the ordered steps are stored under the sentinel tool. Notifies the
-// requester so the card appears live.
+// then the ordered steps are stored under the sentinel tool. Announced as any
+// approval is (announceCreated): the live card and a push.
 func CreatePlanAction(ctx context.Context, requestedBy uuid.UUID, surfaceType, surfaceID string, steps []PlanStep, summary string, attribution ...pendingModels.Attribution) (*pendingModels.PendingAction, error) {
 	// Approving a plan is the same signal as approving a single action, so it
 	// is attributed the same way. See CreatePendingAction.
@@ -103,7 +102,7 @@ func CreatePlanAction(ctx context.Context, requestedBy uuid.UUID, surfaceType, s
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode plan")
 	}
-	action, err := pendingModels.CreatePendingAction(ctx, requestedBy, surfaceType, surfaceID,
+	action, err := createActionRow(ctx, requestedBy, surfaceType, surfaceID,
 		planSentinelTool, map[string]string{"steps": enc}, summary, "", time.Now().Add(pendingActionTTL), attr, bind)
 	if err != nil {
 		return nil, err
@@ -111,16 +110,9 @@ func CreatePlanAction(ctx context.Context, requestedBy uuid.UUID, surfaceType, s
 	if action == nil {
 		return nil, fmt.Errorf("failed to create plan action")
 	}
-	publishPendingAction(action.RequestedBy.String(), &mqttStruct.MqttPendingAction{
-		Action:      "created",
-		ID:          action.Id.String(),
-		SurfaceType: action.SurfaceType,
-		SurfaceID:   action.SurfaceID,
-		ToolName:    action.ToolName,
-		Description: action.Description,
-		Status:      action.Status,
-		CreatedAt:   action.CreatedAt.Format(time.RFC3339),
-	})
+	// The same card and push as a single action, so a plan says which agent
+	// made it and reaches someone who is not looking (V-862).
+	announceCreated(ctx, action)
 	return action, nil
 }
 

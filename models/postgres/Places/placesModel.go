@@ -156,15 +156,27 @@ type View struct {
 }
 
 // RecentViews is what the person opened of one kind (resource_views' "doc"
-// or "board") since a moment, newest first, at most limit.
-func RecentViews(ctx context.Context, userUUID, resourceType string, since time.Time, limit int) ([]View, error) {
+// or "board") since a moment, newest first, at most limit: after a view
+// read before (nil: from the newest), as the next page. The page is a
+// keyset on (last_viewed_at, resource_uuid), never an offset: a view made
+// between two pages moves to the top and neither skips nor repeats one. The
+// user's recent index (migration 206's resource_views_user_recent_idx)
+// orders by last_viewed_at alone; resource_uuid only breaks ties between
+// views made at the same moment, so the order and the keyset are total.
+func RecentViews(ctx context.Context, userUUID, resourceType string, since time.Time, after *View, limit int) ([]View, error) {
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
+	args := []any{userUUID, resourceType, since, limit}
+	keyset := ""
+	if after != nil {
+		keyset = `AND (last_viewed_at, resource_uuid) < ($5, $6)`
+		args = append(args, after.LastViewedAt, after.ResourceUUID)
+	}
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
 		SELECT resource_uuid, last_viewed_at FROM resource_views
-		 WHERE user_uuid = $1 AND resource_type = $2 AND last_viewed_at >= $3
-		 ORDER BY last_viewed_at DESC
-		 LIMIT $4`, userUUID, resourceType, since, limit)
+		 WHERE user_uuid = $1 AND resource_type = $2 AND last_viewed_at >= $3 `+keyset+`
+		 ORDER BY last_viewed_at DESC, resource_uuid DESC
+		 LIMIT $4`, args...)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Places RecentViews err: %+v", err)
 		return nil, err

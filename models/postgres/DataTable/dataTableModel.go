@@ -981,16 +981,19 @@ func WriteAICell(ctx context.Context, tableId, rowId uuid.UUID, field, cellJSON 
 		var old string
 		r, err := scanRow(thenScan{tx.QueryRowContext(dbctx, q, rowId, tableId, cellJSON, maxBytes, field, again, was, reads), []any{&old}})
 		if errors.Is(err, sql.ErrNoRows) {
-			var kept, same bool
-			if qerr := tx.QueryRowContext(dbctx,
+			type why struct{ kept, same bool }
+			if w, found, qerr := pgexec.QueryOne(pgexec.WithTx(dbctx, tx),
 				`SELECT `+fmt.Sprintf(keptSQL, "values")+` ? $3, (values -> $3::text) IS NOT DISTINCT FROM $4::jsonb
 					AND `+fmt.Sprintf(unchangedSQL, "$5", "values")+`
 				FROM data_table_rows WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`,
-				rowId, tableId, field, was, reads).Scan(&kept, &same); qerr == nil {
+				func(r pgexec.Row) (w why, err error) {
+					err = r.Scan(&w.kept, &w.same)
+					return w, err
+				}, rowId, tableId, field, was, reads); qerr == nil && found {
 				switch {
-				case kept && !again:
+				case w.kept && !again:
 					return ErrAIKept
-				case !same:
+				case !w.same:
 					return ErrCellChanged
 				}
 			}

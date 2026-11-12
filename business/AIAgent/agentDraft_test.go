@@ -52,8 +52,9 @@ func TestSanitizeAgentDraftClampsVocabulary(t *testing.T) {
 	if out.TriggerType != "manual" {
 		t.Fatalf("invalid trigger should fall back to manual, got %q", out.TriggerType)
 	}
-	if out.Autonomy != "auto" {
-		t.Fatalf("invalid autonomy should fall back to auto, got %q", out.Autonomy)
+	// Changed on purpose (ADMIN-16): an unreadable choice asks first.
+	if out.Autonomy != "approval" {
+		t.Fatalf("invalid autonomy should fall back to approval, got %q", out.Autonomy)
 	}
 	if out.MaxSteps != draftDefaultMaxSteps {
 		t.Fatalf("out-of-range max_steps should default, got %d", out.MaxSteps)
@@ -75,5 +76,20 @@ func TestSanitizeAgentDraftValidPassThrough(t *testing.T) {
 	})
 	if out.TriggerType != "mention" || out.Autonomy != "approval" || out.MaxSteps != 10 {
 		t.Fatalf("valid values should pass through: %+v", out)
+	}
+}
+
+// A draft that names no autonomy, or one that isn't, asks first: a new agent
+// waits for a yes until someone chooses otherwise (ADMIN-16).
+func TestDraftFallbackIsApproval(t *testing.T) {
+	for _, a := range []string{"", "  ", "yolo", "AUTONOMOUS"} {
+		if got := sanitizeAgentDraft(&AgentDraft{Autonomy: a}).Autonomy; got != "approval" {
+			t.Errorf("draft autonomy %q became %q, want approval", a, got)
+		}
+	}
+	for _, a := range []string{"auto", "Plan", "approval"} {
+		if got := sanitizeAgentDraft(&AgentDraft{Autonomy: a}).Autonomy; got != strings.ToLower(a) {
+			t.Errorf("a chosen autonomy %q is kept: got %q", a, got)
+		}
 	}
 }

@@ -67,6 +67,12 @@ type needs struct {
 	// and fields' ids).
 	table      string
 	tableEvent bool
+	// event is a calendar event's webhook's event (business/Calendar
+	// webhooks.go), and calendarEvent says the webhook is one: it reaches
+	// only someone the calendar shows the event to, and one that names no
+	// event, nobody.
+	event         string
+	calendarEvent bool
 }
 
 // needsOf is what an event names. Whether its task is kept to a few people is
@@ -78,6 +84,9 @@ func needsOf(ctx context.Context, eventType string, data map[string]interface{})
 	}
 	if strings.HasPrefix(eventType, "call.") {
 		n.callEvent, n.meeting = true, named(data, "meeting_id")
+	}
+	if strings.HasPrefix(eventType, "event.") {
+		n.calendarEvent, n.event = true, named(data, "event_id")
 	}
 	if strings.HasPrefix(eventType, "table.") {
 		n.tableEvent, n.table = true, named(data, "table_id")
@@ -115,6 +124,10 @@ var errNoChannelRule = errors.New("webhooks: nothing says who may read a channel
 // may read one.
 var errNoMeetingRule = errors.New("webhooks: nothing says who may read a meeting")
 
+// errNoEventRule is a calendar event asked about before business/Calendar said
+// who is shown one.
+var errNoEventRule = errors.New("webhooks: nothing says who may see a calendar event")
+
 // The rules reachOf is built from, as seams for tests.
 var (
 	memberNow = hooksBusiness.MemberNow
@@ -125,10 +138,13 @@ var (
 	// readsMeeting is business/CallState's MayRead for a meeting, which it
 	// sets (ReadMeetingsWith), as business/Channel sets readsChannel.
 	readsMeeting = func(context.Context, string, string) (bool, error) { return false, errNoMeetingRule }
-	graphUser    = userDomain.GetActiveDgraphUserInfoByUUID
-	projectAs    = projectDomain.GetBasicDgraphProjectInfo
-	standingIn   = workAccess.Of
-	resolveDoc   = func(ctx context.Context, who accessBusiness.Subject, res accessBusiness.Resource) (accessBusiness.Decision, error) {
+	// readsEvent is business/Calendar's rule for whether someone is shown an
+	// event, which it sets (ReadEventsWith).
+	readsEvent = func(context.Context, string, string) (bool, error) { return false, errNoEventRule }
+	graphUser  = userDomain.GetActiveDgraphUserInfoByUUID
+	projectAs  = projectDomain.GetBasicDgraphProjectInfo
+	standingIn = workAccess.Of
+	resolveDoc = func(ctx context.Context, who accessBusiness.Subject, res accessBusiness.Resource) (accessBusiness.Decision, error) {
 		return accessBusiness.Rules.Resolve(ctx, who, res)
 	}
 	hiddenTasks = taskread.For
@@ -152,6 +168,11 @@ func ReadChannelsWith(f func(ctx context.Context, userUUID, channelID string) (b
 // rule.
 func ReadMeetingsWith(f func(ctx context.Context, userUUID, meetingID string) (bool, error)) {
 	readsMeeting = f
+}
+
+// ReadEventsWith sets who is shown a calendar event: business/Calendar's rule.
+func ReadEventsWith(f func(ctx context.Context, userUUID, eventID string) (bool, error)) {
+	readsEvent = f
 }
 
 // reachOf is how an event that names event stands for a webhook set up for
@@ -278,6 +299,15 @@ func (r *reader) reads(ctx context.Context, n needs) (bool, error) {
 			d, err := resolveDoc(ctx, accessBusiness.Subject{UserUID: uid, UserUUID: r.who.String()}, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: n.doc})
 			return err == nil && (d.Level >= accessBusiness.LevelView || d.Deleted && d.Was >= accessBusiness.LevelView), err
 		})
+		if err != nil || !ok {
+			return false, err
+		}
+	}
+	if n.calendarEvent {
+		if n.event == "" {
+			return false, nil
+		}
+		ok, err := r.once("event "+n.event, func() (bool, error) { return readsEvent(ctx, r.who.String(), n.event) })
 		if err != nil || !ok {
 			return false, err
 		}

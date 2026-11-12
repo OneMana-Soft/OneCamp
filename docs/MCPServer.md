@@ -135,7 +135,7 @@ down; they never widen it. A token with `docs:read` held by someone who cannot o
 | `docs:read` / `docs:write` | list documents and read one as Markdown (`GET /v1/docs`, `GET /v1/docs/{id}`); create documents and add to the end of one (`POST /v1/docs`, `POST /v1/docs/{id}/append`) |
 | `messages:read` / `messages:write` | summarise conversations; post messages and DMs |
 | `tables:read` / `tables:write` | read and query tables; create and update rows |
-| `calendar:write` | create reminders and events |
+| `calendar:read` / `calendar:write` | see the calendars you may see, list and read events on them, and find times people are free (`GET /v1/calendars`, `GET /v1/events`, `GET /v1/events/{id}`, `POST /v1/events/find-time`); create reminders and events, change or cancel events, and bring a cancelled one back from the trash. A calendar shared with you as busy-only answers Busy blocks, and a private event you are not on is never shown |
 | `data_sources:read` | read and query connected external data sources |
 | `attention:read` | read what is waiting for you: unread counts (`GET /v1/unread`) and, in the AI edition, approvals and overdue tasks (`GET /v1/attention`); nothing else |
 | `search:read` | search across the workspace, memory, and connected apps; ask what an item is connected to and how two items connect |

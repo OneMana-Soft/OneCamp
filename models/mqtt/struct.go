@@ -148,7 +148,54 @@ const (
 	// project topic, so open grids read their range again. Never a title:
 	// no more than a busy view shows. Number 48 allotted by INTEGRATOR-106.
 	MESSAGE_CALENDAR_LIVE = 48
+	// A DM's or a small group's call rings someone, or stops ringing them, or
+	// was declined (MqttCallRing, business/Chat callRing.go): on the person's
+	// own activity topic, so every device they have open rings and stops
+	// together. Number 49 allotted by INTEGRATOR-112.
+	MESSAGE_CALL_RING = 49
 )
+
+// What MESSAGE_CALL_RING says (business/Chat callRing.go), each naming its
+// call (Session): a ring says who calls, where, until when it rings and
+// whether without a tone (quiet: the conversation is muted, or the person
+// paused); a stop ends the ring on every device (they joined or declined, or
+// the call ended); a decline, told to the call's starter alone, says who.
+const (
+	CallRingRing     = "ring"
+	CallRingStop     = "stop"
+	CallRingDeclined = "declined"
+	// CallRingRinging tells the person ringing who their call rings now
+	// (People), and until when.
+	CallRingRinging = "ringing"
+)
+
+// MqttCallRing is one MESSAGE_CALL_RING.
+type MqttCallRing struct {
+	State     string            `json:"state"`
+	Session   string            `json:"session"`
+	Caller    *CallRingPerson   `json:"caller,omitempty"`
+	Resource  *CallRingResource `json:"resource,omitempty"`
+	RingUntil *time.Time        `json:"ring_until,omitempty"`
+	Quiet     bool              `json:"quiet,omitempty"`
+	By        *CallRingPerson   `json:"by,omitempty"`
+	People    []CallRingPerson  `json:"people,omitempty"`
+}
+
+// CallRingPerson is who calls, or who declined: their id, the name people
+// see, and their picture's object key.
+type CallRingPerson struct {
+	UUID    string `json:"uuid"`
+	Name    string `json:"name"`
+	Profile string `json:"profile,omitempty"`
+	// Quiet is someone rung without a tone, in a ringing's People.
+	Quiet bool `json:"quiet,omitempty"`
+}
+
+// CallRingResource is the DM or group a ringing call is in.
+type CallRingResource struct {
+	Kind string `json:"kind"`
+	UUID string `json:"uuid"`
+}
 
 // MqttInvitationAccepted is who accepted their invitation.
 type MqttInvitationAccepted struct {
@@ -457,7 +504,11 @@ type MqttTaskField struct {
 	ProjectUuid string          `json:"project_uuid"`
 	FieldID     string          `json:"field_id"`
 	Value       json.RawMessage `json:"value"`
-	By          string          `json:"by"`
+	// Refetch says each app reads the task again as its reader: the value
+	// isn't told (a money field's: business/TaskField ForEveryone), or a
+	// formula reads the field, and its value changed with it (FormulasRead).
+	Refetch bool   `json:"refetch,omitempty"`
+	By      string `json:"by"`
 }
 
 type MqttTaskCommentReaction struct {
@@ -619,16 +670,19 @@ type Message struct {
 // engine creates (or refreshes) a nudge for them, so the bell/badge updates in
 // real time without a poll. Action ∈ "new" | "cleared".
 type MqttNudge struct {
-	Action    string `json:"action"`
-	NudgeID   string `json:"nudge_id,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	Title     string `json:"title,omitempty"`
-	Body      string `json:"body,omitempty"`
-	CTAURL    string `json:"cta_url,omitempty"`
-	CTAText   string `json:"cta_text,omitempty"`
-	Priority  int    `json:"priority,omitempty"`
-	OpenCount int    `json:"open_count"`
-	CreatedAt string `json:"created_at,omitempty"`
+	Action  string `json:"action"`
+	NudgeID string `json:"nudge_id,omitempty"`
+	// NudgeIDs names the nudges a "cleared" closes: one event per person per
+	// pass (V-577). None: the count alone (Clear all).
+	NudgeIDs  []string `json:"nudge_ids,omitempty"`
+	Kind      string   `json:"kind,omitempty"`
+	Title     string   `json:"title,omitempty"`
+	Body      string   `json:"body,omitempty"`
+	CTAURL    string   `json:"cta_url,omitempty"`
+	CTAText   string   `json:"cta_text,omitempty"`
+	Priority  int      `json:"priority,omitempty"`
+	OpenCount int      `json:"open_count"`
+	CreatedAt string   `json:"created_at,omitempty"`
 }
 
 // MqttPendingAction is published to a user's activity topic when a durable AI
@@ -651,6 +705,10 @@ type MqttPendingAction struct {
 	Result      string `json:"result,omitempty"`
 	Error       string `json:"error,omitempty"`
 	CreatedAt   string `json:"created_at,omitempty"`
+	// AgentName and ExpiresAt let a card that arrives live say who asks and
+	// until when, as a listed one does. Append-only fields.
+	AgentName string `json:"agent_name,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 // MqttSlackImportProgress is published periodically (throttled) while a
@@ -701,12 +759,15 @@ type MqttAgentWork struct {
 	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
-// MqttPollUpdate says a poll in a channel changed. It carries only the id: a
-// client refetches the poll, which answers with that reader's own choices.
+// MqttPollUpdate says a poll in a channel, or on a board's frame, changed. It
+// carries only the ids: a client refetches the poll, which answers with that
+// reader's own choices.
 type MqttPollUpdate struct {
 	Type        int8   `json:"type"`
 	PollUUID    string `json:"poll_uuid"`
 	ChannelUUID string `json:"channel_uuid"`
+	BoardUUID   string `json:"board_uuid,omitempty"`
+	FrameID     string `json:"frame_id,omitempty"`
 }
 
 // MarshalJSON writes the doc's uuid under doc_uuid as well as doc_id.

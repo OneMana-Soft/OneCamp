@@ -44,3 +44,20 @@ func TestAnAdapterRegistersOncePerProvider(t *testing.T) {
 		}()
 	}
 }
+
+// readOnly is an adapter of a feed that is only read.
+type readOnly struct{ fake }
+
+func (readOnly) ReadsOnly() bool { return true }
+
+// TwoWay names the providers that sync both ways, each once and in order:
+// not a feed that is only read, which has a sweep of its own.
+func TestTwoWayNamesTheProvidersThatSyncBothWays(t *testing.T) {
+	r := &registry{byProvider: map[string]Adapter{}}
+	r.Register(fake{"microsoft"})
+	r.Register(readOnly{fake{"ics"}})
+	r.Register(fake{"google"})
+	if got := r.TwoWay(); len(got) != 2 || got[0] != "google" || got[1] != "microsoft" {
+		t.Fatalf("two-way %v", got)
+	}
+}

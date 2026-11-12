@@ -231,6 +231,10 @@ type Facts struct {
 	// Assignable are the people and AI teammates who may be given its tasks,
 	// of those the template and the maker name.
 	Assignable map[string]bool
+	// Money is whether the maker may set money values, as an admin of the
+	// project (business/TaskField MaySet): what anyone else types in a money
+	// field is left off, and the template's own value stands.
+	Money bool
 }
 
 // Typed is what the maker typed over a template: nil keeps the template's
@@ -301,7 +305,7 @@ func Fit(t Template, typed Typed, facts Facts, start projectTemplate.Start) Made
 			left("The assignee: they can't be given this project's tasks, so the task is unassigned.")
 		}
 	}
-	fitFields(&m, s.Fields, typed.Fields, facts.Fields)
+	fitFields(&m, s.Fields, typed.Fields, facts)
 	for _, st := range s.Subtasks {
 		m.Subtasks = append(m.Subtasks, st.Name)
 	}
@@ -335,16 +339,29 @@ func when(typed *time.Time, cleared bool, day *int, start projectTemplate.Start,
 }
 
 // fitFields sets each field value the project's field takes, typed over the
-// template's (null clears one), and names each it can't take.
-func fitFields(m *Made, preset, typed map[string]json.RawMessage, fields []*taskFieldModel.Field) {
+// template's (null clears one), and names each it can't take. A money value
+// typed by someone who may not set money is left off (facts.Money).
+func fitFields(m *Made, preset, typed map[string]json.RawMessage, facts Facts) {
+	fields := facts.Fields
 	values := map[string]json.RawMessage{}
 	for k, v := range preset {
 		values[k] = v
 	}
+	var refused []string
 	for k, v := range typed {
-		if id, ok := anID(k); ok && id != "" {
-			values[id] = v
+		id, ok := anID(k)
+		if !ok || id == "" {
+			continue
 		}
+		if i := slices.IndexFunc(fields, func(f *taskFieldModel.Field) bool { return f.ID.String() == id }); i >= 0 && fields[i].Type == taskFieldModel.TypeMoney && !facts.Money {
+			refused = append(refused, fields[i].Name)
+			continue
+		}
+		values[id] = v
+	}
+	sort.Strings(refused)
+	for _, name := range refused {
+		m.LeftOff = append(m.LeftOff, fmt.Sprintf("The field %s: %s, so what was typed in it is left off.", name, taskFieldBusiness.ErrMoneyAdminsOnly))
 	}
 	keys := make([]string, 0, len(values))
 	for k := range values {
@@ -388,7 +405,7 @@ func MayManage(t Template, s workAccess.Standing, isAdmin bool) bool {
 // templates and the workspace's, and make a task from one: whoever may make
 // a task there, and never in an archived project. Pure.
 func MayApply(s workAccess.Standing) bool {
-	return !s.Archived && s.Can(workAccess.NeedCreateTask)
+	return s.AddsTasks()
 }
 
 // Defaults is, for each type a listed template is the default for, the id

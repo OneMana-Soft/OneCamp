@@ -194,6 +194,22 @@ func GetDgraphProjectListByAdminDgraphUID(w http.ResponseWriter, r *http.Request
 
 }
 
+// ProjectsForNewTask GET /project/forNewTask: the projects the caller may add
+// tasks to (Work Access), a member's as well as an admin's, by name, each with
+// its team, its people and its key: what New task picks a project from.
+func ProjectsForNewTask(w http.ResponseWriter, r *http.Request) {
+	who, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	projects, err := business.ProjectsForNewTask(r.Context(), &who)
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "projects", "controllers/ProjectsForNewTask")
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "ok", "data": projects})
+}
+
 func RemoveAttachmentFromProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -1049,7 +1065,7 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 	// One builder for every task list (business.ListFilter).
 	filterQuery, err := business.ListFilter(ctx, projectUUIDString, listParams(filtersParam), queryParams.Get("taskSearchString"), time.Now()).Clause()
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "search string is too long or invalid"})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": filterProblem(err, "search string is too long or invalid")})
 		return
 	}
 
@@ -1100,7 +1116,7 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 	// Overlay ephemeral GitHub metadata from PostgreSQL onto Dgraph tasks
 	if dgraphProjectWithTasks != nil && len(dgraphProjectWithTasks.Tasks) > 0 {
 		// GitHub's facts are already on them (business.GetDgraphProjectTaskList; PR1, #24).
-		_ = taskFieldBusiness.MergeFieldValues(ctx, dgraphProjectWithTasks.Tasks)
+		_ = taskFieldBusiness.MergeFieldValues(helpers.WithZone(ctx, r.URL.Query().Get("tz")), dgraphProjectWithTasks.Tasks)
 	}
 
 	pageCount := uint64(1)
@@ -1181,7 +1197,7 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 	filterQuery, err := kanbanFilterQuery(ctx, projectUUIDString, r)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse filters query param",
+			"msg": filterProblem(err, "Failed to parse filters query param"),
 			"err": err,
 		})
 		return
@@ -1213,7 +1229,7 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 		allTasks = append(allTasks, dgraphProjectWithTasks.TasksCanceled...)
 		allTasks = append(allTasks, dgraphProjectWithTasks.TasksDone...)
 		// GitHub's facts are already on them (business.GetDgraphProjectTaskListForKanban; PR1, #24).
-		_ = taskFieldBusiness.MergeFieldValues(ctx, allTasks)
+		_ = taskFieldBusiness.MergeFieldValues(helpers.WithZone(ctx, r.URL.Query().Get("tz")), allTasks)
 		approvalsBusiness.MarkWaiting(ctx, allTasks)
 	}
 	decorate(ctx, &userInfo, dgraphProjectWithTasks)
@@ -1251,6 +1267,16 @@ func kanbanFilterQuery(ctx context.Context, projectUUIDString string, r *http.Re
 
 	// One builder for every task list (business.ListFilter).
 	return business.ListFilter(ctx, projectUUIDString, listParams(filtersParam), "", time.Now()).Clause()
+}
+
+// filterProblem is a list's filter error as the person is told it: one they
+// can fix in its own words (a filter on a formula field), else otherwise.
+func filterProblem(err error, otherwise string) string {
+	var ie *taskFieldBusiness.InputError
+	if errors.As(err, &ie) {
+		return ie.Error()
+	}
+	return otherwise
 }
 
 // listParams is a list's filters as the one builder takes them.
@@ -1309,7 +1335,7 @@ func GetProjectBoardColumn(w http.ResponseWriter, r *http.Request) {
 	}
 	filterQuery, err := kanbanFilterQuery(ctx, projectUUIDString, r)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse filters query param"})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": filterProblem(err, "Failed to parse filters query param")})
 		return
 	}
 	page, err := business.GetProjectBoardColumnPage(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid, filterQuery, status, after,
@@ -1325,7 +1351,7 @@ func GetProjectBoardColumn(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteReadFailure(w, r, err, "board column", "controllers/GetProjectBoardColumn")
 		return
 	}
-	_ = taskFieldBusiness.MergeFieldValues(ctx, page.Cards)
+	_ = taskFieldBusiness.MergeFieldValues(helpers.WithZone(ctx, r.URL.Query().Get("tz")), page.Cards)
 	approvalsBusiness.MarkWaiting(ctx, page.Cards)
 	// What the reader may do with each card, as the board says it.
 	view := &dgraphStruct.DgraphProject{Uuid: projectUUIDString, TasksTodo: page.Cards}

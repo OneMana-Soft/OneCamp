@@ -203,3 +203,26 @@ func TestTheTablesOpsOnNoTableAreTheirKindsTools(t *testing.T) {
 		t.Errorf("the tables ops leave out %v", want)
 	}
 }
+
+// An op on a task (a task's links, jira-01 J-H) publishes as a tool checked by
+// the task's rule, membership of its project to read, and names the task its
+// arguments name; Serve then reads as that member (business/Task Links).
+func TestAnOpOnATaskIsCheckedByTheTasksRule(t *testing.T) {
+	op := v1api.Op{Name: "tasks.links", Summary: "A test op", Scope: "tasks:read", Behaviour: v1api.Behaviour{ReadOnly: true, Idempotent: true},
+		Input: json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`),
+		Reach: func(args map[string]any) (string, string) { id, _ := args["id"].(string); return "task", id }}
+	spec, err := specForOp(op)
+	if err != nil {
+		t.Fatalf("an op on a task can't be published: %v", err)
+	}
+	id := uuid.NewString()
+	if ref, err := spec.Resource(map[string]any{"id": id}); err != nil || ref.Kind != ResourceTask || ref.ID != id {
+		t.Errorf("tasks.links acts on %+v (%v), want task %s", ref, err, id)
+	}
+	if _, err := spec.Resource(map[string]any{}); err == nil {
+		t.Error("tasks.links with no task named acts on something")
+	}
+	if spec.Name != "tasks_links" || !spec.Behaviour.ReadOnly || spec.IdempotencyKey != nil {
+		t.Errorf("tasks.links is published as %+v, want the read tool tasks_links", spec)
+	}
+}

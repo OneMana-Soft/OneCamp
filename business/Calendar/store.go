@@ -77,8 +77,8 @@ type store interface {
 	seriesAfter(ctx context.Context, after uuid.UUID, skip []string, subscribed bool, limit int) ([]uuid.UUID, error)
 	// rangeOf is what person is on that could touch w, outside the trash.
 	rangeOf(ctx context.Context, person uuid.UUID, w models.Window, limit int) ([]*models.Event, error)
-	// trashOf is person's trash, newest first.
-	trashOf(ctx context.Context, person uuid.UUID, before *time.Time, limit int) ([]*models.Event, error)
+	// trashOf is person's trash since since, newest first, from after.
+	trashOf(ctx context.Context, person uuid.UUID, since time.Time, after *models.TrashCursor, limit int) ([]*models.Event, error)
 	// awayOf is these people's out-of-office events that could touch w.
 	awayOf(ctx context.Context, people []uuid.UUID, w models.Window, limit int) ([]*models.Event, error)
 	// placesOf is these people's working-location events that could touch w.
@@ -104,8 +104,15 @@ type store interface {
 	// UIDs name, in the trash or not.
 	byICalUIDs(ctx context.Context, uids []string) ([]*models.Event, error)
 
-	// create writes a new event and its guests.
-	create(ctx context.Context, e *models.Event, guests []models.Attendee) error
+	// create writes a new event, its guests and its files.
+	create(ctx context.Context, e *models.Event, guests []models.Attendee, files []models.EventFile) error
+	// An event's files (eventFiles.go): each event's live ones, in the order
+	// put on; one put on while the event carries fewer than most others
+	// (models.ErrFilesFull), one taken off brought back; and one taken off.
+	// The writes say whether they changed the event's files.
+	filesOf(ctx context.Context, events []uuid.UUID) (map[uuid.UUID][]models.EventFile, error)
+	addFile(ctx context.Context, f models.EventFile, most int) (bool, error)
+	removeFile(ctx context.Context, event uuid.UUID, kind string, ref, by uuid.UUID, at time.Time) (bool, error)
 	// update writes e and its guest changes when it is still at expect (any
 	// sequence when nil), and answers its new sequence (models.ErrStale,
 	// models.ErrNotFound). Guests taken off (people by id, guests by email
@@ -118,6 +125,9 @@ type store interface {
 	// setCallRoom gives an event (and its series' own instances) the call in
 	// room while its call is still was, saying whether it took it.
 	setCallRoom(ctx context.Context, id uuid.UUID, room, was string, now time.Time) (bool, error)
+	// holdingRoom is the live events, series and single ones, that hold the
+	// call in room (models.HoldingRoom).
+	holdingRoom(ctx context.Context, room string) ([]*models.Event, error)
 	// setGoogleID records the event's copy in Google ("" forgets it).
 	setGoogleID(ctx context.Context, id uuid.UUID, googleID string) error
 
@@ -150,8 +160,8 @@ type store interface {
 	// apply writes a change to a series in one transaction: when the series
 	// is still as its guard says, new rows first (an override may move onto a
 	// new series), then the rows' updates (each at its sequence, when one is
-	// named), their guests, and rows into the trash or out of it
-	// (models.ErrStale, models.ErrNotFound).
+	// named), the files a row made from the series carries, their guests, and
+	// rows into the trash or out of it (models.ErrStale, models.ErrNotFound).
 	apply(ctx context.Context, b batch) error
 }
 
@@ -168,6 +178,9 @@ type batch struct {
 	drop       map[uuid.UUID][]uuid.UUID
 	dropEmails map[uuid.UUID][]string
 	roles      []models.Attendee
+	// files are files to put on rows this batch makes from a series (its
+	// live ones: filesTo), none of them on those rows yet.
+	files []models.EventFile
 	// trash and restore move rows into the trash and out of it.
 	trash, restore []uuid.UUID
 	// folded are overrides whose changes this batch moves onto their series'
@@ -342,8 +355,8 @@ func (postgresStore) rangeOf(ctx context.Context, person uuid.UUID, w models.Win
 	return models.RangeOf(ctx, models.Pool(), person, w, limit)
 }
 
-func (postgresStore) trashOf(ctx context.Context, person uuid.UUID, before *time.Time, limit int) ([]*models.Event, error) {
-	return models.TrashOf(ctx, models.Pool(), person, before, limit)
+func (postgresStore) trashOf(ctx context.Context, person uuid.UUID, since time.Time, after *models.TrashCursor, limit int) ([]*models.Event, error) {
+	return models.TrashOf(ctx, models.Pool(), person, since, after, limit)
 }
 
 func (postgresStore) awayOf(ctx context.Context, people []uuid.UUID, w models.Window, limit int) ([]*models.Event, error) {
@@ -378,13 +391,28 @@ func (postgresStore) peopleByEmail(ctx context.Context, emails []string) (map[st
 	return models.PeopleByEmail(ctx, models.Pool(), emails)
 }
 
-func (postgresStore) create(ctx context.Context, e *models.Event, guests []models.Attendee) error {
+func (postgresStore) create(ctx context.Context, e *models.Event, guests []models.Attendee, files []models.EventFile) error {
 	return inTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := models.Insert(ctx, tx, e); err != nil {
 			return err
 		}
-		return models.AddAttendees(ctx, tx, guests)
+		if err := models.AddAttendees(ctx, tx, guests); err != nil {
+			return err
+		}
+		return models.AddFiles(pgexec.WithTx(ctx, tx), files)
 	})
+}
+
+func (postgresStore) filesOf(ctx context.Context, events []uuid.UUID) (map[uuid.UUID][]models.EventFile, error) {
+	return models.FilesOf(ctx, events)
+}
+
+func (postgresStore) addFile(ctx context.Context, f models.EventFile, most int) (bool, error) {
+	return models.AddFile(ctx, f, most)
+}
+
+func (postgresStore) removeFile(ctx context.Context, event uuid.UUID, kind string, ref, by uuid.UUID, at time.Time) (bool, error) {
+	return models.RemoveFile(ctx, event, kind, ref, by, at)
 }
 
 // guestWrites is what one write does to an event's guests: who comes on,
@@ -452,6 +480,10 @@ func (postgresStore) setCallRoom(ctx context.Context, id uuid.UUID, room, was st
 	return models.SetCallRoom(ctx, id, room, was, now)
 }
 
+func (postgresStore) holdingRoom(ctx context.Context, room string) ([]*models.Event, error) {
+	return models.HoldingRoom(ctx, models.Pool(), room)
+}
+
 func (postgresStore) setGoogleID(ctx context.Context, id uuid.UUID, googleID string) error {
 	return models.SetGoogleID(ctx, models.Pool(), id, googleID)
 }
@@ -488,6 +520,9 @@ func (postgresStore) apply(ctx context.Context, b batch) error {
 			if _, err := models.Update(ctx, tx, u.e, u.expect); err != nil {
 				return err
 			}
+		}
+		if err := models.AddFiles(pgexec.WithTx(ctx, tx), b.files); err != nil {
+			return err
 		}
 		if err := models.AddAttendees(ctx, tx, b.guests); err != nil {
 			return err

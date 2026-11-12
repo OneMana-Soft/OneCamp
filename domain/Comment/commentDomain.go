@@ -510,6 +510,7 @@ func getDgraphCommentInfo(ctx context.Context, commentUUID, userDgraphUID string
 					
 					comment_task {
 						 task_uuid
+						task_name
 						task_project {
 							 project_uuid
 							` + isAdmin + `

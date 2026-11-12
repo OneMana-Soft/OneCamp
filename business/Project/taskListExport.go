@@ -57,6 +57,9 @@ func WriteTaskListCSV(ctx context.Context, x TaskListExport, start func(total, r
 	if err != nil {
 		return err
 	}
+	// A field whose values are hidden from the reader (money, to anyone not
+	// the project's admin) is no column of theirs, rather than an empty one.
+	fields = taskFieldBusiness.Readable(ctx, taskFieldBusiness.ReaderOf(ctx), fields)
 	c := &taskCSV{fields: fields, loc: x.Location, link: authService.FrontendBaseURL() + "/app/task/", names: map[string]string{}}
 	var cw *csv.Writer
 	// begin starts the file once the list says how long it is; an empty list,
@@ -76,7 +79,7 @@ func WriteTaskListCSV(ctx context.Context, x TaskListExport, start func(total, r
 			}
 		}
 		taskKeys.Lay(ctx, tasks...)
-		if err := taskFieldBusiness.MergeFieldValues(ctx, tasks); err != nil {
+		if err := taskFieldBusiness.MergeFieldValues(helpers.WithLocation(ctx, x.Location), tasks); err != nil {
 			return err
 		}
 		if err := c.readPeople(ctx, tasks); err != nil {
@@ -189,12 +192,12 @@ func (c *taskCSV) row(t *dgraphStruct.DgraphTask) []string {
 		created = t.CreatedAt.In(c.loc).Format("2006-01-02 15:04")
 	}
 	row := []string{
-		cell(t.Key), cell(t.Name), cell(kind), cell(taskStatusBusiness.Of(t).Display()), priorityLabel(t.Priority),
+		cell(t.Key), cell(t.Name), cell(kind), cell(taskStatusBusiness.Of(t).Display()), helpers.PriorityLabel(t.Priority),
 		cell(assignee), c.day(t.StartDate), c.day(t.DueDate), estimate, cell(tags), cell(parent), created, cell(by),
 	}
 	for _, f := range c.fields {
 		v := taskFieldBusiness.Text(f, t.Fields[f.ID.String()], c.person)
-		if f.Type != taskFieldBusiness.TypeNumber && f.Type != taskFieldBusiness.TypeMoney {
+		if !taskFieldBusiness.Numeric(f, t.Fields[f.ID.String()]) {
 			v = cell(v)
 		}
 		row = append(row, v)
@@ -264,12 +267,4 @@ func (c *taskCSV) person(id string) string {
 		return name
 	}
 	return "Former member"
-}
-
-// priorityLabel is a priority as the app names it: "high" is High.
-func priorityLabel(p string) string {
-	if p == "" {
-		return ""
-	}
-	return strings.ToUpper(p[:1]) + p[1:]
 }

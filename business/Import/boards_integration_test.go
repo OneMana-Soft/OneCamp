@@ -14,6 +14,7 @@ package business
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
@@ -174,7 +175,7 @@ func TestAProvidersBoardComesOverDrawnAndRollsBack(t *testing.T) {
 	if err := processBoardChunk(ctx, prov, job, importProvider.JobOptions{}, chunk, w.importing); err != nil {
 		t.Fatal(err)
 	}
-	list, err := boardBusiness.GetBoardList(ctx, w.uid, "Kickoff", 50, 0, false)
+	list, err := boardBusiness.GetBoardList(ctx, w.uid, "Kickoff", 50, 0, boardBusiness.BoardListFilter{})
 	if err != nil || list == nil || len(list.Boards) != 1 || reads != 1 {
 		t.Fatalf("after a retry: %v boards, read %d times (%v)", list, reads, err)
 	}
@@ -200,7 +201,7 @@ func TestAProvidersBoardComesOverDrawnAndRollsBack(t *testing.T) {
 func oneDrawnBoard(t *testing.T, w *pagesWorld, job *importModels.Job, id string) {
 	t.Helper()
 	ctx := context.Background()
-	list, err := boardBusiness.GetBoardList(ctx, w.uid, "Kickoff", 50, 0, false)
+	list, err := boardBusiness.GetBoardList(ctx, w.uid, "Kickoff", 50, 0, boardBusiness.BoardListFilter{})
 	if err != nil || list == nil || len(list.Boards) != 1 {
 		t.Fatalf("Ada's Kickoff boards: %v (%v)", list, err)
 	}
@@ -299,7 +300,7 @@ func chunkSaid(t *testing.T, w *pagesWorld, chunk *importModels.Chunk, code stri
 // kickoffBoards is how many live "Kickoff" boards Ada has.
 func kickoffBoards(t *testing.T, w *pagesWorld) int {
 	t.Helper()
-	list, err := boardBusiness.GetBoardList(context.Background(), w.uid, "Kickoff", 50, 0, false)
+	list, err := boardBusiness.GetBoardList(context.Background(), w.uid, "Kickoff", 50, 0, boardBusiness.BoardListFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,6 +333,43 @@ func TestABoardDeletedHereBeforeItsNextTryIsLeftOutAndSaid(t *testing.T) {
 	}
 	if n := kickoffBoards(t, w); n != 0 {
 		t.Fatalf("Ada has %d Kickoff boards after the next try, want none", n)
+	}
+}
+
+// A board a try made but couldn't record is taken away again, and never
+// lands in the importer's Deleted boards: it was never theirs to bring back,
+// and the next try makes the board afresh (CR-247 F2, V-865).
+//
+// Run: go test -tags=integration ./business/Import/ -run '^TestAnImportsTakenAwayBoardIsNeverInTheTrash$' -v
+func TestAnImportsTakenAwayBoardIsNeverInTheTrash(t *testing.T) {
+	ctx := context.Background()
+	w := newPagesWorld(t)
+	integration.SetupMinio(t, "content-io-test")
+	job, chunk := w.boardJob(t, "b5")
+	reads := 0
+	prov := boardsFrom{read: &reads}
+	saved := rememberBoard
+	t.Cleanup(func() { rememberBoard = saved })
+	rememberBoard = func(context.Context, uuid.UUID, string, string, string, string, uuid.UUID, *string, json.RawMessage, bool) error {
+		return errors.New("the database is out of reach")
+	}
+	if err := processBoardChunk(ctx, prov, job, importProvider.JobOptions{}, chunk, w.importing); err == nil {
+		t.Fatal("a board that couldn't be recorded finished its chunk")
+	}
+	if n := kickoffBoards(t, w); n != 0 {
+		t.Fatalf("Ada has %d Kickoff boards, want the one made taken away", n)
+	}
+	if status, said := chunkSaid(t, w, chunk, "BOARD_LEFT_BEHIND"); said != 0 {
+		t.Fatalf("the chunk (%s) said BOARD_LEFT_BEHIND %d times: the board wasn't taken away", status, said)
+	}
+	for _, isAdmin := range []bool{false, true} {
+		page, err := boardBusiness.BoardTrash(ctx, w.uid, w.importing.UserDgraphInfo.Uuid, isAdmin, "", 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Boards) != 0 {
+			t.Errorf("Ada's Deleted boards (as an admin: %v) list %+v, want none: the import's board was never hers", isAdmin, page.Boards)
+		}
 	}
 }
 

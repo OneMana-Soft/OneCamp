@@ -391,6 +391,16 @@ func CreateAgent(ctx context.Context, in AgentInput, createdBy uuid.UUID) (*mode
 	return model.GetAgentByID(ctx, id)
 }
 
+// keptAutonomy is the mode a save leaves an agent in: the one sent, when it is
+// a mode, else the one it had. A client that sends none used to flip the
+// agent to acting on its own (ADMIN-16). Pure.
+func keptAutonomy(had, sent string) string {
+	if model.ValidAutonomy(sent) {
+		return sent
+	}
+	return had
+}
+
 // UpdateAgent validates and persists changes to an agent the actor may manage.
 func UpdateAgent(ctx context.Context, id uuid.UUID, in AgentInput, actor Actor) (*model.AiAgent, error) {
 	existing, err := model.GetAgentByID(ctx, id)
@@ -433,7 +443,7 @@ func UpdateAgent(ctx context.Context, id uuid.UUID, in AgentInput, actor Actor) 
 	existing.MaxSteps = v.maxSteps
 	existing.IsActive = in.IsActive
 	existing.DmAble = in.DmAble
-	existing.Autonomy = in.Autonomy
+	existing.Autonomy = keptAutonomy(existing.Autonomy, in.Autonomy)
 	existing.Knowledge = v.knowledgeJSON
 	existing.SkillIds = v.skillIdsJSON
 	existing.MaxDailyTokens = v.maxDailyTokens

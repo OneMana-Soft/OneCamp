@@ -255,7 +255,7 @@ func TestACommentStartsAThreadOnTheRowOrOneOfItsCells(t *testing.T) {
 	if who := w.threads.who[0]; who.Admin || who.AgentUUID != w.agent {
 		t.Fatalf("commented as %+v, want the member without admin powers, as the agent", who)
 	}
-	if c, ok := got.(threadBusiness.Comment); !ok || c.ID != "c-first" || c.ThreadID != "t-new" {
+	if c, ok := got.(apiComment); !ok || c.ID != "c-first" || c.ThreadID != "t-new" {
 		t.Fatalf("answered %#v, want the thread's first comment", got)
 	}
 
@@ -315,7 +315,7 @@ func TestAReplyJoinsItsThreadOnlyOnThisRow(t *testing.T) {
 	if who := w.threads.who[1]; who.Admin || who.AgentUUID != w.agent {
 		t.Fatalf("replied as %+v, want the member without admin powers, as the agent", who)
 	}
-	if c, ok := got.(threadBusiness.Comment); !ok || c.ID != "c-reply" || c.ThreadID != "t1" || c.Text != "<p>Done</p>" {
+	if c, ok := got.(apiComment); !ok || c.ID != "c-reply" || c.ThreadID != "t1" || c.Text != "<p>Done</p>" {
 		t.Fatalf("answered %#v, want the reply", got)
 	}
 

@@ -78,7 +78,7 @@ func withRooms(t *testing.T) *rooms {
 	}
 	title = func(context.Context, string, uuid.UUID) string { return "Maya Chen's room" }
 	liveLinks = func(_ context.Context, _, room string) ([]*guestModel.GuestGrant, error) { return f.links[room], nil }
-	revokeLinks = func(_ context.Context, _, room string) (int64, error) {
+	revokeLinks = func(_ context.Context, _, room string, _ time.Time) (int64, error) {
 		f.revoked = append(f.revoked, room)
 		n := len(f.links[room])
 		delete(f.links, room)

@@ -8,7 +8,9 @@ package integration_test
 // removes for good only boards in the trash longer than its days, never a
 // live one and never one a held person made or edits; what it removes leaves
 // with it (its comments, the links tasks held to it, its search entries and
-// its comments', its drawing and its snapshots); the sweep's one audit row
+// its comments', its drawing, its snapshots, its presenter notes and its
+// polls with their votes); the
+// sweep's one audit row
 // counts the boards; and a hold's boards are searched and exported, deleted
 // ones included.
 //
@@ -136,6 +138,22 @@ func TestBoardsUnderARetentionRuleAndAHoldOverHTTP(t *testing.T) {
 		snapKey := "boardSnapshot/" + id + "/s1.gz"
 		put(snapKey)
 		if _, err := db.ExecContext(ctx, `INSERT INTO board_snapshots (board_uuid, object_key, element_count, state_bytes, reason, contributor_uuids) VALUES ($1, $2, 1, 2, 'interval', '{}')`, id, snapKey); err != nil {
+			t.Fatal(err)
+		}
+		// A presenter note live and one deleted (soft): the purge takes both with the board.
+		for _, deleted := range []string{"NULL", "now()"} {
+			if _, err := db.ExecContext(ctx, `INSERT INTO board_frame_notes (id, board_uuid, frame_id, body, created_by, updated_by, deleted_at)
+				VALUES ($1, $2, 'intro', 'Open with the numbers', $3, $3, `+deleted+`)`, uuid.NewString(), id, s.maker); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// A poll on one of its frames (miro-28 to_win 4) with a vote: the purge takes both with the board.
+		pollID := uuid.NewString()
+		if _, err := db.ExecContext(ctx, `INSERT INTO polls (id, channel_id, question, options, created_by, board_uuid, frame_id)
+			VALUES ($1, '00000000-0000-0000-0000-000000000000', 'Ship it?', '[{"id":"a","text":"Yes"}]', $2, $3, 'intro')`, pollID, s.maker, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO poll_votes (poll_id, option_id, user_id) VALUES ($1, 'a', $2)`, pollID, s.maker); err != nil {
 			t.Fatal(err)
 		}
 		upsert(openSearchStruct.BOARD_INDEX, id, map[string]any{"board_uuid": id, "board_title": s.name})
@@ -278,6 +296,20 @@ func TestBoardsUnderARetentionRuleAndAHoldOverHTTP(t *testing.T) {
 		}
 		return n
 	}
+	notes := func(id string) int {
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM board_frame_notes WHERE board_uuid = $1`, id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	polls := func(id string) (n, votes int) {
+		if err := db.QueryRow(`SELECT count(*), (SELECT count(*) FROM poll_votes v JOIN polls p ON p.id = v.poll_id WHERE p.board_uuid = $1)
+			FROM polls WHERE board_uuid = $1`, id).Scan(&n, &votes); err != nil {
+			t.Fatal(err)
+		}
+		return n, votes
+	}
 	for _, s := range specs {
 		id := ids[s.name]
 		board, comments, links := inGraph(id)
@@ -298,6 +330,12 @@ func TestBoardsUnderARetentionRuleAndAHoldOverHTTP(t *testing.T) {
 		if stored("boardState/"+id+".gz") != !gone || stored("boardSnapshot/"+id+"/s1.gz") != !gone || snapshots(id) != want {
 			t.Errorf("%s after the sweep: drawing stored %v, snapshot stored %v, %d snapshot rows; want each kept only for a kept board",
 				s.name, stored("boardState/"+id+".gz"), stored("boardSnapshot/"+id+"/s1.gz"), snapshots(id))
+		}
+		if n := notes(id); n != 2*want {
+			t.Errorf("%s after the sweep: %d presenter note rows, want %d (a purged board takes its notes, live and deleted)", s.name, n, 2*want)
+		}
+		if n, votes := polls(id); n != want || votes != want {
+			t.Errorf("%s after the sweep: %d poll rows and %d votes, want %d each (a purged board takes its polls and their votes)", s.name, n, votes, want)
 		}
 	}
 	var meta, summary string

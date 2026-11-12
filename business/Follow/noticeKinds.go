@@ -45,6 +45,31 @@ func RegisterNoticeKind(kind string, k NoticeKind) {
 	noticeKinds[kind] = k
 }
 
+// ReadableEach is a NoticeKind's readable set by a check of one resource at a
+// time: which of ids the reader may open now (check, asked once an id), and
+// those ids in their order. A check that fails is the error, and the kind's
+// notices stay unopened.
+func ReadableEach(ctx context.Context, reader string, ids []string, check func(ctx context.Context, reader, id string) (bool, error)) (map[string]bool, []string, error) {
+	readable := make(map[string]bool, len(ids))
+	asked := make(map[string]bool, len(ids))
+	var open []string
+	for _, id := range ids {
+		if asked[id] {
+			continue
+		}
+		asked[id] = true
+		yes, err := check(ctx, reader, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		if yes {
+			readable[id] = true
+			open = append(open, id)
+		}
+	}
+	return readable, open, nil
+}
+
 func noticeKindOf(kind string) (NoticeKind, bool) {
 	noticeKindsMu.RLock()
 	defer noticeKindsMu.RUnlock()

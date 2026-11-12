@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -71,6 +72,10 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	integration.SetupRedis(t)
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
+	// The calendar's routes answer from its one store, moved already: a fresh
+	// database has nothing to move.
+	t.Setenv("CALENDAR_STORE", "postgres")
+	integration.MarkCalendarMoved(t, env.PG)
 	// Search answers with nothing found; writes are accepted.
 	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -162,7 +167,8 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	}
 
 	// One case per route, in an order where each has what it needs.
-	var taskID, docID, rowID, spareID, fieldID, viewID, threadID, commentID, madeID string
+	var taskID, docID, rowID, spareID, fieldID, viewID, threadID, commentID, madeID, eventID string
+	var eventSequence any // the made event's sequence, which a change names
 	type step struct {
 		route string // "METHOD /pattern" as the router has it
 		run   func() (int, map[string]any)
@@ -298,8 +304,35 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 		{"POST /v1/tasks/{id}/status", func() (int, map[string]any) {
 			return call("POST", "/v1/tasks/"+taskID+"/status", map[string]any{"status": "inProgress"})
 		}},
+		{"GET /v1/tasks/{id}/links", func() (int, map[string]any) { return call("GET", "/v1/tasks/"+taskID+"/links", nil) }},
 		{"GET /v1/tasks", func() (int, map[string]any) { return call("GET", "/v1/tasks?search=release", nil) }},
 		{"GET /v1/projects", func() (int, map[string]any) { return call("GET", "/v1/projects", nil) }},
+		// The calendar (gcal-15): an event made, read, listed, changed, put in
+		// the trash and brought back, and free times found.
+		{"GET /v1/calendars", func() (int, map[string]any) { return call("GET", "/v1/calendars", nil) }},
+		{"POST /v1/events", func() (int, map[string]any) {
+			at := time.Now().UTC().Add(72 * time.Hour).Truncate(time.Hour)
+			code, out := call("POST", "/v1/events", map[string]any{"title": "Release review",
+				"start": map[string]any{"at": at.Format(time.RFC3339), "zone": "UTC"}, "end": map[string]any{"at": at.Add(time.Hour).Format(time.RFC3339), "zone": "UTC"}})
+			eventID, _ = out["id"].(string)
+			eventSequence = out["sequence"]
+			return code, out
+		}},
+		{"GET /v1/events", func() (int, map[string]any) {
+			from := time.Now().UTC()
+			return call("GET", "/v1/events?from="+from.Format(time.RFC3339)+"&to="+from.Add(7*24*time.Hour).Format(time.RFC3339), nil)
+		}},
+		{"GET /v1/events/{id}", func() (int, map[string]any) { return call("GET", "/v1/events/"+eventID, nil) }},
+		{"PATCH /v1/events/{id}", func() (int, map[string]any) {
+			return call("PATCH", "/v1/events/"+eventID, map[string]any{"title": "Release review, moved", "sequence": eventSequence})
+		}},
+		{"POST /v1/events/find-time", func() (int, map[string]any) {
+			from := time.Now().UTC().Add(24 * time.Hour)
+			return call("POST", "/v1/events/find-time", map[string]any{"duration_minutes": 30,
+				"from": from.Format(time.RFC3339), "to": from.Add(5 * 24 * time.Hour).Format(time.RFC3339)})
+		}},
+		{"DELETE /v1/events/{id}", func() (int, map[string]any) { return call("DELETE", "/v1/events/"+eventID, nil) }},
+		{"POST /v1/events/{id}/restore", func() (int, map[string]any) { return call("POST", "/v1/events/"+eventID+"/restore", nil) }},
 		{"POST /v1/messages/channel", func() (int, map[string]any) {
 			return call("POST", "/v1/messages/channel", map[string]any{"channel_uuid": deploys.String(), "text": "Deployed v2.72.1\n\n- api\n- web"})
 		}},

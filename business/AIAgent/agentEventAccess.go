@@ -149,7 +149,7 @@ var reach = sponsorReach{
 	inProject:      projectBusiness.HasMember,
 	viewsTable:     tableViewableBy,
 	readsTask:      taskReadableBy,
-	inConversation: inConversationNow,
+	inConversation: chatNotificationBusiness.InConversation,
 }
 
 // seesWhereAsked reports whether the person with userUUID can see, now, the
@@ -260,17 +260,6 @@ func (r sponsorReach) checkReachKeeping(ctx context.Context, sponsorUUID, keptEv
 func taskReadableBy(ctx context.Context, userUUID, taskID string) (bool, error) {
 	readers, err := taskDomain.Readers(ctx, taskID, []string{userUUID})
 	return readers[userUUID], err
-}
-
-// inConversationNow reports whether the person with userUUID is in the DM or
-// group grpID now: one of a DM's two people, or one of a group's participants
-// as the graph has them, which leaving takes them out of
-// (chatNotificationBusiness.InConversationNow, what every notice from a DM or
-// group is held to). Their setting for it is no place in it: a leaver's
-// outlived them.
-func inConversationNow(ctx context.Context, userUUID, grpID string) (bool, error) {
-	in, err := chatNotificationBusiness.InConversationNow(ctx, grpID, []string{userUUID})
-	return len(in) == 1, err
 }
 
 // tableViewableBy reports whether the person with userUUID can view a table

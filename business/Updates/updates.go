@@ -18,9 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -57,7 +55,6 @@ const installCommandTemplate = `/bin/bash -c "$(curl -fsSL https://%s/onecamp/do
 const (
 	defaultReleasesURL = "https://backend.onemana.dev/onecamp/releases"
 	checkCacheTTL      = 10 * time.Minute
-	checkTimeout       = 8 * time.Second
 )
 
 // Seams.
@@ -121,32 +118,12 @@ func releasesHost() string {
 	return u.Host
 }
 
-func releasesURL() string {
-	if u := strings.TrimSpace(os.Getenv("ONECAMP_RELEASES_URL")); u != "" {
-		return u
-	}
-	return defaultReleasesURL
-}
+func releasesURL() string { return helpers.StorefrontURL("ONECAMP_RELEASES_URL", defaultReleasesURL) }
 
 // fetchPublishedReleases GETs the release list and keeps only well-formed
 // release tags, so nothing but a version string from the answer is ever shown.
 func fetchPublishedReleases(ctx context.Context, from string) (map[string]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, from, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("could not reach %s: %w", from, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s answered %d", from, resp.StatusCode)
-	}
-	return parseReleases(io.LimitReader(resp.Body, 64<<10))
+	return helpers.GetStorefront(ctx, from, parseReleases)
 }
 
 // parseReleases reads {"data":{"latest_by_line":{"v2":"v2.33.0"}}}, keeping

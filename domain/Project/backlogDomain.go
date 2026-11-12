@@ -1,7 +1,7 @@
 package Domain
 
 // The backlog's read (B3, STEP4_PLAN §4 #9): a project's open top-level
-// tasks in no open cycle, a page of them with their count and estimate
+// tasks (at the top or in an epic: domain/Task TopLevel) in no open cycle, a page of them with their count and estimate
 // totalled over all of them by the graph (never from the page, PJ10), and
 // the tasks of its open cycles and of its latest completed ones, in one query.
 
@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -50,8 +51,7 @@ var backlogTaskFields = `
 	task_estimate_minutes
 	task_estimate_points
 	task_assignee { uid user_uuid user_name user_full_name user_profile_object_key }
-	task_sub_task_count: count(task_sub_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` @@hidden_tasks@@))
-	task_sub_task_done: count(task_sub_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` AND (eq(task_status, "done") OR eq(task_status, "canceled")) @@hidden_tasks@@))
+	` + taskread.SubTaskCounts + `
 `
 
 // uuidList is ids as a graph function's argument, each a parsed uuid, so
@@ -67,14 +67,11 @@ func uuidList(ids []string) string {
 	return string(b)
 }
 
-// GetDgraphProjectBacklog reads project's backlog, leaving out the tasks in
-// open cycles (inCycles) and reading those of planned, for the reader of ctx
-// (models/taskread): one graph query however many tasks.
-func GetDgraphProjectBacklog(ctx context.Context, projectUUID string, inCycles, planned []string) (*BacklogRead, error) {
-	tr, err := taskread.From(ctx)
-	if err != nil {
-		return nil, err
-	}
+// backlogQuery is the backlog's one query, filled with the reader's filter
+// tr: topBlock and top are domain/Task TopLevel's block and clause (a task at
+// the top or in an epic); it leaves out the tasks of open cycles (inCycles)
+// and reads those of planned. Every block it makes is filled here. Pure.
+func backlogQuery(tr taskread.Filter, topBlock, top string, inCycles, planned []string) string {
 	notPlanned := ""
 	if list := uuidList(inCycles); list != "[]" {
 		notPlanned = " AND NOT eq(task_uuid, " + list + ")"
@@ -83,9 +80,10 @@ func GetDgraphProjectBacklog(ctx context.Context, projectUUID string, inCycles, 
 	if list := uuidList(planned); list != "[]" {
 		plannedBlock = `planned(func: eq(task_uuid, ` + list + `)) @filter(` + dgraphquery.Live("task_deleted_at") + ` @@hidden_tasks@@) {` + backlogTaskFields + `}`
 	}
-	query := tr.Fill(fmt.Sprintf(`query Backlog($id: string) {
+	return tr.Fill(fmt.Sprintf(`query Backlog($id: string) {
+		%s
 		var(func: eq(project_uuid, $id)) {
-			project_tasks @filter(%s AND NOT has(task_parent_task) AND %s%s @@hidden_tasks@@) {
+			project_tasks @filter(%s AND %s AND %s%s @@hidden_tasks@@) {
 				b as uid
 				e as task_estimate_minutes
 				p as task_estimate_points
@@ -96,7 +94,22 @@ func GetDgraphProjectBacklog(ctx context.Context, projectUUID string, inCycles, 
 		summed() { minutes: sum(val(e)) points: sum(val(p)) }
 		backlog(func: uid(b), orderasc: task_created_at, first: %d) {%s}
 		%s
-	}`, dgraphStruct.TASK_LIVE_FILTER, dgraphStruct.TASK_OPEN_FILTER, notPlanned, BacklogPage, backlogTaskFields, plannedBlock))
+	}`, topBlock, dgraphStruct.TASK_LIVE_FILTER, top, dgraphStruct.TASK_OPEN_FILTER, notPlanned, BacklogPage, backlogTaskFields, plannedBlock))
+}
+
+// GetDgraphProjectBacklog reads project's backlog, leaving out the tasks in
+// open cycles (inCycles) and reading those of planned, for the reader of ctx
+// (models/taskread): one graph query however many tasks.
+func GetDgraphProjectBacklog(ctx context.Context, projectUUID string, inCycles, planned []string) (*BacklogRead, error) {
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	block, top, err := taskDomain.TopLevel(ctx, projectUUID)
+	if err != nil {
+		return nil, err
+	}
+	query := backlogQuery(tr, block, top, inCycles, planned)
 	resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx, query, map[string]string{"$id": projectUUID})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetDgraphProjectBacklog err: %+v", err)

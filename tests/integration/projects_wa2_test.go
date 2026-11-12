@@ -331,7 +331,10 @@ func TestWA2ARestrictedTaskIsSeenOnlyByItsPeople(t *testing.T) {
 	}
 
 	// Every surface, as someone. stubs: the restricted tasks may be named
-	// here as "a task you can't see" (a dependency, a parent).
+	// here by id as a stub. None is now: a dependency's or a parent's stub
+	// says a task is there and names none (V-678, main's C1: no title, key or
+	// id), and the time report puts the time on tasks the reader can't see on
+	// one line, "A task you can't see", that names no task.
 	type surface struct {
 		name  string
 		read  func(who string) string
@@ -340,13 +343,13 @@ func TestWA2ARestrictedTaskIsSeenOnlyByItsPeople(t *testing.T) {
 	surfaces := []surface{
 		{"the project's list", func(who string) string {
 			return body(who, projectController.GetProjectTaskList, project, "?getAll=1", nil)
-		}, true},
+		}, false},
 		{"the project's board", func(who string) string {
 			return body(who, projectController.GetProjectTaskListForKanban, project, "?getAll=1", nil)
-		}, true},
+		}, false},
 		{"the timeline", func(who string) string {
 			return body(who, projectController.ProjectTimeline, project, "", nil)
-		}, true},
+		}, false},
 		{"the project's page", func(who string) string {
 			return body(who, projectController.ProjectInfo, project, "", nil)
 		}, false},
@@ -358,7 +361,7 @@ func TestWA2ARestrictedTaskIsSeenOnlyByItsPeople(t *testing.T) {
 		}, false},
 		{"the task it holds up, opened", func(who string) string {
 			return body(who, taskController.GetTaskInfo, map[string]string{"task_uuid": w.task}, "", nil)
-		}, true},
+		}, false},
 		{"the task's history", func(who string) string {
 			return body(who, taskController.GetTaskActivityList, map[string]string{"task_uuid": zephyr}, "", nil)
 		}, false},
@@ -367,10 +370,10 @@ func TestWA2ARestrictedTaskIsSeenOnlyByItsPeople(t *testing.T) {
 		}, false},
 		{"My Tasks", func(who string) string {
 			return body(who, userController.GetDgraphUserTaskList, nil, "?getAll=1", nil)
-		}, true},
+		}, false},
 		{"My Tasks' board", func(who string) string {
 			return body(who, userController.GetDgraphUserTaskListForKanban, nil, "?getAll=1", nil)
-		}, true},
+		}, false},
 		{"the sidebar", func(who string) string {
 			return body(who, userController.GetDgraphUserInfoByUUIDForSidebarNav, nil, "", nil)
 		}, false},
@@ -433,10 +436,10 @@ func TestWA2ARestrictedTaskIsSeenOnlyByItsPeople(t *testing.T) {
 		}, false},
 		{"the time report", func(who string) string {
 			return body(who, timeEntryController.ProjectTime, project, "?from="+from+"&to="+to, nil)
-		}, true},
+		}, false},
 		{"the time export", func(who string) string {
 			return body(who, timeEntryController.ProjectTime, project, "?format=csv&tz=UTC&from="+from+"&to="+to, nil)
-		}, true},
+		}, false},
 		{"the assistant's search", func(who string) string { return tool(who, "search_workspace", map[string]string{"query": "zephyr"}) }, false},
 		{"the assistant's project tasks", func(who string) string {
 			return tool(who, "list_project_tasks", map[string]string{"project_uuid": w.project})
@@ -775,7 +778,7 @@ func TestWA2ARestrictedTaskIsSeenOnlyByItsPeople(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &got); err != nil {
 			t.Fatal(err)
 		}
-		if len(got.Data.BlockedBy) != 1 || got.Data.BlockedBy[0]["task_uuid"] != zephyr || got.Data.BlockedBy[0]["task_hidden"] != true || got.Data.BlockedBy[0]["task_name"] != nil {
+		if len(got.Data.BlockedBy) != 1 || got.Data.BlockedBy[0]["task_uuid"] != nil || got.Data.BlockedBy[0]["task_hidden"] != true || got.Data.BlockedBy[0]["task_name"] != nil {
 			t.Errorf("what it waits on, as Ben sees it: %v", got.Data.BlockedBy)
 		}
 		for _, s := range got.Data.SubTasks {
@@ -793,7 +796,7 @@ func TestWA2ARestrictedTaskIsSeenOnlyByItsPeople(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &opened); err != nil {
 			t.Fatal(err)
 		}
-		if opened.Data.Name != "Book the room" || opened.Data.Parent["task_hidden"] != true || opened.Data.Parent["task_name"] != nil {
+		if opened.Data.Name != "Book the room" || opened.Data.Parent["task_hidden"] != true || opened.Data.Parent["task_name"] != nil || opened.Data.Parent["task_uuid"] != nil {
 			t.Errorf("the task below it opened again, as Ben sees it: %s", out)
 		}
 	})

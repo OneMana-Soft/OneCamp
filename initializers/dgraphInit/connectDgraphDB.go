@@ -386,6 +386,7 @@ func createSchema() (err error) {
 		board_created_at: dateTime .
 		board_updated_at: dateTime .
 		board_deleted_at: dateTime .
+		board_scratch: bool @index(bool) .
 
 		activity_uuid: string @index(exact) @upsert .
 		activity_by: uid .
@@ -428,6 +429,21 @@ func createSchema() (err error) {
 		# A task waits on these (finish-to-start): it can start once they are
 		# done. @reverse reads the tasks waiting on it. business/Task/taskDependency.go
 		task_blocked_by: [uid] @reverse .
+		# Typed links between tasks (jira-01 J-H): relates, duplicates, clones.
+		# Blocking is never a link: it is task_blocked_by, the date dependency.
+		# One node per pair and kind, named by tasklink_key ("relates:<lower
+		# uuid>:<higher>", "duplicates:<from>:<to>"); removing a link stamps
+		# tasklink_deleted_at and _by, and adding it again revives the node.
+		# A live link's tasklink_deleted_at is the zero time.
+		# business/Task/taskLink.go, domain/Task/taskLinkDomain.go
+		tasklink_key: string @index(exact) @upsert .
+		tasklink_kind: string .
+		tasklink_from: uid @reverse .
+		tasklink_to: uid @reverse .
+		tasklink_created_by: uid .
+		tasklink_created_at: dateTime .
+		tasklink_deleted_at: dateTime .
+		tasklink_deleted_by: uid .
 		# How long the task should take, in minutes; unset or 0, no estimate.
 		# The workload counts it in hours. business/Task/taskEstimate.go
 		task_estimate_minutes: int .
@@ -596,6 +612,7 @@ func createSchema() (err error) {
 			board_created_at
 			board_updated_at
 			board_deleted_at
+			board_scratch
 		}
 
 		type Status {
@@ -829,6 +846,17 @@ func createSchema() (err error) {
 			linked_docs: [Doc]
 			linked_boards: [Board]
 			refers_to
+		}
+
+		type TaskLink {
+			tasklink_key
+			tasklink_kind
+			tasklink_from: Task
+			tasklink_to: Task
+			tasklink_created_by: User
+			tasklink_created_at
+			tasklink_deleted_at
+			tasklink_deleted_by: User
 		}
 
 		type Event {

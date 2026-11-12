@@ -87,7 +87,9 @@ func (mc *modelResolver) get(key string, ep Endpoint, cfg *AIConfig, limitsFor f
 	// construction, so a model allowed with a 128k window would otherwise be built with
 	// the workspace's (often 8192) and genuinely RUN small — the prompt budget being
 	// wrong is only the visible half of that.
-	llm, err := buildLLM(ep, lim.ContextWindow, lim.MaxOutput, cfg.ReasoningEnabled, cfg.redactorForEndpoint(ep))
+	// The thinking switch too: the client sends room to think by it, so the budget holds the same back.
+	lim.Reasoning = cfg.ReasoningEnabled
+	llm, err := buildLLM(ep, lim.ContextWindow, lim.MaxOutput, lim.Reasoning, cfg.redactorForEndpoint(ep))
 	if err != nil {
 		return nil, err
 	}

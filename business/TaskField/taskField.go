@@ -19,6 +19,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
+	formula "github.com/akashc777/OneCamp/business/Formula"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
@@ -43,8 +45,15 @@ const (
 	TypeURL         = model.TypeURL
 )
 
-// Types lists every field type.
-var Types = []string{TypeText, TypeNumber, TypeMoney, TypeDate, TypeSelect, TypeMultiSelect, TypePerson, TypeCheckbox, TypeURL}
+// Types lists every field type: the kinds of the one registry a task field
+// may be (business/FieldTypes, OnTasks).
+var Types = func() []string {
+	var out []string
+	for _, k := range fieldTypes.Kinds.ForTasks() {
+		out = append(out, k.ID)
+	}
+	return out
+}()
 
 const (
 	MaxPerProject  = 30
@@ -109,6 +118,9 @@ type Input struct {
 	RemovedOptions []string      `json:"removed_options,omitempty"`
 	Currency       string        `json:"currency"`
 	OnCard         bool          `json:"on_card"`
+	// Formula is a formula field's, with the fields it reads by name
+	// ({Hours} * 2); no other field keeps one.
+	Formula string `json:"formula,omitempty"`
 }
 
 func cleanName(s string) string { return strings.Join(strings.Fields(s), " ") }
@@ -182,6 +194,13 @@ func Check(in Input, typ string) (*model.Field, error) {
 			f.Options = append(f.Options, model.Option{ID: id, Label: label, Color: color})
 		}
 	}
+	if typ == TypeFormula {
+		src := strings.TrimSpace(in.Formula)
+		if src == "" || utf8.RuneCountInString(src) > formula.MaxLength {
+			return nil, invalid("Write the field's formula, of up to %d characters.", formula.MaxLength)
+		}
+		f.Formula = src
+	}
 	if typ == TypeMoney {
 		cur := strings.ToUpper(strings.TrimSpace(in.Currency))
 		if len(cur) != 3 || strings.Trim(cur, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
@@ -234,6 +253,11 @@ func newOptions(have []model.Option, add []OptionInput) []model.Option {
 // what to fix. An empty text, an unticked box and an empty multi-select are no
 // value. A person's id is checked to be a person by SetValue. Pure.
 func Normalize(f *model.Field, raw json.RawMessage) (json.RawMessage, error) {
+	// A field worked out on each read (a formula) has no value to set, nor
+	// one to take off.
+	if k, ok := fieldTypes.Kinds.Lookup(f.Type); ok && !k.Stored {
+		return nil, invalid("%s is worked out from its formula, so it can't be set.", f.Name)
+	}
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
@@ -351,22 +375,35 @@ func Normalize(f *model.Field, raw json.RawMessage) (json.RawMessage, error) {
 
 // Text is a value as a person writes it in a cell, for each shape Normalize
 // stores: an option by its label, several joined by ", ", a person by the
-// name person gives for their id, money in its units, a ticked box as Yes.
-// A value that isn't its field's shape, or an option taken away since, is
+// name person gives for their id, money in its units, a ticked box as Yes;
+// a formula's value as it reads, Yes or No for a checkbox's, and Error when
+// it couldn't be worked out. A value that isn't its field's shape, or an option taken away since, is
 // nothing. Pure.
 func Text(f *model.Field, raw json.RawMessage, person func(id string) string) string {
 	if len(raw) == 0 || string(raw) == "null" {
 		return ""
 	}
-	label := func(id string) string {
-		for _, o := range f.Options {
-			if o.ID == id {
-				return o.Label
+	label := func(id string) string { return optionLabel(f, id) }
+	switch f.Type {
+	case TypeFormula:
+		var v any
+		if json.Unmarshal(raw, &v) != nil {
+			return ""
+		}
+		switch x := v.(type) {
+		case float64:
+			return strconv.FormatFloat(x, 'f', -1, 64)
+		case string:
+			return x
+		case bool:
+			if x {
+				return "Yes"
 			}
+			return "No"
+		case map[string]any:
+			return "Error"
 		}
 		return ""
-	}
-	switch f.Type {
 	case TypeText, TypeURL, TypeDate, TypeSelect, TypePerson:
 		var s string
 		if json.Unmarshal(raw, &s) != nil {
@@ -413,10 +450,34 @@ func Text(f *model.Field, raw json.RawMessage, person func(id string) string) st
 	return ""
 }
 
+// optionLabel is the label of f's option id, none for one taken away.
+func optionLabel(f *model.Field, id string) string {
+	for _, o := range f.Options {
+		if o.ID == id {
+			return o.Label
+		}
+	}
+	return ""
+}
+
+// Numeric is whether a value of f is a number, written as one in a CSV:
+// a number's, money's, a formula's that gives one.
+func Numeric(f *model.Field, raw json.RawMessage) bool {
+	switch f.Type {
+	case TypeNumber, TypeMoney:
+		return true
+	case TypeFormula:
+		var v float64
+		return json.Unmarshal(raw, &v) == nil
+	}
+	return false
+}
+
 // InputOf is a field as the app sends one: a template keeps a project's
-// fields this way, options and their ids included.
+// fields this way, options and their ids included, a formula as it's kept
+// (InputsOf gives one by its fields' names).
 func InputOf(f *model.Field) Input {
-	in := Input{Name: f.Name, Type: f.Type, Currency: f.Currency, OnCard: f.OnCard}
+	in := Input{Name: f.Name, Type: f.Type, Currency: f.Currency, OnCard: f.OnCard, Formula: f.Formula}
 	for _, o := range f.Options {
 		in.Options = append(in.Options, OptionInput(o))
 	}
@@ -448,6 +509,15 @@ func Create(ctx context.Context, project uuid.UUID, in Input, by uuid.UUID, bill
 		return nil, err
 	}
 	f.ProjectID = project
+	if f.Type == TypeFormula {
+		fields, err := model.List(ctx, project)
+		if err != nil {
+			return nil, err
+		}
+		if _, f.Formula, err = compileFormula(fields, uuid.Nil, f.Name, f.Formula); err != nil {
+			return nil, err
+		}
+	}
 	var made *model.Field
 	err = bound(project).Add(ctx, func(ctx context.Context) error {
 		var err error
@@ -470,11 +540,26 @@ func Update(ctx context.Context, project, id uuid.UUID, in Input) (field *model.
 			in.Currency = old.Currency
 		}
 	}
+	var fields []*model.Field
+	if old.Type == TypeFormula {
+		if fields, err = model.List(ctx, project); err != nil {
+			return nil, nil, err
+		}
+		// A change that sends no formula (a rename) keeps the one it has.
+		if strings.TrimSpace(in.Formula) == "" {
+			in.Formula = formula.Display(old.Formula, inputs(fields))
+		}
+	}
 	f, err := Check(in, old.Type)
 	if err != nil {
 		return nil, nil, err
 	}
 	f.ID, f.ProjectID = old.ID, project
+	if f.Type == TypeFormula {
+		if _, f.Formula, err = compileFormula(fields, f.ID, f.Name, f.Formula); err != nil {
+			return nil, nil, err
+		}
+	}
 	field, changed, err = model.Update(ctx, f, in.RemovedOptions)
 	var taken *model.OptionTakenError
 	if errors.As(err, &taken) {
@@ -565,7 +650,13 @@ func SetValue(ctx context.Context, task *dgraphStruct.DgraphTask, f *model.Field
 	}
 	// The Work Change Log, as the set's own answer names a value.
 	if task.Project != nil {
-		diff, _ := json.Marshal(map[string]any{"field_id": f.ID.String(), "value": value})
+		// Every member hears the log alike: a money change names the field
+		// and no value (ForEveryone), and each app reads the task again.
+		change := map[string]any{"field_id": f.ID.String(), "value": value}
+		if _, refetch := ForEveryone(f, value); refetch {
+			change = map[string]any{"field_id": f.ID.String(), "refetch": true}
+		}
+		diff, _ := json.Marshal(change)
 		workFeed.RecordTasks(ctx, user.Uuid, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: task.Project.Uuid, Task: task, Diff: diff})
 	}
 	return value, nil
@@ -584,8 +675,21 @@ func sameValue(a, b json.RawMessage) bool {
 	return string(ja) == string(jb)
 }
 
-// MergeFieldValues lays each task's field values over it, for the app.
+// MergeFieldValues lays each task's field values over it, for the app, as
+// the reader of ctx may read them (MergeFieldValuesFor, ReaderOf).
 func MergeFieldValues(ctx context.Context, tasks []*dgraphStruct.DgraphTask) error {
+	return MergeFieldValuesFor(ctx, ReaderOf(ctx), tasks)
+}
+
+// MergeFieldValuesFor lays each task's field values over it as r may read
+// them: a money field's values only for an admin of its project (V-698);
+// for anyone else the field has no value on any task, and the field lists
+// say it is hidden (Views). One read of the values, and one of r's standing
+// only when a money field holds one. Formula fields (J-F) are worked out
+// here for r: one more read finds the tasks whose projects have one, and
+// their fields are read only then; a formula reading money, directly or
+// through other formulas, is hidden as money is, by the same rule.
+func MergeFieldValuesFor(ctx context.Context, r Reader, tasks []*dgraphStruct.DgraphTask) error {
 	ids := make([]uuid.UUID, 0, len(tasks))
 	for _, t := range tasks {
 		if t == nil {
@@ -598,9 +702,35 @@ func MergeFieldValues(ctx context.Context, tasks []*dgraphStruct.DgraphTask) err
 	if len(ids) == 0 {
 		return nil
 	}
-	values, err := model.ValuesFor(ctx, ids)
+	values, money, err := model.ReadValues(ctx, ids)
 	if err != nil {
 		return err
+	}
+	projects, err := model.FormulaProjects(ctx, ids)
+	if err != nil {
+		return err
+	}
+	var fields []*model.Field
+	if len(projects) > 0 {
+		var of []uuid.UUID
+		seen := map[string]bool{}
+		for _, p := range projects {
+			if id, err := uuid.Parse(p); err == nil && !seen[p] {
+				seen[p] = true
+				of = append(of, id)
+			}
+		}
+		if fields, err = model.ListForProjects(ctx, of); err != nil {
+			return err
+		}
+		for id, p := range moneyOf(fields) {
+			money[id] = p
+		}
+	}
+	hidden := hiddenOf(ctx, r, money)
+	blank(values, hidden)
+	if len(projects) > 0 {
+		workOut(ctx, tasks, values, projects, fields, hidden)
 	}
 	for _, t := range tasks {
 		if t != nil {
@@ -626,21 +756,70 @@ func FilterID(field uuid.UUID) string {
 }
 
 // View is a field as the app gets it, with the filter id that narrows a list
-// to its values, so the app never builds one itself.
+// to its values, so the app never builds one itself, and whether its values
+// are hidden from this reader (a money field, or a formula reading one, to
+// anyone not an admin of its project): the app shows such a field as
+// hidden, never as empty. A formula field says its formula with its fields
+// by name (a deleted one as {Deleted field}), what it gives (number, text,
+// date, checkbox) and, when it can't be worked out, why.
 type View struct {
 	*model.Field
 	FilterID string `json:"filter_id"`
+	Hidden   bool   `json:"hidden"`
+	Formula  string `json:"formula,omitempty"`
+	Result   string `json:"result,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
-// Views is fields as the app gets them.
-func Views(fields ...*model.Field) []View {
+// Views is a project's fields as the app gets them, those hidden names
+// (Hidden) marked hidden. A formula is read against the fields given, so
+// they are all the project's.
+func Views(hidden map[string]bool, fields ...*model.Field) []View {
+	var program *formula.Program
+	var in []formula.Field
+	if hasFormula(fields) {
+		in = inputs(fields)
+		program = formula.Compile(in)
+	}
 	out := make([]View, 0, len(fields))
 	for _, f := range fields {
-		if f != nil {
-			out = append(out, View{Field: f, FilterID: FilterID(f.ID)})
+		if f == nil {
+			continue
 		}
+		v := View{Field: f, FilterID: FilterID(f.ID), Hidden: hidden[f.ID.String()]}
+		if f.Type == TypeFormula && program != nil {
+			v.Formula = formula.Display(f.Formula, in)
+			v.Result = program.Kind(f.ID.String()).Name()
+			if err := program.Err(f.ID.String()); err != nil {
+				v.Error = formula.Message(err)
+			}
+		}
+		out = append(out, v)
 	}
 	return out
+}
+
+// ViewOf is a field of its project as the reader of ctx gets it (Views).
+func ViewOf(ctx context.Context, f *model.Field) (View, error) {
+	fields, err := model.List(ctx, f.ProjectID)
+	if err != nil {
+		return View{}, err
+	}
+	found := false
+	for i, g := range fields {
+		if g.ID == f.ID {
+			fields[i], found = f, true
+		}
+	}
+	if !found {
+		fields = append(fields, f)
+	}
+	for _, v := range Views(Hidden(ctx, ReaderOf(ctx), fields), fields...) {
+		if v.ID == f.ID {
+			return v, nil
+		}
+	}
+	return View{Field: f, FilterID: FilterID(f.ID)}, nil
 }
 
 // FieldOfFilter reads the field a filter id names.
@@ -657,26 +836,32 @@ const (
 	// value of the field and with none.
 	FilterAny  = "any"
 	FilterNone = "none"
-	// matchNothing is a clause no task matches.
-	matchNothing = `eq(task_uuid, "00000000-0000-0000-0000-000000000000")`
 )
 
 // FilterClause narrows a project's task list to the tasks whose value of the
 // field is one of the values given (an option id, a person's id, "true" for a
 // ticked box), and with "any" or "none" to the tasks with some value or none.
 // Values are ORed. A field that isn't the project's (since deleted, say)
-// narrows nothing.
+// narrows nothing, and so does one whose values are hidden from the reader
+// of ctx (a money field, Hidden), so a filter tells them nothing of them.
 func FilterClause(ctx context.Context, project uuid.UUID, filterID string, values []string) (string, error) {
 	fieldID, ok := FieldOfFilter(filterID)
 	if !ok {
-		return matchNothing, nil
+		return taskDomain.NoTask, nil
 	}
-	if _, err := model.Get(ctx, project, fieldID); err != nil {
+	f, err := model.Get(ctx, project, fieldID)
+	if err != nil {
 		// A field since deleted (a saved view, an old link) narrows nothing.
 		if errors.Is(err, model.ErrNotFound) {
 			return "", nil
 		}
 		return "", err
+	}
+	if Hidden(ctx, ReaderOf(ctx), []*model.Field{f})[f.ID.String()] {
+		return "", nil
+	}
+	if f.Type == TypeFormula {
+		return "", invalid("A list can't be narrowed by a formula yet.")
 	}
 	var asked []string
 	wantAny, wantNone := false, false
@@ -696,7 +881,7 @@ func FilterClause(ctx context.Context, project uuid.UUID, filterID string, value
 		if err != nil {
 			return "", err
 		}
-		parts = append(parts, inClause(ids))
+		parts = append(parts, taskDomain.TasksClause(ids, false))
 	}
 	if wantAny || wantNone {
 		ids, err := model.TasksMatching(ctx, fieldID, model.Match{Any: true})
@@ -704,13 +889,13 @@ func FilterClause(ctx context.Context, project uuid.UUID, filterID string, value
 			return "", err
 		}
 		if wantAny {
-			parts = append(parts, inClause(ids))
+			parts = append(parts, taskDomain.TasksClause(ids, false))
 		}
 		if wantNone {
 			if len(ids) == 0 {
 				parts = append(parts, "has(task_uuid)")
 			} else {
-				parts = append(parts, "NOT "+inClause(ids))
+				parts = append(parts, taskDomain.TasksClause(ids, true))
 			}
 		}
 	}
@@ -718,13 +903,4 @@ func FilterClause(ctx context.Context, project uuid.UUID, filterID string, value
 		return "", nil
 	}
 	return "(" + strings.Join(parts, " OR ") + ")", nil
-}
-
-// inClause matches the tasks listed, or none.
-func inClause(ids []string) string {
-	if len(ids) == 0 {
-		return matchNothing
-	}
-	b, _ := json.Marshal(ids)
-	return fmt.Sprintf("eq(task_uuid, %s)", b)
 }

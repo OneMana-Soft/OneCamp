@@ -41,6 +41,7 @@ import (
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
+	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -119,9 +120,8 @@ func MaybeRunMeetingRecap(call liveKitBusiness.FinishedCall) {
 }
 
 // recapWindowSlack widens the call's window when picking the recordings made
-// during it: the room's start comes from LiveKit's clock and a recording's
-// from this server's, which can disagree by a few seconds.
-const recapWindowSlack = time.Minute
+// during it (domain/Recording CallWindowSlack, which a board's calls use too).
+const recapWindowSlack = recordingDomain.CallWindowSlack
 
 func runMeetingRecap(ctx context.Context, call liveKitBusiness.FinishedCall) error {
 	roomName := call.Room
@@ -908,7 +908,9 @@ func executeReadMeetingTranscript(ctx context.Context, action ai.ProposedAction,
 			break
 		}
 	}
-	if !permitted {
+	// A live call's transcript is for the people connected to it (V-860):
+	// while the channel's newest is a call still running, only they read it.
+	if !permitted || !liveKitBusiness.NewestTranscriptOpenTo(ctx, channelUUID, userInfo.UserDgraphInfo.Uid) {
 		// Same answer as a channel that does not exist. Telling somebody a call
 		// happened somewhere they cannot see is itself a disclosure.
 		return "", nil, fmt.Errorf("no call found for that channel, or you do not have access to it")

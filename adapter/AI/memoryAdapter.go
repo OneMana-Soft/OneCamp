@@ -19,6 +19,9 @@ type MemoryItemView struct {
 	Confidence  int    `json:"confidence"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
+	// Stale: an open commitment overdue for longer than it needs its person
+	// now (14 days). The memory page asks "Still relevant? Done / Drop".
+	Stale bool `json:"stale,omitempty"`
 
 	// ── Resolved scope display (server-side, permission-safe) ──────────
 	// The list endpoint only returns UUIDs; resolving human names here —

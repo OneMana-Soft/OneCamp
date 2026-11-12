@@ -1645,6 +1645,41 @@ func (g githubStandIn) RoundTrip(r *http.Request) (*http.Response, error) {
 		Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 }
 
+// refuseGitHub keeps a test off GitHub itself: until it ends, a request to a
+// GitHub host that reaches the network is refused, and the test fails naming
+// it. Called first, beneath a fakeGitHub, it proves the stand-in answered all
+// of GitHub's API (api.github.com never gets past one) from the test's start.
+func refuseGitHub(t *testing.T) {
+	t.Helper()
+	real := http.DefaultTransport
+	g := &githubRefusal{real: real}
+	http.DefaultTransport = g
+	t.Cleanup(func() {
+		http.DefaultTransport = real
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if len(g.reached) > 0 {
+			t.Errorf("the test reached GitHub itself, past its stand-in: %v", g.reached)
+		}
+	})
+}
+
+type githubRefusal struct {
+	real    http.RoundTripper
+	mu      sync.Mutex
+	reached []string
+}
+
+func (g *githubRefusal) RoundTrip(r *http.Request) (*http.Response, error) {
+	if h := r.URL.Hostname(); h == "github.com" || strings.HasSuffix(h, ".github.com") || strings.HasSuffix(h, ".githubusercontent.com") {
+		g.mu.Lock()
+		g.reached = append(g.reached, r.Method+" "+r.URL.String())
+		g.mu.Unlock()
+		return nil, fmt.Errorf("refused %s: this test's GitHub is its stand-in", r.URL)
+	}
+	return g.real.RoundTrip(r)
+}
+
 // taskComments is the text of every comment on a task.
 func taskComments(t *testing.T, taskID string) []string {
 	t.Helper()

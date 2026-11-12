@@ -166,6 +166,48 @@ func TestADefaultPerCalendarRemindsWhenNoneIsSet(t *testing.T) {
 	}
 }
 
+// V-524: a reminder email has no unsubscribe link, so its footer says where
+// to stop it: on the event for one set there; in the calendar's Default
+// reminders for one that came from a default.
+func TestAReminderEmailSaysWhereToStopIt(t *testing.T) {
+	h, rem := reminding(t)
+	ctx := context.Background()
+	sam := h.member("Sam")
+	own, byDefault := h.create(sam, "Design review"), h.create(sam, "Standup")
+	if _, err := h.s.SetReminders(ctx, sam, own.ID, []int{60}, []int{60}); err != nil {
+		t.Fatal(err)
+	}
+	rem.defaults[personOf(sam)] = map[string]ReminderDefaults{
+		DefaultsMine: {Timed: &ReminderSet{Minutes: []int{30}, Email: []int{30}}},
+	}
+	if err := h.s.planReminders(ctx, uuid.MustParse(byDefault.ID), nil); err != nil {
+		t.Fatal(err)
+	}
+	why := func(event string, minutes int) string {
+		t.Helper()
+		emailed := emailing(t, 1, false)
+		j, ok := rem.next(sam, event, models.ReminderNext)
+		if !ok || j.p.Minutes != minutes || !j.p.Email {
+			t.Fatalf("%s: planned %+v %v, want %d minutes by email", event, j, ok, minutes)
+		}
+		h.clock = j.at.Add(30 * time.Second)
+		if err := h.s.fireReminder(ctx, j.person, j.p); err != nil {
+			t.Fatal(err)
+		}
+		if len(*emailed) != 1 {
+			t.Fatalf("%s: emailed %d", event, len(*emailed))
+		}
+		return (*emailed)[0].Why
+	}
+	if w := why(own.ID, 60); !strings.Contains(w, "change or remove the reminder on the event") || strings.Contains(w, "Default reminders") {
+		t.Errorf("a reminder set on the event: %q", w)
+	}
+	if w := why(byDefault.ID, 30); !strings.Contains(w, "default reminders") || !strings.Contains(w, "change Default reminders") ||
+		strings.Contains(w, "on the event") {
+		t.Errorf("a reminder from the calendar's default: %q, want where to change the default", w)
+	}
+}
+
 func TestDefaultRemindersAreCheckedAsWritten(t *testing.T) {
 	for _, bad := range []string{
 		`[]`, `{"mine": {"timed": {"minutes": [99999]}}}`, `{"mine": {"timed": {"minutes": [10], "email": [20]}}}`,

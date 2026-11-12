@@ -248,7 +248,7 @@ func TestTableCellEdits(t *testing.T) {
 			t.Errorf("after the patch the row holds %v", v)
 		}
 
-		if err := dataTableBusiness.DeleteRow(w.ctx, deals.Id, row, w.people["bo"]); err != nil {
+		if _, err := dataTableBusiness.DeleteRow(w.ctx, deals.Id, row, w.people["bo"]); err != nil {
 			t.Fatal(err)
 		}
 		if code, out := send(row, fmt.Sprintf(`{"values": {%q: "Open"}}`, status)); code != http.StatusNotFound || out["msg"] != "row not found" {
@@ -261,7 +261,7 @@ func TestTableCellEdits(t *testing.T) {
 		if _, err := dataTableBusiness.UpdateRow(w.ctx, deals.Id, row, dataTableBusiness.RowInput{Values: map[string]interface{}{status: "Open"}}, w.people["bo"]); !dataTableBusiness.IsRowNotFound(err) {
 			t.Errorf("updating a deleted row answered %v, want row not found", err)
 		}
-		if err := dataTableBusiness.DeleteRow(w.ctx, deals.Id, row, w.people["bo"]); !dataTableBusiness.IsRowNotFound(err) {
+		if _, err := dataTableBusiness.DeleteRow(w.ctx, deals.Id, row, w.people["bo"]); !dataTableBusiness.IsRowNotFound(err) {
 			t.Errorf("deleting a deleted row answered %v, want row not found", err)
 		}
 	})

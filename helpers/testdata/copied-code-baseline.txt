@@ -43,8 +43,6 @@ business/Import/providers/notion/provider.go 216
 business/Import/providers/todoist/provider.go 335
 business/Import/providers/trello/provider.go 109
 business/Import/user_resolver.go 107
-business/Poll/conversation.go 153
-business/Poll/pollBusiness.go 153
 business/Post/postBusiness.go 104
 business/Post/postReactions.go 101
 business/SavedItem/savedItem.go 244
@@ -68,7 +66,7 @@ controllers/Import/importController.go 419
 controllers/Post/postController.go 246
 controllers/Project/projectController.go 450
 controllers/SlackImport/slackImportController.go 419
-controllers/Task/taskController.go 1368
+controllers/Task/taskController.go 425
 controllers/Task/taskRecurrenceController.go 236
 controllers/User/userController.go 450
 controllers/V1/direct.go 230
@@ -83,13 +81,13 @@ domain/WorkGraph/neighbours.go 107
 middleware/requireAuth.go 208
 middleware/requireDocColabAuth.go 208
 models/dgraph/Activity/activityModel.go 316
-models/postgres/AIAgent/aiAgentModel.go 252
+models/postgres/AIAgent/aiAgentModel.go 242
 models/postgres/CalendarV2/reminderModel.go 212
 models/postgres/Import/importModel.go 741
 models/postgres/SlackImport/slackImportModel.go 749
 models/postgres/User/userModel.go 206
 services/AI/anthropic.go 422
 services/AI/embeddings.go 216
-services/AI/openai.go 1063
+services/AI/openai.go 711
 services/AI/vision.go 345
 services/AI/webSearch.go 316

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -18,6 +19,9 @@ import (
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	business "github.com/akashc777/OneCamp/business/Board"
 	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
+	teamBusiness "github.com/akashc777/OneCamp/business/Team"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -933,10 +937,20 @@ func sanitizeBoardSearch(raw string) string {
 	return strings.TrimSpace(b.String())
 }
 
-// GetBoardList GET /board/getBoardList?pageSize=&pageIndex=&search=&editable= -
-// returns the boards the caller can access (owned or shared), newest-edited
-// first. editable=1 lists only the boards they may edit: a call's Present a
-// board picker, since present_board refuses any other (board_not_editable).
+// GetBoardList GET /board/getBoardList?pageSize=&pageIndex=&search=&editable=
+// &owner=&project=|team= - returns the boards the caller can access (owned or
+// shared), newest-edited first. editable=1 lists only the boards they may
+// edit: a call's Present a board picker, since present_board refuses any
+// other (board_not_editable). The rest only narrow that list, inside the
+// query, so data.count and pageCount are the narrowed list's: owner=mine is
+// the boards they made, owner=shared the rest; project=<uuid> is the boards
+// linked from that project's home, archived or not, for anyone Work Access
+// lets view it; team=<uuid> is the boards linked from the team's live
+// projects (as the team page lists them), for anyone who may read the team
+// (teamBusiness.CanReadTeam: a member, a team admin or a workspace admin).
+// A project and a team at once, an unknown owner or an id that isn't one is
+// a 400; a project or team that isn't there, a deleted team or one they may
+// not read is a 404 with one body.
 func GetBoardList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -950,8 +964,12 @@ func GetBoardList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	search := sanitizeBoardSearch(q.Get("search"))
+	filter, ok := boardListFilter(w, r, q, userInfo)
+	if !ok {
+		return
+	}
 
-	list, err := business.GetBoardList(ctx, userInfo.UserDgraphInfo.Uid, search, pageSize, pageIndex*pageSize, q.Get("editable") == "1")
+	list, err := business.GetBoardList(ctx, userInfo.UserDgraphInfo.Uid, search, pageSize, pageIndex*pageSize, filter)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetBoardList failed err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get board list", "err": err.Error()})
@@ -967,4 +985,54 @@ func GetBoardList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Success", "pageCount": pageCount, "data": list})
+}
+
+// boardListFilter reads the board list's narrowing (miro-46): editable=1,
+// owner=mine|shared, and project=<uuid> or team=<uuid>, checking the caller
+// may read the project or team named, by the checks those routes make: Work
+// Access's NeedView for a project, archived or not (its members open an
+// archived project, to restore it); the team's CanReadTeam (a member, a team
+// admin or a workspace admin) for a team. The filter only narrows the list
+// of boards the caller may read, so a workspace admin outside a team lists
+// only those of its boards they may read. An owner it doesn't know, a
+// project and a team at once, or an id that isn't one is a 400. A project
+// or team that isn't there, a deleted team, or one the caller may not read
+// is a 404, alike, so the answer never says that one exists. caller is who
+// is asking. When ok is false the answer is written.
+func boardListFilter(w http.ResponseWriter, r *http.Request, q url.Values, caller userModels.UserInfo) (filter business.BoardListFilter, ok bool) {
+	filter = business.BoardListFilter{Editable: q.Get("editable") == "1", Owner: q.Get("owner")}
+	switch filter.Owner {
+	case "", business.BoardsMine, business.BoardsShared:
+	default:
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "owner is mine or shared."})
+		return filter, false
+	}
+	project, team := q.Get("project"), q.Get("team")
+	switch {
+	case project != "" && team != "":
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Filter by a project or a team, not both."})
+		return filter, false
+	case project != "":
+		id, _, ok := projectaccess.RequireID(w, r, project, workAccess.NeedView, "")
+		if !ok {
+			return filter, false
+		}
+		filter.ProjectUUID = id.String()
+	case team != "":
+		id, err := uuid.Parse(team)
+		if err != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a team."})
+			return filter, false
+		}
+		t, err := teamBusiness.GetBasicDgraphTeamInfoByUUID(r.Context(), id.String(), caller.UserDgraphInfo.Uid)
+		if err == nil && (t == nil || t.Uuid == "" || helpers.IsSoftDeleted(t.DeletedAt) || !teamBusiness.CanReadTeam(t, caller.UserPostgresInfo.IsAdmin)) {
+			err = helpers.ErrNotFound
+		}
+		if err != nil {
+			helpers.WriteReadFailure(w, r, err, "team", "controllers/GetBoardList")
+			return filter, false
+		}
+		filter.TeamUUID = id.String()
+	}
+	return filter, true
 }

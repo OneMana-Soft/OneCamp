@@ -295,9 +295,14 @@ var exemptFromDeadExportedCheck = map[string]string{
 	"ArchivedProjectsWithNamePrefix":  "called only by beta's demo seed (retired copies of the curated projects); the release lines don't carry it.",
 	"ChannelIDsWithNamePrefix":        "called only by beta's demo seed (the visitor leaves every retired copy of the curated channels); the release lines don't carry it.",
 	"ClearForPersonInProject":         "called only by beta's demo seed (its showcase time entries); the release lines don't carry it.",
+	"CreatorOf":                       "models/postgres/Project's is called only by beta's demo seed (business/DemoSeed/codeLinked.go finds who made the project); the release lines don't carry the seed.",
+	"FileUnderGroup":                  "business/LiveKit's is called only by beta's demo seed (business/DemoSeed/groupCall.go files the demo call's recording under its group); the release lines don't carry the seed.",
+	"KeepEndedSession":                "models/postgres/CallState's is called only by beta's demo seed (business/DemoSeed/groupCall.go keeps a finished call whole); the release lines don't carry the seed.",
 	"MarkProjectArchivedInOpenSearch": "called only by beta's demo seed (a refresh takes every retired copy of a curated project out of search); the release lines don't carry it.",
 	"NoteColourByID":                  "business/Board/scene's is called only by beta's demo seed (business/DemoSeed/board.go colours its board's notes by id); the release lines don't carry the seed.",
+	"RecordLanded":                    "business/GitHub's is called only by beta's demo seed (business/DemoSeed/codeLinked.go writes a landed pull request on a task as GitHub's deliveries would); the release lines don't carry the seed.",
 	"SaveAll":                         "business/TaskTemplate's is called only by beta's demo seed (business/DemoSeed/taskTemplates.go writes the demo's templates, each scope's set at once); the release lines don't carry the seed.",
+	"SetDgraphTaskHistory":            "domain/Task's is called only by beta's demo seed (business/DemoSeed/history.go and topup.go write finished tasks' status history); the release lines don't carry the seed.",
 	"TakeOver":                        "business/TaskKeys' is called only by beta's demo seed (a refreshed project keeps its key); never offered to people; the release lines don't carry the seed.",
 	"UpdateDocPermissions":            "business/Doc's is called only by beta's demo seed (the docs home's shared and team docs); the share routes don't call it; the release lines don't carry the seed.",
 
@@ -313,6 +318,12 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"teammate hands the work over through this slot, which business/AIAgent fills when its worker " +
 		"starts, on the AI edition only. On the AI-free line there are no AI teammates and the slot " +
 		"stays empty.",
+
+	"RegisterNotesDrafter": "an EDITION-CONDITIONAL registration slot (P10-1b). business/Release " +
+		"ships in both editions and declares a release's notes drafter; business/AI fills it from an " +
+		"init and exists only on the AI edition. On the AI-free line the slot is declared and never " +
+		"filled, so drafting a release's notes is not found, with no edit on either side. Deleting " +
+		"it would force business/Release to import AI, which the AI-free build cannot do.",
 
 	"CapPlansForTest": "cuts a plan read at a few finished tasks (business/Task's planLimit), so the " +
 		"integration test can prove a very large project's forecast counts every open task and its " +
@@ -402,10 +413,21 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"started before every comparison they make, so nothing else can make a restored stamp " +
 		"older than the process. It is built only with the integration tag.",
 
+	"SyncLinkForTest": "keeps one Google link in step through a fake provider, as the sync sweep " +
+		"does, so the integration test of a see-only calendar (V-594) proves the provider's own events " +
+		"still land on it and nothing is sent to it. No test can reach Google, and the sweep picks its " +
+		"adapter from the registry. It is built only with the integration tag.",
+
 	"SwapGoogleEventUpdateForTest": "stands in for the write of an edit to an event's Google copy, " +
 		"so the integration test of a copy Google says is gone can answer \"gone\" only after a " +
 		"newer edit has landed, and prove the forgetting keeps that edit. No test can reach " +
 		"Google, and nothing else orders the two edits. It is built only with the integration tag.",
+
+	"SetClockForTest": "pins helpers.Now, the clock a handler hands its business function, so " +
+		"the integration test of plan my week asks over HTTP at the week's last hour and on a " +
+		"Monday morning IST instead of whenever the gate runs (V-827). Which week a plan covers " +
+		"turns on the instant, and only the handler reads it. It is built only with the " +
+		"integration tag, so no request and no product code can move the clock.",
 
 	"AgentBudgetLimit": "reads the per-agent cap off a context so business/MCPServer's tests can " +
 		"assert SpendContext actually carries it. services/AI keeps budgetDimensions unexported, " +

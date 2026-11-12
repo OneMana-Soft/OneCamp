@@ -62,6 +62,37 @@ func TestTheDependencyRightsMatrix(t *testing.T) {
 	}
 }
 
+// An archived project's tasks are read-only: no link, dependency or parent
+// is made to or from one, nor taken off, whoever asks; the refusal says why
+// in words, and it is a refusal (403), not a task that isn't there.
+func TestAnArchivedProjectsTasksTakeNoLinks(t *testing.T) {
+	const words = "This project is archived, so its tasks can't change. Restore it first."
+	admin := Standing{ProjectUUID: "p", Role: RoleAdmin, EditWho: EditMembers}
+	archived := admin
+	archived.Archived = true
+	v := func(s Standing) Verdict { return VerdictOf(s, TaskFacts{}) }
+	for _, c := range []struct {
+		name string
+		err  error
+	}{
+		{"the waiting end archived", MayLink(v(archived), v(admin), false)},
+		{"the other end archived", MayLink(v(admin), v(archived), false)},
+		{"both ends in one archived project", MayLink(v(archived), v(archived), true)},
+		{"taking a link off a task there", MayUnlink(v(archived))},
+	} {
+		if !errors.Is(c.err, ErrNotAllowed) || errors.Is(c.err, ErrHiddenEnd) {
+			t.Errorf("%s: %v, want a refusal", c.name, c.err)
+			continue
+		}
+		if c.err.Error() != words {
+			t.Errorf("%s: %q, want %q", c.name, c.err.Error(), words)
+		}
+	}
+	if err := MayLink(v(admin), v(admin), false); err != nil {
+		t.Errorf("a live project's admin links across: %v", err)
+	}
+}
+
 // The verdicts follow the one rule: seeing is NeedView, moving is
 // NeedEditTask, on the task.
 func TestVerdictsAreTheTaskRule(t *testing.T) {
@@ -176,20 +207,25 @@ func TestKeepSeenEndsDropsHiddenEndsWhole(t *testing.T) {
 		BlockedBy: []*dgraphStruct.DgraphTask{
 			{Uuid: mine.String(), Project: &dgraphStruct.DgraphProject{Uuid: p.String(), IsProjectMember: 1}},
 			{Uuid: inQ.String(), Project: &dgraphStruct.DgraphProject{Uuid: q.String(), IsProjectMember: 1}},
-			{Uuid: stubP.String(), Hidden: true},
+			{StubOf: stubP.String(), Hidden: true},
 		},
 		Blocks: []*dgraphStruct.DgraphTask{
 			{Uuid: inR.String(), Project: &dgraphStruct.DgraphProject{Uuid: r.String()}},
-			{Uuid: stubQ.String(), Hidden: true},
+			{StubOf: stubQ.String(), Hidden: true},
 			{Uuid: uuid.NewString()}, // no project: not an end anyone may see
 		},
 	}
 	if err := KeepSeenEnds(context.Background(), uuid.NewString(), "0x9", task); err != nil {
 		t.Fatal(err)
 	}
+	// A stub answers no id (V-678): which task it stands for is StubOf's.
 	ids := func(ts []*dgraphStruct.DgraphTask) []string {
 		var out []string
 		for _, x := range ts {
+			if x.Hidden {
+				out = append(out, x.StubOf)
+				continue
+			}
 			out = append(out, x.Uuid)
 		}
 		return out

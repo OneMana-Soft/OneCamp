@@ -126,9 +126,6 @@ func undoStep(ctx context.Context, who *userModels.UserInfo, st *workflowModel.S
 	if now != after {
 		return false, "changed since, kept"
 	}
-	if st.Field == "priority" && before == "" {
-		return false, "had no priority, kept"
-	}
 	if err := applyOps(helpers.WithWorkflowGenerated(ctx), who, taskID, []taskWriter.Op{op}); err != nil {
 		return false, plainError(err)
 	}

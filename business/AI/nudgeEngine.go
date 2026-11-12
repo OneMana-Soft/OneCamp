@@ -36,7 +36,9 @@ package business
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,6 +129,9 @@ func runNudgePass(ctx context.Context) {
 		}
 	}()
 
+	// Open nudges are settled first, whether or not this pass makes any.
+	settleOpenNudges(ctx, time.Now())
+
 	settings, err := getAISettingsForMemory(ctx)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "nudge engine: load settings failed: %v", err)
@@ -179,6 +184,76 @@ func runNudgePass(ctx context.Context) {
 	helpers.LogInfoWithContext(ctx, "nudge engine: evaluated %d owner(s), created/refreshed %d nudge(s)", len(byUser), totalCreated)
 }
 
+// nudgeQuietAfter is how long an urgent nudge stays urgent without being
+// raised again: then it drops to priority 0, still listed.
+const nudgeQuietAfter = 14 * 24 * time.Hour
+
+// settleOpenNudges settles the open nudges a pass would otherwise leave as
+// they were (V-581, D2), by a status or priority change, never a delete:
+//   - an overdue-commitment nudge whose commitment no longer needs its person
+//     now (done, deleted, missing, someone else's, or stale) is superseded,
+//     by the same predicate the attention list uses (commitmentNeedsMeNow);
+//   - any urgent nudge not raised again for nudgeQuietAfter drops to priority
+//     0: still listed, no longer urgent. When it was last raised is left as
+//     it was.
+//
+// Each person whose open nudges changed hears ONE "cleared" naming every
+// nudge of theirs it superseded (none when theirs only went quiet), with
+// their open count after, read for them all at once. Best effort: a failed
+// read leaves the nudges for the next pass.
+func settleOpenNudges(ctx context.Context, now time.Time) {
+	// closed is each changed person's superseded nudges.
+	closed := map[uuid.UUID][]uuid.UUID{}
+	open, err := nudgeModels.ListOpenOfKind(ctx, nudgeModels.KindOverdueCommitment, nudgeMaxRows)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "nudge engine: list open commitment nudges failed: %v", err)
+	} else if len(open) > 0 {
+		var ids []uuid.UUID
+		for _, n := range open {
+			if id, perr := uuid.Parse(n.SourceID); perr == nil {
+				ids = append(ids, id)
+			}
+		}
+		live, lerr := memoryModels.LiveByIDs(ctx, ids)
+		if lerr != nil {
+			helpers.LogErrorWithContext(ctx, "nudge engine: read the commitments behind %d nudge(s) failed: %v", len(ids), lerr)
+		} else {
+			var settle []uuid.UUID
+			for _, n := range open {
+				id, _ := uuid.Parse(n.SourceID)
+				it := live[id]
+				if it == nil || it.OwnerID == nil || *it.OwnerID != n.UserID || !commitmentNeedsMeNow(it, now) {
+					settle = append(settle, n.ID)
+				}
+			}
+			byUser, serr := nudgeModels.SupersedeByIDs(ctx, settle)
+			if serr != nil {
+				helpers.LogErrorWithContext(ctx, "nudge engine: settle %d nudge(s) failed: %v", len(settle), serr)
+			}
+			maps.Copy(closed, byUser)
+		}
+	}
+	quiet, err := nudgeModels.QuietUnraisedSince(ctx, now.Add(-nudgeQuietAfter))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "nudge engine: quiet unraised nudges failed: %v", err)
+	}
+	for _, u := range quiet {
+		if _, ok := closed[u]; !ok {
+			closed[u] = nil
+		}
+	}
+	if len(closed) == 0 {
+		return
+	}
+	counts, err := nudgeModels.CountOpenForUsers(ctx, slices.Collect(maps.Keys(closed)))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "nudge engine: count the open nudges of %d person(s) failed: %v", len(closed), err)
+	}
+	for u, ids := range closed {
+		PublishNudgeCleared(u.String(), counts[u], ids...)
+	}
+}
+
 // reconcileResolvedUsers supersedes open nudges for users who had open nudges
 // but produced zero candidates this pass (every signal resolved). Without this,
 // a nudge for a commitment that got done would never clear on its own.
@@ -192,8 +267,8 @@ func reconcileResolvedUsers(ctx context.Context, byUser map[uuid.UUID][]candidat
 		if _, hadCandidates := byUser[uid]; hadCandidates {
 			continue // already reconciled in applyUserNudges via its keep-set
 		}
-		if n, serr := nudgeModels.SupersedeStaleForUser(ctx, uid, nil); serr == nil && n > 0 {
-			publishBadge(ctx, uid)
+		if closed, serr := nudgeModels.SupersedeStaleForUser(ctx, uid, nil); serr == nil {
+			publishCleared(ctx, uid, closed...)
 		}
 	}
 }
@@ -232,7 +307,7 @@ func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
 	// content) would follow a user out of a conversation they've left, leaking
 	// it. When we can positively confirm the owner left, we also clear
 	// owner_user_id so future passes don't re-scan it (self-healing).
-	memberCache := map[string]*dgraphMembership{}
+	memberCache := map[string]*memoryScopes{}
 
 	var out []candidateNudge
 	var stale []uuid.UUID
@@ -253,6 +328,12 @@ func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
 			if resolved {
 				stale = append(stale, it.ID)
 			}
+			continue
+		}
+		// A commitment is nudged of only while it needs its person now: never
+		// undated, due today or later, or stale (commitmentNeedsMeNow). It is
+		// checked after the scope, so an owner who left is still detached.
+		if it.Kind == memoryModels.KindCommitment && !commitmentNeedsMeNow(it, now) {
 			continue
 		}
 		c := candidateNudge{
@@ -289,85 +370,39 @@ func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
 	return out
 }
 
-// dgraphMembership is a per-owner snapshot of scope membership used to gate
-// nudge delivery. Built lazily from the owner's Dgraph profile and cached for
-// the duration of a single pass (one lookup per distinct owner).
-type dgraphMembership struct {
-	channels map[string]struct{}
-	projects map[string]struct{}
-	dmGroups map[string]struct{}
-	// resolved is false when the owner's profile couldn't be loaded (deleted
-	// user / transient error); callers treat that as "no longer in scope".
-	resolved bool
-}
-
 // ownerScopeStatus reports whether the owner currently belongs to the item's
 // scope (channel / project / DM-group), and whether the owner's profile was
-// resolved at all. This is the fire-time complement to memoryItemVisibleTo:
-// an item is only ever nudged to an owner who can still see where it lives.
-// The owner's postgres Id equals their Dgraph user_uuid.
+// resolved at all. This is the fire-time complement to memoryItemVisibleTo,
+// by the same check (memoryScopes): an item is only ever nudged to an owner
+// who can still see where it lives. The owner's postgres Id equals their
+// Dgraph user_uuid. cache holds each owner's scopes for the pass (one lookup
+// per distinct owner; nil when unresolved).
 //
 // Returns (inScope, resolved). When resolved is false the owner's profile
 // couldn't be loaded (deleted user / transient error) and inScope is false —
 // the caller must NOT clear ownership in that case, only skip the pass.
-func ownerScopeStatus(ctx context.Context, ownerID uuid.UUID, it *memoryModels.MemoryItem, cache map[string]*dgraphMembership) (inScope bool, resolved bool) {
+func ownerScopeStatus(ctx context.Context, ownerID uuid.UUID, it *memoryModels.MemoryItem, cache map[string]*memoryScopes) (inScope bool, resolved bool) {
 	key := ownerID.String()
-	m, ok := cache[key]
+	scopes, ok := cache[key]
 	if !ok {
-		m = loadOwnerMembership(ctx, key)
-		cache[key] = m
+		scopes = ownerScopesNow(ctx, ownerID)
+		cache[key] = scopes
 	}
-	if !m.resolved {
+	if scopes == nil {
 		return false, false
 	}
-	if it.ChannelUUID != nil {
-		if _, in := m.channels[it.ChannelUUID.String()]; in {
-			return true, true
-		}
-	}
-	if it.ProjectUUID != nil {
-		if _, in := m.projects[it.ProjectUUID.String()]; in {
-			return true, true
-		}
-	}
-	if it.ChatGrpID != "" {
-		if _, in := m.dmGroups[it.ChatGrpID]; in {
-			return true, true
-		}
-	}
-	return false, true
+	return scopes.canRead(it), true
 }
 
-// loadOwnerMembership fetches the owner's current Dgraph membership sets. A
-// missing profile or error yields an unresolved snapshot so the caller fails
-// closed (no nudge) rather than leaking.
-func loadOwnerMembership(ctx context.Context, ownerUUID string) *dgraphMembership {
-	m := &dgraphMembership{
-		channels: map[string]struct{}{},
-		projects: map[string]struct{}{},
-		dmGroups: map[string]struct{}{},
-	}
-	info, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, ownerUUID)
+// ownerScopesNow is where a person is now, from their current Dgraph profile,
+// for a reader with no request (the nudge engine, the digest). nil when the
+// profile can't be loaded, so the caller fails closed rather than leaking.
+func ownerScopesNow(ctx context.Context, ownerID uuid.UUID) *memoryScopes {
+	info, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, ownerID.String())
 	if err != nil || info == nil {
-		return m // resolved == false
+		return nil
 	}
-	for _, ch := range info.Channels {
-		if ch != nil && ch.Uuid != "" {
-			m.channels[ch.Uuid] = struct{}{}
-		}
-	}
-	for _, pr := range info.Projects {
-		if pr != nil && pr.Uuid != "" {
-			m.projects[pr.Uuid] = struct{}{}
-		}
-	}
-	for _, dm := range info.DMs {
-		if dm != nil && dm.GroupingId != "" {
-			m.dmGroups[dm.GroupingId] = struct{}{}
-		}
-	}
-	m.resolved = true
-	return m
+	return newMemoryScopes(info)
 }
 
 // applyUserNudges upserts a user's candidate nudges (capped, dedup-suppressed),
@@ -443,9 +478,9 @@ func applyUserNudges(ctx context.Context, userID uuid.UUID, list []candidateNudg
 	// Supersede the user's open nudges whose signal no longer holds (resolved /
 	// no longer overdue). If the user had open nudges and none survive, this
 	// clears them — keeping the bell honest.
-	if n, err := nudgeModels.SupersedeStaleForUser(ctx, userID, keep); err == nil && n > 0 {
-		// A change to the open set: nudge the badge so it reflects reality.
-		publishBadge(ctx, userID)
+	if closed, err := nudgeModels.SupersedeStaleForUser(ctx, userID, keep); err == nil {
+		// Each one closed is told by its id, so open tabs drop exactly it.
+		publishCleared(ctx, userID, closed...)
 	}
 	return created
 }
@@ -468,10 +503,14 @@ func publishNudge(ctx context.Context, userID, nudgeID uuid.UUID, c candidateNud
 	PublishNudgeToUser(userID.String(), msg)
 }
 
-// publishBadge sends a lightweight "count changed" event (no new nudge).
-func publishBadge(ctx context.Context, userID uuid.UUID) {
+// publishCleared tells the person each nudge of theirs that closed, by id,
+// with their open count after; nothing when none did.
+func publishCleared(ctx context.Context, userID uuid.UUID, closed ...uuid.UUID) {
+	if len(closed) == 0 {
+		return
+	}
 	count, _ := nudgeModels.CountOpenForUser(ctx, userID)
-	PublishNudgeToUser(userID.String(), &mqttStruct.MqttNudge{Action: "cleared", OpenCount: count})
+	PublishNudgeCleared(userID.String(), count, closed...)
 }
 
 // ClearNudgeForMemoryItem supersedes the OPEN nudge for a memory item the
@@ -481,7 +520,7 @@ func publishBadge(ctx context.Context, userID uuid.UUID) {
 // the next sweep (which supersedes stale signals anyway). Safe to call async.
 func ClearNudgeForMemoryItem(ctx context.Context, memoryItemID string) {
 	dedupKey := "memory:" + memoryItemID
-	userID, err := nudgeModels.SupersedeOpenByDedupKey(ctx, dedupKey)
+	userID, nudgeID, err := nudgeModels.SupersedeOpenByDedupKey(ctx, dedupKey)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "ClearNudgeForMemoryItem supersede failed for %s: %v", memoryItemID, err)
 		return
@@ -489,7 +528,7 @@ func ClearNudgeForMemoryItem(ctx context.Context, memoryItemID string) {
 	if userID == uuid.Nil {
 		return // no open nudge for this item — nothing to clear
 	}
-	publishBadge(ctx, userID)
+	publishCleared(ctx, userID, nudgeID)
 }
 
 // PublishNudgeToUser publishes a nudge event to a single user's activity topic.
@@ -499,11 +538,16 @@ func PublishNudgeToUser(userUUID string, msg *mqttStruct.MqttNudge) {
 	mqttBusiness.PublishMessageToUser(userUUID, mqttStruct.MESSAGE_AI_NUDGE, msg)
 }
 
-// PublishNudgeBadge pushes a lightweight "open count changed" event to a user's
-// activity topic. Exported for the controller to call after dismiss/act so all
-// of a user's open tabs update their badge in real time.
-func PublishNudgeBadge(userUUID string, openCount int) {
-	PublishNudgeToUser(userUUID, &mqttStruct.MqttNudge{Action: "cleared", OpenCount: openCount})
+// PublishNudgeCleared tells a person's open tabs that nudges of theirs closed:
+// ONE "cleared" naming them all (nudge_ids), so each tab drops those and no
+// other, with their open count after. With no ids it is the count alone (all
+// of them dismissed at once: 0). The controller calls it after dismiss/act.
+func PublishNudgeCleared(userUUID string, openCount int, nudgeIDs ...uuid.UUID) {
+	msg := &mqttStruct.MqttNudge{Action: "cleared", OpenCount: openCount}
+	for _, id := range nudgeIDs {
+		msg.NudgeIDs = append(msg.NudgeIDs, id.String())
+	}
+	PublishNudgeToUser(userUUID, msg)
 }
 
 // SetNudgesEnabled toggles the proactive-nudge engine (admin). Exported so the

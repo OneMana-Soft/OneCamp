@@ -146,14 +146,8 @@ func MeetingPrepBrief(ctx context.Context, userInfo *userModels.UserInfo, req ad
 		}
 	}
 
-	// The requester's OPEN follow-up items (owner-scoped). Best-effort.
-	ownerID := userInfo.UserPostgresInfo.Id
-	openItems, oerr := memoryModels.List(ctx, memoryModels.QueryFilter{
-		Statuses: []string{memoryModels.StatusOpen},
-		Kinds:    []string{memoryModels.KindCommitment, memoryModels.KindQuestion},
-		OwnerID:  &ownerID,
-		Limit:    prepMaxOpenItems,
-	})
+	// The requester's OPEN follow-up items, from where they are now. Best-effort.
+	openItems, oerr := ownOpenItems(ctx, userInfo, []string{memoryModels.KindCommitment, memoryModels.KindQuestion}, prepMaxOpenItems)
 	if oerr != nil {
 		helpers.LogInfoWithContext(ctx, "meeting prep: open items failed: %v", oerr)
 	}

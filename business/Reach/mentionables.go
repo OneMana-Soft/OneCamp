@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
+	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	domain "github.com/akashc777/OneCamp/domain/Message"
 	teamDomain "github.com/akashc777/OneCamp/domain/Team"
 	"github.com/akashc777/OneCamp/helpers"
@@ -93,10 +93,17 @@ var (
 		admin := who.UserPostgresInfo.IsAdmin && !helpers.ActsThroughToken(ctx)
 		return teamDomain.TeamsWithMembersOf(ctx, who.UserDgraphInfo.Uid, admin)
 	}
-	zonesOf        = prefModels.ZonesOf
-	defaultChannel = func(id string) bool {
-		ids, _ := settingsBusiness.DefaultChannelIDs()
-		return slices.ContainsFunc(ids, func(x string) bool { return strings.EqualFold(x, id) })
+	zonesOf = prefModels.ZonesOf
+	// Whether id is a channel new members join: the admin's choice, or the
+	// workspace's #general while there is none, by the rule joining uses
+	// (V-731: reading only the choice offered @everyone nowhere until an
+	// admin chose).
+	defaultChannel = func(ctx context.Context, id string) (bool, error) {
+		joined, _, err := channelBusiness.DefaultChannels(ctx)
+		if err != nil {
+			return false, err
+		}
+		return slices.ContainsFunc(joined, func(c channelBusiness.Channel) bool { return strings.EqualFold(c.UUID.String(), id) }), nil
 	}
 )
 
@@ -143,7 +150,11 @@ func MentionablesIn(ctx context.Context, who *userModels.UserInfo, place Place) 
 	if place.Kind == "channel" && place.Channel != nil {
 		m.Name = place.Channel.Name
 		m.Broadcasts = []BroadcastOffer{{Name: Here}, {Name: Channel, Count: max(len(members)-1, 0)}}
-		if defaultChannel(place.ID) {
+		everyone, err := defaultChannel(ctx, place.ID)
+		if err != nil {
+			return Mentionables{}, err
+		}
+		if everyone {
 			// @everyone where everyone is: a channel each new member joins.
 			m.Broadcasts = append(m.Broadcasts, BroadcastOffer{Name: Everyone, Count: max(len(members)-1, 0)})
 		}

@@ -263,6 +263,27 @@ func Delete(ctx context.Context, spec registry.Spec, args []string) error {
 	return nil
 }
 
+// deleteIfHeldScript drops a key only while it holds the value given, in one
+// step, so nothing can claim the key between the read and the delete.
+var deleteIfHeldScript = redis.NewScript(`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) end return 0`)
+
+// DeleteIfHeld drops the key only while it still holds value, and says
+// whether it did: how a holder lets go of a claim it took with a value of its
+// own (SetStringIfAbsent with a token), so a holder whose claim ran out never
+// frees the claim the next holder took. No-op without Redis.
+func DeleteIfHeld(ctx context.Context, spec registry.Spec, args []string, value string) (bool, error) {
+	if !IsAvailable() {
+		return false, nil
+	}
+	key := spec.Build(args...)
+	n, err := deleteIfHeldScript.Run(ctx, redisInit.RedisClient, []string{key}, value).Int()
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "redis store: DeleteIfHeld failed key=%s err=%+v", key, err)
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // SetJSONIndexed is SetJSON that also records args' last part in index under
 // the leading parts (index's args), so DeleteIndexed drops the whole family
 // by name. The index outlives its newest entry: its TTL is renewed on every

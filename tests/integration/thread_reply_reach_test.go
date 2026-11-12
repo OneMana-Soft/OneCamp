@@ -208,7 +208,7 @@ func TestAThreadReplyReachesTheChannelOnly(t *testing.T) {
 	t.Run("activity", func(t *testing.T) {
 		feed := func(name string) string {
 			t.Helper()
-			page, err := activityBusiness.GetUnifiedActivity(ctx, people[name], uids[name], time.Now().Add(time.Minute), 20)
+			page, err := activityBusiness.GetUnifiedActivity(ctx, activityBusiness.FeedQuery{User: people[name], DgraphID: uids[name], Before: time.Now().Add(time.Minute), Limit: 20})
 			if err != nil {
 				t.Fatal(err)
 			}

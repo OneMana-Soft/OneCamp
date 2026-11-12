@@ -80,7 +80,8 @@ business/AI/memoryBackfill.go :: backfillScope :: extractWindowChunked
 business/AI/memoryBackfill.go :: backfillScope :: writeMemoryWatermark
 business/AI/memoryBackfill.go :: runMemoryBackfill :: backfillScope
 business/AI/memoryDigest.go :: StartMemoryDigestLoop :: maybeRunDigest
-business/AI/memoryDigest.go :: runDigest :: notification.DispatchMemoryDigest
+business/AI/memoryDigest.go :: runDigest :: readableDigestItems
+business/AI/memoryDigest.go :: runDigest :: sendMemoryDigest
 business/AI/memoryExtractor.go :: MaybeExtractMemory :: persistMemoryItem
 business/AI/memoryWorker.go :: StartMemoryExtractionLoop :: runMemoryExtractionPass
 business/AI/memoryWorker.go :: extractWindowChunked :: MaybeExtractMemory
@@ -89,8 +90,9 @@ business/AI/nudgeEngine.go :: StartNudgeLoop :: runNudgePass
 business/AI/nudgeEngine.go :: applyUserNudges :: publishNudge
 business/AI/nudgeEngine.go :: gatherMemoryNudges :: ownerScopeStatus
 business/AI/nudgeEngine.go :: reconcileResolvedUsers :: nudgeModels.SupersedeStaleForUser
-business/AI/nudgeEngine.go :: reconcileResolvedUsers :: publishBadge
+business/AI/nudgeEngine.go :: reconcileResolvedUsers :: publishCleared
 business/AI/nudgeEngine.go :: runNudgePass :: applyUserNudges
+business/AI/nudgeEngine.go :: settleOpenNudges :: PublishNudgeCleared
 business/AI/sandboxExecutor.go :: resolveSandboxInputs :: dataTableBusiness.AggregateTable
 business/AI/sandboxExecutor.go :: resolveSandboxInputs :: dataTableBusiness.GetBundle
 business/AI/sandboxExecutor.go :: resolveSandboxInputs :: dataTableBusiness.ListRows
@@ -213,8 +215,7 @@ business/BulkPostAndChat/bulkPostAndChatBusiness.go :: AddChatsAndPostsToOpensea
 business/BulkPostAndChat/bulkPostAndChatBusiness.go :: BulkPostAndChatForward :: conversationDomain.Opened
 business/BulkPostAndChat/bulkPostAndChatBusiness.go :: PublishChatsAndPostsMqtt :: mqttBusiness.PublishChat
 business/BulkPostAndChat/bulkPostAndChatBusiness.go :: PublishChatsAndPostsMqtt :: mqttBusiness.PublishPost
-business/BulkPostAndChat/bulkPostAndChatBusiness.go :: sendFwdMessageNotifications :: deliverForward
-business/BulkPostAndChat/bulkPostAndChatBusiness.go :: sendFwdMessageNotifications :: eligibleForForward
+business/BulkPostAndChat/bulkPostAndChatBusiness.go :: sendFwdMessageNotifications :: tellForward
 business/Calendar/access.go :: DecideMany :: bookingModel.PageById
 business/Calendar/access.go :: DecideMany :: domain.GetDgraphEventInfoByUUID
 business/Calendar/availability.go :: BusySeenBy :: BusyFor
@@ -268,7 +269,10 @@ business/CallControl/act.go :: muteAll :: mute
 business/CallControl/act.go :: hold :: holdIn
 business/CallControl/act.go :: holdIn :: giveSources
 business/CallControl/act.go :: holdIn :: livekitInit.IsPerson
+business/CallControl/act.go :: holdIn :: livekitInit.IsCompanion
+business/CallControl/act.go :: holdIn :: livekitInit.PersonOf
 business/CallControl/act.go :: holdIn :: model.RunsCall
+business/CallControl/act.go :: allow :: giveSources
 business/CallControl/act.go :: others :: livekitInit.IsPerson
 business/CallControl/people.go :: handOn :: callStateBusiness.SetRole
 business/CallControl/people.go :: handOn :: liveKitBusiness.TellInCall
@@ -277,6 +281,7 @@ business/CallControl/people.go :: handOn :: tellPart
 business/CallControl/people.go :: handOn :: tellSources
 business/CallControl/people.go :: mayStay :: stayCheck
 business/CallControl/people.go :: stillHere :: livekitInit.IsPerson
+business/CallControl/people.go :: tellSources :: giveSources
 business/CallControl/sweep.go :: Reconcile :: callStateBusiness.BelongsHere
 business/CallControl/sweep.go :: Reconcile :: reconcileRoom
 business/CallControl/sweep.go :: endLeftInRooms :: callStateBusiness.EndLeftInRooms
@@ -497,8 +502,8 @@ business/GitHub/githubBusiness.go :: handleCheckRunEvent :: publishGitHubSyncMqt
 business/GitHub/githubBusiness.go :: handleCheckRunEvent :: taskDomain.FindTaskUUIDByPRURL
 business/GitHub/githubBusiness.go :: handleCheckRunEvent :: taskDomain.UpdateTaskPRState
 business/GitHub/githubBusiness.go :: handleDeleteEvent :: publishGitHubSyncMqtt
-business/GitHub/githubBusiness.go :: handlePushEvent :: applyAutomationRules
-business/GitHub/githubBusiness.go :: handlePushEvent :: eventTask
+business/GitHub/githubBusiness.go :: handlePushEvent :: closeByRef
+business/GitHub/githubBusiness.go :: handlePushEvent :: codeTask
 business/GitHub/githubBusiness.go :: handlePushEvent :: publishGitHubSyncMqtt
 business/GitHub/githubBusiness.go :: maybeEmitCIConcluded :: webhookBusiness.DispatchEvent
 business/GitHub/githubBusiness.go :: registerGitHubWebhook :: .Do
@@ -671,6 +676,7 @@ business/ImportReview/review.go :: RemoveAll :: takeOff
 business/Integration/googleCalendarBusiness.go :: googleBusy :: .Do
 business/Integration/googleCalendarBusiness.go :: listGoogleEvents :: .Do
 business/LiveKit/callRemoval.go :: RemoveGuestsWhere :: RemoveFromCall
+business/LiveKit/callRemoval.go :: putOut :: livekitInit.LiveKitService.RemoveParticipant
 business/LiveKit/callTranscriptRepair.go :: RepairCallTranscripts :: callSessionNodes
 business/LiveKit/callTranscriptRepair.go :: RepairCallTranscripts :: markCallSessionEnded
 business/MCPServer/claim.go :: StartPendingActionHousekeeping :: pendingModels.ExpireStale
@@ -843,7 +849,6 @@ business/Task/createMany.go :: newTaskNodes :: taskStatusBusiness.Resolve
 business/Task/statusSince.go :: StartStatusSinceBackfill :: domain.GetDgraphTasksWithoutStatusSince
 business/Task/statusSince.go :: StartStatusSinceBackfill :: domain.SetDgraphTaskStatusSince
 business/Task/taskBusiness.go :: publishTaskCommentActivity :: activityBusiness.PublishActivityToUser
-business/Task/taskBusiness.go :: sendNewTaskNotification :: activityBusiness.PublishActivityToUser
 business/Task/taskDependency.go :: afterMove :: integrationBusiness.SyncTaskToGoogleCalendar
 business/Task/taskDependency.go :: afterMove :: moveChanged
 business/Task/taskDependency.go :: afterMove :: mqttBusiness.PublishTaskDatesMany
@@ -865,7 +870,9 @@ business/TaskWriter/contract.go :: Apply :: restoreTask
 business/TaskWriter/contract.go :: Apply :: setAssignee
 business/TaskWriter/contract.go :: Apply :: setDates
 business/TaskWriter/contract.go :: Apply :: setEstimate
+business/TaskWriter/contract.go :: Apply :: setParent
 business/TaskWriter/contract.go :: Apply :: setPriority
+business/TaskWriter/contract.go :: Apply :: setRelation
 business/TaskWriter/contract.go :: Apply :: setStatus
 business/TaskWriter/contract.go :: Apply :: unseeing
 business/Thread/docResource.go :: tagWithRetry :: tagDocComment
@@ -1053,7 +1060,7 @@ business/LiveKit/callState.go :: SetTranscription :: switchRoom
 # 27 Oct 2026, CAL-LEAD-13 (calendar A3, ranked times): a person's busy times are one person's read (ReadBusy: their
 # OneCamp events, then their Google calendar), so the engine reads the people a request names side by side, eight at
 # a time (errgroup), for at most 20 people (maxPeople), as BusySeenBy reads Find a time's.
-business/Availability/engine.go :: Suggestions :: busyFor
+business/Availability/engine.go :: readPeople :: busyFor
 # 27 Oct 2026, CAL-LEAD-15 (the demo seed's cast hours): the fictional cast's zone and weekday hours are kept as each
 # one's own preferences through Person Preferences' one checked Set: two keys for each of the two people, once a run.
 # 27 Oct 2026, TABLES-LEAD-45: an import indexes each table it made or filled once, in the background (ImportBaseAs ::
@@ -1106,6 +1113,56 @@ business/WorkFeed/prune.go :: prune :: deleteBefore
 # transaction with its audit row (main's audit rule, 3 Nov), so runSteps calls applyItem once per item; bounded by
 # the batch cap of 100 items in all (maxSchemaBatch), counted before anything is read, recorded or applied.
 business/DataTable/apiBatch.go :: runSteps :: applyItem
+# 5 Nov 2026, TABLES-LEAD-191 (V-529): a tree's lock tries its one key again every 25 ms until lockWait (8 s): a lock's acquire, nothing to batch (it went through the store from raw SetNX, which the guard didn't see).
+business/Tree/graph/lock.go :: lock :: redisStore.SetStringIfAbsent
+# 5 Nov 2026, CAL43-D2 (calendar B7, Outlook sync): calls to Microsoft Graph, one per page Graph
+# hands back (@odata.nextLink / deltaLink), per series master read once, per change pushed, and the
+# retry loop of one call (429/503 Retry-After). Graph's JSON $batch does carry the masters' reads
+# (GET /me/events/{id}, readSeries), 20 at a time, which is not used yet (V-593 (1)); it has no batch for delta
+# pages or the instances lookup. The Syncer reads each two-way provider's links once per sweep (two providers).
+business/Calendar/syncGoogle.go :: syncAll :: .syncedLinks
+business/CalendarSync/microsoft/adapter.go :: Calendars :: .call
+business/CalendarSync/microsoft/adapter.go :: Pull :: .call
+business/CalendarSync/microsoft/adapter.go :: Pull :: .readSeries
+business/CalendarSync/microsoft/adapter.go :: call :: .Do
+business/CalendarSync/microsoft/adapter.go :: push :: .call
+business/CalendarSync/microsoft/adapter.go :: push :: .occurrence
+# 6 Nov, PROJ-LEAD-209 (P10-1a): code names tasks by key ("Fixes WEB-12"). A push's commits and a merged pull
+# request's words close each task they name (closeByRef, with a pr_merged line for one that isn't the pull request's
+# own), and namedIn tries the refs in order for the first task the event may change. These are per-ref writes and a
+# first-match lead, at most taskKeys.MaxRefs (50) refs a text, with each key, project and link read once an event
+# (eventReads). handlePushEvent's closeByRef and codeTask above are its applyAutomationRules and eventTask, renamed.
+business/GitHub/codeRefs.go :: closeMergedRefs :: closeByRef
+business/GitHub/codeRefs.go :: closeMergedRefs :: codeTask
+business/GitHub/codeRefs.go :: closeMergedRefs :: githubTaskActivityDomain.CreateGitHubTaskActivity
+business/GitHub/codeRefs.go :: closeMergedRefs :: publishGitHubSyncMqtt
+business/GitHub/codeRefs.go :: namedIn :: codeTask
+# 6 Nov, PROJ211-P10A4 (P10-1a W1): a task's stored branch leads only to a task the integration's bot may read (botReads,
+# as a key's task in codeTask). onBranch asks of the tasks carrying the branch, the first to carry it first, and stops at
+# the first the bot reads: a first-match lead, usually one task (two when a pull request from a restricted task's branch
+# made its own), at most the finder's 50. botReads is the one check, per task (workAccess.FactsFor); a batch would copy it.
+business/GitHub/taskRepoLink.go :: onBranch :: botReads
+# 6 Nov 2026, CHAT41-BE (NOTIF-H2/H3, head A): dropToldMentions builds each mention item's notice key with
+# followModels.MentionKey, a pure string builder that lives in models/ (no store call; the keys are then read
+# in ONE query). The task-comment owner repair reads the graph a page (500) at a time, resumably: one read per page.
+business/Activity/toldMentions.go :: dropToldMentions :: toldMentionKey
+business/Task/commentOwnerRepair.go :: eachCommentOwnersPage :: commentOwnersPage
+business/GitHub/releases.go :: tagCommit :: githubGet
+business/GitHub/releases.go :: tasksNamed :: codeTask
+# 6 Nov 2026, PROJ-LEAD-213 (P10-1b job 2, CR-B32 F1, the lead's ruling): a tag ships in each project syncing the
+# repository in that project's own transaction, its release with its tasks (business/Release ShipTag, moved from
+# business/GitHub shipTag, whose four lines it replaces): one project's failure must leave the others shipped with their
+# tasks, so the writes can't share one statement. The tasks are read once a previous tag (one compare for the projects
+# that share it), and a tag reaches the handful of projects that link one repository.
+business/Release/git.go :: ShipTag :: shipTask
+# 10 Nov 2026, CALLS139-BE1 (V-860): whether a running call has kept a line is read once per room of ONE call (its own room and its open breakout rooms, a handful), stopping at the first that has; to batch: GetCallTranscriptLines for many keys in one query.
+business/LiveKit/transcriptReaders.go :: NewestTranscriptOpenTo :: .Kept
+# 10 Nov 2026, CALLS140-BE2 (V-860 F1): presence in that call is asked of LiveKit, uncached, once per room of the same handful
+# (connectedNow, never the 60 s grant), stopping at the first room the person is in; asks and tool calls are rare.
+business/LiveKit/transcriptReaders.go :: NewestTranscriptOpenTo :: connectedNow
+# 10 Nov 2026, CHAT-LEAD-58 (V-843 F1): RetractMentionNotices builds each kind's notice key with followModels.MentionKey,
+# the same pure string builder as dropToldMentions (no store call); the keys are then retracted in ONE statement.
+business/Notification/mentionsAdded.go :: RetractMentionNotices :: followModels.MentionKey
 # RELEASE-LINE ONLY (main and without-ai, from v2.75.0; again for v2.76.0): the release lines carry
 # the old demo seeder (business/DemoSeed as the line has it), never beta's; its loops are recorded as they are.
 business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.GetBasicDgraphChannelInfoByUUID

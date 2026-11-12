@@ -221,7 +221,7 @@ func TestAnExcelWorkbookIsReadAsExcelWritesIt(t *testing.T) {
 	}
 	want := [][]string{
 		{"Item", "When", "Due", "Share", "Time", "Rupees", "Euros", "Big", "Note", "Done", "Check", "Starts"},
-		{"Big deal", "d:2026-10-23 00:00:00", "d:2026-10-23 12:00:00", "n:12.5%", "dur:94500", "n:1200.5 INR", "n:-3.5 other", "n:150000000000000000000", "", "b:true", "=e:#DIV/0!", "dur:34200"},
+		{"Big deal", "d:2026-10-23 00:00:00", "d:2026-10-23 12:00:00", "n:12.5%", "dur:94500", "n:1200.5 INR", "n:-3.5 EUR", "n:150000000000000000000", "", "b:true", "=e:#DIV/0!", "dur:34200"},
 		{"inline", "d:2026-10-23 00:00:00", "=inline!", "", "", "", "", "", "漢字", "line one\r\nline two, _x000D_ kept"},
 		{"no ref", "n:7"},
 	}

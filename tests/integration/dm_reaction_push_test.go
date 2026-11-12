@@ -3,12 +3,14 @@
 
 package integration_test
 
-// A reaction in a direct conversation is pushed to whoever wrote the message,
+// A reaction in a direct conversation reaches whoever wrote the message,
 // against real Postgres, Redis and Dgraph. It was pushed to the devices of
-// whoever reacted, and the author heard nothing. Now it reaches the author, as
-// their setting for the conversation allows ("Nothing" hears nothing), by
-// the one way a push goes out (notificationBusiness.Deliver): the desktop app
-// hears of it too, and focus time holds it.
+// whoever reacted, and the author heard nothing; then it was pushed to the
+// author. Now (A4 H2, design D2: reactions never push or badge) it goes
+// through the one door (business/Notify) to the author's Inbox alone, as
+// their setting for the conversation allows, and live on their Activity
+// whatever it is ("Nothing" too, as before H2): no push, no desktop notice,
+// and a hold (focus time) doesn't keep it out of the Inbox.
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestADirectMessageReactionReachesItsAuthor -v
 
@@ -161,36 +163,72 @@ func TestADirectMessageReactionReachesItsAuthor(t *testing.T) {
 		return false
 	}
 
+	// inboxed counts the reaction items name's Inbox was sent live.
+	inboxed := func(name string) int {
+		settled()
+		broker.mu.Lock()
+		defer broker.mu.Unlock()
+		topic := helpers.GetMqttTopicForUserActivity(people[name].String())
+		n := 0
+		for _, m := range broker.got {
+			var msg struct {
+				Type int8 `json:"type"`
+				Data struct {
+					Activity struct {
+						ActivityType string `json:"activity_type"`
+					} `json:"activity"`
+				} `json:"data"`
+			}
+			if m.topic == topic && json.Unmarshal(m.payload, &msg) == nil && msg.Type == mqttStruct.MESSAGE_ACTIVITY &&
+				msg.Data.Activity.ActivityType == mqttStruct.MESSAGE_ACTIVITY_REACTION {
+				n++
+			}
+		}
+		return n
+	}
+
 	lunch := send("sam", chatController.CreateChat, chatAdapter.ChatInfo{ToUuid: people["alex"].String(), TextHtml: "<p>Lunch?</p>"})["uuid"].(string)
 
-	t.Run("a reaction to a message reaches whoever wrote it", func(t *testing.T) {
+	t.Run("a reaction to a message reaches whoever wrote it, in their Inbox alone", func(t *testing.T) {
+		before := inboxed("sam")
 		send("alex", chatController.CreateOrUpdateChatReaction, chatAdapter.InputUpdateReactionForChat{Uuid: lunch, EmojiReactionUuid: "thumbs_up"})
-		if to := pushed(firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION, true); !slices.Equal(to, []string{"tok-sam"}) {
-			t.Errorf("pushed to %v, want sam's phone, not alex's", to)
+		if to := pushed(firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION, false); len(to) != 0 {
+			t.Errorf("pushed to %v: a reaction never pushes (D2)", to)
 		}
-	})
-
-	t.Run("a reaction reaches its author's desktop app, with no device as well", func(t *testing.T) {
-		hello := send("dana", chatController.CreateChat, chatAdapter.ChatInfo{ToUuid: people["alex"].String(), TextHtml: "<p>Hello from the app</p>"})["uuid"].(string)
-		send("alex", chatController.CreateOrUpdateChatReaction, chatAdapter.InputUpdateReactionForChat{Uuid: hello, EmojiReactionUuid: "wave"})
-		settled()
-		if !noticed("dana", firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION) {
-			t.Error("dana's desktop app wasn't told of alex's reaction")
+		if got := inboxed("sam") - before; got != 1 {
+			t.Errorf("sam's Inbox got %d reaction items, want 1", got)
 		}
-		if noticed("alex", firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION) {
+		if inboxed("alex") != 0 {
 			t.Error("alex, who reacted, was told of it")
 		}
 	})
 
-	t.Run("a reaction to a reply reaches whoever wrote the reply", func(t *testing.T) {
-		reply := send("sam", chatController.CreateChatComment, chatAdapter.InputCreateOrUpdateCommentToChat{ChatUuid: lunch, HTMLText: "<p>12:30?</p>"})["comment_id"].(string)
-		send("alex", chatController.CreateOrUpdateChatCommentReaction, chatAdapter.InputUpdateReactionForCommentInChat{Uuid: reply, EmojiReactionUuid: "thumbs_up"})
-		if to := pushed(firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_COMMENT_REACTION, true); !slices.Equal(to, []string{"tok-sam"}) {
-			t.Errorf("pushed to %v, want sam's phone, not alex's", to)
+	t.Run("a reaction tells no desktop app, and reaches an Inbox with no device", func(t *testing.T) {
+		hello := send("dana", chatController.CreateChat, chatAdapter.ChatInfo{ToUuid: people["alex"].String(), TextHtml: "<p>Hello from the app</p>"})["uuid"].(string)
+		before := inboxed("dana")
+		send("alex", chatController.CreateOrUpdateChatReaction, chatAdapter.InputUpdateReactionForChat{Uuid: hello, EmojiReactionUuid: "wave"})
+		settled()
+		if noticed("dana", firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION) || noticed("alex", firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION) {
+			t.Error("a desktop app was told of alex's reaction: a reaction never pushes (D2)")
+		}
+		if got := inboxed("dana") - before; got != 1 {
+			t.Errorf("dana's Inbox got %d reaction items, want 1", got)
 		}
 	})
 
-	t.Run("an author who hears nothing from the conversation isn't pushed", func(t *testing.T) {
+	t.Run("a reaction to a reply reaches whoever wrote the reply, in their Inbox alone", func(t *testing.T) {
+		reply := send("sam", chatController.CreateChatComment, chatAdapter.InputCreateOrUpdateCommentToChat{ChatUuid: lunch, HTMLText: "<p>12:30?</p>"})["comment_id"].(string)
+		before := inboxed("sam")
+		send("alex", chatController.CreateOrUpdateChatCommentReaction, chatAdapter.InputUpdateReactionForCommentInChat{Uuid: reply, EmojiReactionUuid: "thumbs_up"})
+		if to := pushed(firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_COMMENT_REACTION, false); len(to) != 0 {
+			t.Errorf("pushed to %v: a reaction never pushes (D2)", to)
+		}
+		if got := inboxed("sam") - before; got != 1 {
+			t.Errorf("sam's Inbox got %d reaction items, want 1", got)
+		}
+	})
+
+	t.Run("an author who hears nothing from the conversation still finds it on their Activity", func(t *testing.T) {
 		grp := helpers.GetGroupingId(people["sam"].String(), people["alex"].String())
 		if _, err := env.PG.Exec(`UPDATE users_chat_notification SET notification_type = 'block' WHERE user_id = $1 AND grp_id = $2`, people["sam"], grp); err != nil {
 			t.Fatal(err)
@@ -198,14 +236,17 @@ func TestADirectMessageReactionReachesItsAuthor(t *testing.T) {
 		// A message alex hasn't reacted to: an author hears of someone's
 		// reactions once, so a second one to lunch would say nothing either way.
 		coffee := send("sam", chatController.CreateChat, chatAdapter.ChatInfo{ToUuid: people["alex"].String(), TextHtml: "<p>Coffee?</p>"})["uuid"].(string)
-		pushed(firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION, false) // clears what came before
+		before := inboxed("sam")
 		send("alex", chatController.CreateOrUpdateChatReaction, chatAdapter.InputUpdateReactionForChat{Uuid: coffee, EmojiReactionUuid: "heart"})
 		if to := pushed(firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION, false); len(to) != 0 {
-			t.Errorf("pushed to %v while sam hears nothing from it", to)
+			t.Errorf("pushed to %v: a reaction never pushes (D2)", to)
+		}
+		if got := inboxed("sam") - before; got != 1 {
+			t.Errorf("sam's Activity got %d reaction items while sam hears nothing from it, want 1 (as before A4 H2)", got)
 		}
 	})
 
-	t.Run("an author in focus time is told nothing of it", func(t *testing.T) {
+	t.Run("an author in focus time still finds it in their Inbox, unpushed", func(t *testing.T) {
 		// sam hears everything from alex again, so focus time alone holds it.
 		grp := helpers.GetGroupingId(people["sam"].String(), people["alex"].String())
 		if _, err := env.PG.Exec(`UPDATE users_chat_notification SET notification_type = 'all' WHERE user_id = $1 AND grp_id = $2`, people["sam"], grp); err != nil {
@@ -214,9 +255,13 @@ func TestADirectMessageReactionReachesItsAuthor(t *testing.T) {
 		heldEvent(t, env.PG, people["sam"], "Deep work", time.Now().Add(-10*time.Minute), time.Now().Add(50*time.Minute), true)
 		tea := send("sam", chatController.CreateChat, chatAdapter.ChatInfo{ToUuid: people["alex"].String(), TextHtml: "<p>Tea?</p>"})["uuid"].(string)
 		pushed(firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION, false) // clears what came before
+		before := inboxed("sam")
 		send("alex", chatController.CreateOrUpdateChatReaction, chatAdapter.InputUpdateReactionForChat{Uuid: tea, EmojiReactionUuid: "tea"})
 		if to := pushed(firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION, false); len(to) != 0 {
 			t.Errorf("pushed to %v while sam is in focus time", to)
+		}
+		if got := inboxed("sam") - before; got != 1 {
+			t.Errorf("sam's Inbox got %d reaction items in focus time, want 1 (the Inbox still moves)", got)
 		}
 	})
 }

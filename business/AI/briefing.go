@@ -81,16 +81,12 @@ func GetBriefing(ctx context.Context, userInfo *userModels.UserInfo) (*adapter.B
 	channels, projects := getAccessibleResourceUUIDs(userInfo)
 	grpIDs := accessibleGroupingIDs(userInfo)
 	userUUID := userInfo.UserDgraphInfo.Uuid
-	ownerID := userInfo.UserPostgresInfo.Id
 
-	// Open items the user OWNS — only when the memory layer is enabled.
+	// Open items the user OWNS, from where they are now — only when the
+	// memory layer is enabled.
 	if settings.memoryEnabled {
 		helpers.GoSafeNamed("business/AI/briefing:GetBriefing", func() {
-			items, lerr := memoryModels.List(bctx, memoryModels.QueryFilter{
-				Statuses: []string{memoryModels.StatusOpen},
-				OwnerID:  &ownerID,
-				Limit:    briefingMaxOpenItems,
-			})
+			items, lerr := ownOpenItems(bctx, userInfo, nil, briefingMaxOpenItems)
 			if lerr != nil {
 				helpers.LogErrorWithContext(bctx, "briefing: open items failed: %v", lerr)
 				itemsCh <- itemsResult{}

@@ -19,7 +19,7 @@
 // that tab's later updates waiting for ever.
 
 import { openDoc } from './write.js'
-import { putBackSocketWrites } from './mapGuard.js'
+import { newer, putBackSocketWrites } from './mapGuard.js'
 
 export const PROTECTED = 'protected'
 
@@ -33,12 +33,6 @@ export const MAX_PROTECT = 500
 const ELEMENTS = 'elements'
 
 const refuse = (status, msg) => Object.assign(new Error(msg), { status })
-
-// newer is v as a version every tab takes over the ones given.
-function newer(v, ...against) {
-    const version = Math.max(v.version || 0, ...against.map((a) => a?.version || 0)) + 1
-    return { ...v, version, versionNonce: Math.floor(Math.random() * 2 ** 31), updated: Date.now() }
-}
 
 // trackProtected keeps a board's protected elements, and the record of them,
 // as they are against every socket. Changes with no socket behind them

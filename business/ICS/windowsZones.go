@@ -144,3 +144,18 @@ var windowsZones = map[string]string{
 	"Samoa Standard Time":             "Pacific/Apia",
 	"Line Islands Standard Time":      "Pacific/Kiritimati",
 }
+
+// WindowsZoneOf is the IANA zone a Windows zone name stands for, and whether
+// the table knows it: the one table the codec reads TZIDs by and calendar
+// sync's Outlook adapter reads Graph's zones by.
+func WindowsZoneOf(name string) (string, bool) {
+	z, ok := windowsZones[name]
+	return z, ok
+}
+
+// EachWindowsZone calls f with each Windows zone name and its IANA zone.
+func EachWindowsZone(f func(windows, iana string)) {
+	for w, z := range windowsZones {
+		f(w, z)
+	}
+}

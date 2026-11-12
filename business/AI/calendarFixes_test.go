@@ -161,12 +161,19 @@ func TestWhatNeedsMeHoldsTheDaysMeetings(t *testing.T) {
 	}
 }
 
-// fakeBusy stands in for the calendar's busy engine.
-func fakeBusy(t *testing.T, busy map[string]calendarBusiness.Busy, fail map[string]bool, except **dgraphStruct.DgraphEvent) {
+// fakeBusy stands in for the calendar's busy engine, and answers whose
+// calendars were read. Everyone's busy times show to the asker unless the
+// test says otherwise (fakeSeen).
+func fakeBusy(t *testing.T, busy map[string]calendarBusiness.Busy, fail map[string]bool, except **dgraphStruct.DgraphEvent) *[]string {
 	t.Helper()
-	prev := readBusy
-	t.Cleanup(func() { readBusy = prev })
+	prev, prevSeen := readBusy, peopleSeenBy
+	t.Cleanup(func() { readBusy, peopleSeenBy = prev, prevSeen })
+	peopleSeenBy = func(_ context.Context, _ string, people []string) ([]string, []string, error) {
+		return people, nil, nil
+	}
+	var read []string
 	readBusy = func(_ context.Context, uid string, _, _ time.Time, opts calendarBusiness.BusyOptions) (calendarBusiness.Busy, error) {
+		read = append(read, uid)
 		if except != nil {
 			*except = opts.Except
 		}
@@ -175,6 +182,7 @@ func fakeBusy(t *testing.T, busy map[string]calendarBusiness.Busy, fail map[stri
 		}
 		return busy[uid], nil
 	}
+	return &read
 }
 
 // CAL-BUG-12: Find a time reads the calendar's one engine, Google included:
@@ -184,7 +192,7 @@ func TestFindATimeNeverProposesAGoogleBusyHour(t *testing.T) {
 	googleBusy := calendarBusiness.Interval{Start: now.Add(9 * time.Hour), End: now.Add(12 * time.Hour)}
 	fakeBusy(t, map[string]calendarBusiness.Busy{"me": {Intervals: []calendarBusiness.Interval{googleBusy}}}, nil, nil)
 	resp := &adapter.ScheduleProposeResponse{Participants: []adapter.ScheduleParticipant{{UUID: "me", Name: "You"}}}
-	proposeSlots(context.Background(), resp, []string{"me"}, now, 1, 60, time.UTC, 9, 18)
+	proposeSlots(context.Background(), resp, "me", []string{"me"}, now, 1, 60, time.UTC, 9, 18)
 	if len(resp.Candidates) == 0 {
 		t.Fatal("no candidates")
 	}
@@ -204,7 +212,7 @@ func TestFindATimeNeverProposesAGoogleBusyHour(t *testing.T) {
 func TestACalendarThatCantBeReadIsNamedNotFree(t *testing.T) {
 	fakeBusy(t, map[string]calendarBusiness.Busy{"me": {}, "maya": {GoogleUnread: true}}, map[string]bool{"jonas": true}, nil)
 	resp := &adapter.ScheduleProposeResponse{Participants: []adapter.ScheduleParticipant{{UUID: "me", Name: "You"}, {UUID: "maya", Name: "Maya"}, {UUID: "jonas", Name: "Jonas"}}}
-	proposeSlots(context.Background(), resp, []string{"me", "maya", "jonas"}, mondayUTC(), 1, 60, time.UTC, 9, 18)
+	proposeSlots(context.Background(), resp, "me", []string{"me", "maya", "jonas"}, mondayUTC(), 1, 60, time.UTC, 9, 18)
 	for _, want := range []string{"Couldn't read Maya's calendar", "Couldn't read Jonas's calendar"} {
 		if !strings.Contains(resp.Note, want) {
 			t.Errorf("note %q lacks %q", resp.Note, want)
@@ -224,7 +232,7 @@ func TestRescheduleLeavesTheEventItselfOut(t *testing.T) {
 	var except *dgraphStruct.DgraphEvent
 	fakeBusy(t, map[string]calendarBusiness.Busy{}, nil, &except)
 	moving := &dgraphStruct.DgraphEvent{Uuid: "review"}
-	gatherFreeBusy(context.Background(), []string{"me"}, time.Now(), time.Now().Add(time.Hour), moving)
+	gatherFreeBusy(context.Background(), "me", []string{"me"}, time.Now(), time.Now().Add(time.Hour), moving)
 	if except != moving {
 		t.Fatal("the event being moved wasn't left out of busy times")
 	}

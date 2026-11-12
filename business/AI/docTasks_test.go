@@ -147,6 +147,13 @@ func TestTasksFromADocLinkBackToTheirLine(t *testing.T) {
 	rows := fakeRecord(t)
 	fakeDecision(t, accessBusiness.Decision{Level: accessBusiness.LevelView}, nil)
 	made, links := fakeTaskMaking(t, &dgraphStruct.DgraphProject{Uuid: billing, Name: "Launch", IsProjectAdmin: 1})
+	// The person is the project's admin. Their standing is faked, as the next
+	// test fakes it, so the test never reaches Postgres.
+	saved := standingIn
+	standingIn = func(context.Context, string, *dgraphStruct.DgraphProject) (workAccess.Standing, error) {
+		return workAccess.Standing{ProjectUUID: billing, Role: workAccess.RoleAdmin, EditWho: workAccess.EditMembers}, nil
+	}
+	t.Cleanup(func() { standingIn = saved })
 	res, err := CreateDocTasks(context.Background(), member(), recDoc, billing, []DocProposedTask{
 		{ProposedTask: ProposedTask{Title: "Send the deck", Description: "For the board"}, BlockID: "b-priya"},
 		{ProposedTask: ProposedTask{Title: "Book the venue"}},

@@ -12,6 +12,8 @@ package business
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -265,6 +267,78 @@ func TestAnExportAskedForWronglyIsRefused(t *testing.T) {
 	} {
 		if e, err := PrepareExport(w.ctx, deals.Id, w.me, in); !IsExportInput(err) || e != nil {
 			t.Errorf("an export with %s: %v, %v; want it refused as asked for wrongly", what, e, err)
+		}
+	}
+}
+
+// An amount in any currency goes the whole way through the business layer
+// (UX-TB-H4): a formula saves its result's currency by ISO 4217 code, kept in
+// capitals; what isn't a code is refused in plain words and nothing is
+// saved; only who manages the table may change it; and the export writes
+// each field's own currency, which the import's reader reads back.
+func TestAnAmountInAnyCurrencyIsSavedAndExported(t *testing.T) {
+	w := newRelationWorld(t)
+	deals, name := w.table("Deals")
+	currencyOf := func(f *model.Field) interface{} {
+		t.Helper()
+		fields, err := model.ListFields(w.ctx, deals.Id)
+		if err != nil {
+			t.Fatalf("list fields: %v", err)
+		}
+		for _, have := range fields {
+			if have.Id == f.Id {
+				var cfg struct {
+					Format map[string]interface{} `json:"format"`
+				}
+				_ = json.Unmarshal([]byte(have.Config), &cfg)
+				return cfg.Format["currency"]
+			}
+		}
+		t.Fatalf("no field %s", f.Name)
+		return nil
+	}
+	amount := w.field(deals, "Amount", model.FieldNumber, map[string]interface{}{"format": map[string]interface{}{"currency": "EUR", "decimals": 2}})
+	rupees := w.field(deals, "Fee", model.FieldNumber, map[string]interface{}{"format": map[string]interface{}{"currency": "INR"}})
+	plain := w.field(deals, "Count", model.FieldNumber, nil)
+	double := w.field(deals, "Double", model.FieldFormula, map[string]interface{}{"formula": "{Amount} * 2", "format": map[string]interface{}{"currency": "gbp", "decimals": 2}})
+	if got := currencyOf(double); got != "GBP" {
+		t.Errorf("a formula's result in gbp is stored as %v, want GBP", got)
+	}
+	for _, bad := range []interface{}{"EU", "eur1", "XYZ"} {
+		_, err := CreateField(w.ctx, deals.Id, FieldInput{Name: "Bad", Type: model.FieldFormula,
+			Config: map[string]interface{}{"formula": "{Amount} * 3", "format": map[string]interface{}{"currency": bad}}}, w.me)
+		if err == nil || !strings.Contains(err.Error(), "A result's currency is a three-letter code, like EUR") {
+			t.Errorf("a result in %v: %v, want it refused as not a code", bad, err)
+		}
+	}
+	chf := map[string]interface{}{"formula": "{Amount} * 2", "format": map[string]interface{}{"currency": "CHF"}}
+	if _, err := UpdateField(w.ctx, deals.Id, double.Id, FieldPatch{Config: chf}, w.member); !errors.Is(err, errForbidden) {
+		t.Errorf("a member who doesn't manage the table changed a result's currency: %v", err)
+	}
+	if got := currencyOf(double); got != "GBP" {
+		t.Errorf("after two refusals the result's currency is %v, want GBP still", got)
+	}
+	if _, err := UpdateField(w.ctx, deals.Id, double.Id, FieldPatch{Config: map[string]interface{}{"formula": "{Amount} * 2", "format": map[string]interface{}{"currency": "EU"}}}, w.me); err == nil {
+		t.Error("a result's currency changed to EU, which is no code")
+	}
+	if _, err := UpdateField(w.ctx, deals.Id, double.Id, FieldPatch{Config: chf}, w.me); err != nil {
+		t.Fatalf("change the result's currency to CHF: %v", err)
+	}
+	if got := currencyOf(double); got != "CHF" {
+		t.Errorf("the result's currency is %v, want CHF", got)
+	}
+
+	w.row(deals, map[string]interface{}{name.Id.String(): "Booth", amount.Id.String(): 1250.5, rupees.Id.String(): 99, plain.Id.String(): 3})
+	rows, notes := w.exported(deals.Id, w.member, ExportInput{Fields: []uuid.UUID{name.Id, amount.Id, rupees.Id, plain.Id, double.Id}})
+	if len(notes) != 0 || len(rows) != 2 || len(rows[1]) != 5 {
+		t.Fatalf("the export: %d rows, notes %q; want a header and a row of 5 cells", len(rows), notes)
+	}
+	for i, want := range []struct {
+		n   float64
+		cur string
+	}{{1250.5, "EUR"}, {99, "INR"}, {3, ""}, {2501, "CHF"}} {
+		if c := rows[1][i+1]; c.Kind != contentIOBusiness.CellNumber || c.Number != want.n || c.Currency != want.cur {
+			t.Errorf("%s reads back as %+v, want %v in %q", rows[0][i+1].Text, c, want.n, want.cur)
 		}
 	}
 }

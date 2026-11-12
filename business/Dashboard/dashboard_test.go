@@ -98,7 +98,21 @@ func TestAWidgetIsCheckedBeforeItIsKept(t *testing.T) {
 	refused("a project that isn't one", ws, at(Widget{Kind: KindFlow, Query: Query{Projects: []string{"nope"}}}))
 	refused("a kind there isn't", ws, at(Widget{Kind: "pie"}))
 	refused("a metric without a measure", ws, at(Widget{Kind: KindMetric}))
-	refused("a breakdown by status", ws, at(Widget{Kind: KindBreakdown, Query: Query{By: "status"}}))
+	refused("a breakdown by mood", ws, at(Widget{Kind: KindBreakdown, Query: Query{By: "mood"}}))
+	refused("a breakdown by a field that isn't one", ws, at(Widget{Kind: KindBreakdown, Query: Query{By: "field:nope"}}))
+	refused("a breakdown measuring money", ws, at(Widget{Kind: KindBreakdown, Query: Query{By: "labels", Measure: "money"}}))
+	// A breakdown is by any way the insights slice work, a custom field's
+	// by its canonical id, and measures count or effort; a metric, effort.
+	field := uuid.New()
+	for by, want := range map[string]string{"status": "status", "labels": "labels", "cycle": "cycle", "estimate": "estimate", "type": "type",
+		"field:" + strings.ToUpper(field.String()): "field:" + field.String()} {
+		if got := ok(ws, at(Widget{Kind: KindBreakdown, Query: Query{By: by, Measure: "effort"}})); got.Query.By != want || got.Query.Measure != "effort" {
+			t.Errorf("a breakdown by %s: %+v", by, got.Query)
+		}
+	}
+	for _, m := range []string{"effort_open", "effort_done"} {
+		ok(ws, at(Widget{Kind: KindMetric, Query: Query{Measure: m}}))
+	}
 	refused("a goal widget without a goal", ws, at(Widget{Kind: KindGoal}))
 	refused("53 weeks", ws, at(Widget{Kind: KindThroughput, Query: Query{Weeks: 53}}))
 	refused("a long search", ws, at(Widget{Kind: KindThroughput, Query: Query{Search: strings.Repeat("a", MaxSearch+1)}}))
@@ -197,8 +211,6 @@ func TestEachKindShowsItsPartOfTheReport(t *testing.T) {
 		{Widget{Kind: KindMetric, Query: Query{Measure: "cycle"}}, `{"measure":"cycle","value":2.5,"spread":{"n":3,"p25":0,"p50":2.5,"p85":0,"p95":0}}`},
 		{Widget{Kind: KindMetric, Query: Query{Measure: "lead"}}, `{"measure":"lead","value":null,"spread":{"n":0,"p25":0,"p50":0,"p85":0,"p95":0}}`},
 		{Widget{Kind: KindThroughput}, `{"added":[3,4],"done":[1,2],"weeks":["w1","w2"]}`},
-		{Widget{Kind: KindBreakdown, Query: Query{By: "person"}}, `{"by":"person","rows":[{"user_uuid":"u","to_do":0,"in_progress":0,"in_review":0,"overdue":0,"done":0}]}`},
-		{Widget{Kind: KindBreakdown, Query: Query{By: "priority"}}, `{"by":"priority","rows":[{"priority":"high","open":0,"overdue":0}]}`},
 	} {
 		if got := asJSON(shape(c.w, rep)); got != c.want {
 			t.Errorf("%s %+v: %s, want %s", c.w.Kind, c.w.Query, got, c.want)
@@ -219,7 +231,7 @@ func TestEachKindShowsItsPartOfTheReport(t *testing.T) {
 // search or goal (case 5 of the permission model).
 func TestAReaderSeesAWidgetsShapeNeverItsQuery(t *testing.T) {
 	full := Query{Projects: []string{"p-website", "p-launch"}, Filters: []taskDomain.TaskListParam{{ID: "label", Value: "secret-launch"}},
-		Search: "acquisition", Weeks: 8, Measure: "open", By: "project", Goal: "g-revenue"}
+		Search: "acquisition", Weeks: 8, Measure: "open", By: "project", Goal: "g-revenue", View: "v-secret-sprint"}
 	widgets := []Widget{{ID: "w1", Kind: KindMetric, Title: "Launch", Query: full, X: 3, Y: 2, W: 6, H: 3}}
 	asJSON := func(v any) string { b, _ := json.Marshal(v); return string(b) }
 	whole := asJSON(widgets)
@@ -232,7 +244,7 @@ func TestAReaderSeesAWidgetsShapeNeverItsQuery(t *testing.T) {
 	if got := asJSON(read); got != want {
 		t.Fatalf("a reader reads %s, want %s", got, want)
 	}
-	for _, kept := range []string{"p-website", "p-launch", "secret-launch", "acquisition", "g-revenue"} {
+	for _, kept := range []string{"p-website", "p-launch", "secret-launch", "acquisition", "g-revenue", "v-secret-sprint"} {
 		if strings.Contains(asJSON(read), kept) {
 			t.Fatalf("a reader's widgets name %q", kept)
 		}
@@ -242,5 +254,64 @@ func TestAReaderSeesAWidgetsShapeNeverItsQuery(t *testing.T) {
 	}
 	if got := Shown(nil, false); len(got) != 0 {
 		t.Fatalf("no widgets read as %v", got)
+	}
+}
+
+// A breakdown widget is by any slice of the insights, measuring count or
+// effort (L32), beside the rows it sent before: by project, person or
+// priority its "by" and "rows" are as they were, for today's app. Metric
+// widgets measure the open and done effort.
+func TestABreakdownIsByAnySliceAndOldRowsStay(t *testing.T) {
+	field := "field:" + uuid.NewString()
+	rep := &projectBusiness.Report{
+		Projects:   []projectBusiness.ReportProjectRow{{UUID: "p"}},
+		People:     []projectBusiness.ReportPersonRow{{UUID: "u"}},
+		Priorities: []projectBusiness.ReportPriorityRow{{Priority: "high"}},
+		Insights: projectBusiness.Insights{
+			Slices: []projectBusiness.InsightSlice{
+				{By: "person", Key: "u", Name: "Una", Open: 1},
+				{By: "labels", Key: "bug", Name: "Bug", Open: 2, Overdue: 1, Done: 3,
+					Effort: projectBusiness.InsightEffort{Open: projectBusiness.Effort{Points: 5}, Done: projectBusiness.Effort{Hours: 2.5}}},
+				{By: field, Key: "web", Name: "Web", Open: 4},
+			},
+			Fields: []projectBusiness.InsightField{{By: field, Name: "Team", Type: "select", Project: "p"}},
+			Effort: projectBusiness.InsightEffort{Open: projectBusiness.Effort{Points: 8, Hours: 3}, Done: projectBusiness.Effort{Hours: 2.5}},
+		},
+	}
+	asJSON := func(v any) string { b, _ := json.Marshal(v); return string(b) }
+	keys := func(w Widget) map[string]json.RawMessage {
+		var m map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(asJSON(shape(w, rep))), &m)
+		return m
+	}
+	for by, rows := range map[string]string{
+		"person":   `[{"user_uuid":"u","to_do":0,"in_progress":0,"in_review":0,"overdue":0,"done":0}]`,
+		"priority": `[{"priority":"high","open":0,"overdue":0}]`,
+		"project":  `[{"project_uuid":"p","project_name":"","to_do":0,"in_progress":0,"in_review":0,"overdue":0,"done":0}]`,
+	} {
+		got := keys(Widget{Kind: KindBreakdown, Query: Query{By: by}})
+		if string(got["by"]) != `"`+by+`"` || string(got["rows"]) != rows || string(got["measure"]) != `"count"` {
+			t.Errorf("by %s, as before: %v", by, got)
+		}
+	}
+	got := keys(Widget{Kind: KindBreakdown, Query: Query{By: "labels", Measure: "effort"}})
+	if _, has := got["rows"]; has || string(got["measure"]) != `"effort"` ||
+		string(got["slices"]) != `[{"by":"labels","key":"bug","name":"Bug","cycle":{"n":0,"p25":0,"p50":0,"p85":0,"p95":0},"lead":{"n":0,"p25":0,"p50":0,"p85":0,"p95":0},"age":{"n":0,"p25":0,"p50":0,"p85":0,"p95":0},"open":2,"overdue":1,"done":3,"effort":{"open":{"points":5,"hours":0},"done":{"points":0,"hours":2.5}}}]` {
+		t.Errorf("by labels, with effort: %v", got)
+	}
+	got = keys(Widget{Kind: KindBreakdown, Query: Query{By: field}})
+	if string(got["field"]) != asJSON(rep.Insights.Fields[0]) || !strings.Contains(string(got["slices"]), `"key":"web"`) || strings.Contains(string(got["slices"]), `"bug"`) {
+		t.Errorf("by a field: %v", got)
+	}
+	if got := keys(Widget{Kind: KindBreakdown, Query: Query{By: "cycle"}}); string(got["slices"]) != `[]` {
+		t.Errorf("a way with no slices reads as none: %v", got)
+	}
+	for m, want := range map[string]string{
+		"effort_open": `{"measure":"effort_open","value":8,"effort":{"points":8,"hours":3}}`,
+		"effort_done": `{"measure":"effort_done","value":2.5,"effort":{"points":0,"hours":2.5}}`,
+	} {
+		if got := asJSON(shape(Widget{Kind: KindMetric, Query: Query{Measure: m}}, rep)); got != want {
+			t.Errorf("%s: %s, want %s", m, got, want)
+		}
 	}
 }

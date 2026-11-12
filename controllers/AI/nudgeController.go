@@ -23,7 +23,8 @@ import (
 const maxNudgesReturned = 50
 
 // ListNudges handles GET /ai/nudges — the caller's open nudges, newest/highest
-// priority first, plus the open count for the badge.
+// priority first, each marked unread as the Inbox badge counts it, plus the
+// open count.
 func ListNudges(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -38,6 +39,11 @@ func ListNudges(w http.ResponseWriter, r *http.Request) {
 	// would crash the FE's globally-mounted nudge bell (`nudges.length`).
 	if items == nil {
 		items = []*nudgeModels.Nudge{}
+	}
+	// Each one's dot as the Inbox badge counts it. No dots rather than a
+	// guess when their last look can't be read.
+	if err := aiBusiness.MarkNudgesUnread(ctx, userInfo.UserPostgresInfo.Id, items); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/ListNudges: %s's nudges couldn't be marked: %+v", userInfo.UserPostgresInfo.Id, err)
 	}
 	count, _ := nudgeModels.CountOpenForUser(ctx, userInfo.UserPostgresInfo.Id)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
@@ -80,9 +86,9 @@ func setNudgeStatus(w http.ResponseWriter, r *http.Request, status string) {
 		return
 	}
 
-	// Live badge update so other open tabs reflect the new count immediately.
+	// Their other open tabs drop this nudge, by its id, at once.
 	count, _ := nudgeModels.CountOpenForUser(ctx, uid)
-	aiBusiness.PublishNudgeBadge(uid.String(), count)
+	aiBusiness.PublishNudgeCleared(uid.String(), count, id)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": map[string]int{"open_count": count}})
 }
@@ -99,7 +105,7 @@ func DismissAllNudges(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "failed to dismiss nudges"})
 		return
 	}
-	aiBusiness.PublishNudgeBadge(uid.String(), 0)
+	aiBusiness.PublishNudgeCleared(uid.String(), 0)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": map[string]int64{"dismissed": n}})
 }
 

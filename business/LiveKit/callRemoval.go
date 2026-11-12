@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	livekit "github.com/livekit/protocol/livekit"
+
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
@@ -35,8 +37,12 @@ const (
 	// A breakout room someone's token was for: its rooms closed, or it isn't a
 	// room they may be in (calls package C). Their client goes back to the
 	// call's own room.
-	RemovedRoomClosed   = "room_closed"
-	RemovedNotYourRoom  = "not_your_room"
+	RemovedRoomClosed  = "room_closed"
+	RemovedNotYourRoom = "not_your_room"
+	// A companion whose person went into one of the call's breakout rooms
+	// (meet-04): a companion stays with the call's own room, and its client
+	// says why it left.
+	RemovedWentToRoom   = "went_to_room"
 	guestIdentityPrefix = "guest-"
 )
 
@@ -112,23 +118,27 @@ type Remover struct {
 	Name     string
 }
 
-// RemoveFromCall tells someone why, then puts them out of the call in a room.
-// A host's removal also keeps them out of this call until it ends (their next
-// token is refused, and a token they still hold is thrown out when it
-// connects): kept out first, and never put out without it, as they could come
-// straight back (ErrCallUnchecked, and the host tries again). Someone not
-// connected is ErrNotInCall.
+// RemoveFromCall tells someone why, then puts them out of the call in a room,
+// on every device: their own connection and their companions' (meet-04). A
+// companion's identity puts out its person, as what may not stay on one
+// device may not stay on another. A host's removal also keeps them out of
+// this call until it ends (their next token, a companion's too, is refused,
+// and a token they still hold is thrown out when it connects): kept out
+// first, and never put out without it, as they could come straight back
+// (ErrCallUnchecked, and the host tries again). Someone connected on no
+// device is ErrNotInCall.
 func RemoveFromCall(ctx context.Context, roomName, identity string, by Remover, reason string) error {
 	roomName = strings.TrimSpace(roomName)
-	identity = strings.TrimSpace(identity)
+	identity = livekitInit.PersonOf(strings.TrimSpace(identity))
 	if roomName == "" || identity == "" || IsAgentIdentity(identity) || !livekitInit.LiveKitService.Ready() {
 		return ErrNotInCall
 	}
-	present, err := livekitInit.LiveKitService.RoomHasParticipant(ctx, roomName, identity)
+	people, err := livekitInit.LiveKitService.ConnectedParticipants(ctx, roomName)
 	if err != nil {
 		return err
 	}
-	if !present {
+	devices := identitiesOf(people, identity, true)
+	if len(devices) == 0 {
 		// Nobody to put out, and nothing to remember: someone who already left
 		// is not barred from coming back.
 		return ErrNotInCall
@@ -139,12 +149,53 @@ func RemoveFromCall(ctx context.Context, roomName, identity string, by Remover, 
 			return err
 		}
 	}
-	// Told first, so their screen can say why rather than "disconnected".
-	// Best-effort: the removal matters more than the explanation.
-	if err := TellInCall(ctx, roomName, CallPacket{T: "removed", By: by.Name, Reason: reason}, identity); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/RemoveFromCall could not tell %s why: %+v", identity, err)
+	return putOut(ctx, roomName, devices, CallPacket{T: "removed", By: by.Name, Reason: reason})
+}
+
+// RemoveCompanions puts out of a room every companion of person (a member's
+// graph uid), telling them why, and leaves the person where they are.
+// Answers how many went.
+func RemoveCompanions(ctx context.Context, roomName, person, reason string) int {
+	if !livekitInit.LiveKitService.Ready() {
+		return 0
 	}
-	return livekitInit.LiveKitService.RemoveParticipant(ctx, roomName, identity)
+	people, err := livekitInit.LiveKitService.ConnectedParticipants(ctx, roomName)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/RemoveCompanions could not list %s: %+v", roomName, err)
+		return 0
+	}
+	companions := identitiesOf(people, person, false)
+	if len(companions) == 0 {
+		return 0
+	}
+	if err := putOut(ctx, roomName, companions, CallPacket{T: "removed", Reason: reason}); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/RemoveCompanions could not put out a companion of %s from %s: %+v", person, roomName, err)
+	}
+	return len(companions)
+}
+
+// identitiesOf is the identities of person's connections among people
+// (livekitInit.DevicesOf): their companions, and their own when own.
+func identitiesOf(people []*livekit.ParticipantInfo, person string, own bool) []string {
+	var out []string
+	for _, p := range livekitInit.DevicesOf(people, person, own) {
+		out = append(out, p.Identity)
+	}
+	return out
+}
+
+// putOut tells each of identities why, then disconnects them from a room.
+// Told first, so their screen can say why rather than "disconnected";
+// best-effort, as the removal matters more than the explanation.
+func putOut(ctx context.Context, roomName string, identities []string, why CallPacket) error {
+	if err := TellInCall(ctx, roomName, why, identities...); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/RemoveFromCall could not tell %v why: %+v", identities, err)
+	}
+	var errs []error
+	for _, identity := range identities {
+		errs = append(errs, livekitInit.LiveKitService.RemoveParticipant(ctx, roomName, identity))
+	}
+	return errors.Join(errs...)
 }
 
 // markRemoved keeps a removed person out of the call going on in a room until

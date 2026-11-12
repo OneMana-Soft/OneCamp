@@ -105,3 +105,32 @@ func TestAnImportedCopyExportsUnderTheUIDItCopies(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// An export says an event is private (CLASS, RFC 5545 3.8.1.3), and says
+// nothing of one that isn't: every push to a provider is built from it.
+func TestAPrivateEventExportsAsPrivate(t *testing.T) {
+	h := newHarness(t)
+	sam := h.member("Sam")
+	doctor := h.create(sam, "Doctor")
+	h.create(sam, "Standup")
+	private, seq := visibilityPrivate, doctor.Sequence
+	if _, err := h.s.Update(context.Background(), sam, doctor.ID, EventPatch{Visibility: &private, Sequence: &seq}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if _, err := h.s.Export(context.Background(), sam, &out); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(out.String(), "CLASS:"); n != 1 || !strings.Contains(out.String(), "CLASS:PRIVATE") {
+		t.Fatalf("%d CLASS lines, want one CLASS:PRIVATE:\n%s", n, out.String())
+	}
+	cal, err := ICS.Read(bytes.NewReader(out.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range cal.Events {
+		if want := map[string]string{"Doctor": "PRIVATE", "Standup": ""}[ev.Summary]; ev.Class != want {
+			t.Fatalf("%s exported with CLASS %q, want %q", ev.Summary, ev.Class, want)
+		}
+	}
+}

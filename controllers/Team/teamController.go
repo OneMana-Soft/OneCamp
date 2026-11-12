@@ -741,7 +741,7 @@ func GetDgraphTeamMemberListByTeamUUID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphTeamInfo.IsMember == 0 && !userInfo.UserPostgresInfo.IsAdmin {
+	if !business.CanReadTeam(dgraphTeamInfo, userInfo.UserPostgresInfo.IsAdmin) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -776,6 +776,22 @@ func GetDgraphTeamListByUserDgraphUID(w http.ResponseWriter, r *http.Request) {
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got team list!", "data": dgraphTeamList})
 
+}
+
+// TeamsForNewProject GET /team/forNewProject: the teams the caller may start
+// projects in, by the workspace's "Who can make projects", by name, in the
+// shape /team/teamListByAdminUID answers: what New project picks a team from.
+func TeamsForNewProject(w http.ResponseWriter, r *http.Request) {
+	who, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	teams, err := business.TeamsForNewProject(r.Context(), who.UserDgraphInfo.Uid)
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "teams", "controllers/TeamsForNewProject")
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "ok", "data": teams})
 }
 
 func GetDgraphTeamListByAdminDgraphUID(w http.ResponseWriter, r *http.Request) {
@@ -919,7 +935,7 @@ func GetTeamInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphTeam.IsMember == 0 && !userInfo.UserPostgresInfo.IsAdmin {
+	if !business.CanReadTeam(dgraphTeam, userInfo.UserPostgresInfo.IsAdmin) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})

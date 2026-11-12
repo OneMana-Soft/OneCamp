@@ -390,7 +390,7 @@ func (p *Program) RunRow(row Row, cell func(id string) (Value, int), now time.Ti
 // Refs is the fields a formula reads, as it writes them ("Price" for
 // {Price}), in the order it reads them; none when it can't be read.
 func Refs(src string) []string {
-	if utf8.RuneCountInString(src) > MaxLength {
+	if utf8.RuneCountInString(src) > MaxStoredLength {
 		return nil
 	}
 	toks, err := lex(src)
@@ -447,6 +447,9 @@ func Check(src string, fields []Field, self string) (Kind, error) {
 	}
 	if strings.TrimSpace(src) == "" {
 		return KindBlank, &SyntaxError{Msg: "Write a formula"}
+	}
+	if utf8.RuneCountInString(src) > MaxLength {
+		return KindBlank, &SyntaxError{Msg: fmt.Sprintf("A formula can be at most %d characters", MaxLength)}
 	}
 	p := Compile(draft)
 	for _, c := range p.order {
@@ -550,4 +553,49 @@ func rewrite(src string, to func(ref, link string) (string, error)) (string, err
 
 func escapeRef(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `}`, `\}`).Replace(s)
+}
+
+// Tainted is the formulas that read a field of hidden, directly or through
+// other formulas, with hidden itself: what a reader kept from those fields
+// may not read either, since a formula's value would tell them of its
+// inputs. A formula caught in a loop or naming a field that isn't there
+// reads what it names all the same. One pass in the order formulas run,
+// then the loops until nothing more is added. hidden isn't changed.
+func (p *Program) Tainted(hidden map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(hidden))
+	for id, h := range hidden {
+		if h {
+			out[id] = true
+		}
+	}
+	if len(out) == 0 {
+		return out
+	}
+	for added := true; added; {
+		added = false
+		for _, c := range p.order {
+			if out[c.id] {
+				continue
+			}
+			for _, ref := range c.reads {
+				if link, _, ok := SplitLinkedRef(ref); ok {
+					ref = link
+				}
+				if out[ref] {
+					out[c.id], added = true, true
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// Preview is a formula being written, checked against its fields: what it
+// gives, its values on the first rows or tasks, and why it can't be read.
+// Tables and task fields answer their previews in it alike.
+type Preview struct {
+	Result string        `json:"result"`
+	Error  string        `json:"error,omitempty"`
+	Values []interface{} `json:"values"`
 }

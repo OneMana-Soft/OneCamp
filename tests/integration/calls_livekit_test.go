@@ -87,7 +87,7 @@ func join(t *testing.T, env *integration.LiveKitEnv, token string) *joined {
 // publishTrack puts a silent track on the call as the given source.
 func publishTrack(room *lksdk.Room, source livekit.TrackSource) error {
 	codec := webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2}
-	if source == livekit.TrackSource_CAMERA {
+	if source == livekit.TrackSource_CAMERA || source == livekit.TrackSource_SCREEN_SHARE {
 		codec = webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}
 	}
 	track, err := lksdk.NewLocalTrack(codec)

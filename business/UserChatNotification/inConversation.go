@@ -9,8 +9,8 @@ package business
 // in the threads of what they wrote there and the reactions to it: by push,
 // desktop notice, email and Activity.
 //
-// So each read of who hears (GetEligibleUsersForChatActivity,
-// GetLevelsInConversation) keeps only those in the conversation when they are
+// So each read of who hears (MembersOnAll, GetLevelsInConversation, which
+// business/Notify plans with) keeps only those in the conversation when they are
 // told (InConversationNow), whatever settings are kept. Leave takes the
 // leaver's setting away, and the start-up repair takes away the settings of
 // everyone who left before that and gives none back (settingsRepair.go).

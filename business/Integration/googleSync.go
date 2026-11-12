@@ -233,6 +233,10 @@ func googleEventOf(ev ICS.Event) *calendar.Event {
 	} else {
 		out.Transparency = "opaque"
 	}
+	out.Visibility = "default"
+	if ev.Class != "" {
+		out.Visibility = strings.ToLower(ev.Class)
+	}
 	if ev.StartDate != "" {
 		out.Start, out.End = &calendar.EventDateTime{Date: ev.StartDate}, &calendar.EventDateTime{Date: ev.EndDate}
 	} else {
@@ -289,6 +293,9 @@ var googleAnswers = map[string]string{"accepted": ICS.Accepted, "declined": ICS.
 func eventOf(ev *calendar.Event, cal calendarSyncBusiness.Remote) ICS.Event {
 	out := ICS.Event{UID: ev.ICalUID, Sequence: int(ev.Sequence), Summary: ev.Summary, Description: googleNotes(ev.Description),
 		Location: ev.Location, Transparent: ev.Transparency == "transparent", Status: strings.ToUpper(ev.Status)}
+	if v := ev.Visibility; v != "" && v != "default" {
+		out.Class = strings.ToUpper(v)
+	}
 	if out.UID == "" {
 		out.UID = ev.Id + "@google.com"
 	}

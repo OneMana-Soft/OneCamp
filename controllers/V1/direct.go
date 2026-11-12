@@ -234,8 +234,9 @@ func ListTasksV1(w http.ResponseWriter, r *http.Request) {
 }
 
 // CreateTaskV1 POST /v1/tasks — scope tasks:write. Body: task_name,
-// project_uuid, description, priority, assignee_uuid. Whoever may make tasks
-// in the project in the app may (Work Access).
+// project_uuid, description, priority (urgent, high, medium or low; left out,
+// the task has none, as one made in the app), assignee_uuid. Whoever may make
+// tasks in the project in the app may (Work Access).
 func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := apiUser(r)
@@ -274,12 +275,10 @@ func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusForbidden, err.Error())
 		return
 	}
+	// None given is none, as in the app.
 	priority := strings.ToLower(strings.TrimSpace(params["priority"]))
-	if priority == "" {
-		priority = dgraphStruct.TASK_PRIORITY_MEDIUM
-	}
-	if !taskPriority.Is(priority) {
-		refuse(w, http.StatusBadRequest, "priority is urgent, high, medium or low")
+	if !taskPriority.IsOrNone(priority) {
+		refuse(w, http.StatusBadRequest, "priority is urgent, high, medium or low, or leave it out for none")
 		return
 	}
 	var assignee *dgraphStruct.DgraphUser
@@ -317,7 +316,7 @@ func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
 	}
 	audited(r, "create_task", map[string]interface{}{"task_id": taskID.String(), "project_id": projectID.String()})
 	key := taskKeys.KeyOf(ctx, taskID)
-	msg := fmt.Sprintf("Task %s created in project %s (priority: %s)", taskKeys.Named(key, strconv.Quote(name)), project.Name, priority)
+	msg := fmt.Sprintf("Task %s created in project %s", taskKeys.Named(key, strconv.Quote(name)), project.Name) + taskPriority.Noted(priority)
 	if assignee != nil {
 		msg += ", assigned to " + assignee.DisplayName()
 	}

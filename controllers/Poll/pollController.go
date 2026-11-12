@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 
+	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	pollBusiness "github.com/akashc777/OneCamp/business/Poll"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -33,6 +34,13 @@ func fail(w http.ResponseWriter, r *http.Request, err error, what string) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": input.Error()})
 	case errors.Is(err, pollBusiness.ErrNoAccess):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": err.Error()})
+	case errors.Is(err, pollBusiness.ErrNotBoardEditor):
+		helpers.WriteForbidden(w, "Only people who can edit this board start or close its polls.")
+	case errors.Is(err, pollBusiness.ErrFrameNotOnBoard):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "frame_not_on_board",
+			"msg": "That frame isn't on this board yet. A frame drawn just now is saved within half a minute: try again then."})
+	case errors.Is(err, boardBusiness.ErrDocumentUnreadable):
+		helpers.WriteRetryLater(w, "Couldn't read the board just now. Try again.")
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/poll %s: %v", what, err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Something went wrong with the poll. Try again."})
@@ -110,6 +118,41 @@ func ClosePoll(w http.ResponseWriter, r *http.Request) {
 	v, err := pollBusiness.Close(r.Context(), user, chi.URLParam(r, "id"))
 	if err != nil {
 		fail(w, r, err, "close")
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": v})
+}
+
+// CreateBoardPoll handles POST /board/polls {board_uuid, frame_id, question,
+// options[], multiple}: a poll on a frame of a board, by who may edit it.
+func CreateBoardPoll(w http.ResponseWriter, r *http.Request) {
+	user, ok := currentUser(w, r)
+	if !ok {
+		return
+	}
+	var in pollBusiness.BoardPoll
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid body"})
+		return
+	}
+	v, err := pollBusiness.CreateOnBoard(r.Context(), user, in)
+	if err != nil {
+		fail(w, r, err, "create on board")
+		return
+	}
+	helpers.WriteJSON(w, http.StatusCreated, helpers.Envolope{"data": v})
+}
+
+// BoardPolls handles GET /board/polls/{board_uuid}: the board's polls, oldest
+// first, to whoever may open it.
+func BoardPolls(w http.ResponseWriter, r *http.Request) {
+	user, ok := currentUser(w, r)
+	if !ok {
+		return
+	}
+	v, err := pollBusiness.BoardViews(r.Context(), user, chi.URLParam(r, "board_uuid"))
+	if err != nil {
+		fail(w, r, err, "board's polls")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": v})

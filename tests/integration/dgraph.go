@@ -157,7 +157,7 @@ func startDgraph() (*dgraphServer, func(), error) {
 			WithStartupTimeout(180 * time.Second),
 	}
 
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	c, err := StartContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
 		Started:          true,
 	})

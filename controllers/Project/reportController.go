@@ -41,8 +41,9 @@ func Report(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	report, err := business.ReportFor(ctx, user.UserDgraphInfo.Uid, time.Now(), helpers.Location(q.Get("tz")),
-		business.ReportAsk{Weeks: weeks, Only: only, Params: params, Search: q.Get("taskSearchString")})
+	// The zone on ctx too: a formula field's TODAY() is the reader's day.
+	report, err := business.ReportFor(helpers.WithZone(ctx, q.Get("tz")), user.UserDgraphInfo.Uid, time.Now(), helpers.Location(q.Get("tz")),
+		business.ReportAsk{Weeks: weeks, Only: only, Params: params, Search: q.Get("taskSearchString"), Reader: user.UserPostgresInfo.Id.String()})
 	if errors.Is(err, taskDomain.ErrSearchTerm) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "search string is too long or invalid"})
 		return

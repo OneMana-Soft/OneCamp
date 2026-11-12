@@ -9,7 +9,7 @@ package business
 // person may still authorise work. A row's autofill leaves what the rate
 // stopped to a turn the same way, through the same loop (fillCells).
 //
-// Run: integ_rel.sh <tree> <log> '^(TestAFillLeavesWhatTheRateStoppedToTheBackground|TestAFillStopsWhenItsPersonIsDeactivated|TestARowsAutofillLeavesWhatTheRateStoppedToItsTurn|TestARowsAutofillIsOneChangeSetItsWriterCanUndo|TestARowsAutofillUndoneBeforeItsTurnWritesNoMore|TestATurnCutOffByItsMinuteStillQueuesItsNext)$' with PKGS='./business/DataTable/'
+// Run: integ_rel.sh <tree> <log> '^(TestAFillLeavesWhatTheRateStoppedToTheBackground|TestAFillStopsWhenItsPersonIsDeactivated|TestARowsAutofillLeavesWhatTheRateStoppedToItsTurn|TestARowsAutofillIsOneChangeSetItsWriterCanUndo|TestARowsAutofillUndoneBeforeItsTurnWritesNoMore|TestATurnCutOffByItsMinuteStillQueuesItsNext|TestAFillWritingFromAnOldCopyKeepsWhatChangedSince)$' with PKGS='./business/DataTable/'
 
 import (
 	"context"
@@ -450,5 +450,37 @@ func TestATurnCutOffByItsMinuteStillQueuesItsNext(t *testing.T) {
 	}
 	if got := s.cells(5, 8); fmt.Sprint(got) != fmt.Sprint([]string{"A3", "A5", "A6"}) || len(s.queued) != 0 {
 		t.Errorf("after the next turn the cells are %q with %d turns queued; want all three filled, none", got, len(s.queued))
+	}
+}
+
+// A fill read a row; then a person changed a cell and moved the row; then the
+// fill wrote its answer. Both changes stand beside it: the fill writes its own
+// cell alone, never the copy of the row it read.
+func TestAFillWritingFromAnOldCopyKeepsWhatChangedSince(t *testing.T) {
+	w := newRelationWorld(t)
+	tb, nameField := w.table("Accounts")
+	name, stage := nameField.Id.String(), w.field(tb, "Stage", model.FieldText, nil).Id.String()
+	notes := w.field(tb, "Notes", model.FieldText, nil)
+	at := func(p float64) *float64 { return &p }
+	row, err := CreateRow(w.ctx, tb.Id, RowInput{Values: map[string]interface{}{name: "Acme", stage: "Won"}, Position: at(5)}, w.me)
+	if err != nil {
+		t.Fatalf("create row: %v", err)
+	}
+	stale, err := model.GetRowByID(w.ctx, tb.Id, row.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UpdateRow(w.ctx, tb.Id, row.Id, RowInput{Values: map[string]interface{}{name: "Acme Ltd", stage: "Won"}, Position: at(9)}, w.me); err != nil {
+		t.Fatalf("a person's edit: %v", err)
+	}
+	if err := writeCellInto(w.ctx, tb, stale, notes, "Big account", "", false, uuid.Nil); err != nil {
+		t.Fatalf("the fill: %v", err)
+	}
+	r, err := model.GetRowByID(w.ctx, tb.Id, row.Id)
+	if err != nil || r == nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if v := parseRowValues(r.Values); v[name] != "Acme Ltd" || v[stage] != "Won" || v[notes.Id.String()] != "Big account" || r.Position != 9 {
+		t.Errorf("after the fill: %v at %v", v, r.Position)
 	}
 }

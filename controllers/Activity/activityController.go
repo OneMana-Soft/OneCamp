@@ -5,6 +5,7 @@ import (
 	"time"
 
 	business "github.com/akashc777/OneCamp/business/Activity"
+	readStateBusiness "github.com/akashc777/OneCamp/business/ReadState"
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 )
@@ -132,7 +133,13 @@ func GetUnifiedActivity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	unifiedPage, err := unifiedActivity(ctx, userInfo.UserPostgresInfo.Id, userInfo.UserDgraphInfo.Uid, beforeTime, limit)
+	// Notices ("NOTICE" items: a mention in a doc's body, "shared with you", a
+	// proposal) only for an app that says it draws them: an older app meets an
+	// activity type it has no badge for and stops drawing the feed.
+	unifiedPage, err := unifiedActivity(ctx, business.FeedQuery{
+		User: userInfo.UserPostgresInfo.Id, DgraphID: userInfo.UserDgraphInfo.Uid, Before: beforeTime, Limit: limit,
+		Notices: r.URL.Query().Get("notices") == "1",
+	})
 
 	if err != nil {
 
@@ -148,19 +155,22 @@ func GetUnifiedActivity(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	// Notices ("NOTICE" items: a mention in a doc's body, "shared with you", a
-	// proposal) only for an app that says it draws them: an older app meets an
-	// activity type it has no badge for and stops drawing the feed.
-	if r.URL.Query().Get("notices") == "1" {
-		unifiedPage = business.WithNotices(ctx, unifiedPage, userInfo.UserPostgresInfo.Id.String(), beforeTime, limit)
-	}
-
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got unified activity successfully!", "data": unifiedPage})
 }
 
-// MarkActivitySeen is the Inbox opened: everything in the feed until now is
-// seen, and the badge counts from here. The Inbox calls it; reading the feed
-// marks nothing, or Home, which reads it, cleared the badge on every load.
+// Seams for tests: opening the Inbox, and counting its badge.
+var (
+	inboxSeen   = readStateBusiness.InboxSeen
+	unreadCount = business.UnreadActivityCount
+)
+
+// MarkActivitySeen is POST /activity/seen, the Inbox opened: everything in the
+// signed-in person's feed until now is seen, and the badge counts from here.
+// It answers the badge after the write ({"count": n}; none when it couldn't be
+// counted, and the app asks GET /activity/unread), and tells their own tabs and
+// devices (read.moved, kind inbox). The Inbox calls it; reading the feed marks
+// nothing, or Home, which reads it, cleared the badge on every load. Only the
+// caller's own last look moves.
 func MarkActivitySeen(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -169,11 +179,37 @@ func MarkActivitySeen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := business.MarkActivitySeen(ctx, userInfo.UserPostgresInfo.Id); err != nil {
+	count, err := inboxSeen(ctx, &userInfo)
+	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/MarkActivitySeen Failed to mark the feed seen err: %+v", err)
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't mark your Inbox read. Try again."})
 		return
 	}
+	data := helpers.Envolope{}
+	if count != nil {
+		data["count"] = *count
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Marked your Inbox read.", "data": data})
+}
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Marked your Inbox read."})
+// GetActivityUnread is GET /activity/unread: the signed-in person's Inbox badge,
+// {"count": n} up to 100 (the app shows 99+), counted from their own feed with
+// its notices by the rule the Inbox marks its items by (business/Activity
+// UnreadActivityCount), so it never counts what they can't open. A count that
+// can't be read is 503, never a 0 the server didn't count.
+func GetActivityUnread(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
+
+	n, err := unreadCount(ctx, userInfo.UserPostgresInfo.Id, userInfo.UserDgraphInfo.Uid)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/GetActivityUnread Failed to count the Inbox err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't count your Inbox. Try again."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Counted your Inbox.", "data": helpers.Envolope{"count": n}})
 }

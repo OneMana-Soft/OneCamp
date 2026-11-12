@@ -78,3 +78,10 @@ func fileUnderHome(ctx context.Context, uid string, home callHome) error {
 	}
 	return err
 }
+
+// FileUnderGroup files a recording node (its uid) under the DM or group whose
+// grouping id is group, where that conversation's own calls file theirs
+// (fileUnderHome). Idempotent. ErrTranscriptNotKept for no group.
+func FileUnderGroup(ctx context.Context, uid, group string) error {
+	return fileUnderHome(ctx, uid, callHome{chat: group})
+}

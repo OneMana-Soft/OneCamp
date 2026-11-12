@@ -300,10 +300,13 @@ func (f Filter) Directive() string {
 }
 
 // Stub is what a reader who may not see a task is shown of it where a link
-// to it must stay (a parent, a dependency): its id, and that it is hidden.
+// to it must stay (a parent, a dependency): that a task is there, and the
+// link's kind, never which task (V-678, main's C1: no title, key or id).
+// Every read that answers a hidden task answers this one stub, so none can
+// name it; the id stays server-side only, in StubOf.
 func Stub(t *dgraphStruct.DgraphTask) *dgraphStruct.DgraphTask {
 	return &dgraphStruct.DgraphTask{
-		Uuid:           t.Uuid,
+		StubOf:         t.Uuid,
 		Hidden:         true,
 		DependencyKind: t.DependencyKind,
 		DependencyLag:  t.DependencyLag,
@@ -651,6 +654,14 @@ func Settle(ctx context.Context, result any, err *error) {
 // with a Mark left in it fails, so a block that asks for the filter can't
 // quietly go without it.
 const Mark = "@@hidden_tasks@@"
+
+// SubTaskCounts are a task's live sub-tasks as its reader may count them, the
+// hidden left out (Mark): how many (task_sub_task_count), and how many are
+// closed, done or canceled (task_sub_task_done). An epic's progress is these
+// two over its tasks, so no reader is told of a task kept from them. Every
+// list row asks them through this one fragment.
+const SubTaskCounts = `task_sub_task_count: count(task_sub_tasks @filter(` + dgraphStruct.TASK_LIVE_FILTER + ` ` + Mark + `))
+	task_sub_task_done: count(task_sub_tasks @filter(` + dgraphStruct.TASK_LIVE_FILTER + ` AND ` + dgraphStruct.TASK_CLOSED_FILTER + ` ` + Mark + `))`
 
 // Fill fills every Mark in query with the filter.
 func (f Filter) Fill(query string) string {

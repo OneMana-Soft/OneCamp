@@ -163,7 +163,7 @@ func TestFromProject(t *testing.T) {
 			SubTasks: []*dgraphStruct.DgraphTask{{Name: "early step", Status: "todo", DueDate: at("2026-03-01T04:00:00Z")}, {Name: "dropped", Status: "canceled", DueDate: at("2026-02-01T04:00:00Z")}}},
 		{Name: "  ", Status: "todo"},
 	}
-	got := FromProject("Launch", "", statuses, tasks, kolkata)
+	got := FromProject("Launch", "", statuses, tasks, nil, kolkata)
 
 	names := []string{}
 	for _, task := range got.Tasks {
@@ -230,11 +230,11 @@ func TestFromProject(t *testing.T) {
 	}
 
 	// A start after the due date is dropped rather than refused.
-	late := FromProject("x", "", nil, []*dgraphStruct.DgraphTask{{Name: "odd", Status: "todo", StartDate: at("2026-03-09T09:00:00Z"), DueDate: at("2026-03-02T09:00:00Z")}}, time.UTC)
+	late := FromProject("x", "", nil, []*dgraphStruct.DgraphTask{{Name: "odd", Status: "todo", StartDate: at("2026-03-09T09:00:00Z"), DueDate: at("2026-03-02T09:00:00Z")}}, nil, time.UTC)
 	if late.Tasks[0].StartDay != nil || late.Tasks[0].DueDay == nil {
 		t.Errorf("start after due: %+v", late.Tasks[0])
 	}
-	long := FromProject("x", "", nil, []*dgraphStruct.DgraphTask{{Name: strings.Repeat("y", MaxTaskName+50), Status: "todo"}}, time.UTC)
+	long := FromProject("x", "", nil, []*dgraphStruct.DgraphTask{{Name: strings.Repeat("y", MaxTaskName+50), Status: "todo"}}, nil, time.UTC)
 	if n := len([]rune(long.Tasks[0].Name)); n != MaxTaskName {
 		t.Errorf("a long name is cut to %d: %d", MaxTaskName, n)
 	}

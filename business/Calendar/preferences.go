@@ -10,10 +10,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 	"unicode/utf8"
 
 	preferencesBusiness "github.com/akashc777/OneCamp/business/Preferences"
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/google/uuid"
 )
 
@@ -23,7 +25,47 @@ const (
 	// PrefZones is the zones a person's day and week show beside their own
 	// (calendar head 6, gcal-3), each with its label: [{zone, label}].
 	PrefZones = "calendar.zones"
+	// PrefRecentColours is a person's own colours, newest first ("Your
+	// colours" in the colour picker).
+	PrefRecentColours = "calendar.recent_colours"
 )
+
+// maxRecentColours is how many of a person's own colours the picker keeps.
+const maxRecentColours = 12
+
+// recentColoursProblem is why a list of colours can't be kept, or nil: each
+// one "#rrggbb" in lower case, as an event keeps its own. Pure.
+func recentColoursProblem(v json.RawMessage) error {
+	var colours []string
+	if json.Unmarshal(v, &colours) != nil {
+		return &preferencesBusiness.Refused{Msg: "Your colours are a list of colours like #1a73e8."}
+	}
+	for _, c := range colours {
+		if !helpers.IsHexColour(c) {
+			return &preferencesBusiness.Refused{Msg: "Each of your colours is written like #1a73e8."}
+		}
+	}
+	return nil
+}
+
+// keptRecentColours is a checked list as it is kept: each colour once, the
+// newest (first) first, and the oldest past maxRecentColours dropped. Pure.
+func keptRecentColours(_ context.Context, _ uuid.UUID, v json.RawMessage) (json.RawMessage, error) {
+	var colours []string
+	if err := json.Unmarshal(v, &colours); err != nil {
+		return nil, err
+	}
+	kept := make([]string, 0, maxRecentColours)
+	for _, c := range colours {
+		if len(kept) == maxRecentColours {
+			break
+		}
+		if !slices.Contains(kept, c) {
+			kept = append(kept, c)
+		}
+	}
+	return json.Marshal(kept)
+}
 
 // MaxOtherZones is how many zones a person keeps beside their own: three
 // columns with theirs, as Google's day and week show.
@@ -89,6 +131,7 @@ func init() {
 		return nil
 	}})
 	preferencesBusiness.Register(PrefZones, preferencesBusiness.Key{Default: json.RawMessage("[]"), Check: zonesProblem})
+	preferencesBusiness.Register(PrefRecentColours, preferencesBusiness.Key{Default: json.RawMessage("[]"), Check: recentColoursProblem, Prepare: keptRecentColours})
 }
 
 // HoursOf is each of these people's working hours in their zone, for those

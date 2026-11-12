@@ -9,12 +9,10 @@ package business
 // permission model; no parallel AI runtime.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -702,54 +700,6 @@ func aiColumns(fields []*model.Field) []string {
 	return ids
 }
 
-// changedCells is the cells, by field id, that differ between a row's values
-// as they were (was) and are (is); the AI columns' marks (AIKeptKey) aren't a
-// cell.
-func changedCells(was, is string) map[string]bool {
-	var before, after map[string]json.RawMessage
-	_ = json.Unmarshal([]byte(was), &before)
-	_ = json.Unmarshal([]byte(is), &after)
-	changed := map[string]bool{}
-	for id, v := range after {
-		if !sameJSON(before[id], v) {
-			changed[id] = true
-		}
-	}
-	for id := range before {
-		if _, kept := after[id]; !kept {
-			changed[id] = true
-		}
-	}
-	delete(changed, model.AIKeptKey)
-	return changed
-}
-
-// sameJSON is whether two JSON values are the same value, however they're
-// written: spacing, key order and escapes aside. A row with a person's AI
-// cells has its values written again as its marks are lifted out
-// (model.liftAIKept), with "&" as "\u0026": compared as written, every such
-// cell read as changed, and asked the row's AI columns again.
-func sameJSON(a, b json.RawMessage) bool {
-	if a == nil || b == nil {
-		return bytes.Equal(a, b)
-	}
-	x, xerr := decodeJSON(a)
-	y, yerr := decodeJSON(b)
-	if xerr != nil || yerr != nil {
-		return bytes.Equal(a, b)
-	}
-	return reflect.DeepEqual(x, y)
-}
-
-// decodeJSON is a JSON value decoded, its numbers as written.
-func decodeJSON(b json.RawMessage) (interface{}, error) {
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.UseNumber()
-	var v interface{}
-	err := d.Decode(&v)
-	return v, err
-}
-
 // readCells is the cells an AI column's answer is worked out from, as the
 // row the fill read (rw, as the row stores them) holds them, by field id:
 // those its prompt reads (promptReads), or every cell but the AI columns'
@@ -826,7 +776,7 @@ func writeCellInto(ctx context.Context, t *model.DataTable, rw *model.Row, targe
 		return uerr
 	}
 	announce(ctx, t, cs, neither)
-	broadcastRow(t.Id.String(), "updated", updated)
+	broadcastRow(t.Id.String(), "updated", updated, cs)
 	helpers.GoSafeNamed("tellLinkedTables", func() { tellLinkedTables(context.WithoutCancel(ctx), t.Id, rw.Id, false) })
 	return nil
 }

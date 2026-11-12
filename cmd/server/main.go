@@ -257,6 +257,11 @@ func startBackgroundLoops(ctx context.Context) {
 	// task is assigned by, each assignee it would refuse now taken off, and
 	// each project's admins told who and how many (business/AssigneeRepair).
 	assigneeRepairBusiness.Repair.Start(ctx)
+	// Once per install: each old task comment, owned by its writer until
+	// 6 Nov 2026 and so listed for nobody, re-owned to whom it is addressed
+	// (its task's assignee, else its maker), batched a page a write after a
+	// logged dry-run count; resumable (business/Task commentOwnerRepair.go).
+	taskBusiness.CommentOwnerRepair.Start(ctx)
 	// Every start: an @handle for each member who has none (accounts from
 	// before handles), derived from their name.
 	userBusiness.StartHandleBackfill(ctx)

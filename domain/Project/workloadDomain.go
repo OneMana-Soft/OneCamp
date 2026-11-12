@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -88,6 +89,7 @@ func GetDgraphWorkload(ctx context.Context, userDgraphUID string, from, until ti
 				}
 				undated: project_tasks @filter(%[3]s AND NOT gt(task_start_date, %[1]s) AND NOT gt(task_due_date, %[1]s)) {
 					uid
+					task_uuid
 					task_assignee { %[2]s }
 				}
 			}
@@ -121,11 +123,28 @@ func GetDgraphWorkload(ctx context.Context, userDgraphUID string, from, until ti
 		return read, nil
 	}
 	projects := out.Me[0].Projects
+	// An epic is a container: it weighs on no one (taskDomain.DropEpics, the
+	// plan totals' rule). A list read full may hold more past the epics it
+	// drops, so it says so.
+	ids := make([]string, 0, len(projects))
+	lists := make([]*[]*dgraphStruct.DgraphTask, 0, 3*len(projects))
+	for i := range projects {
+		p := &projects[i]
+		ids = append(ids, p.UUID)
+		for _, list := range []*[]*dgraphStruct.DgraphTask{&p.Dated, &p.DatedStart} {
+			p.Truncated = p.Truncated || len(*list) > WorkloadProjectsCap
+		}
+		lists = append(lists, &p.Dated, &p.DatedStart, &p.Undated)
+	}
+	if err := taskDomain.DropEpics(ctx, ids, lists...); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetDgraphWorkload epics err: %+v", err)
+		return nil, err
+	}
 	for i := range projects {
 		p := &projects[i]
 		for _, list := range []*[]*dgraphStruct.DgraphTask{&p.Dated, &p.DatedStart} {
 			if len(*list) > WorkloadProjectsCap {
-				*list, p.Truncated = (*list)[:WorkloadProjectsCap], true
+				*list = (*list)[:WorkloadProjectsCap]
 			}
 		}
 		p.Dated, p.DatedStart = append(p.Dated, p.DatedStart...), nil

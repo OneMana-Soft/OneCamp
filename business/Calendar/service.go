@@ -62,6 +62,9 @@ type service struct {
 	// before answering, as tests need, rather than in the background.
 	ledger  syncLedger
 	moveNow bool
+	// opens is which of the docs, boards and tasks an event carries someone
+	// may open (eventFiles.go).
+	opens func(ctx context.Context, who *model.UserInfo, refs []FileRef) (map[FileRef]bool, error)
 }
 
 func newService(s store) *service {
@@ -75,6 +78,7 @@ func newService(s store) *service {
 		ready:   storeReady,
 		rem:     postgresReminders{},
 		ledger:  postgresLedger{},
+		opens:   opensRefs,
 	}
 	svc.effects = liveEffects{svc}
 	svc.tells = liveTeller{svc}
@@ -281,6 +285,9 @@ func (s *service) namesOf(ctx context.Context, rows []instance, guests map[uuid.
 	}
 	for _, e := range rows {
 		add(e.CreatedBy)
+		if e.DeletedBy != nil {
+			add(*e.DeletedBy)
+		}
 		for _, a := range guests[e.owner().ID] {
 			if a.UserID != nil {
 				add(*a.UserID)
@@ -329,6 +336,8 @@ func (s *service) views(ctx context.Context, reader *model.UserInfo, rows []inst
 	}
 	booked := bookingsOf(ctx, reader, plain)
 	tasks := s.tasksOf(ctx, subjectOf(reader), plain)
+	files := s.filesOf(ctx, reader, rows)
+	guestLinks := guestLinksOn()
 	out := make([]Event, 0, len(rows))
 	for _, inst := range rows {
 		e := inst.Event
@@ -339,13 +348,18 @@ func (s *service) views(ctx context.Context, reader *model.UserInfo, rows []inst
 		}
 		v := Event{
 			ID: inst.ref, CalendarID: e.CalendarID.String(), ReadOnly: e.Source == sourceSubscribed, Kind: EventKind(e.Kind),
-			Title: titleOf(e, task), Task: task, Notes: e.Notes, NotesFormat: e.NotesFormat, Location: e.Location, CallRoom: e.CallRoom,
+			Title: titleOf(e, task), Task: task, Notes: e.Notes, NotesFormat: e.NotesFormat, Files: helpers.NonNil(files[inst.owner().ID]),
+			Location: e.Location, CallRoom: e.CallRoom,
 			Start: start, End: end, AllDay: e.AllDay(),
 			Transparency: e.Transparency, Visibility: e.Visibility, Hue: e.Hue, Status: e.Status,
 			GuestsCanModify: e.GuestsCanModify, GuestsCanInvite: e.GuestsCanInvite, GuestsCanSeeGuests: e.GuestsCanSeeGuests,
 			Organiser: personNamed(e.CreatedBy, names), Attendees: []Attendee{},
 			Sequence: e.Sequence, ICalUID: e.ICalUID, GoogleEventID: e.GoogleEventID,
-			Booking: booked[e.ID.String()], CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, DeletedAt: e.DeletedAt,
+			Booking: booked[e.ID.String()], Room: roomView(inst.owner(), inst.ref, guestLinks), CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, DeletedAt: e.DeletedAt,
+		}
+		if e.DeletedBy != nil {
+			by := personNamed(*e.DeletedBy, names)
+			v.DeletedBy = &by
 		}
 		if series := inst.owner(); series.RRule != "" {
 			sStart, loc, _ := seriesTime(series)
@@ -465,8 +479,8 @@ func (s *service) announce(ctx context.Context, who *model.UserInfo, kind resour
 }
 
 // create writes a new event for who, on their own calendar, with the guests
-// that can be invited.
-func (s *service) create(ctx context.Context, who *model.UserInfo, e *models.Event, wanted []GuestInput, syncToGoogle bool) (*models.Event, []models.Attendee, error) {
+// that can be invited and its files (checked: fileRefsOf, mayOpenAll).
+func (s *service) create(ctx context.Context, who *model.UserInfo, e *models.Event, wanted []GuestInput, files []FileRef, syncToGoogle bool) (*models.Event, []models.Attendee, error) {
 	if err := check(e); err != nil {
 		return nil, nil, err
 	}
@@ -497,7 +511,7 @@ func (s *service) create(ctx context.Context, who *model.UserInfo, e *models.Eve
 		}
 		guests = append(guests, row)
 	}
-	if err := s.store.create(ctx, e, guests); err != nil {
+	if err := s.store.create(ctx, e, guests, fileRows(e.ID, files, me, now)); err != nil {
 		return nil, nil, err
 	}
 	ids := guestIDs(guests)
@@ -789,8 +803,10 @@ func (s *service) remove(ctx context.Context, who *model.UserInfo, cur *models.E
 		return err
 	}
 	cur.Sequence, cur.DeletedAt, cur.DeletedBy = seq, &now, &me
-	// Its call ends with it (calendar B11): a restored event is given a new one.
-	s.endCall(ctx, cur.CallRoom)
+	// Its call closes with it (calendar B11), kept in its call_room to open
+	// again at the same address when it comes back (V-641); one it shares but
+	// wasn't made for answers on, for its series.
+	s.endCall(ctx, cur.ID, cur.CallRoom)
 	s.announce(ctx, who, resourceEventBusiness.CalendarEventDeleted, cur, guestIDs(guests), nil)
 	s.effects.deleted(ctx, who, cur, guests)
 	if len(guests) > 0 {
@@ -940,7 +956,16 @@ func (s *service) Create(ctx context.Context, who *model.UserInfo, in EventInput
 		}
 		rule = &r
 	}
-	created, guests, err := s.create(withoutSending(ctx, in.Notify), who, e, in.Attendees, in.SyncToGoogle)
+	// Its files last: each is a read of who may open it (Duplicate carries
+	// the files of what it copies).
+	files, err := fileRefsOf(in.Files)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.mayOpenAll(ctx, who, files); err != nil {
+		return nil, err
+	}
+	created, guests, err := s.create(withoutSending(ctx, in.Notify), who, e, in.Attendees, files, in.SyncToGoogle)
 	if err != nil {
 		return nil, err
 	}
@@ -1253,7 +1278,9 @@ func (s *service) Restore(ctx context.Context, who *model.UserInfo, id string) (
 			return nil, err
 		}
 		if back.SeriesID == nil {
-			// Its series no longer has it: an event of its own now.
+			// Its series no longer has it: an event of its own now, without
+			// its series' call.
+			s.callBack(ctx, back)
 			restored, g, err := s.load(ctx, back.ID)
 			if err != nil {
 				return nil, err
@@ -1274,6 +1301,10 @@ func (s *service) Restore(ctx context.Context, who *model.UserInfo, id string) (
 	if _, err := s.store.setDeleted(ctx, e.ID, nil, nil, s.now(), nil); err != nil {
 		return nil, err
 	}
+	// Its call, closed with it, answers again at its address (V-641); one it
+	// shared but wasn't made for, it comes back without. An instance has its
+	// series' call, which deleting the instance never closed.
+	s.callBack(ctx, e)
 	restored, guests, err := s.load(ctx, e.ID)
 	if err != nil {
 		return nil, err
@@ -1285,14 +1316,51 @@ func (s *service) Restore(ctx context.Context, who *model.UserInfo, id string) (
 // trashPage is how many events one look at the trash gives.
 const trashPage = 50
 
-// Trash is who's deleted events, newest first, deleted before before (nil:
-// from the newest), a deleted instance of a series by the instance's id.
-// Nothing is purged from it (the owner's question O6).
-func (s *service) Trash(ctx context.Context, who *model.UserInfo, before *time.Time) ([]Event, error) {
+// trashDays is how far back the trash lists what its person deleted.
+const trashDays = 30
+
+// trashSince is where the trash starts at now: trashDays before it. What its
+// person deleted before that stays deleted, and is listed no more. Pure.
+func trashSince(now time.Time) time.Time { return now.Add(-trashDays * 24 * time.Hour) }
+
+// TrashAfter is where a look at the trash goes on from: the last event the
+// one before gave, by when it was deleted and its id as it gave it (an
+// event's, or an instance's "<series id>_<start>"). Events deleted at once
+// share the time, so the id says where among them the look stopped; without
+// it (an older client), the look goes on from before that time, as it did.
+type TrashAfter struct {
+	DeletedAt time.Time
+	ID        string
+}
+
+// trashCursor is where the store goes on from for after: its time, and its
+// id read as an event's or an instance's (an input error for neither). Pure.
+func trashCursor(after *TrashAfter) (*models.TrashCursor, error) {
+	if after == nil {
+		return nil, nil
+	}
+	c := &models.TrashCursor{DeletedAt: after.DeletedAt}
+	if after.ID == "" {
+		return c, nil
+	}
+	var err error
+	c.Event, c.Recurrence, err = parseRef(after.ID)
+	return c, err
+}
+
+// Trash is who's events deleted in the last trashDays, newest first, from
+// after (nil: from now), a deleted instance of a series by the instance's id,
+// each with when and by whom. Nothing is purged: an older one stays deleted,
+// and Restore still brings it back by its id (the owner's question O6).
+func (s *service) Trash(ctx context.Context, who *model.UserInfo, after *TrashAfter) ([]Event, error) {
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
-	rows, err := s.store.trashOf(ctx, personOf(who), before, trashPage)
+	from, err := trashCursor(after)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.store.trashOf(ctx, personOf(who), trashSince(s.now()), from, trashPage)
 	if err != nil {
 		return nil, err
 	}

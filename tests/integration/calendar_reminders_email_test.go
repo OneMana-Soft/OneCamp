@@ -20,6 +20,7 @@ import (
 	"time"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
 	preferencesController "github.com/akashc777/OneCamp/controllers/Preferences"
 	prefModels "github.com/akashc777/OneCamp/models/postgres/UserNotificationPreference"
@@ -41,6 +42,11 @@ func TestRemindersByEmailAndDefaultsPerCalendarOverHTTP(t *testing.T) {
 		t.Fatalf("create: %d %v", code, body)
 	}
 	e := dataEvent(t, body)
+	// The create's reminders sink runs after it returns (V-730): settled, it
+	// can't undo the reminders and the replan asserted below.
+	if !resourceEventBusiness.Sinks.Settle(30 * time.Second) {
+		t.Fatal("the design review's sinks didn't settle")
+	}
 	var rem struct {
 		Minutes []int `json:"minutes"`
 		Email   []int `json:"email"`
@@ -139,6 +145,41 @@ func TestRemindersByEmailAndDefaultsPerCalendarOverHTTP(t *testing.T) {
 	}
 	listed("default", []int{30}, []int{30}, true)
 
+	// The replan is part of the change (V-532): when Sam's coming reminders
+	// can't be planned again, his new default isn't kept either, and he is
+	// told in words to try again, never a default his reminders don't follow.
+	refuse := "v532_replan_" + strings.ReplaceAll(samID.String(), "-", "")
+	t.Cleanup(func() {
+		_, _ = env.PG.Exec(`DROP TRIGGER IF EXISTS ` + refuse + ` ON scheduled_jobs`)
+		_, _ = env.PG.Exec(`DROP FUNCTION IF EXISTS ` + refuse + `()`)
+	})
+	for _, q := range []string{
+		`CREATE FUNCTION ` + refuse + `() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.user_uuid = '` + samID.String() + `'::uuid AND NEW.job_type = 'calendar_reminder' THEN
+				RAISE EXCEPTION 'test: Sam''s reminders can''t be planned';
+			END IF;
+			RETURN NEW;
+		END $$`,
+		`CREATE TRIGGER ` + refuse + ` BEFORE INSERT OR UPDATE ON scheduled_jobs FOR EACH ROW EXECUTE PROCEDURE ` + refuse + `()`,
+	} {
+		if _, err := env.PG.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kept := string(prefs(t, sam)["calendar.default_reminders"])
+	rec := call(t, preferencesController.SetMine, http.MethodPut, "/user/preferences/calendar.default_reminders", sam,
+		`{"value":{"mine":{"timed":{"minutes":[45]}}}}`, map[string]string{"key": "calendar.default_reminders"})
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "Couldn't save that. Try again in a moment.") {
+		t.Errorf("a default whose replan fails: %d %s, want 503 and words to try again", rec.Code, rec.Body.String())
+	}
+	if got := string(prefs(t, sam)["calendar.default_reminders"]); got != kept {
+		t.Errorf("a default whose replan failed was kept: %s, want %s as before", got, kept)
+	}
+	if _, err := env.PG.Exec(`DROP TRIGGER ` + refuse + ` ON scheduled_jobs`); err != nil {
+		t.Fatal(err)
+	}
+
 	// A member guest's default reaches the events she is on: Maya, a guest of
 	// Sam's standup, sets one, and her wake-up for it is planned now; Sam's
 	// design review, which she isn't on, gets none for her.
@@ -149,6 +190,11 @@ func TestRemindersByEmailAndDefaultsPerCalendarOverHTTP(t *testing.T) {
 		t.Fatalf("Sam's standup with Maya: %d %v", code, body)
 	}
 	standup := dataEvent(t, body)
+	// Settled before Maya's change: run after it, the standup's sink would
+	// replace her replan (V-730).
+	if !resourceEventBusiness.Sinks.Settle(30 * time.Second) {
+		t.Fatal("the standup's sinks didn't settle")
+	}
 	mayaID, beforeMaya := maya.UserPostgresInfo.Id, time.Now()
 	if rec := call(t, preferencesController.SetMine, http.MethodPut, "/user/preferences/calendar.default_reminders", maya,
 		`{"value":{"mine":{"timed":{"minutes":[15]}}}}`, map[string]string{"key": "calendar.default_reminders"}); rec.Code != 200 {

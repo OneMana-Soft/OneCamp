@@ -61,14 +61,3 @@ func GetNotificationTypeByUserIdAndChannelId(userId string, channelId string) (n
 	}
 	return
 }
-
-func GetEligibleUsersForChannelActivity(ctx context.Context, channelId string, excludeUserID string, mentionsList []string, limitToMentions bool) (userIds []string, err error) {
-	userIds, err = domain.GetEligibleUsersForChannelActivity(ctx, channelId, excludeUserID, mentionsList, limitToMentions)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetEligibleUsersForChannelActivity Failed to get eligible users err: %+v",
-			err)
-		return
-	}
-	return
-}

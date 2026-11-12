@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	formula "github.com/akashc777/OneCamp/business/Formula"
+	"github.com/akashc777/OneCamp/helpers/currency"
 )
 
 // maxXMLDepth is how deep a workbook's XML may nest: a sheet's cells sit six
@@ -137,17 +138,18 @@ func moneyCell(n float64, sign string) Cell {
 	return Cell{Kind: CellNumber, Number: n, Currency: currencyOf(sign), Text: text}
 }
 
-// currencyOf is a currency's sign or code as a cell's Currency: "USD" and
-// "INR" for the two a table's number shows, "other" for another, "" for
-// none. Pure.
+// currencyOf is a currency's sign or code as a cell's Currency: its ISO
+// 4217 code, "other" for a sign that names no one currency, "" for none.
+// Pure.
 func currencyOf(sign string) string {
-	switch strings.ToUpper(strings.TrimSpace(sign)) {
-	case "":
+	if strings.TrimSpace(sign) == "" {
 		return ""
-	case "$", "US$", "USD":
-		return "USD"
-	case "₹", "RS", "RS.", "INR":
-		return "INR"
+	}
+	if code := currency.OfSign(sign); code != "" {
+		return code
+	}
+	if code := currency.Code(sign); code != "" {
+		return code
 	}
 	return "other"
 }

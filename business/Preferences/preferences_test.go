@@ -85,7 +85,7 @@ func TestPrepareRefusesBeforeAnythingIsWritten(t *testing.T) {
 // What follows a change follows only a change: a refused value calls no hook.
 func TestARefusalCallsNoHook(t *testing.T) {
 	called := 0
-	OnChange("week_start", func(context.Context, uuid.UUID, json.RawMessage) { called++ })
+	OnChange("week_start", func(context.Context, uuid.UUID, json.RawMessage) error { called++; return nil })
 	if err := Set(context.Background(), uuid.New(), "week_start", json.RawMessage(`9`)); err == nil || called != 0 {
 		t.Errorf("a refused week_start: %v, the hook called %d times", err, called)
 	}

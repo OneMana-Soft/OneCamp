@@ -1368,6 +1368,115 @@ func TestATokenActsAsAMemberAcrossTheAPI(t *testing.T) {
 		}
 	})
 
+	t.Run("over the public API, a comment mentions a member as @[their uuid]: they are told as in the app, and it reads back as written", func(t *testing.T) {
+		// V-529 (2): Airtable's API writes @[usrID]. A token writes
+		// @[<member uuid>]; the comment keeps the chip the app's composer
+		// writes (data-id "<uuid>@<graph uid>"), so the threads service records
+		// the member as mentioned; every answer writes the chip back as
+		// @[uuid] and names them in comment_mentioned.
+		board, err := dataTableBusiness.CreateTable(ctx, dataTableBusiness.TableInput{Name: "Launch board", Visibility: "workspace"}, boActor)
+		if err != nil {
+			t.Fatalf("make Bo's Launch board: %v", err)
+		}
+		task, err := dataTableBusiness.CreateRow(ctx, board.Id, dataTableBusiness.RowInput{Values: map[string]interface{}{}}, boActor)
+		if err != nil {
+			t.Fatalf("add a row to the Launch board: %v", err)
+		}
+		key, err := apiTokenBusiness.CreateToken(ctx, "Bo's mentions key", []string{apiTokenBusiness.ScopeTablesRead, apiTokenBusiness.ScopeTablesWrite}, 30, bo.UserPostgresInfo.Id, nil, false)
+		if err != nil {
+			t.Fatalf("make Bo's token: %v", err)
+		}
+		send := func(method, path string, body any) (int, map[string]any) {
+			t.Helper()
+			var b []byte
+			if body != nil {
+				b, _ = json.Marshal(body)
+			}
+			req := httptest.NewRequest(method, path, bytes.NewReader(b))
+			req.Header.Set("Authorization", "Bearer "+key.Plaintext)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			routes.ServeHTTP(rec, req)
+			var out map[string]any
+			_ = json.Unmarshal(rec.Body.Bytes(), &out)
+			return rec.Code, out
+		}
+		cyID, boID := cy.UserDgraphInfo.Uuid, bo.UserDgraphInfo.Uuid
+		named := func(out map[string]any, id, name string) bool {
+			m, _ := out["comment_mentioned"].(map[string]any)
+			p, _ := m[id].(map[string]any)
+			return p != nil && p["user_uuid"] == id && p["user_name"] == name
+		}
+		comments := "/v1/tables/" + board.Id.String() + "/rows/" + task.Id.String() + "/comments"
+
+		// Bo asks Cy, by her uuid in any case: the answer reads as he wrote it, and names her.
+		code, out := send("POST", comments, map[string]any{"text": "Can @[" + strings.ToUpper(cyID) + "] take the <copy>?"})
+		thread, _ := out["thread_id"].(string)
+		asked, _ := out["comment_uuid"].(string)
+		if code != http.StatusCreated || thread == "" || out["comment_text"] != "<p>Can @["+cyID+"] take the &lt;copy&gt;?</p>" || !named(out, cyID, "Cy") {
+			t.Fatalf("Bo's mention answered %d: %v", code, out)
+		}
+		// It is kept as the app's chip, and Cy is in the thread as mentioned.
+		var body string
+		if err := env.PG.QueryRow(`SELECT body FROM thread_comments WHERE id = $1`, asked).Scan(&body); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(body, `data-type="mention"`) || !strings.Contains(body, `data-id="`+cyID+`@`+cy.UserDgraphInfo.Uid+`"`) || !strings.Contains(body, `data-label="Cy"`) {
+			t.Fatalf("Bo's comment is kept as %q, want Cy's chip", body)
+		}
+		var role string
+		if err := env.PG.QueryRow(`SELECT role FROM thread_participants WHERE thread_id = $1 AND user_uuid = $2`, thread, cyID).Scan(&role); err != nil || role != "mentioned" {
+			t.Fatalf("Cy is in the thread as %q (%v), want mentioned", role, err)
+		}
+
+		// A reply mentions both; an edit changes who is mentioned; the list reads every mention back.
+		code, out = send("POST", comments, map[string]any{"text": "@[" + boID + "] and @[" + cyID + "]: done", "thread": thread})
+		if code != http.StatusCreated || out["comment_text"] != "<p>@["+boID+"] and @["+cyID+"]: done</p>" || !named(out, boID, "Bo") || !named(out, cyID, "Cy") {
+			t.Fatalf("the reply answered %d: %v", code, out)
+		}
+		code, out = send("PATCH", "/v1/tables/"+board.Id.String()+"/rows/"+task.Id.String()+"/threads/"+thread+"/comments/"+asked, map[string]any{"text": "Can @[" + boID + "] take it?"})
+		if code != http.StatusOK || out["comment_text"] != "<p>Can @["+boID+"] take it?</p>" || !named(out, boID, "Bo") || named(out, cyID, "Cy") {
+			t.Fatalf("the edit answered %d: %v", code, out)
+		}
+		code, out = send("GET", comments, nil)
+		threads, _ := out["threads"].([]any)
+		if code != http.StatusOK || len(threads) != 1 {
+			t.Fatalf("the row's comments answered %d: %v", code, out)
+		}
+		said, _ := threads[0].(map[string]any)["comments"].([]any)
+		if len(said) != 2 {
+			t.Fatalf("the thread has %d comments, want 2: %v", len(said), threads[0])
+		}
+		first, _ := said[0].(map[string]any)
+		second, _ := said[1].(map[string]any)
+		if first["comment_text"] != "<p>Can @["+boID+"] take it?</p>" || !named(first, boID, "Bo") || second["comment_text"] != "<p>@["+boID+"] and @["+cyID+"]: done</p>" || !named(second, cyID, "Cy") {
+			t.Fatalf("the list reads %v and %v, want each mention as @[uuid], named", first, second)
+		}
+		if raw := fmt.Sprint(out); strings.Contains(raw, "@"+cy.UserDgraphInfo.Uid) || strings.Contains(raw, "data-type") {
+			t.Fatalf("the list carries a chip or a graph uid: %s", raw)
+		}
+
+		// Someone who is no member is refused by name, and nothing is posted.
+		nobody := uuid.NewString()
+		var before int
+		if err := env.PG.QueryRow(`SELECT count(*) FROM thread_comments WHERE resource_uuid = $1`, task.Id.String()).Scan(&before); err != nil {
+			t.Fatal(err)
+		}
+		code, out = send("POST", comments, map[string]any{"text": "Ask @[" + nobody + "]"})
+		e, _ := out["error"].(map[string]any)
+		if msg, _ := e["message"].(string); code != http.StatusBadRequest || e["code"] != "invalid_argument" || !strings.Contains(msg, "@["+nobody+"]") {
+			t.Fatalf("a mention of no one answered %d: %v", code, out)
+		}
+		var after int
+		if err := env.PG.QueryRow(`SELECT count(*) FROM thread_comments WHERE resource_uuid = $1`, task.Id.String()).Scan(&after); err != nil || after != before {
+			t.Fatalf("%d comments after the refusal, want %d (%v)", after, before, err)
+		}
+		// Text that only looks like a mention stays text.
+		if code, out = send("POST", comments, map[string]any{"text": "@[not-a-uuid] and @[] stay"}); code != http.StatusCreated || out["comment_text"] != "<p>@[not-a-uuid] and @[] stay</p>" {
+			t.Fatalf("text like a mention answered %d: %v", code, out)
+		}
+	})
+
 	t.Run("over the public API, a table's maker makes, renames, deletes and brings back a table, its rows' threads are resolved and comments edited, with a row each, and no one else does", func(t *testing.T) {
 		// Tables H2c: tables.table.create/update/delete/restore and
 		// tables.deleted.list (the app's CreateTable, UpdateTable,

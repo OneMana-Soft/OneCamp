@@ -4,10 +4,28 @@ import (
 	"context"
 	"time"
 
+	"github.com/google/uuid"
+
 	domain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
+
+// StatusChange is one status change in a task's history: by (a graph uid)
+// moved it at at from prev to next, each named as the activity names it (a
+// built-in status's key, or a project's own status's name as it was then).
+// A move as it happens (UpdateTaskStatusByTaskUUID) and a data move that
+// knows its history (the demo's finished work) write the same record. Pure.
+func StatusChange(by string, at time.Time, prev, next string) *dgraphStruct.DgraphTaskActivity {
+	return &dgraphStruct.DgraphTaskActivity{
+		Uuid:      uuid.NewString(),
+		Type:      dgraphStruct.ACTIVITY_TYPE_STATUS,
+		CreatedBy: &dgraphStruct.DgraphUser{Uid: by},
+		LogTime:   &at,
+		PrevState: prev,
+		NextState: next,
+	}
+}
 
 // StatusSinceOf works out when a task entered its current status, for tasks
 // from before task_status_since was kept: its latest status change, or its

@@ -44,6 +44,9 @@ func init() { calendarSyncBusiness.Adapters.Register(adapter{fetch: safefetch.Fe
 
 func (adapter) Provider() string { return "ics" }
 
+// ReadsOnly: a feed is only read, by subscriptions' own sweep.
+func (adapter) ReadsOnly() bool { return true }
+
 // Calendars: a subscription names its own one calendar.
 func (adapter) Calendars(context.Context, calendarSyncBusiness.Link) ([]calendarSyncBusiness.Remote, error) {
 	return nil, nil

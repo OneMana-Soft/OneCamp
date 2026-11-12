@@ -171,12 +171,23 @@ func (e RowErrors) Error() string {
 // ledgerTx runs write and stores cs in one transaction, then runs committing
 // in it, and commits; a write of one row has DBTimeout, of more BulkTimeout.
 // A change set with no changes (a write that changed nothing) isn't stored.
+//
+// The transaction runs without parallel workers (pgexec.WithoutWorkers): a
+// write's reads (a batch finds its rows, their versions and links) gain
+// little from them, and a write is never run again, so one that ran out of
+// /dev/shm for its workers would be refused (V-583: 4 of 19,051 writes at
+// 64M, in ApplyBatch). Its reads, the observers' in committing too, go
+// through pgexec (pgexec.WithTx(ctx, tx)), which plans each for its run there
+// (V-611); a raw statement on tx only writes or locks rows.
 func ledgerTx(ctx context.Context, rows int, cs *ChangeSet, committing Committing, write func(ctx context.Context, tx *sql.Tx) error) error {
 	timeout := postgresInit.DBConn.DBTimeout
 	if rows > 1 || timeout <= 0 {
 		timeout = postgresInit.BulkTimeout
 	}
 	return postgresInit.InTx(ctx, timeout, func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := pgexec.Exec(pgexec.WithTx(ctx, tx), pgexec.WithoutWorkers); err != nil {
+			return err
+		}
 		if err := write(ctx, tx); err != nil {
 			return err
 		}
@@ -376,10 +387,10 @@ func placeKeys(ctx context.Context, tx *sql.Tx, table uuid.UUID, at Place, movin
 	if moving == nil {
 		moving = []uuid.UUID{}
 	}
+	ctx = pgexec.WithTx(ctx, tx)
 	keyOf := func(row uuid.UUID) (string, error) {
-		var k sql.NullString
-		err := tx.QueryRowContext(ctx, `SELECT position_key FROM data_table_rows
-			WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL AND NOT id = ANY($3)`, row, table, moving).Scan(&k)
+		k, err := pgexec.Scalar[sql.NullString](ctx, `SELECT position_key FROM data_table_rows
+			WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL AND NOT id = ANY($3)`, row, table, moving)
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && !k.Valid) {
 			return "", ErrNoSuchPlace
 		}
@@ -391,35 +402,35 @@ func placeKeys(ctx context.Context, tx *sql.Tx, table uuid.UUID, at Place, movin
 		if prev, err = keyOf(at.After); err != nil {
 			return "", "", err
 		}
-		err = tx.QueryRowContext(ctx, `SELECT MIN(position_key) FROM data_table_rows
-			WHERE table_id = $1 AND deleted_at IS NULL AND position_key > $2 AND NOT id = ANY($3)`, table, prev, moving).Scan(&k)
+		k, err = pgexec.Scalar[sql.NullString](ctx, `SELECT MIN(position_key) FROM data_table_rows
+			WHERE table_id = $1 AND deleted_at IS NULL AND position_key > $2 AND NOT id = ANY($3)`, table, prev, moving)
 		return prev, k.String, err
 	case at.Before != uuid.Nil:
 		if next, err = keyOf(at.Before); err != nil {
 			return "", "", err
 		}
-		err = tx.QueryRowContext(ctx, `SELECT MAX(position_key) FROM data_table_rows
-			WHERE table_id = $1 AND deleted_at IS NULL AND position_key < $2 AND NOT id = ANY($3)`, table, next, moving).Scan(&k)
+		k, err = pgexec.Scalar[sql.NullString](ctx, `SELECT MAX(position_key) FROM data_table_rows
+			WHERE table_id = $1 AND deleted_at IS NULL AND position_key < $2 AND NOT id = ANY($3)`, table, next, moving)
 		return k.String, next, err
 	case at.Number != nil:
-		err = tx.QueryRowContext(ctx, `SELECT position_key FROM data_table_rows
+		k, err = pgexec.Scalar[sql.NullString](ctx, `SELECT position_key FROM data_table_rows
 			WHERE table_id = $1 AND deleted_at IS NULL AND position <= $2 AND position_key IS NOT NULL AND NOT id = ANY($3)
-			ORDER BY position DESC, position_key DESC LIMIT 1`, table, *at.Number, moving).Scan(&k)
+			ORDER BY position DESC, position_key DESC LIMIT 1`, table, *at.Number, moving)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return "", "", err
 		}
 		prev = k.String
 		var n sql.NullString
 		if prev == "" {
-			err = tx.QueryRowContext(ctx, `SELECT MIN(position_key) FROM data_table_rows
-				WHERE table_id = $1 AND deleted_at IS NULL AND NOT id = ANY($2)`, table, moving).Scan(&n)
+			n, err = pgexec.Scalar[sql.NullString](ctx, `SELECT MIN(position_key) FROM data_table_rows
+				WHERE table_id = $1 AND deleted_at IS NULL AND NOT id = ANY($2)`, table, moving)
 		} else {
-			err = tx.QueryRowContext(ctx, `SELECT MIN(position_key) FROM data_table_rows
-				WHERE table_id = $1 AND deleted_at IS NULL AND position_key > $2 AND NOT id = ANY($3)`, table, prev, moving).Scan(&n)
+			n, err = pgexec.Scalar[sql.NullString](ctx, `SELECT MIN(position_key) FROM data_table_rows
+				WHERE table_id = $1 AND deleted_at IS NULL AND position_key > $2 AND NOT id = ANY($3)`, table, prev, moving)
 		}
 		return prev, n.String, err
 	}
-	err = tx.QueryRowContext(ctx, `SELECT MAX(position_key) FROM data_table_rows WHERE table_id = $1 AND NOT id = ANY($2)`, table, moving).Scan(&k)
+	k, err = pgexec.Scalar[sql.NullString](ctx, `SELECT MAX(position_key) FROM data_table_rows WHERE table_id = $1 AND NOT id = ANY($2)`, table, moving)
 	return k.String, "", err
 }
 
@@ -607,18 +618,19 @@ func patchRowsTx(ctx context.Context, tx *sql.Tx, table, by uuid.UUID, patches [
 // RowErrors, each gone, too large, or written since its version.
 func whyRowsNotWritten(ctx context.Context, tx *sql.Tx, table uuid.UUID, patches []CellsPatch, written map[uuid.UUID]*Row, maxBytes int) error {
 	var out RowErrors
+	ctx = pgexec.WithTx(ctx, tx)
 	for _, p := range patches {
 		if written[p.Row] != nil {
 			continue
 		}
-		r, err := scanRow(tx.QueryRowContext(ctx, `SELECT `+rowColumns+` FROM data_table_rows
-			WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL`, p.Row, table))
+		r, found, err := pgexec.QueryOne(ctx, `SELECT `+rowColumns+` FROM data_table_rows
+			WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL`, func(r pgexec.Row) (*Row, error) { return scanRow(r) }, p.Row, table)
 		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			out = append(out, RowError{Row: p.Row, Err: sql.ErrNoRows})
-			continue
 		case err != nil:
 			return err
+		case !found:
+			out = append(out, RowError{Row: p.Row, Err: sql.ErrNoRows})
+			continue
 		}
 		if p.Version != 0 && r.Version != p.Version {
 			liftAIKept(r)
@@ -641,9 +653,9 @@ func WriteRow(ctx context.Context, table, row, by uuid.UUID, valuesJSON string, 
 	}
 	var out *Row
 	err := ledgerTx(ctx, 1, cs, committing, func(ctx context.Context, tx *sql.Tx) error {
-		var was float64
-		if err := tx.QueryRowContext(ctx, `SELECT position FROM data_table_rows WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL`,
-			row, table).Scan(&was); err != nil {
+		was, err := pgexec.Scalar[float64](pgexec.WithTx(ctx, tx), `SELECT position FROM data_table_rows WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL`,
+			row, table)
+		if err != nil {
 			return err
 		}
 		// A move takes the table's place lock, before the row's as creates do,
@@ -691,9 +703,8 @@ func WriteRow(ctx context.Context, table, row, by uuid.UUID, valuesJSON string, 
 
 // whyNotWrittenTx is whyNotWritten in tx.
 func whyNotWrittenTx(ctx context.Context, tx *sql.Tx, table, row uuid.UUID) error {
-	var live bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM data_table_rows WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL)`,
-		row, table).Scan(&live); err == nil && live {
+	if live, err := pgexec.Scalar[bool](pgexec.WithTx(ctx, tx), `SELECT EXISTS (SELECT 1 FROM data_table_rows WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL)`,
+		row, table); err == nil && live {
 		return ErrRowTooLarge
 	}
 	return sql.ErrNoRows
@@ -913,26 +924,27 @@ func deleteRowsAt(ctx context.Context, tx *sql.Tx, table, by uuid.UUID, ids []uu
 
 // lastLinks is each row's links as its latest delete took them away.
 func lastLinks(ctx context.Context, tx *sql.Tx, rows []uuid.UUID) (map[uuid.UUID][]storedLink, error) {
-	rs, err := tx.QueryContext(ctx, `SELECT DISTINCT ON (row_id) row_id, before FROM data_table_changes
+	type last struct {
+		id     uuid.UUID
+		before []byte
+	}
+	lasts, err := pgexec.Query(pgexec.WithTx(ctx, tx), `SELECT DISTINCT ON (row_id) row_id, before FROM data_table_changes
 		WHERE row_id = ANY($1) AND field = '' AND after ? 'deleted'
-		ORDER BY row_id, at DESC, seq DESC`, rows)
+		ORDER BY row_id, at DESC, seq DESC`, func(r pgexec.Row) (l last, err error) {
+		err = r.Scan(&l.id, &l.before)
+		return l, err
+	}, rows)
 	if err != nil {
 		return nil, err
 	}
-	defer rs.Close()
 	out := map[uuid.UUID][]storedLink{}
-	for rs.Next() {
-		var id uuid.UUID
-		var before []byte
-		if err := rs.Scan(&id, &before); err != nil {
-			return nil, err
-		}
+	for _, l := range lasts {
 		var w wholeRow
-		if json.Unmarshal(before, &w) == nil {
-			out[id] = w.Links
+		if json.Unmarshal(l.before, &w) == nil {
+			out[l.id] = w.Links
 		}
 	}
-	return out, rs.Err()
+	return out, nil
 }
 
 // restoreRows brings back the deleted rows among ids in tx, each only at its
@@ -1273,10 +1285,10 @@ func changeLinksMade(ctx context.Context, tx *sql.Tx, changes []FieldLinks, live
 		for _, m := range ms {
 			out = append(out, m.l)
 		}
-		var over int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT from_row FROM data_table_links
+		over, err := pgexec.Scalar[int](pgexec.WithTx(ctx, tx), `SELECT COUNT(*) FROM (SELECT from_row FROM data_table_links
 			WHERE field_id = $1 AND from_row = ANY($2) GROUP BY from_row HAVING COUNT(*) > $3) x`,
-			c.Field, pq.Array(from), maxPerRow).Scan(&over); err != nil {
+			c.Field, pq.Array(from), maxPerRow)
+		if err != nil {
 			return nil, err
 		}
 		if over > 0 {
@@ -1302,35 +1314,23 @@ func scanChangeSet(s scanner) (*ChangeSet, error) {
 	return &cs, nil
 }
 
-// changesOf is a change set's changes, in the order it made them.
-func changesOf(ctx context.Context, db queryRower, set uuid.UUID) ([]Change, error) {
-	rs, err := db.QueryContext(ctx, `SELECT row_id, field, before, after FROM data_table_changes WHERE change_set = $1 ORDER BY seq`, set)
-	if err != nil {
-		return nil, err
-	}
-	defer rs.Close()
-	var out []Change
-	for rs.Next() {
-		var c Change
-		var b, a []byte
-		if err := rs.Scan(&c.Row, &c.Field, &b, &a); err != nil {
-			return nil, err
-		}
-		if b != nil {
-			c.Before = json.RawMessage(b)
-		}
-		if a != nil {
-			c.After = json.RawMessage(a)
-		}
-		out = append(out, c)
-	}
-	return out, rs.Err()
-}
-
-// queryRower is the database, or a transaction on it.
-type queryRower interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+// changesOf is a change set's changes, in the order it made them, in the
+// transaction ctx carries when it carries one.
+func changesOf(ctx context.Context, set uuid.UUID) ([]Change, error) {
+	return pgexec.Query(ctx, `SELECT row_id, field, before, after FROM data_table_changes WHERE change_set = $1 ORDER BY seq`,
+		func(r pgexec.Row) (c Change, err error) {
+			var b, a []byte
+			if err = r.Scan(&c.Row, &c.Field, &b, &a); err != nil {
+				return c, err
+			}
+			if b != nil {
+				c.Before = json.RawMessage(b)
+			}
+			if a != nil {
+				c.After = json.RawMessage(a)
+			}
+			return c, nil
+		}, set)
 }
 
 // GetChangeSet is a table's change set, with its changes; nil when it isn't
@@ -1347,7 +1347,7 @@ func GetChangeSet(ctx context.Context, table, id uuid.UUID) (*ChangeSet, error) 
 		helpers.LogErrorWithContext(ctx, "models/GetChangeSet err: %+v", err)
 		return nil, err
 	}
-	if cs.Changes, err = changesOf(dbctx, postgresInit.DBConn.SqlDB, id); err != nil {
+	if cs.Changes, err = changesOf(dbctx, id); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/GetChangeSet changes err: %+v", err)
 		return nil, err
 	}
@@ -1466,7 +1466,7 @@ func ApplyInverse(ctx context.Context, table, by uuid.UUID, target uuid.UUID, ma
 		if undone.Valid {
 			return ErrUndone
 		}
-		changes, err := changesOf(ctx, tx, target)
+		changes, err := changesOf(pgexec.WithTx(ctx, tx), target)
 		if err != nil {
 			return err
 		}
@@ -2056,8 +2056,8 @@ func keyRowsWithoutTx(ctx context.Context, tx *sql.Tx, table uuid.UUID, keys Key
 	if keys == nil {
 		return 0, nil
 	}
-	var last sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT MAX(position_key) FROM data_table_rows WHERE table_id = $1`, table).Scan(&last); err != nil {
+	last, err := pgexec.Scalar[sql.NullString](pgexec.WithTx(ctx, tx), `SELECT MAX(position_key) FROM data_table_rows WHERE table_id = $1`, table)
+	if err != nil {
 		return 0, err
 	}
 	ks, err := keys(last.String, "", len(ids))

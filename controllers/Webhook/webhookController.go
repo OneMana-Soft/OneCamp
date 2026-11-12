@@ -363,6 +363,9 @@ var EventTypes = []string{
 	// meeting began or ended, with its times and how many joined; a DM's or a
 	// group chat's call is sent nowhere.
 	"call.started", "call.ended",
+	// Calendar events (business/Calendar webhooks.go): busy-shaped, ids and
+	// times only, and only to an owner the calendar shows the event to.
+	"event.created", "event.updated", "event.cancelled", "event.deleted", "event.restored",
 }
 
 // HandleGetWebhookEventTypes returns the supported event types (admin only).

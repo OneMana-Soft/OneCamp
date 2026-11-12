@@ -11,11 +11,14 @@ import (
 
 	"github.com/google/uuid"
 
+	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	conversationDomain "github.com/akashc777/OneCamp/domain/Conversation"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -99,6 +102,9 @@ func TestARunsMomentPingsOnlyWhoCanStillSeeWhereTheyAsked(t *testing.T) {
 		}
 	}
 	channel := uuid.NewString()
+	if _, err := env.PG.Exec(`INSERT INTO channels (id, ch_name, ch_private) VALUES ($1, 'exec', true)`, channel); err != nil {
+		t.Fatal(err)
+	}
 	group, err := helpers.GenerateGroupID(four)
 	if err != nil {
 		t.Fatal(err)
@@ -133,18 +139,65 @@ func TestARunsMomentPingsOnlyWhoCanStillSeeWhereTheyAsked(t *testing.T) {
 	inChannel := Surface{Kind: SurfaceChannelPost, ChannelID: channel, PostID: uuid.NewString()}
 	inGroup := Surface{Kind: SurfaceGroupChat, GroupID: group, MessageID: uuid.NewString()}
 	for _, who := range []uuid.UUID{ana, cy} {
-		notifyTriggerer(ctx, agent, inChannel, who.String(), "Done: the numbers are in the thread.")
-		notifyTriggerer(ctx, agent, inGroup, who.String(), "Done: the numbers are in the thread.")
+		notifyTriggerer(ctx, agent, inChannel, who.String(), NoticeAgentReplied, "Done: the numbers are in the thread.")
+		notifyTriggerer(ctx, agent, inGroup, who.String(), NoticeAgentReplied, "Done: the numbers are in the thread.")
 	}
 	if busy := helpers.SettleBackground(10 * time.Second); len(busy) > 0 {
 		t.Fatalf("still at work: %v", busy)
 	}
-	if got := broker.activities(helpers.GetMqttTopicForUserActivity(ana.String())); got != 2 {
-		t.Errorf("ana, in the channel and the group, was pinged %d times, want 2", got)
+	if got := broker.notices(helpers.GetMqttTopicForUserActivity(ana.String())); got != 2 {
+		t.Errorf("ana, in the channel and the group, was pinged %d times by a notice, want 2", got)
 	}
-	if got := broker.activities(helpers.GetMqttTopicForUserActivity(cy.String())); got != 0 {
+	if got := broker.notices(helpers.GetMqttTopicForUserActivity(cy.String())) + broker.activities(helpers.GetMqttTopicForUserActivity(cy.String())); got != 0 {
 		t.Errorf("cy, who left the channel and the group, was pinged %d times with the agent's words", got)
 	}
+	// C2: a moment was a live item alone, never stored, so the Inbox never
+	// listed it and the badge (counted from what the Inbox lists) never
+	// counted it, while the live +1 did. It is ana's Inbox notice now:
+	// stored, listed with the agent's words and the place, and counted.
+	if got := broker.activities(helpers.GetMqttTopicForUserActivity(ana.String())); got != 0 {
+		t.Errorf("ana was sent %d live activity items no list holds", got)
+	}
+	var stored int
+	if err := env.PG.QueryRow(`SELECT count(*) FROM resource_notices WHERE user_uuid = $1 AND kind = $2`, ana, NoticeAgentReplied).Scan(&stored); err != nil || stored != 2 {
+		t.Errorf("ana has %d stored notices of the run's moments (%v), want 2", stored, err)
+	}
+	var cyStored int
+	if err := env.PG.QueryRow(`SELECT count(*) FROM resource_notices WHERE user_uuid = $1`, cy).Scan(&cyStored); err != nil || cyStored != 0 {
+		t.Errorf("cy has %d stored notices (%v), want none", cyStored, err)
+	}
+	page := activityBusiness.WithNotices(ctx, dgraphModels.UnifiedActivityPagination{}, ana.String(), time.Now().Add(time.Minute), 20)
+	places := map[string]bool{}
+	for _, it := range page.Activities {
+		n := it.Notice
+		if n == nil || n.Kind != NoticeAgentReplied || !n.CanOpen || n.Data[notificationBusiness.NoticeWords] != "Done: the numbers are in the thread." || n.Agent == nil {
+			t.Errorf("ana's Inbox lists %+v; want the agent's reply, from the agent, with its words, openable", n)
+			continue
+		}
+		places[n.ResourceKind+":"+n.Title] = true
+	}
+	if len(page.Activities) != 2 || !places["channel:exec"] || !places["conversation:"] {
+		t.Errorf("ana's Inbox lists %d moments in %v; want the one in #exec and the one in the group", len(page.Activities), places)
+	}
+	if n, err := activityBusiness.UnreadActivityCount(ctx, ana, uids["ana"]); err != nil || n != 2 {
+		t.Errorf("ana's badge counts %d (%v); want her 2 moments", n, err)
+	}
+}
+
+// notices is how many live Inbox notices were published on topic.
+func (b *recordingBroker) notices(topic string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, m := range b.sent {
+		var msg struct {
+			Type int8 `json:"type"`
+		}
+		if m.topic == topic && json.Unmarshal(m.body, &msg) == nil && msg.Type == mqttStruct.MESSAGE_NOTICE {
+			n++
+		}
+	}
+	return n
 }
 
 // noticeTitles is the title of each desktop notice published on topic.

@@ -16,7 +16,9 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // Kinds — keep aligned with the CHECK constraint in migration 75.
@@ -55,7 +57,14 @@ type Nudge struct {
 	Status     string    `json:"status"`
 	Priority   int       `json:"priority"`
 	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	// UpdatedAt is when it was last raised while open: made, or raised again
+	// by Upsert. The engine's pass finding it still open leaves it
+	// (UpsertMany), so the Inbox badge, which counts an urgent nudge raised
+	// since the person last looked, doesn't count it again every pass.
+	UpdatedAt time.Time `json:"updated_at"`
+	// Unread is whether the Inbox badge counts it, set by the list
+	// (business/AI MarkNudgesUnread), never stored.
+	Unread bool `json:"unread"`
 }
 
 // UpsertInput is the write shape for one generated nudge.
@@ -73,9 +82,10 @@ type UpsertInput struct {
 }
 
 // Upsert inserts a new OPEN nudge or, when an OPEN row with the same dedup_key
-// already exists, refreshes its mutable fields in place. This makes re-running
-// the engine idempotent: the same signal updates the existing nudge rather than
-// stacking duplicates. Terminal rows (dismissed/acted/superseded) for the same
+// already exists, refreshes its mutable fields in place and raises it again
+// (updated_at moves, so the Inbox badge counts it again): it is called when
+// something happened, as an agent's tests failing again. The same signal
+// updates the existing nudge rather than stacking duplicates. Terminal rows (dismissed/acted/superseded) for the same
 // key are left untouched — but if the user already dismissed this exact signal
 // we do NOT resurrect it (honored via the caller's recent-dismissal check).
 // Returns the row id and whether it was newly created.
@@ -171,15 +181,47 @@ func ListOpenForUser(ctx context.Context, userID uuid.UUID, limit int) ([]*Nudge
 	return out, rows.Err()
 }
 
-// CountOpenForUser returns the number of open nudges for the badge.
-func CountOpenForUser(ctx context.Context, userID uuid.UUID) (int, error) {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
+// UrgentRaisedFor is when each of the person's own open urgent nudges
+// (priority above 0) was last raised, newest first, at most limit: what the
+// Inbox badge counts them by. The user_id predicate keeps it to their own.
+func UrgentRaisedFor(ctx context.Context, userID uuid.UUID, limit int) ([]time.Time, error) {
+	return pgexec.Query(ctx, `
+		SELECT GREATEST(created_at, updated_at) AS raised FROM workspace_nudges
+		WHERE user_id = $1 AND status = 'open' AND priority > 0
+		ORDER BY raised DESC
+		LIMIT $2`, func(r pgexec.Row) (at time.Time, err error) { err = r.Scan(&at); return }, userID, limit)
+}
 
-	var n int
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(cctx,
-		`SELECT COUNT(*) FROM workspace_nudges WHERE user_id = $1 AND status = 'open'`, userID).Scan(&n)
-	return n, err
+// CountOpenForUser returns the number of open nudges for the badge: the one
+// count, CountOpenForUsers, for one person.
+func CountOpenForUser(ctx context.Context, userID uuid.UUID) (int, error) {
+	counts, err := CountOpenForUsers(ctx, []uuid.UUID{userID})
+	return counts[userID], err
+}
+
+// CountOpenForUsers is each of these people's open nudges for the badge, in
+// one read. A person with none is absent: 0. It is the badge's one open count:
+// the GETs and every pushed count read it.
+func CountOpenForUsers(ctx context.Context, userIDs []uuid.UUID) (map[uuid.UUID]int, error) {
+	if len(userIDs) == 0 {
+		return nil, nil
+	}
+	type open struct {
+		user uuid.UUID
+		n    int
+	}
+	rows, err := pgexec.Query(ctx, `
+		SELECT user_id, COUNT(*) FROM workspace_nudges
+		WHERE user_id = ANY($1) AND status = 'open'
+		GROUP BY user_id`, func(r pgexec.Row) (o open, err error) { err = r.Scan(&o.user, &o.n); return }, pq.Array(userIDs))
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[uuid.UUID]int, len(rows))
+	for _, o := range rows {
+		counts[o.user] = o.n
+	}
+	return counts, nil
 }
 
 // SetStatus transitions a nudge owned by userID to a terminal status. The
@@ -219,11 +261,12 @@ func DismissAllForUser(ctx context.Context, userID uuid.UUID) (int64, error) {
 	return n, nil
 }
 
-// SupersedeOpenByKeys marks open nudges whose dedup_key is NOT in keep as
+// SupersedeStaleForUser marks open nudges whose dedup_key is NOT in keep as
 // superseded for a user — used at the end of an engine pass so signals that no
 // longer hold (e.g. a commitment that got resolved) stop showing. keep may be
-// empty (supersede all of the user's open nudges). Returns affected count.
-func SupersedeStaleForUser(ctx context.Context, userID uuid.UUID, keep []string) (int64, error) {
+// empty (supersede all of the user's open nudges). Returns the ids it closed,
+// so the person's tabs are told which.
+func SupersedeStaleForUser(ctx context.Context, userID uuid.UUID, keep []string) ([]uuid.UUID, error) {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
@@ -239,36 +282,31 @@ func SupersedeStaleForUser(ctx context.Context, userID uuid.UUID, keep []string)
 		}
 		q += " AND dedup_key NOT IN (" + strings.Join(ph, ",") + ")"
 	}
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(cctx, q, args...)
-	if err != nil {
-		return 0, err
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	return pgexec.Query(cctx, q+" RETURNING id", func(r pgexec.Row) (id uuid.UUID, err error) { err = r.Scan(&id); return }, args...)
 }
 
 // SupersedeOpenByDedupKey marks the OPEN nudge for a single logical signal
 // (identified by dedup_key) as superseded, returning the owning user id so the
 // caller can push a live badge update. Used to close the loop the instant the
 // underlying item is resolved/dismissed/deleted, instead of waiting for the
-// next engine sweep. Returns (uuid.Nil, nil) when there was no open nudge.
-func SupersedeOpenByDedupKey(ctx context.Context, dedupKey string) (uuid.UUID, error) {
+// next engine sweep. Returns the owner and the nudge's id, or uuid.Nil twice
+// when there was no open nudge.
+func SupersedeOpenByDedupKey(ctx context.Context, dedupKey string) (userID, nudgeID uuid.UUID, err error) {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	var userID uuid.UUID
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(cctx,
+	err = postgresInit.DBConn.SqlDB.QueryRowContext(cctx,
 		`UPDATE workspace_nudges SET status = 'superseded', updated_at = NOW()
 		 WHERE dedup_key = $1 AND status = 'open'
-		 RETURNING user_id`, dedupKey).Scan(&userID)
+		 RETURNING user_id, id`, dedupKey).Scan(&userID, &nudgeID)
 	if err == sql.ErrNoRows {
-		return uuid.Nil, nil
+		return uuid.Nil, uuid.Nil, nil
 	}
 	if err != nil {
 		helpers.LogErrorWithContext(cctx, "models/workspaceNudge SupersedeOpenByDedupKey failed: %+v", err)
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
-	return userID, nil
+	return userID, nudgeID, nil
 }
 
 // UsersWithOpenNudges returns the distinct user ids that currently have at

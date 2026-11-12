@@ -11,7 +11,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -46,10 +45,7 @@ func CreateInCall(ctx context.Context, session, createdBy uuid.UUID, in CallPoll
 	}
 	p := &pollModel.Poll{
 		ID: uuid.New(), ChannelID: uuid.Nil, SessionID: &session, Question: n.Question, Multiple: n.Multiple,
-		CreatedBy: createdBy, Anonymous: in.Anonymous, ResultsHidden: in.HideResults,
-	}
-	for i, o := range n.Options {
-		p.Options = append(p.Options, pollModel.Option{ID: strconv.Itoa(i + 1), Text: o})
+		CreatedBy: createdBy, Anonymous: in.Anonymous, ResultsHidden: in.HideResults, Options: optionsOf(n.Options),
 	}
 	made, err := pollModel.CreateInSession(ctx, p, MaxCallPolls)
 	if err != nil {
@@ -140,6 +136,13 @@ func CallViews(ctx context.Context, session uuid.UUID, voter func(*pollModel.Pol
 	if err != nil {
 		return nil, err
 	}
+	return viewsOf(ctx, polls, voter, func(p *pollModel.Poll, t *pollModel.Tally) *View { return CallView(p, t, runs) })
+}
+
+// viewsOf is polls as one reader sees them (show), tallied in one read with
+// the choices of whoever voter says each poll keeps theirs under.
+func viewsOf(ctx context.Context, polls []*pollModel.Poll, voter func(*pollModel.Poll) (uuid.UUID, error), show func(*pollModel.Poll, *pollModel.Tally) *View) ([]*View, error) {
+	var err error
 	mine := make(map[uuid.UUID]uuid.UUID, len(polls))
 	for _, p := range polls {
 		if mine[p.ID], err = voter(p); err != nil {
@@ -152,7 +155,7 @@ func CallViews(ctx context.Context, session uuid.UUID, voter func(*pollModel.Pol
 	}
 	out := make([]*View, 0, len(polls))
 	for _, p := range polls {
-		out = append(out, CallView(p, tallies[p.ID], runs))
+		out = append(out, show(p, tallies[p.ID]))
 	}
 	return out, nil
 }

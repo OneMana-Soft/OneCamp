@@ -125,7 +125,7 @@ Return ONLY a JSON object (no prose, no markdown fences) of this shape:
     "title": "<short imperative task title>",
     "assignee": "<person name if a specific owner is stated, else empty>",
     "due": "<YYYY-MM-DD if a deadline is stated, else empty>",
-    "priority": "urgent" | "high" | "medium" | "low",
+    "priority": "urgent" | "high" | "medium" | "low" | "" (empty unless the text says how urgent it is),
     "details": "<one short line of context, optional>",
     "block": <the number of the line the action item comes from>
   }

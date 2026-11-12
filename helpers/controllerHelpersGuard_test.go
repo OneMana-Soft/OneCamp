@@ -20,7 +20,7 @@ const (
 	// http.Error writes a text/plain body the web app can't read (13).
 	httpErrorBaseline = 13
 	// {"error": ...} bodies; the shape is {"msg": ...} (WriteError, 207 before F5).
-	errorBodyBaseline = 181
+	errorBodyBaseline = 178
 )
 
 // unauthorizedWithReason are 401s that say why on purpose: a sign-in that

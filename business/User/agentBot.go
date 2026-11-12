@@ -194,6 +194,26 @@ func EnsureUpgradeRepairBot(ctx context.Context) (*BotIdentity, error) {
 	return upgradeRepairBot.ensure(ctx)
 }
 
+var (
+	integrationBotsMu sync.Mutex
+	integrationBots   = map[string]*fixedBot{}
+)
+
+// EnsureIntegrationBot resolves (provisioning on first use) the principal a
+// code host acts as (provider "github", named "GitHub"): a task a commit
+// closes reads as closed by GitHub in its history, never by the person who
+// linked the repository.
+func EnsureIntegrationBot(ctx context.Context, provider, name string) (*BotIdentity, error) {
+	integrationBotsMu.Lock()
+	b := integrationBots[provider]
+	if b == nil {
+		b = &fixedBot{email: domain.IntegrationBotEmail(provider), username: domain.IntegrationBotUsername(provider), name: name}
+		integrationBots[provider] = b
+	}
+	integrationBotsMu.Unlock()
+	return b.ensure(ctx)
+}
+
 // InvalidateAgentBot drops an agent's cached principal (call after delete) so a
 // stale identity is not served. Resolution will re-provision on next use.
 func InvalidateAgentBot(agentID uuid.UUID) {

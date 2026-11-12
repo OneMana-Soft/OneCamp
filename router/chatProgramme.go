@@ -55,4 +55,5 @@ func mountChatProgramme(rt chatRouters) {
 	mountChatThreads(rt)   // P2: threads you follow
 	mountChatReach(rt)     // P3: mentions that reach
 	mountSlackDMs(rt)      // item 2: each member's own Slack DMs
+	mountChatNotify(rt)    // A4 H3: send me a test, why am I seeing this
 }

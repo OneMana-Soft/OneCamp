@@ -10,6 +10,7 @@ package business
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
@@ -157,5 +158,41 @@ func TestAnUndoStoppedMidwayIsFinishedByTheNext(t *testing.T) {
 	}
 	if n := rows(); n != 60 {
 		t.Errorf("one redo brought back %d rows, want 60", n)
+	}
+}
+
+// A row's delete answers the change set it stored, as every other row write
+// does, so the web's one undo order names it and no later change: the row's
+// delete is undone by its set, even after another write landed after it
+// (V-529 (3); V-360).
+func TestARowsDeleteAnswersItsChangeSet(t *testing.T) {
+	w := newRelationWorld(t)
+	tb, name := w.table("Deliveries")
+	gone := w.row(tb, map[string]interface{}{name.Id.String(): "late"})
+	other := w.row(tb, map[string]interface{}{name.Id.String(): "on time"})
+	set, err := DeleteRow(w.ctx, tb.Id, gone, w.me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set == nil {
+		t.Fatal("a row's delete answered no change set")
+	}
+	if _, err := PatchRow(w.ctx, tb.Id, other, map[string]interface{}{name.Id.String(): "early"}, w.me); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Undo(w.ctx, tb.Id, set, w.me); err != nil {
+		t.Fatalf("the delete's set: %v", err)
+	}
+	live, err := model.ListRows(w.ctx, tb.Id, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back, early bool
+	for _, r := range live {
+		back = back || r.Id == gone
+		early = early || (r.Id == other && strings.Contains(r.Values, `"early"`))
+	}
+	if !back || !early {
+		t.Errorf("after undoing the delete's set: the row is back %v, the later change kept %v; want both", back, early)
 	}
 }

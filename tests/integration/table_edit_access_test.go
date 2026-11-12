@@ -150,7 +150,7 @@ func TestTableEditAccess(t *testing.T) {
 				_, err := dataTableBusiness.UpdateRow(w.ctx, vendors.Id, row.Id, dataTableBusiness.RowInput{Values: map[string]interface{}{city: "Ely"}}, ben)
 				return err
 			},
-			"delete": func() error { return dataTableBusiness.DeleteRow(w.ctx, vendors.Id, row.Id, ben) },
+			"delete": func() error { _, err := dataTableBusiness.DeleteRow(w.ctx, vendors.Id, row.Id, ben); return err },
 			"undo": func() error {
 				_, err := dataTableBusiness.Undo(w.ctx, vendors.Id, nil, ben)
 				return err

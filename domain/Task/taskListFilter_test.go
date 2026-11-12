@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
 // PR1: one builder for a task list's filters (the project's list and board,
@@ -26,8 +28,8 @@ func TestATaskListsFiltersAreBuiltInOnePlace(t *testing.T) {
 		},
 		Now:    now,
 		Status: func(v []string) string { return "STATUS(" + strings.Join(v, ",") + ")" },
-		Side: func(id string, v []string) (string, bool) {
-			return "SIDE(" + id + ")", id == "task_cycle"
+		Side: func(id string, v []string) (string, bool, error) {
+			return "SIDE(" + id + ")", id == "task_cycle", nil
 		},
 	}
 	got, err := f.Clause()
@@ -65,6 +67,12 @@ func TestATaskListsFiltersAreBuiltInOnePlace(t *testing.T) {
 	if got, _ := (TaskListFilter{DueBy: &to}).Clause(); !strings.Contains(got, `le(task_due_date, "2026-10-26T09:00:00Z")`) || !strings.Contains(got, `gt(task_due_date, "1970-01-01T00:00:00Z")`) || !strings.Contains(got, "not eq(task_status") {
 		t.Fatalf("due by: %s", got)
 	}
+	// Open: every task still to do, dated or not, in a project's own
+	// statuses too (the calendar's Tasks list, CAL51-TB): the open rule
+	// alone, as every open query spells it.
+	if got, _ := (TaskListFilter{Open: true}).Clause(); got != dgraphStruct.TASK_OPEN_FILTER {
+		t.Fatalf("open: %s", got)
+	}
 	// Nothing set: nothing.
 	if got, err := (TaskListFilter{Search: "   "}).Clause(); got != "" || err != nil {
 		t.Fatalf("empty: %q %v", got, err)
@@ -72,5 +80,25 @@ func TestATaskListsFiltersAreBuiltInOnePlace(t *testing.T) {
 	// A search that can't be made safe is the person's to fix.
 	if _, err := (TaskListFilter{Search: strings.Repeat("a", 500)}).Clause(); !errors.Is(err, ErrSearchTerm) {
 		t.Fatalf("a long search: %v", err)
+	}
+}
+
+// TestTasksClauseIsEverySideFiltersShape pins the one clause the side filters
+// (cycles, releases, types, task fields) share: the tasks named, or every task
+// but them, and naming none, no task, or with but nothing narrowed.
+func TestTasksClauseIsEverySideFiltersShape(t *testing.T) {
+	for _, c := range []struct {
+		tasks []string
+		but   bool
+		want  string
+	}{
+		{nil, false, NoTask},
+		{nil, true, ""},
+		{[]string{"a", "b"}, false, `eq(task_uuid, ["a","b"])`},
+		{[]string{"a"}, true, `NOT eq(task_uuid, ["a"])`},
+	} {
+		if got := TasksClause(c.tasks, c.but); got != c.want {
+			t.Errorf("TasksClause(%v, %v) = %s, want %s", c.tasks, c.but, got, c.want)
+		}
 	}
 }

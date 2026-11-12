@@ -190,7 +190,7 @@ func TestNormalizeTaskPriority(t *testing.T) {
 	cases := map[string]string{
 		"high": "high", "urgent": "urgent", "critical": "urgent", "P1": "high", "highest": "urgent",
 		"low": "low", "lowest": "low", "p5": "low", "minor": "low",
-		"medium": "medium", "normal": "medium", "": "medium", "banana": "medium", "P2": "medium",
+		"medium": "medium", "normal": "medium", "": "", "banana": "", "P2": "medium",
 	}
 	for in, want := range cases {
 		if got := normalizeTaskPriority(in); got != want {

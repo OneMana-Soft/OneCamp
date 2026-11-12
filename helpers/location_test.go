@@ -36,6 +36,9 @@ func TestSameZone(t *testing.T) {
 	for _, p := range [][2]string{
 		{"Asia/Kolkata", "Asia/Calcutta"}, {"Europe/Kyiv", "Europe/Kiev"}, {"UTC", "Etc/UTC"}, {"Etc/UTC", "Zulu"},
 		{"America/New_York", "US/Eastern"}, {"America/Indiana/Indianapolis", "America/Indianapolis"},
+		// Names a host may keep in another tzdata release than Go's own copy
+		// (Canada/Pacific in tzdata-legacy, beside the main tzdata).
+		{"America/Vancouver", "Canada/Pacific"},
 		{" Asia/Kolkata ", "Asia/Calcutta"},
 		// Equal names are one zone, whatever they name: nothing changed.
 		{"Asia/Kolkata", "Asia/Kolkata"}, {"", ""}, {"Mars/Olympus", "Mars/Olympus"},

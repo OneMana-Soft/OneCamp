@@ -14,6 +14,7 @@ package codepr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -199,10 +200,16 @@ func credentialRepoAccess(cred Credential) RepoAccessChecker {
 	}
 }
 
-// liveOpenPR opens the PR via the GitHub write path, mapping the GitHub
-// already-exists sentinel to the orchestrator's so it's surfaced as success-ish.
-func liveOpenPR(ctx context.Context, repo RepoRef, head, base, title, body string, draft bool) (string, error) {
-	res, err := githubBusiness.CreatePullRequest(ctx, repo.Owner, repo.Name, head, base, title, body, draft)
+// liveOpenPR opens the PR with the run's own credential, the identity that
+// pushed its branch, mapping the GitHub already-exists sentinel to the
+// orchestrator's so it's surfaced as success-ish. Never the workspace's GitHub
+// connection: a pull request opened with it is its admin's, on any repository
+// their account reaches (credential.go). No usable credential, no pull request.
+func liveOpenPR(ctx context.Context, cred Credential, repo RepoRef, head, base, title, body string, draft bool) (string, error) {
+	if !cred.Usable() {
+		return "", errors.New("no GitHub identity of the run's own to open the pull request with")
+	}
+	res, err := githubBusiness.CreatePullRequestWithToken(ctx, cred.Token, repo.Owner, repo.Name, head, base, title, body, draft)
 	if err != nil {
 		if err == githubBusiness.ErrPullRequestExists {
 			return "", ErrPullRequestExists

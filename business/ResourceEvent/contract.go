@@ -199,8 +199,10 @@ const (
 	// "view") with the people in Subjects; for an export, its format and "via"
 	// ("browser": the canvas made the file in the person's browser).
 	// Taking a place away is recorded before it happens (RecordedTaking).
+	// A restore brings a deleted board back from the trash (UX-TB-H2-BE).
 	BoardShared   Kind = "board.shared"
 	BoardExported Kind = "board.exported"
+	BoardRestored Kind = "board.restored"
 )
 
 // Actor is who made the change, from server context (I11): for an agent, the

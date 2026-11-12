@@ -11,16 +11,17 @@ package notification
 //
 // {"working_hours": true} follows their calendar working hours instead: the
 // server copies calendar.working_hours and their zone into the value when it
-// is set, and again whenever either changes (followWorkingHours).
+// is set, and again in the same change whenever either changes
+// (followWorkingHours).
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	preferencesBusiness "github.com/akashc777/OneCamp/business/Preferences"
 	weekHours "github.com/akashc777/OneCamp/business/WeekHours"
-	"github.com/akashc777/OneCamp/helpers"
 	prefModels "github.com/akashc777/OneCamp/models/postgres/UserNotificationPreference"
 	"github.com/google/uuid"
 )
@@ -61,16 +62,17 @@ func init() {
 // left to follow (their hours cleared, or a zone Postgres can't read) the
 // schedule is cleared: notifications reach them as before they set one,
 // rather than by hours they took away. Their devices are told either way
-// (Set).
-func followWorkingHours(ctx context.Context, user uuid.UUID, _ json.RawMessage) {
+// (Set). It runs in the change it follows (OnChange): a copy that can't be
+// kept fails that change too, so the person is told their save didn't
+// happen, and pushes are never held by hours they no longer keep (V-532).
+func followWorkingHours(ctx context.Context, user uuid.UUID, _ json.RawMessage) error {
 	raw, err := keptValue(ctx, user, prefModels.ScheduleKey)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "notification/followWorkingHours %s: read the schedule: %+v", user, err)
-		return
+		return fmt.Errorf("notification/followWorkingHours %s: read the schedule: %w", user, err)
 	}
 	var s prefModels.Schedule
 	if raw == nil || json.Unmarshal(raw, &s) != nil || !s.WorkingHours {
-		return
+		return nil
 	}
 	err = preferencesBusiness.Set(ctx, user, prefModels.ScheduleKey, json.RawMessage(`{"working_hours":true}`))
 	var refused *preferencesBusiness.Refused
@@ -78,8 +80,9 @@ func followWorkingHours(ctx context.Context, user uuid.UUID, _ json.RawMessage) 
 		err = preferencesBusiness.Set(ctx, user, prefModels.ScheduleKey, json.RawMessage("null"))
 	}
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "notification/followWorkingHours %s: %+v", user, err)
+		return fmt.Errorf("notification/followWorkingHours %s: %w", user, err)
 	}
+	return nil
 }
 
 // maxRangesADay is as many ranges as a day of the schedule takes, as many

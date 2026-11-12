@@ -9,9 +9,11 @@ import (
 
 	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
 	appBusiness "github.com/akashc777/OneCamp/business/App"
+	calendarAPI "github.com/akashc777/OneCamp/business/CalendarAPI"
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	policyBusiness "github.com/akashc777/OneCamp/business/Policy"
 	v1api "github.com/akashc777/OneCamp/business/PublicAPI"
+	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	"github.com/akashc777/OneCamp/helpers"
 )
 
@@ -97,7 +99,7 @@ func init() {
 			{Method: http.MethodPost, Path: "/tables/{id}/rows", Summary: "Add a row; the answer names the change set it stored", Scope: apiTokenBusiness.ScopeTablesWrite, Write: true, Legacy: true, Reach: reaches("table"), Handler: CreateRow},
 		},
 	}, dataTableBusiness.APIOps())
-	v1api.Register(v1api.Resource{
+	v1api.RegisterOps(v1api.Resource{
 		Name: "tasks", Owner: "projects",
 		Scopes: []v1api.ScopeDecl{
 			{Name: apiTokenBusiness.ScopeTasksRead, Description: "Read the tasks you can see"},
@@ -110,7 +112,17 @@ func init() {
 			{Method: http.MethodPost, Path: "/tasks/{id}/status", Summary: "Change a task's status", Scope: apiTokenBusiness.ScopeTasksWrite, Write: true, Legacy: true, Reach: reaches("task"), Handler: UpdateTaskStatusV1},
 		},
 		Events: []string{"task.created", "task.updated", "task.assigned", "task.status_changed", "task.comment.created", "task.deleted", "task.restored"},
-	})
+	}, taskBusiness.APIOps())
+	// The calendar (gcal-15): its ops are declared once in business/CalendarAPI,
+	// and in the AI edition they are MCP tools too.
+	v1api.RegisterOps(v1api.Resource{
+		Name: "calendar", Owner: "calendar",
+		Scopes: []v1api.ScopeDecl{
+			{Name: apiTokenBusiness.ScopeCalendarRead, Description: "Read the calendars and events you may see, as the calendar shows them to you"},
+			{Name: apiTokenBusiness.ScopeCalendarWrite, Description: "Make, change and cancel events where you may"},
+		},
+		Events: calendarAPI.Events,
+	}, calendarAPI.APIOps())
 	v1api.Register(v1api.Resource{
 		Name: "projects", Owner: "projects",
 		Scopes: []v1api.ScopeDecl{{Name: apiTokenBusiness.ScopeProjectsRead, Description: "Read the projects you belong to"}},

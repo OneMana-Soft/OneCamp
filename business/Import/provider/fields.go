@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/akashc777/OneCamp/helpers/currency"
 	taskFieldModel "github.com/akashc777/OneCamp/models/postgres/TaskField"
 )
 
@@ -170,17 +171,10 @@ func nearestHex(c string) string {
 	return best
 }
 
-// currencySymbols are the currency signs sources show for money columns
-// that don't give a code (monday.com, Notion's number formats).
-var currencySymbols = map[string]string{
-	"$": "USD", "us$": "USD", "€": "EUR", "£": "GBP", "₹": "INR", "¥": "JPY", "₩": "KRW",
-	"₽": "RUB", "₺": "TRY", "₪": "ILS", "₫": "VND", "₱": "PHP", "฿": "THB", "zł": "PLN",
-	"kr": "SEK", "r$": "BRL", "a$": "AUD", "c$": "CAD", "chf": "CHF", "₦": "NGN",
-}
-
-// currencyCodes are the ISO 4217 codes a source's money is likely kept in.
-// A code not here isn't taken for one: a unit like "hrs" or "pcs" is three
-// letters too.
+// currencyCodes are the ISO 4217 codes a source's money is likely kept in,
+// for text that may be a unit instead (CurrencyOf): a code not here isn't
+// taken for one there, since "top", "all" and "cup" are codes too. What a
+// code is at all is helpers/currency's to say.
 var currencyCodes = map[string]bool{}
 
 func init() {
@@ -192,14 +186,13 @@ func init() {
 }
 
 // CurrencyCode is a currency a source names by its code (ClickUp's
-// currency_type, Asana's currency_code): any three letters, as ISO 4217
-// codes are, or a sign CurrencyOf knows. "" when it's neither. Pure.
+// currency_type, Asana's currency_code): any ISO 4217 code, in capitals, or
+// a sign's. "" when it's neither. Pure.
 func CurrencyCode(s string) string {
-	code := strings.ToUpper(strings.TrimSpace(s))
-	if len(code) == 3 && strings.Trim(code, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") == "" {
+	if code := currency.Code(s); code != "" {
 		return code
 	}
-	return CurrencyOf(s)
+	return currency.OfSign(s)
 }
 
 // IDString is an id a source sends as a JSON string or a number ("123" or
@@ -223,11 +216,10 @@ func IDString(raw json.RawMessage) string {
 // knows ("€", "eur", "EUR"), or "" when it isn't one. A unit like "hrs" is
 // three letters too, so units are matched only against known codes. Pure.
 func CurrencyOf(s string) string {
-	s = strings.TrimSpace(s)
-	if code, ok := currencySymbols[strings.ToLower(s)]; ok {
+	if code := currency.OfSign(s); code != "" {
 		return code
 	}
-	if code := strings.ToUpper(s); currencyCodes[code] {
+	if code := currency.Code(s); currencyCodes[code] {
 		return code
 	}
 	return ""

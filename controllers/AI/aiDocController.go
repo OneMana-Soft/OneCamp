@@ -114,6 +114,10 @@ var docAIPingEvery = 10 * time.Second
 // maxDocAIInputRunes bounds what the client may send as text, context or doc.
 const maxDocAIInputRunes = 200_000
 
+// aiSwitchedOffMsg is the one answer every AI route gives while AI is off
+// in the workspace, whether at the gate or after it.
+const aiSwitchedOffMsg = "AI is switched off in this workspace."
+
 // preparedDocAI is a validated action, ready to run.
 type preparedDocAI struct {
 	action business.DocAction
@@ -210,7 +214,7 @@ func prepareDocAI(ctx context.Context, userInfo *userModels.UserInfo, req DocAIR
 	userUUID := userInfo.UserDgraphInfo.Uuid
 	llm, cb, limits, model := docAIRun.Resolve(ctx, userUUID)
 	if llm == nil || cb == nil {
-		return ctx, nil, &docAIError{status: http.StatusServiceUnavailable, msg: "AI is switched off in this workspace."}
+		return ctx, nil, &docAIError{status: http.StatusServiceUnavailable, msg: aiSwitchedOffMsg}
 	}
 	ctx = ai.WithModelLimits(ctx, limits)
 	ctx = ai.WithContextNoticeSink(ctx)
@@ -302,21 +306,29 @@ func docAIOptions(a business.DocAction) ai.ChatOptions {
 // gateDocAI decodes a request and checks the service and the rate limit,
 // answering a refusal itself. ok is false when it answered.
 func gateDocAI(w http.ResponseWriter, r *http.Request, ctx context.Context) (DocAIRequest, *userModels.UserInfo, bool) {
+	var req DocAIRequest
+	userInfo, ok := gateAI(w, r, ctx, &req)
+	return req, userInfo, ok
+}
+
+// gateAI is the gate in front of a member's ask of their model: the
+// workspace's AI is on, the request reads into `into`, and the member hasn't
+// asked too often. It answers a refusal itself; ok is false when it answered.
+func gateAI(w http.ResponseWriter, r *http.Request, ctx context.Context, into any) (*userModels.UserInfo, bool) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !docAIRun.Enabled() {
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "AI is switched off in this workspace."})
-		return DocAIRequest{}, nil, false
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": aiSwitchedOffMsg})
+		return nil, false
 	}
-	var req DocAIRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "The request couldn't be read."})
-		return req, nil, false
+		return nil, false
 	}
 	if err := docAIRun.CheckRateLimit(ctx, userInfo.UserDgraphInfo.Uuid); err != nil {
 		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": "You've asked AI a lot in the last minute. Try again in a moment."})
-		return req, nil, false
+		return nil, false
 	}
-	return req, &userInfo, true
+	return &userInfo, true
 }
 
 func writeDocAIError(w http.ResponseWriter, ctx context.Context, err error) {

@@ -22,7 +22,7 @@ func openHead() PRHead {
 func continuingOrch(t *testing.T, runner CodingRunner, head PRHead, headErr error) (*Orchestrator, *[]Outcome, *int) {
 	o, rec := baseOrch(runner)
 	opened := 0
-	o.OpenPR = func(_ context.Context, _ RepoRef, _, _, _, _ string, _ bool) (string, error) {
+	o.OpenPR = func(_ context.Context, _ Credential, _ RepoRef, _, _, _, _ string, _ bool) (string, error) {
 		opened++
 		return "https://github.com/o/r/pull/8", nil
 	}

@@ -212,6 +212,29 @@ func SuggestTimes(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": res})
 }
 
+// PlanWeek proposes blocks for the caller's own open tasks over the rest of
+// their work week from now (helpers.Now), in their free time (calendar B13,
+// CAL52-T3). It writes nothing: the calendar creates each kept proposal as a
+// task block.
+// POST /event/planWeek {"hours": {...}, "skip": ["<task uuid>", ...]}
+func PlanWeek(w http.ResponseWriter, r *http.Request) {
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	var in availabilityBusiness.PlanInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
+		return
+	}
+	plan, err := availabilityBusiness.PlanWeek(r.Context(), &userInfo, in, helpers.Now())
+	if err != nil {
+		writeAvailabilityError(w, r, "PlanWeek", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": plan})
+}
+
 // PeopleHours answers the working hours, in their zone, of each of the people
 // asked about who keeps some (calendar A3): for the week's drawn hours and
 // the event form's "outside their hours". Only those the asker may see when

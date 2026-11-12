@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	business "github.com/akashc777/OneCamp/business/Doc"
@@ -81,6 +82,29 @@ func GetPlaces(w http.ResponseWriter, r *http.Request) {
 	}
 	if items == nil {
 		items = []placesBusiness.Item{}
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": helpers.Envolope{"places": items}})
+}
+
+// Recent lists' bounds: what the person opened in the last 90 days, 20 at a
+// time unless they ask for fewer or more (at most 50).
+const (
+	recentPlacesWindow = 90 * 24 * time.Hour
+	recentPlacesLimit  = 20
+	recentPlacesMost   = 50
+)
+
+// GetRecentPlaces is what the person opened lately of one kind (GET
+// /places/recent?resource_kind=board[&limit=]), newest first, only what they
+// may still open, each named.
+func GetRecentPlaces(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	limit := helpers.SizeParam(q, "limit", recentPlacesLimit, recentPlacesMost)
+	items, err := placesBusiness.RecentItems(ctx, placesPerson(r), q.Get("resource_kind"), time.Now().Add(-recentPlacesWindow), limit)
+	if err != nil {
+		placeFailed(ctx, w, err)
+		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": helpers.Envolope{"places": items}})
 }

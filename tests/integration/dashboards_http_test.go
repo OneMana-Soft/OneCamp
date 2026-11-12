@@ -16,7 +16,13 @@ package integration_test
 //  3. workspace: its admins keep them; every member reads one once shared;
 //  4. a guest's link is no session: every dashboards route answers 401;
 //  5. the data is the reader's: a shared widget on a project the reader
-//     isn't in reads empty (counts 0, no names), never its maker's numbers.
+//     isn't in reads empty (counts 0, no names), never its maker's numbers;
+//  6. a widget over a saved view (B9-b4) reads the view as the reader: its
+//     owner reads it as the view is now, and after it is deleted, that it is
+//     gone; anyone else reads the widget's "can't read" word, never the
+//     view's work or name; a keeper puts on a dashboard only a view of their
+//     own that fits it (on a project's, that project's), and another keeper
+//     may retitle the widget but not point it at a view of someone else's.
 //
 // Deleting a dashboard or a widget is soft, and either comes back.
 //
@@ -473,6 +479,104 @@ func TestDashboardsOverHTTP(t *testing.T) {
 			t.Fatalf("%s, outside the project, reads rows on Website's widget: %v", who, rows)
 		}
 	}
+
+	// 6. A widget over a saved view reads the view as the reader.
+	ben := graphUID("ben")
+	// widgetsOf is a dashboard's widgets worked out for who, whole (errors
+	// included), by widget id, and the answer's body.
+	widgetsOf := func(who, dash string) (map[string]map[string]any, string) {
+		t.Helper()
+		code, raw, body := send(session(who), http.MethodGet, mine+"/"+dash+"/data?tz=Asia/Kolkata", nil)
+		d := expect(who+" reads "+dash+"'s data", code, raw, http.StatusOK)
+		got := map[string]map[string]any{}
+		for _, x := range d["widgets"].([]any) {
+			m, _ := x.(map[string]any)
+			got[fmt.Sprint(m["id"])] = m
+		}
+		return got, body
+	}
+	// shows is the number a widget worked out shows.
+	shows := func(widget map[string]any) float64 {
+		data, _ := widget["data"].(map[string]any)
+		return value(data)
+	}
+	saveView := func(who, scope, name string, filters []map[string]any) string {
+		t.Helper()
+		code, out := call(who, http.MethodPost, "/task/views", map[string]any{"scope": scope, "name": name, "state": map[string]any{"filters": filters, "sort": []any{}}})
+		id, _ := expect(who+" saves the view "+name, code, out, http.StatusOK)["id"].(string)
+		if id == "" {
+			t.Fatalf("%s saved %v", who, out)
+		}
+		return id
+	}
+	website := "project:" + w.project
+	bensWork := saveView("wes", website, "Ben's work", []map[string]any{{"id": "task_assignee_name", "value": []string{ben}}})
+	// The widget keeps the view, and none of the query sent beside it.
+	overView := widget("wes", launch, map[string]any{"kind": "metric", "title": "Ben's open", "query": map[string]any{"view": bensWork, "measure": "open",
+		"projects": []string{w.project}, "filters": []map[string]any{{"id": "task_priority", "value": []string{"high"}}}, "search": "launch"},
+		"x": 3, "y": 3, "w": 3, "h": 2})
+	code, raw, body = send(session("wes"), http.MethodGet, mine+"/"+launch, nil)
+	expect("wes reads Launch", code, raw, http.StatusOK)
+	if !strings.Contains(body, bensWork) || strings.Contains(body, "task_priority") || strings.Contains(body, `"search"`) {
+		t.Fatalf("Launch keeps its widget over a view as %s", body)
+	}
+	got, _ := widgetsOf("wes", launch)
+	if v := shows(got[overView]); v != 1 || got[overView]["view"] != "Ben's work" {
+		t.Fatalf("wes reads his view's widget as %v, want Ben's one open task under its name", got[overView])
+	}
+	// The view changes, and the widget follows it.
+	saveView("wes", website, "Ben's work", []map[string]any{})
+	if got, _ = widgetsOf("wes", launch); shows(got[overView]) != shows(got[launchOpen]) {
+		t.Fatalf("the widget kept the view's old filters: %v, want %v", got[overView], got[launchOpen])
+	}
+	// cy and eve read Launch, but the view is wes's alone: the widget's own
+	// word, never the view's work, name or id.
+	for _, who := range []string{"cy", "eve"} {
+		got, body := widgetsOf(who, launch)
+		if got[overView]["error"] != "This widget reads a saved view only its owner can see." || got[overView]["data"] != nil || got[overView]["view"] != nil {
+			t.Fatalf("%s reads wes's view's widget as %v", who, got[overView])
+		}
+		if strings.Contains(body, "Ben's work") || strings.Contains(body, bensWork) {
+			t.Fatalf("%s's read names wes's view: %s", who, body)
+		}
+		if _, raw, body := send(session(who), http.MethodGet, mine+"/"+launch, nil); strings.Contains(body, bensWork) {
+			t.Fatalf("%s's GET of Launch names wes's view: %v", who, raw)
+		}
+	}
+	// A keeper puts on a dashboard only a view of their own.
+	code, out, body = send(session("ben"), http.MethodPost, mine+"/"+bens+"/widgets", map[string]any{"kind": "metric", "query": map[string]any{"view": bensWork, "measure": "open"}, "x": 0, "y": 3, "w": 3, "h": 2})
+	if expect("ben adds wes's view to his own", code, out, http.StatusBadRequest); strings.Contains(body, bensWork) {
+		t.Fatalf("the refusal names the view: %s", body)
+	}
+	// My Tasks' view reads its owner's tasks: ben's one, of Website's three.
+	bensMine := saveView("ben", "mine", "Everything of mine", []map[string]any{})
+	mineWidget := widget("ben", bens, map[string]any{"kind": "metric", "query": map[string]any{"view": bensMine, "measure": "open"}, "x": 3, "y": 3, "w": 3, "h": 2})
+	if got, _ := widgetsOf("ben", bens); shows(got[mineWidget]) != 1 || shows(got[open]) <= 1 {
+		t.Fatalf("ben's My Tasks view reads %v beside all Website's %v", got[mineWidget], got[open])
+	}
+	// A project's dashboard takes that project's views alone.
+	anasMine := saveView("ana", "mine", "Mine", []map[string]any{})
+	anasWebsite := saveView("ana", website, "Unassigned", []map[string]any{})
+	code, out = call("ana", http.MethodPost, mine+"/"+health+"/widgets", map[string]any{"kind": "flow", "query": map[string]any{"view": anasMine}, "x": 0, "y": 7, "w": 6, "h": 3})
+	expect("ana adds her My Tasks view to Website's", code, out, http.StatusBadRequest)
+	onHealth := widget("ana", health, map[string]any{"kind": "flow", "query": map[string]any{"view": anasWebsite}, "x": 0, "y": 7, "w": 6, "h": 3})
+	if got, _ := widgetsOf("ana", health); got[onHealth]["error"] != nil || got[onHealth]["view"] != "Unassigned" {
+		t.Fatalf("ana reads her Website view's widget as %v", got[onHealth])
+	}
+	// fay keeps Website's dashboards too: she retitles ana's widget, which
+	// keeps ana's view, but can't point it at a view of someone else's.
+	code, out = call("fay", http.MethodPost, mine+"/"+health+"/widgets/"+onHealth, map[string]any{"kind": "flow", "title": "Flow", "query": map[string]any{"view": anasWebsite}, "x": 0, "y": 7, "w": 6, "h": 3})
+	expect("fay retitles ana's view's widget", code, out, http.StatusOK)
+	code, out = call("fay", http.MethodPost, mine+"/"+health+"/widgets/"+onHealth, map[string]any{"kind": "flow", "query": map[string]any{"view": bensWork}, "x": 0, "y": 7, "w": 6, "h": 3})
+	expect("fay points it at wes's view", code, out, http.StatusBadRequest)
+	// A deleted view: its owner reads that it has gone.
+	code, out = call("wes", http.MethodPost, "/task/views/delete", map[string]any{"id": bensWork})
+	expect("wes deletes his view", code, out, http.StatusOK)
+	if got, _ := widgetsOf("wes", launch); got[overView]["error"] != "That saved view isn't there any more." || got[overView]["data"] != nil {
+		t.Fatalf("a deleted view's widget reads %v", got[overView])
+	}
+	code, out = call("ana", http.MethodPost, mine+"/"+health+"/widgets/"+onHealth+"/delete", nil)
+	expect("ana removes her view's widget", code, out, http.StatusOK)
 
 	// Deleting is soft: off the list, not there, and back on restore.
 	kept := placed("ana", health)

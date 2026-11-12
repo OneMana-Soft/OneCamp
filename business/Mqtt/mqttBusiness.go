@@ -1026,16 +1026,27 @@ func PublishTablePresence(tableId string, data interface{}) {
 
 // PublishPollUpdate tells a channel's clients that one of its polls changed.
 func PublishPollUpdate(channelId, pollId string) {
+	publishPollUpdate(helpers.GetMqttTopicForChannelMessage(channelId),
+		&mqttStruct.MqttPollUpdate{Type: mqttStruct.TYPE_UPDATE, PollUUID: pollId, ChannelUUID: channelId})
+}
+
+// PublishBoardPollUpdate tells a board's open tabs that one of its polls was
+// started (TYPE_CREATE) or changed (TYPE_UPDATE: a vote, a close), on the
+// board's own topic, which only who may open the board hears
+// (business/MqttAccess readsBoard).
+func PublishBoardPollUpdate(boardId, pollId, frameId string, kind int8) {
+	publishPollUpdate(helpers.GetMqttTopicForBoard(boardId),
+		&mqttStruct.MqttPollUpdate{Type: kind, PollUUID: pollId, BoardUUID: boardId, FrameID: frameId})
+}
+
+func publishPollUpdate(topic string, update *mqttStruct.MqttPollUpdate) {
 	ctx := context.Background()
-	marshalled, err := json.Marshal(mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_POLL_UPDATE,
-		Data: &mqttStruct.MqttPollUpdate{Type: mqttStruct.TYPE_UPDATE, PollUUID: pollId, ChannelUUID: channelId},
-	})
+	marshalled, err := json.Marshal(mqttStruct.Message{Type: mqttStruct.MESSAGE_POLL_UPDATE, Data: update})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/PublishPollUpdate marshal err: %+v", err)
 		return
 	}
-	res := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalled)
+	res := mqttInit.MqttClient.Publish(topic, 1, false, marshalled)
 	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishPollUpdate", func() {
 		_ = res.WaitTimeout(mqttInit.PublishWait)
 		if res.Error() != nil {

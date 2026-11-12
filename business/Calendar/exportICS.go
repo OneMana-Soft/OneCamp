@@ -107,7 +107,7 @@ func (s *service) icsOf(ctx context.Context, reader uuid.UUID, rows []*models.Ev
 		base := func(row *models.Event) ICS.Event {
 			ev := ICS.Event{UID: exportedUID(e.ICalUID), Sequence: row.Sequence, Stamp: now, Summary: title(row),
 				Description: notesAsText(row), Location: row.Location, Organizer: organiser, Attendees: attendees,
-				Transparent: row.Transparency == transparencyTransparent, Alarms: alarms, Conference: callLinkIn(notesAsText(row))}
+				Transparent: row.Transparency == transparencyTransparent, Class: classOf(row.Visibility), Alarms: alarms, Conference: callLinkIn(notesAsText(row))}
 			if row.Status == statusCancelled {
 				ev.Status = "CANCELLED"
 			}

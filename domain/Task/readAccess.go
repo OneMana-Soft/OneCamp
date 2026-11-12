@@ -11,6 +11,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Task"
 	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -21,12 +22,7 @@ import (
 // its own and its project's deletion. One query for the lot; ids that aren't
 // uuids are left out, and so is any task that doesn't exist.
 func GetTasksReadAccessFor(ctx context.Context, taskUUIDs []string, userUID string) ([]*dgraphStruct.DgraphTask, error) {
-	ids := make([]string, 0, len(taskUUIDs))
-	for _, id := range taskUUIDs {
-		if parsed, err := uuid.Parse(id); err == nil {
-			ids = append(ids, parsed.String())
-		}
-	}
+	ids := uuidsIn(taskUUIDs)
 	if len(ids) == 0 || userUID == "" {
 		return nil, nil
 	}
@@ -35,7 +31,48 @@ func GetTasksReadAccessFor(ctx context.Context, taskUUIDs []string, userUID stri
 		return nil, err
 	}
 	query := `query Readable($user: string) {
-				tasks(func: eq(task_uuid, ` + string(list) + `)) {
+				tasks(func: eq(task_uuid, ` + string(list) + `)) {` + readAccessFields + `
+				}
+			}`
+	tasks, err := dgraphModels.QueryDgraphTasks(ctx, query, map[string]string{"$user": userUID})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetTasksReadAccessFor err: %+v", err)
+	}
+	return tasks, err
+}
+
+// GetBlockTasksFor is GetTasksReadAccessFor for the tasks of calendar blocks
+// (CAL51-TB), read for the person with graph uid userUID and uuid
+// readerUUID: each task also with how many open tasks it waits on in the
+// reader's projects (TASK_BLOCKED_OPEN) and the first of those, read as
+// GetTasksReadAccessFor reads a task so the caller judges it the same way.
+// One query for the lot: the count and the first blocker are edges of each
+// task, never a read per task.
+func GetBlockTasksFor(ctx context.Context, taskUUIDs []string, userUID, readerUUID string) ([]*dgraphStruct.DgraphTask, error) {
+	ids := uuidsIn(taskUUIDs)
+	if len(ids) == 0 || userUID == "" {
+		return nil, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, err
+	}
+	query := `query Readable($user: string) {` + dgraphStruct.ReaderProjectsVar(readerUUID) + `
+				tasks(func: eq(task_uuid, ` + string(list) + `)) {` + readAccessFields + `
+					` + dgraphStruct.TASK_BLOCKED_OPEN + `
+					task_blocked_by (first: 1) ` + dgraphStruct.TASK_OPEN_BLOCKERS + ` {` + readAccessFields + `
+					}
+				}
+			}`
+	tasks, err := dgraphModels.QueryDgraphTasks(ctx, query, map[string]string{"$user": userUID})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetBlockTasksFor err: %+v", err)
+	}
+	return tasks, err
+}
+
+// readAccessFields is what GetTasksReadAccessFor reads of each task.
+const readAccessFields = `
 					task_uuid
 					task_name
 					task_status
@@ -51,12 +88,54 @@ func GetTasksReadAccessFor(ctx context.Context, taskUUIDs []string, userUID stri
 						project_deleted_at
 						project_is_member: count(project_members @filter(uid($user)))
 						project_is_admin: count(project_admins @filter(uid($user)))
-					}
+					}`
+
+// uuidsIn is the ids that are uuids, in canonical form.
+func uuidsIn(taskUUIDs []string) []string {
+	ids := make([]string, 0, len(taskUUIDs))
+	for _, id := range taskUUIDs {
+		if parsed, err := uuid.Parse(id); err == nil {
+			ids = append(ids, parsed.String())
+		}
+	}
+	return ids
+}
+
+// GetHistoryTasksFor is GetTasksReadAccessFor for the tasks a task's history
+// names: the named tasks and, when ofTask is a task's uuid, every one of its
+// sub-tasks (a sub-task line names its sub-task by name only). Read whole,
+// restricted tasks too, because it is what judging them as the reader takes
+// (business/Task keepHistorySeen); nothing it reads is shown. One query.
+func GetHistoryTasksFor(ctx context.Context, taskUUIDs []string, ofTask string, userUID string) ([]*dgraphStruct.DgraphTask, error) {
+	ids := uuidsIn(taskUUIDs)
+	parent, perr := uuid.Parse(ofTask)
+	if userUID == "" || (len(ids) == 0 && perr != nil) {
+		return nil, nil
+	}
+	params, vars := "$user: string", map[string]string{"$user": userUID}
+	var blocks, roots []string
+	if len(ids) > 0 {
+		list, err := json.Marshal(ids)
+		if err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, `named as var(func: eq(task_uuid, `+string(list)+`))`)
+		roots = append(roots, "named")
+	}
+	if perr == nil {
+		params += ", $of: string"
+		vars["$of"] = parent.String()
+		blocks = append(blocks, `var(func: eq(task_uuid, $of)) { subs as task_sub_tasks }`)
+		roots = append(roots, "subs")
+	}
+	query := `query History(` + params + `) {
+				` + strings.Join(blocks, "\n\t\t\t\t") + `
+				tasks(func: uid(` + strings.Join(roots, ", ") + `)) {` + readAccessFields + `
 				}
 			}`
-	tasks, err := dgraphModels.QueryDgraphTasks(ctx, query, map[string]string{"$user": userUID})
+	tasks, err := dgraphModels.QueryDgraphTasks(taskread.WithSystem(ctx), query, vars)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetTasksReadAccessFor err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "domain/GetHistoryTasksFor err: %+v", err)
 	}
 	return tasks, err
 }
@@ -68,12 +147,7 @@ func GetTasksReadAccessFor(ctx context.Context, taskUUIDs []string, userUID stri
 // restricted.go), for anyone, before anything is shown. Ids that aren't uuids
 // are left out.
 func GetTasksStandingFor(ctx context.Context, taskUUIDs []string, userUUID string) ([]*dgraphStruct.DgraphTask, error) {
-	ids := make([]string, 0, len(taskUUIDs))
-	for _, id := range taskUUIDs {
-		if parsed, err := uuid.Parse(id); err == nil {
-			ids = append(ids, parsed.String())
-		}
-	}
+	ids := uuidsIn(taskUUIDs)
 	me, err := uuid.Parse(userUUID)
 	if len(ids) == 0 || err != nil {
 		return nil, nil

@@ -7,6 +7,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 
 	"github.com/google/uuid"
 )
@@ -208,4 +209,16 @@ func AnyMadeBefore(ctx context.Context, t time.Time) (bool, error) {
 	err := postgresInit.DBConn.SqlDB.QueryRowContext(c,
 		`SELECT EXISTS (SELECT 1 FROM projects WHERE deleted_at IS NULL AND created_at < $1)`, t).Scan(&found)
 	return found, err
+}
+
+// CreatorOf is who made project (projects.created_by); uuid.Nil when there is
+// no such project.
+func CreatorOf(ctx context.Context, project uuid.UUID) (uuid.UUID, error) {
+	by, _, err := pgexec.QueryOne(ctx, `SELECT created_by FROM projects WHERE id = $1`,
+		func(r pgexec.Row) (uuid.UUID, error) {
+			var u uuid.UUID
+			err := r.Scan(&u)
+			return u, err
+		}, project)
+	return by, err
 }

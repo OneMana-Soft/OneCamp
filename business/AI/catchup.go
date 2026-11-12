@@ -335,17 +335,20 @@ func catchUpOwnedItems(ctx context.Context, userInfo *userModels.UserInfo, req a
 	if err != nil || !settings.memoryEnabled {
 		return ""
 	}
+	// Their own items in that one place, and only while they are in it
+	// (memoryScopes): ownership alone never lists an item.
 	ownerID := userInfo.UserPostgresInfo.Id
+	scopes := newMemoryScopes(&userInfo.UserDgraphInfo)
 	filter := memoryModels.QueryFilter{
 		Statuses: []string{memoryModels.StatusOpen},
-		OwnerID:  &ownerID,
+		OwnedBy:  &ownerID,
 		Limit:    catchUpMaxMemoryItems,
 	}
 	switch req.ScopeType {
 	case catchUpScopeChannel:
-		filter.AccessibleChannels = []string{strings.TrimSpace(req.ChannelUUID)}
+		filter.AccessibleChannels = keepIn([]string{strings.TrimSpace(req.ChannelUUID)}, scopes.channels)
 	case catchUpScopeChat:
-		filter.AccessibleGrpIDs = []string{strings.TrimSpace(req.ChatGrpID)}
+		filter.AccessibleGrpIDs = keepIn([]string{strings.TrimSpace(req.ChatGrpID)}, scopes.dms)
 	default:
 		return "" // workspace-wide recap leans on the briefing for owned items
 	}

@@ -256,7 +256,7 @@ func actOnBoard(ctx context.Context, actor *dgraphStruct.DgraphUser, s *callStat
 }
 
 // boardToPresent is the board a present_board puts on the stage, one its
-// presenter may edit, or the board a new_board makes for the call.
+// presenter may present (boardBusiness.CanPresent), or the board a new_board makes for the call.
 func boardToPresent(ctx context.Context, actor *dgraphStruct.DgraphUser, s *callStateBusiness.Session, a Action) (uuid.UUID, error) {
 	if a.Action == ActNewBoard {
 		made, err := newBoardFor(ctx, actor, s)
@@ -270,7 +270,7 @@ func boardToPresent(ctx context.Context, actor *dgraphStruct.DgraphUser, s *call
 		return uuid.Nil, ErrNotYourBoard
 	}
 	board, err := boardBusiness.GetBasicBoardByUUID(ctx, id.String(), actor.Uid)
-	if err != nil || !boardBusiness.CanEdit(board, actor.Uuid) {
+	if err != nil || !boardBusiness.CanPresent(board, actor.Uuid) {
 		return uuid.Nil, ErrNotYourBoard
 	}
 	return id, nil

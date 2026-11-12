@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	formula "github.com/akashc777/OneCamp/business/Formula"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/akashc777/OneCamp/tests/timing"
 	"github.com/google/uuid"
@@ -417,7 +418,7 @@ func TestListCellsAreChargedAsRead(t *testing.T) {
 	}
 	rows := rowsOf(500, map[string]interface{}{tags.String(): items})
 	withComputed(context.Background(), fields, rows)
-	if strings.Contains(rows[0].Values, `"error"`) || !strings.Contains(rows[499].Values, "This table's formulas take too much working out") {
+	if strings.Contains(rows[0].Values, `"error"`) || !strings.Contains(rows[499].Values, formula.RanOut().Str) {
 		t.Errorf("the first row %.80s…, the last %.200s…", rows[0].Values, rows[499].Values)
 	}
 }

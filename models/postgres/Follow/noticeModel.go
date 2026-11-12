@@ -7,6 +7,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -32,6 +33,15 @@ type Notice struct {
 // them), so the inbox never shows it and it is never counted unread.
 const ReasonListed = "listed"
 
+// ReasonRetracted is a notice taken back: what it told of was deleted
+// (business/Notify Retract). The row stays (every delete is soft) and still
+// holds its key, so nobody is told of it again and the feed keeps the graph's
+// mention of it left out, but the inbox never shows it or counts it.
+const ReasonRetracted = "retracted"
+
+// hidden is the reasons of notices the inbox never shows or counts.
+var hidden = pq.Array([]string{ReasonListed, ReasonRetracted})
+
 // maxDedupKey is the column's width; a longer key is shortened to a prefix and
 // a hash, which stays unique.
 const maxDedupKey = 255
@@ -53,10 +63,7 @@ func InsertNotices(ctx context.Context, rows []*Notice) (map[uuid.UUID]bool, err
 		if n.CreatedAt.IsZero() {
 			n.CreatedAt = time.Now()
 		}
-		key := n.DedupKey
-		if len(key) > maxDedupKey {
-			key = key[:120] + "|" + helpers.HashString(key)
-		}
+		key := storedKey(n.DedupKey)
 		data := n.Data
 		if data == nil {
 			data = map[string]string{}
@@ -99,6 +106,69 @@ func InsertNotices(ctx context.Context, rows []*Notice) (map[uuid.UUID]bool, err
 	return written, res.Err()
 }
 
+// storedKey is a dedup key as the column holds it.
+func storedKey(key string) string {
+	if len(key) > maxDedupKey {
+		return key[:120] + "|" + helpers.HashString(key)
+	}
+	return key
+}
+
+// MentionKey is the dedup key of telling people of a mention in a thing (kind
+// "task", "post", "chat" or "comment", and its uuid): each person's notice
+// adds "|<their uuid>" (business/Notification Tell), so the feed can ask whom
+// it was told to (HeldNotices).
+func MentionKey(kind, id string) string { return "mention|" + kind + "|" + id }
+
+// HeldNotices is which of keys (each a telling's key and a person's id, as
+// Tell writes them) name a notice the inbox shows: one indexed read (the
+// unique dedup_key index). A listed notice (ReasonListed) isn't shown, so it
+// isn't held. A retracted one is (ReasonRetracted): what it told of was
+// deleted, and the feed keeps the graph's mention of it left out.
+func HeldNotices(ctx context.Context, keys []string) (map[string]bool, error) {
+	held := map[string]bool{}
+	if len(keys) == 0 {
+		return held, nil
+	}
+	stored := make([]string, len(keys))
+	asked := make(map[string]string, len(keys))
+	for i, k := range keys {
+		stored[i] = storedKey(k)
+		asked[stored[i]] = k
+	}
+	found, err := pgexec.Query(ctx, `SELECT dedup_key FROM resource_notices WHERE dedup_key = ANY($1) AND reason <> $2`,
+		pgexec.Text, pq.Array(stored), ReasonListed)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/Follow HeldNotices err: %+v", err)
+		return nil, err
+	}
+	for _, k := range found {
+		held[asked[k]] = true
+	}
+	return held, nil
+}
+
+// RetractNotices takes back the notices of keys (each a telling's key and a
+// person's id, as HeldNotices reads them): soft, by their reason, so the
+// inbox stops showing and counting them. A listed notice was never shown and
+// stays listed. One write by the unique dedup_key index; answers how many
+// were taken back.
+func RetractNotices(ctx context.Context, keys []string) (int64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	stored := make([]string, len(keys))
+	for i, k := range keys {
+		stored[i] = storedKey(k)
+	}
+	n, err := pgexec.Exec(ctx, `UPDATE resource_notices SET reason = $2 WHERE dedup_key = ANY($1) AND reason <> ALL($3)`,
+		pq.Array(stored), ReasonRetracted, hidden)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/Follow RetractNotices err: %+v", err)
+	}
+	return n, err
+}
+
 // uuidOrEmpty is s as a uuid's text, or "" (no one) when it isn't one.
 func uuidOrEmpty(s string) string {
 	if u, err := uuid.Parse(s); err == nil {
@@ -118,9 +188,9 @@ func NoticesFor(ctx context.Context, userUUID uuid.UUID, before time.Time, limit
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
 		`SELECT id, user_uuid, kind, resource_kind, resource_uuid, COALESCE(actor_uuid::text, ''), COALESCE(agent_uuid::text, ''),
 		        reason, data, created_at
-		   FROM resource_notices WHERE user_uuid = $1 AND created_at < $2 AND reason <> $4
+		   FROM resource_notices WHERE user_uuid = $1 AND created_at < $2 AND reason <> ALL($4)
 		  ORDER BY created_at DESC LIMIT $3`,
-		userUUID, before, limit, ReasonListed)
+		userUUID, before, limit, hidden)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Follow NoticesFor err: %+v", err)
 		return nil, err
@@ -148,7 +218,7 @@ func CountNoticesSince(ctx context.Context, userUUID uuid.UUID, since time.Time)
 	defer cancel()
 	var n uint64
 	err := postgresInit.DBConn.SqlDB.QueryRowContext(c,
-		`SELECT COUNT(*) FROM resource_notices WHERE user_uuid = $1 AND created_at > $2 AND reason <> $3`, userUUID, since, ReasonListed).Scan(&n)
+		`SELECT COUNT(*) FROM resource_notices WHERE user_uuid = $1 AND created_at > $2 AND reason <> ALL($3)`, userUUID, since, hidden).Scan(&n)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Follow CountNoticesSince err: %+v", err)
 	}

@@ -12,8 +12,10 @@ package controllers
 //  1. recent_transcript from the request body — the FE's in-memory rolling
 //     buffer of final utterances, which is the freshest source mid-call
 //     (the Dgraph copy only exists while recording AND lags by a write).
-//  2. the persisted Dgraph transcript for the room (fallback / when the FE
-//     buffer is empty, e.g. a late joiner asking about earlier discussion).
+//  2. the transcript the call going on has kept so far (fallback / when the
+//     FE buffer is empty, e.g. a late joiner asking about earlier
+//     discussion). That call's, never the room's: a channel's room is the
+//     same for every call in it.
 //
 // Security: the caller must be a member/participant of the call's surface
 // (channel member, DM participant, or group member). The room id shape tells
@@ -32,7 +34,6 @@ import (
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
-	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
@@ -114,7 +115,10 @@ func broadcastInCallAnswer(ctx context.Context, req inCallAskRequest, asker, ans
 const (
 	inCallMaxQuestion   = 2000
 	inCallMaxTranscript = 24000 // bound prompt size
-	inCallFallbackLines = 400   // persisted-transcript fallback cap
+	inCallFallbackLines = 400   // persisted-transcript fallback cap: the newest this many
+	// inCallFallbackRead is how many lines the fallback reads to find the
+	// newest: the read gives a call's lines from its start, as the recap's does.
+	inCallFallbackRead = 4000
 )
 
 // inCallSystemPrompt keeps answers tight, grounded, and call-appropriate.
@@ -176,8 +180,16 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 	}
 	asker := userInfo.UserDgraphInfo.Uid
 
-	// Permission: the caller must belong to the call's surface.
+	// Permission: the caller must belong to the call's surface, and be
+	// connected to the call going on in it (V-860): a live call's transcript
+	// is for its people. The same words for both, so a refusal never says
+	// whether a call is running.
 	if !callerCanAccessRoom(ctx, &userInfo, req.RoomID) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You're not in this call."})
+		return
+	}
+	live, err := liveKitBusiness.ConnectedCall(ctx, req.RoomID, asker)
+	if err != nil {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You're not in this call."})
 		return
 	}
@@ -197,7 +209,7 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 	// the persisted Dgraph transcript for late joiners / empty buffers.
 	transcript := strings.TrimSpace(req.RecentTranscript)
 	if transcript == "" {
-		transcript = fetchPersistedTranscript(ctx, req.RoomID)
+		transcript = fetchPersistedTranscript(ctx, live)
 	}
 	transcript = clampTranscriptTail(transcript, inCallMaxTranscript)
 
@@ -305,14 +317,23 @@ func clampTranscriptTail(transcript string, maxBytes int) string {
 	return strings.TrimSpace(tail)
 }
 
-// fetchPersistedTranscript pulls the room's persisted transcript from Dgraph
-// and renders it as "Name: text" lines (matching the FE live-buffer format the
-// prompt expects). Speaker uids are resolved to display names, cached per call.
-// Best-effort: returns "" on any error or when nothing is recorded.
-func fetchPersistedTranscript(ctx context.Context, roomID string) string {
-	lines, _, err := transcriptDomain.GetTranscriptLinesByRoom(ctx, roomID, inCallFallbackLines)
+// fetchPersistedTranscript renders what the call the asker is connected to
+// has kept so far, its newest inCallFallbackLines lines, as "Name: text" lines (the FE
+// live-buffer format the prompt expects). Speaker uids are resolved to display
+// names in one read. Best-effort: "" on any error, with no call going on, or
+// when the call has kept nothing yet.
+//
+// The call's own lines (its session key) and the recordings made during it,
+// read as the recap reads a call. It read the room's newest recording: in a
+// call that had kept nothing yet, the channel's previous call, so a question
+// about this call was answered from another one, its people's words included.
+func fetchPersistedTranscript(ctx context.Context, call *liveKitBusiness.LiveCall) string {
+	lines, err := call.Kept(ctx, inCallFallbackRead)
 	if err != nil || len(lines) == 0 {
 		return ""
+	}
+	if len(lines) > inCallFallbackLines {
+		lines = lines[len(lines)-inCallFallbackLines:]
 	}
 
 	// Every speaker's name in one read (backend audit #22).

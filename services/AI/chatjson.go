@@ -1,6 +1,9 @@
 package ai
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // ChatJSONWithRetry runs a JSON-mode chat and, when the output fails the
 // caller's `valid` check, retries ONCE with a corrective nudge appended.
@@ -18,11 +21,18 @@ import "context"
 // Behaviour:
 //   - Forces JSONMode on.
 //   - Records the circuit-breaker outcome of every model call (nil cb is fine).
+//   - When the host refuses an answer the model left empty (errEmptyJSONAnswer:
+//     a model that thinks spent its whole budget thinking), asks ONCE more at
+//     the least thinking its family takes (ChatOptions.LeastThinking), unless
+//     the caller already asked for that. No other error is retried (V-811b).
+//     A provider returns that refusal only when the retry is another request
+//     (chatStatusError), so an identical call is never sent twice (V-811c).
 //   - Returns the FIRST output that passes `valid`; if neither attempt passes,
 //     returns the latest raw output so the caller can still run its own parse
 //     and emit its own error message.
-//   - A transport error on the first call is returned immediately; a transport
-//     error on the retry falls back to the first output (best-effort).
+//   - Any other error on the first call, and that refusal again on its retry,
+//     is returned; a transport error on the corrective retry falls back to the
+//     first output (best-effort).
 //
 // Generic across every JSON-extraction feature; callers supply `valid`
 // (typically "does my parser succeed on this output").
@@ -40,9 +50,18 @@ func ChatJSONWithRetry(
 		{Role: "user", Content: user},
 	}
 
+	record := func(err error) {
+		if cb != nil {
+			cb.RecordResult(err)
+		}
+	}
+
 	out, err := llm.Chat(ctx, messages, opts)
-	if cb != nil {
-		cb.RecordResult(err)
+	record(err)
+	if errors.Is(err, errEmptyJSONAnswer) && !opts.LeastThinking {
+		opts.LeastThinking = true
+		out, err = llm.Chat(ctx, messages, opts)
+		record(err)
 	}
 	if err != nil {
 		return "", err
@@ -60,9 +79,7 @@ func ChatJSONWithRetry(
 		{Role: "user", Content: "That was not valid. Reply with ONLY the JSON described in the instructions. No prose, no markdown code fences."},
 	}
 	out2, err2 := llm.Chat(ctx, retry, opts)
-	if cb != nil {
-		cb.RecordResult(err2)
-	}
+	record(err2)
 	if err2 != nil {
 		// Retry transport failed; hand back the first output for a final parse.
 		return out, nil

@@ -9,8 +9,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/akashc777/OneCamp/models/taskread"
@@ -22,6 +24,10 @@ const (
 	SourceProject = "project"
 	RefDoc        = "doc"
 	RefBoard      = "board"
+	// RefTask is a task a link names where a doc or a board may be (an
+	// event's links, business/Calendar eventFiles.go); a task links to a doc
+	// or a board, never to a task (refUUIDPredicate).
+	RefTask = "task"
 )
 
 // notDeleted builds this repository's "is not soft-deleted" filter for a Dgraph
@@ -200,23 +206,31 @@ func CountTasksAndLiveTasks(ctx context.Context) (total, live int, err error) {
 // can authorise and read links in a single round-trip instead of two.
 type refAccessResp struct {
 	Q []struct {
-		Private       *bool `json:"private,omitempty"`
-		ReadAccess    uint8 `json:"read_access,omitempty"`
-		EditAccess    uint8 `json:"edit_access,omitempty"`
-		CommentAccess uint8 `json:"comment_access,omitempty"`
+		UUID          string `json:"uuid,omitempty"`
+		Private       *bool  `json:"private,omitempty"`
+		ReadAccess    uint8  `json:"read_access,omitempty"`
+		EditAccess    uint8  `json:"edit_access,omitempty"`
+		CommentAccess uint8  `json:"comment_access,omitempty"`
 		CreatedBy     *struct {
 			Uuid string `json:"user_uuid,omitempty"`
 		} `json:"created_by,omitempty"`
 	} `json:"q"`
 }
 
-// CanReadRef reports whether the viewer may see a doc/board: it is public, the
-// viewer has read/edit/comment access, or the viewer created it. Used to gate
-// linking (you can't attach what you can't see) and the reverse read.
-func CanReadRef(ctx context.Context, refType, refUUID, userDgraphUID, userUUID string) (bool, error) {
+// CanReadRefs is which of refUUIDs (docs or boards, by refType) the viewer
+// may see, by lower-case uuid, in one query: it is public, the viewer has
+// read/edit/comment access, or the viewer created it. Used to gate linking
+// (you can't attach what you can't see) and the reverse read. One that isn't
+// there, or is deleted, is left out.
+func CanReadRefs(ctx context.Context, refType string, refUUIDs []string, userDgraphUID, userUUID string) (map[string]bool, error) {
 	refPred, ok := refUUIDPredicate(refType)
 	if !ok {
-		return false, fmt.Errorf("invalid reference type %q", refType)
+		return nil, fmt.Errorf("invalid reference type %q", refType)
+	}
+	out := map[string]bool{}
+	list := dgraphquery.UUIDList(refUUIDs)
+	if list == "" {
+		return out, nil
 	}
 
 	prefix := "doc"
@@ -224,41 +238,42 @@ func CanReadRef(ctx context.Context, refType, refUUID, userDgraphUID, userUUID s
 		prefix = "board"
 	}
 
-	query := fmt.Sprintf(`query RefAccess($uid: string, $userId: string) {
-		q(func: eq(%s, $uid)) @filter(%s) {
+	query := fmt.Sprintf(`query RefAccess($userId: string) {
+		q(func: eq(%s, [%s])) @filter(%s) {
+			uuid: %s
 			private: %s_private
 			read_access: count(%s_reading_users @filter(uid($userId)))
 			edit_access: count(%s_editing_users @filter(uid($userId)))
 			comment_access: count(%s_commenting_users @filter(uid($userId)))
 			created_by: %s_created_by { user_uuid }
 		}
-	}`, refPred, notDeleted(prefix+"_deleted_at"), prefix, prefix, prefix, prefix, prefix)
+	}`, refPred, list, notDeleted(prefix+"_deleted_at"), refPred, prefix, prefix, prefix, prefix, prefix)
 
-	variables := map[string]string{"$uid": refUUID, "$userId": userDgraphUID}
+	variables := map[string]string{"$userId": userDgraphUID}
 
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 	res, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/CanReadRef query failed err: %+v", err)
-		return false, err
+		helpers.LogErrorWithContext(ctx, "domain/CanReadRefs query failed err: %+v", err)
+		return nil, err
 	}
 
 	var parsed refAccessResp
 	if err = json.Unmarshal(res.Json, &parsed); err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/CanReadRef unmarshal failed err: %+v", err)
-		return false, err
+		helpers.LogErrorWithContext(ctx, "domain/CanReadRefs unmarshal failed err: %+v", err)
+		return nil, err
 	}
-	if len(parsed.Q) == 0 {
-		return false, nil // not found (or deleted)
+	for _, row := range parsed.Q {
+		if row.UUID != "" && refReadable(row.Private, row.ReadAccess, row.EditAccess, row.CommentAccess, row.CreatedBy != nil && row.CreatedBy.Uuid == userUUID) {
+			out[strings.ToLower(row.UUID)] = true
+		}
 	}
-	row := parsed.Q[0]
-	if row.Private == nil || !*row.Private {
-		return true, nil
-	}
-	if row.ReadAccess > 0 || row.EditAccess > 0 || row.CommentAccess > 0 {
-		return true, nil
-	}
-	return row.CreatedBy != nil && row.CreatedBy.Uuid == userUUID, nil
+	return out, nil
+}
+
+// refReadable is the rule: public, shared with the viewer, or theirs. Pure.
+func refReadable(private *bool, read, edit, comment uint8, theirs bool) bool {
+	return private == nil || !*private || read > 0 || edit > 0 || comment > 0 || theirs
 }
 
 func GetLinksForSource(ctx context.Context, sourceType, sourceUUID, userDgraphUID string) (docs []*dgraphStruct.DgraphDoc, boards []*dgraphStruct.DgraphBoard, isMember bool, err error) {

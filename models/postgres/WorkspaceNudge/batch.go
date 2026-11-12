@@ -39,8 +39,16 @@ type Upserted struct {
 	Inserted bool
 }
 
-// UpsertMany is Upsert for one person's nudges in one statement. Each dedup
-// key is written once: a key given twice keeps its first.
+// UpsertMany is the engine's pass over one person's nudges, in one statement:
+// each signal that still holds is a new open nudge, or refreshes the copy of
+// the one already open, keeping its updated_at. Finding it open again is no
+// news, so it isn't raised again: the Inbox badge counts an urgent nudge by
+// when it was last raised, and moving updated_at on every pass brought it
+// back after every pass (V-577). Nor does a pass make it more urgent than it
+// is: one gone quiet (QuietUnraisedSince) stays quiet (V-581). A nudge closed
+// since (resolved, dismissed or superseded) comes back as a new row, so it is
+// raised now. Each dedup key is written once: a key given twice keeps its
+// first.
 func UpsertMany(ctx context.Context, userID uuid.UUID, in []UpsertInput) ([]Upserted, error) {
 	seen := map[string]bool{}
 	var kinds, titles, bodies, ctaURLs, ctaTexts, srcTypes, srcIDs, keys []string
@@ -72,8 +80,7 @@ func UpsertMany(ctx context.Context, userID uuid.UUID, in []UpsertInput) ([]Upse
 			body       = EXCLUDED.body,
 			cta_url    = EXCLUDED.cta_url,
 			cta_text   = EXCLUDED.cta_text,
-			priority   = EXCLUDED.priority,
-			updated_at = NOW()
+			priority   = LEAST(workspace_nudges.priority, EXCLUDED.priority)
 		RETURNING dedup_key, id, (xmax = 0)`, func(r pgexec.Row) (u Upserted, err error) {
 		err = r.Scan(&u.DedupKey, &u.ID, &u.Inserted)
 		return

@@ -19,6 +19,7 @@ import (
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	v1Controller "github.com/akashc777/OneCamp/controllers/V1"
 	"github.com/akashc777/OneCamp/helpers"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 )
 
@@ -34,25 +35,12 @@ func TestATaskToolsAnswerNamesTheTasksKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	type answer struct {
-		Message string            `json:"message"`
-		Data    map[string]string `json:"data"`
-	}
+	type answer = v1Answer
 	// v1 runs one of the API's handlers as ana's token, with the task's id or
 	// key in the path.
 	v1 := func(h http.HandlerFunc, id string, body map[string]string) answer {
 		t.Helper()
-		raw, _ := json.Marshal(body)
-		rc := chi.NewRouteContext()
-		rc.URLParams.Add("id", id)
-		c := helpers.WithActsThroughToken(context.WithValue(context.WithValue(ctx, chi.RouteCtxKey, rc), helpers.UserInfoContextKey, ana))
-		rec := httptest.NewRecorder()
-		h(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw)).WithContext(c))
-		var out answer
-		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || rec.Code != http.StatusOK {
-			t.Fatalf("%d %s", rec.Code, rec.Body.String())
-		}
-		return out
+		return callV1(t, ctx, ana, h, id, body)
 	}
 	named := func(what string, a answer, name string) string {
 		t.Helper()
@@ -91,4 +79,28 @@ func TestATaskToolsAnswerNamesTheTasksKey(t *testing.T) {
 	named("an agent's status", tool("update_task_status", map[string]string{"task_uuid": other, "status": "done"}), "Print the badges")
 	named("an agent's assign", tool("assign_task", map[string]string{"task_uuid": key, "assignee_uuid": w.people["ben"].String()}), "Book the room")
 	named("an agent's due date", tool("set_task_due_date", map[string]string{"task_uuid": key, "due_date": "2026-11-02T09:00:00Z"}), "Book the room")
+}
+
+// v1Answer is what the API's handlers answer: what happened, in words, and the
+// ids and names it touched.
+type v1Answer struct {
+	Message string            `json:"message"`
+	Data    map[string]string `json:"data"`
+}
+
+// callV1 runs one of the API's handlers as who's token (ActsThroughToken), with
+// a task's id or key in the path, and fails the test unless it answers 200.
+func callV1(t *testing.T, ctx context.Context, who userModels.UserInfo, h http.HandlerFunc, id string, body map[string]string) v1Answer {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	rc := chi.NewRouteContext()
+	rc.URLParams.Add("id", id)
+	c := helpers.WithActsThroughToken(context.WithValue(context.WithValue(ctx, chi.RouteCtxKey, rc), helpers.UserInfoContextKey, who))
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw)).WithContext(c))
+	var out v1Answer
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	return out
 }

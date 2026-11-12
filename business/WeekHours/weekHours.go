@@ -3,7 +3,7 @@
 // time they cover. The calendar's working hours and booking pages read it
 // (business/Calendar keeps its names as aliases), and so does the schedule
 // notifications may reach a person by (notify.schedule, business/Notification).
-// It imports nothing of the app's, so anything may.
+// It imports only helpers (a zone's next change of clock).
 package business
 
 import (
@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // Interval is a stretch of time, start inclusive, end exclusive.
@@ -212,14 +214,17 @@ func (w Hours) NextOpen(t time.Time, within time.Duration) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	limit := t.Add(within)
-	for cur := t; cur.Before(limit); {
+	// Each pass moves on to the zone's next change, always later; the cap
+	// is so no pass can ever repeat without end, whatever t is (a focus
+	// event's end, the person's own, may lie decades ahead).
+	for cur, pass := t, 0; cur.Before(limit) && pass < nextOpenPasses; pass++ {
 		local := cur.In(loc)
 		if w.insideIn(local) {
 			return cur, true
 		}
 		// The clock runs evenly, offset from UTC by off, until next (the
 		// zone's next change, or the limit).
-		_, next := local.ZoneBounds()
+		next := helpers.NextZoneChange(local)
 		if next.IsZero() || next.After(limit) {
 			next = limit
 		}
@@ -240,3 +245,8 @@ func (w Hours) NextOpen(t time.Time, within time.Duration) (time.Time, bool) {
 	}
 	return time.Time{}, false
 }
+
+// nextOpenPasses caps NextOpen's passes, one per change of the zone's clock
+// before the limit: a zone changes a few times a year (Go adds a year's
+// start or end), so 1024 is centuries of search.
+const nextOpenPasses = 1024

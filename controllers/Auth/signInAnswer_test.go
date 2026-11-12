@@ -22,6 +22,7 @@ var signInAnswerFields = map[string]string{
 	"email_configured": "whether mailed links (a password reset, an invitation) can arrive, so the page doesn't offer one in vain",
 	"email_sender":     "the address mail comes from, which every mail it sends shows anyway",
 	"workspace_name":   "the workspace's name, which its own sign-in page shows",
+	"hosting":          "where the workspace runs (self, cloud, demo), so the sign-in page's trust line is true; the address already says as much",
 }
 
 func TestTheSignInAnswerCarriesOnlyPublicFields(t *testing.T) {

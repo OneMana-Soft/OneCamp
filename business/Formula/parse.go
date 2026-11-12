@@ -9,8 +9,15 @@ import (
 	"unicode/utf8"
 )
 
-// MaxLength is the longest formula, in characters.
+// MaxLength is the longest formula, in characters, as people write it
+// (Check holds every save to it).
 const MaxLength = 2000
+
+// MaxStoredLength is the longest formula as it's stored (Canonical): each
+// {Field name}, three characters at the least, written as a 36-character id
+// in {#...}, makes it at most 13 times as long. A read compiles the stored
+// form, so parse is held only to this bound.
+const MaxStoredLength = MaxLength * 13
 
 // maxDepth bounds nesting, so a formula can't exhaust the stack.
 const maxDepth = 64
@@ -55,7 +62,7 @@ const (
 
 var (
 	tooMuch     = Error("This formula takes too much working out")
-	tooMuchRead = Error("This table's formulas take too much working out")
+	tooMuchRead = Error("These formulas take too much working out")
 )
 
 // run works out a node, within the row's and the read's budgets.
@@ -461,7 +468,7 @@ func parse(src string, field func(ref string) (string, error), linked func(link,
 	if strings.TrimSpace(src) == "" {
 		return nil, nil, &SyntaxError{Msg: "Write a formula"}
 	}
-	if utf8.RuneCountInString(src) > MaxLength {
+	if utf8.RuneCountInString(src) > MaxStoredLength {
 		return nil, nil, &SyntaxError{Msg: fmt.Sprintf("A formula can be at most %d characters", MaxLength)}
 	}
 	toks, err := lex(src)

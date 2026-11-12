@@ -33,6 +33,10 @@ type tasksRead struct {
 	// name is the brief's name now.
 	name    string
 	readers []string
+	// blocked and blocker are what the brief waits on, as the block's read
+	// (blockTasks) tells its reader.
+	blocked int
+	blocker *taskBusiness.ReadableRef
 }
 
 func stubTasks(t *testing.T) *tasksRead {
@@ -49,7 +53,16 @@ func stubTasks(t *testing.T) *tasksRead {
 		}
 		return out, nil
 	}
-	t.Cleanup(func() { readableTasks = prev })
+	prevBlocks := blockTasks
+	blockTasks = func(ctx context.Context, ids []string, uid, _ string) (map[string]taskBusiness.ReadableTask, error) {
+		out, err := readableTasks(ctx, ids, uid)
+		for id, task := range out {
+			task.BlockedOpen, task.FirstBlocker = r.blocked, r.blocker
+			out[id] = task
+		}
+		return out, err
+	}
+	t.Cleanup(func() { readableTasks, blockTasks = prev, prevBlocks })
 	return r
 }
 
@@ -189,7 +202,7 @@ func TestBlocksReadTheirTasksInOneReadAndKeepTheirTaskWhenItIsHidden(t *testing.
 	_ = setWhen(hidden, start, end)
 	id := uuid.MustParse(hiddenTask)
 	hidden.Kind, hidden.Title, hidden.TaskUUID, hidden.CreatedBy = string(EventTaskBlock), "Old work", &id, personOf(sam)
-	if _, _, err := h.s.create(context.Background(), sam, hidden, nil, false); err != nil {
+	if _, _, err := h.s.create(context.Background(), sam, hidden, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	reads.calls = nil
@@ -226,6 +239,37 @@ func TestBlocksReadTheirTasksInOneReadAndKeepTheirTaskWhenItIsHidden(t *testing.
 	}
 	if tasks != 2 {
 		t.Errorf("the grid's answers carry both blocks' tasks: %d", tasks)
+	}
+}
+
+// CAL51-TB: a block says what its task waits on, in the grid's answers and
+// the event's own: how many open tasks, and the first by name when the
+// reader may read it (business/Task ReadableBlockTasks decides).
+func TestABlockSaysWhatItsTaskWaitsOn(t *testing.T) {
+	h := newHarness(t)
+	reads := stubTasks(t)
+	reads.blocked, reads.blocker = 2, &taskBusiness.ReadableRef{UUID: hiddenTask, Name: "Sign off the copy"}
+	sam := withGraphUID(h.member("Sam"), "0xsam")
+	start, end := timed(h.clock.Add(2*time.Hour), 60, "UTC")
+	if _, err := h.s.Create(context.Background(), sam, EventInput{Kind: EventTaskBlock, TaskUUID: briefTask, Start: start, End: end}); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := h.s.Range(context.Background(), sam, h.clock, h.clock.Add(24*time.Hour))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("%v %v", got, err)
+	}
+	if b := got[0].Task; b == nil || b.BlockedOpen != 2 || len(b.BlockedBy) != 1 || b.BlockedBy[0].UUID != hiddenTask || b.BlockedBy[0].Name != "Sign off the copy" {
+		t.Fatalf("the block's task: %+v", b)
+	}
+	old, err := h.s.legacyRange(context.Background(), sam, h.clock, h.clock.Add(24*time.Hour))
+	if err != nil || len(old) != 1 || old[0].Task == nil || old[0].Task.BlockedOpen != 2 || len(old[0].Task.BlockedBy) != 1 {
+		t.Fatalf("the grid's answer: %+v %v", old, err)
+	}
+	// A blocker the reader may not read: the count alone.
+	reads.blocker = nil
+	got, _, _ = h.s.Range(context.Background(), sam, h.clock, h.clock.Add(24*time.Hour))
+	if b := got[0].Task; b == nil || b.BlockedOpen != 2 || b.BlockedBy != nil {
+		t.Fatalf("counted, not named: %+v", b)
 	}
 }
 

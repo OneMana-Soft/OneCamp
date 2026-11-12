@@ -37,7 +37,20 @@ const (
 	UpgradeRepairBotUsername = "upgrade-repair"
 	// UpgradeRepairBotEmail keys that principal's row.
 	UpgradeRepairBotEmail = UpgradeRepairBotUsername + BotEmailDomain
+	// IntegrationBotPrefix begins the username and email of a code host's
+	// principal (integration-github): what code changes on a task (a commit
+	// that fixes it) is recorded as the host's, never as a person's.
+	IntegrationBotPrefix = "integration-"
 )
+
+// IntegrationBotUsername is the username of the principal a code host acts
+// as ("github").
+func IntegrationBotUsername(provider string) string { return IntegrationBotPrefix + provider }
+
+// IntegrationBotEmail keys that principal's row.
+func IntegrationBotEmail(provider string) string {
+	return IntegrationBotUsername(provider) + BotEmailDomain
+}
 
 // BotKind names what a bot principal actually IS.
 //
@@ -75,6 +88,9 @@ const (
 	// BotKindRepair is the principal an upgrade's repairs act as. It has no
 	// AI: it acts only when a release repairs what an older one left.
 	BotKindRepair BotKind = "repair"
+	// BotKindIntegration is a code host's principal (GitHub): it has no AI and
+	// moves a task only when code says it fixes or closes it.
+	BotKindIntegration BotKind = "integration"
 	// BotKindUnknown is a bot this build does not recognise. Returned rather
 	// than guessing, so a caller shows neutral copy instead of the assistant's.
 	BotKindUnknown BotKind = "bot"
@@ -109,6 +125,8 @@ func ClassifyBot(email string) BotKind {
 		return BotKindRepair
 	case strings.HasPrefix(email, AgentBotPrefix):
 		return BotKindAgent
+	case strings.HasPrefix(email, IntegrationBotPrefix):
+		return BotKindIntegration
 	default:
 		return BotKindUnknown
 	}

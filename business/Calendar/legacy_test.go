@@ -80,6 +80,9 @@ func TestTheOldRoutesAnswerInTheGraphsShape(t *testing.T) {
 		"event_reminders_email": []any{},
 		// Calendar A6: the calendar it is on, Sam's own.
 		"event_calendar_id": samCalendar.String(),
+		// gcal-15 head B: its call room, where a member joins it; no guest
+		// link while guest access is off.
+		"event_room": map[string]any{"join": RoomJoinPath + out.EventUuid, "guest_links": false},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("the old shape:\n got %v\nwant %v", got, want)

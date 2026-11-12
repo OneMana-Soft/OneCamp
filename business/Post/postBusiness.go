@@ -12,13 +12,15 @@ import (
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifyBusiness "github.com/akashc777/OneCamp/business/Notify"
 	outboxBusiness "github.com/akashc777/OneCamp/business/Outbox"
+	postDelete "github.com/akashc777/OneCamp/business/PostDelete"
+	reachBusiness "github.com/akashc777/OneCamp/business/Reach"
 	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
-	channelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
-	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	domain "github.com/akashc777/OneCamp/domain/Post"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -336,69 +338,55 @@ func sendNewPostNotification(title string, body string, channelId string, mentio
 	notifyNewPost(context.Background(), title, body, "", channelId, mentionsDgraphUsersList, dgraphChannelInfo, postID, userDgraph, replyToAuthorUUID, nil)
 }
 
-// notifyNewPost is a channel post's notices: the Activity item for each
-// eligible person it mentions (or whose post it quotes), the push and desktop
-// notice for everyone eligible, and the email for those it names. html is the
-// post as written: whom its own chips name. Someone a broadcast or a team's
-// mention reached (business/Reach) is told in the Inbox and by push, as
-// anyone mentioned, and isn't emailed: one @channel in a large channel would
-// otherwise email everyone in it who is away.
+// notifyNewPost is a channel post's notices, through the one door
+// (business/Notify Tell: Plan, then Deliver, which records each delivery
+// once): who hears of it is the router's (the mentioned, the replied-to
+// author, the teams and broadcast its write reached, keyword matches, those
+// who hear everything), and of those newly told, the Inbox's live item goes
+// to each told in the Inbox, and the email to each Plan emails (those its own
+// chips name and the replied-to author: a broadcast or a team's mention is
+// never emailed). html is the post as written: whom its own chips name, and
+// the teams and broadcast it asks for. mentionsDgraphUsersList is everyone
+// its write recorded as mentioned or reached: a plan never reaches more.
 func notifyNewPost(ctx context.Context, title string, body string, html string, channelId string, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel, postID string, userDgraph *dgraphStruct.DgraphUser, replyToAuthorUUID string, tell outboxBusiness.Told) {
-
-	mentionsUUIDList := []string{}
-	mentionsMap := make(map[string]bool)
-
-	for _, mention := range mentionsDgraphUsersList {
-		mentionsUUIDList = append(mentionsUUIDList, mention.Uuid)
-		mentionsMap[mention.Uuid] = true
-	}
 	named := namedIn(html, mentionsDgraphUsersList)
-
-	// Treat the replied-to author as an implicit mention recipient so an inline
-	// reply notifies them through the mention pipeline. Suppress self-replies
-	// and de-dup with an explicit @mention of the same person.
-	if replyToAuthorUUID != "" && replyToAuthorUUID != userDgraph.Uuid {
-		if !mentionsMap[replyToAuthorUUID] {
-			mentionsUUIDList = append(mentionsUUIDList, replyToAuthorUUID)
-			mentionsMap[replyToAuthorUUID] = true
+	var mentions []string
+	for _, m := range mentionsDgraphUsersList {
+		if m != nil && named[m.Uuid] {
+			mentions = append(mentions, m.Uuid)
 		}
-		named[replyToAuthorUUID] = true
 	}
-
-	// Members whose keywords it holds hear of it as of a mention (TN-53),
-	// never by email (they aren't in named).
-	for _, id := range keywordReached(ctx, channelId, body, userDgraph.Uuid, mentionsMap) {
-		mentionsUUIDList = append(mentionsUUIDList, id)
-		mentionsMap[id] = true
-	}
-
-	// 1. Get eligible users for notifications (based on preferences)
-	eligibleUserIDs, err := channelNotificationBusiness.GetEligibleUsersForChannelActivity(ctx, channelId, userDgraph.Uuid, mentionsUUIDList, false)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendNewPostNotification Failed to get eligible users err: %+v",
-			err)
+	asked := reachBusiness.Parse(html)
+	told := notifyBusiness.Tell(ctx, notifyBusiness.Event{
+		ID:        "channel:" + channelId + ":" + postID,
+		Cause:     notifyBusiness.CauseMessage,
+		Actor:     userDgraph.Uuid,
+		Place:     notifyBusiness.Place{Kind: notifyBusiness.PlaceChannel, ID: channelId},
+		MessageID: postID,
+		Mentions:  mentions,
+		Author:    replyToAuthorUUID,
+		Teams:     asked.Groups,
+		Broadcast: widest(asked.Broadcasts),
+		Within:    append([]string{}, dgraphStruct.UUIDsOf(mentionsDgraphUsersList)...),
+		ActorInfo: actorInfo(ctx, userDgraph, len(asked.Groups) > 0),
+		Push: map[string]string{
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE:      firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHANNEL,
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:   channelId,
+			firebaseInit.FIREBASE_PUSH_DATA_TITLE:     title,
+			firebaseInit.FIREBASE_PUSH_DATA_BODY:      body,
+			firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID: postID,
+			firebaseInit.FIREBASE_PUSH_DATA_USERNAME:  userDgraph.DisplayName(),
+			firebaseInit.FIREBASE_PUSH_DATA_ICON:      userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
+		},
+	})
+	if len(told) == 0 {
 		return
 	}
 
-	if len(eligibleUserIDs) == 0 {
-		return
-	}
-
-	// 2. Publish MQTT Activity Events
-	eligibleMentionsUserIDs, eligibleNamedUserIDs := []string{}, []string{}
-
-	for _, uid := range eligibleUserIDs {
-		if mentionsMap[uid] {
-			eligibleMentionsUserIDs = append(eligibleMentionsUserIDs, uid)
-		}
-		if named[uid] {
-			eligibleNamedUserIDs = append(eligibleNamedUserIDs, uid)
-		}
-	}
-	for _, recipientID := range tell.Only("activity", eligibleMentionsUserIDs) {
+	// The live Activity (Inbox) item, to each told in the Inbox.
+	for _, recipientID := range tell.Only("activity", notifyBusiness.By(told, notifyBusiness.ToInbox)) {
 		activityItem := &dgraphModels.UnifiedActivityItem{
-			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION, // In channels, new posts are notifications for members
+			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Mention: &dgraphStruct.DgraphMentions{
 				PostUuid: postID,
@@ -420,25 +408,9 @@ func notifyNewPost(ctx context.Context, title string, body string, html string, 
 		activityBusiness.PublishActivityToUser(recipientID, activityItem)
 	}
 
-	// 3. The push, and the desktop app's notice, to those of them the push
-	// gate lets through (business/Notification Deliver).
-	pushData := make(map[string]string)
-
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHANNEL
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = channelId
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = postID
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
-
-	if pushTo := tell.Only("push", eligibleUserIDs); len(pushTo) > 0 {
-		notificationBusiness.DeliverFrom(ctx, userDgraph.Uuid, pushTo, pushData, "channel:"+channelId+":"+postID)
-	}
-
-	// Email fan-out: only the people it names — channel posts in general,
-	// and a broadcast's whole room, are too noisy to email. The dispatcher
-	// applies its own gates (per-user pref, online check, suppressions).
+	// Email stays the site's (A4 H2 moved push and desktop only): to those
+	// Plan emails. The dispatcher applies its own gates (per-user pref,
+	// online check, suppressions).
 	notificationBusiness.DispatchChannelMention(
 		userDgraph.Uuid,
 		userDgraph.DisplayName(),
@@ -447,8 +419,33 @@ func notifyNewPost(ctx context.Context, title string, body string, html string, 
 		dgraphChannelInfo.Name,
 		postID,
 		body,
-		tell.Only("email", eligibleNamedUserIDs),
+		tell.Only("email", notifyBusiness.By(told, notifyBusiness.ToEmail)),
 	)
+}
+
+// widest is the widest broadcast of bs: @channel or @everyone, else @here.
+// Pure.
+func widest(bs []reachBusiness.Broadcast) string {
+	best := ""
+	for _, b := range bs {
+		if b == reachBusiness.Channel || b == reachBusiness.Everyone {
+			return string(b)
+		}
+		best = string(b)
+	}
+	return best
+}
+
+// actorInfo is the writer as the router's team reach asks for them: whether
+// they are an admin (read only when the post names a team) and their node.
+func actorInfo(ctx context.Context, u *dgraphStruct.DgraphUser, teams bool) *userModels.UserInfo {
+	info := &userModels.UserInfo{UserDgraphInfo: *u}
+	if id, err := uuid.Parse(u.Uuid); err == nil && teams {
+		if pg, err := userDomain.GetActiveUserWithAdminFlagByUserUUID(ctx, id); err == nil && pg != nil {
+			info.UserPostgresInfo = *pg
+		}
+	}
+	return info
 }
 
 // namedIn is the people of mentions (by user uuid) whom html names by their
@@ -501,6 +498,9 @@ func UpdatePostComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *
 		UpdatedAt: &currentTime,
 	}
 
+	// Who the reply named before this save: only whom it adds is told.
+	mentions, tellMentions := notificationBusiness.SaveOfMentions(ctx, "comment", commentUUID.String(), mentionsDgraphUsersList)
+
 	err = commentBusiness.UpdateComment(ctx, &dgraphComment, commentUUID, currentTime)
 
 	if err != nil {
@@ -508,6 +508,10 @@ func UpdatePostComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *
 			"business/UpdatePostComment Failed to update comment on post err: %+v",
 			err)
 		return
+	}
+	if tellMentions && rawDgraphCommentInfo.Post != nil && rawDgraphCommentInfo.Post.Channel != nil {
+		tellPostMentionsAdded(ctx, notificationBusiness.ActorOf(ctx, rawDgraphCommentInfo.CommentBy.Uuid), rawDgraphCommentInfo.Post.Channel.Uuid, rawDgraphCommentInfo.Post.Uuid,
+			commentUUID.String(), commentInfo.HTMLText, mentionsDgraphUsersList, mentions)
 	}
 
 	// A reply sent to its channel too: the copy there says what it now says.
@@ -679,6 +683,9 @@ func GetPostByUUID(ctx context.Context, postUUID uuid.UUID) (postInfo *models.Po
 
 func UpdatePost(ctx context.Context, inputPostInfo *adapter.InputCreateOrUpdatePostInfo, mentions []*dgraphStruct.DgraphUser, postUUID uuid.UUID, channelId string, postByUUID string) (err error) {
 
+	// Who the message named before this save: only whom it adds is told.
+	saved, tellMentions := notificationBusiness.SaveOfMentions(ctx, "post", postUUID.String(), mentions)
+
 	currentTime := time.Now()
 	err = domain.UpdatePostByUUID(ctx, postUUID, currentTime)
 	if err != nil {
@@ -721,6 +728,9 @@ func UpdatePost(ctx context.Context, inputPostInfo *adapter.InputCreateOrUpdateP
 		return
 	}
 	refsBusiness.Saved(ctx, refsBusiness.Message, postUUID.String(), inputPostInfo.HTMLText, false)
+	if tellMentions {
+		tellPostMentionsAdded(ctx, notificationBusiness.ActorOf(ctx, postByUUID), channelId, postUUID.String(), "", inputPostInfo.HTMLText, mentions, saved)
+	}
 
 	mqttPost := mqttStruct.MqttPost{
 		Type:            mqttStruct.TYPE_UPDATE,
@@ -768,105 +778,17 @@ func UpdatePost(ctx context.Context, inputPostInfo *adapter.InputCreateOrUpdateP
 }
 
 func DeletePost(ctx context.Context, rawDgraphPost *dgraphStruct.DgraphPost, channelId string) (err error) {
-
-	postUUID, err := uuid.Parse(rawDgraphPost.Uuid)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/UpdatePost Failed to parse post UUID err: %+v",
-			err)
+	// The soft delete is shared with a bot's dropped streamed post
+	// (business/PostDelete); the webhook is a person's delete's own.
+	if err = postDelete.Delete(ctx, rawDgraphPost, channelId); err != nil {
 		return
 	}
-
-	currentTime := time.Now()
-
-	err = domain.SoftDeletePostByUUIUD(ctx, postUUID, currentTime)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/UpdatePost Failed to soft delete post err: %+v",
-			err)
-		return
-	}
-
-	// Its files and its replies' go with it, before it leaves the graph: a
-	// failure leaves the post there to delete again.
-	_, err = attachmentBusiness.ArchiveFilesOf(ctx, attachmentBusiness.PostFiles, postUUID, currentTime)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/DeletePost Failed to take its files off with it err: %+v",
-			err)
-		return
-	}
-
-	// add delete time in dgraph
-	dgraphPost := dgraphStruct.DgraphPost{
-		Uid:       "uid(po)",
-		Uuid:      postUUID.String(),
-		DType:     []string{"Post"},
-		DeletedAt: &currentTime,
-	}
-
-	_, err = domain.CreateOrUpdateDgraphPost(ctx, &dgraphPost)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/CreatePost Failed to update post in dgraph err: %+v",
-			err)
-
-		return
-
-	}
-
-	mqttPost := mqttStruct.MqttPost{
-		PostUuid:        postUUID.String(),
-		Type:            mqttStruct.TYPE_DELETE,
-		PostChannelUuid: channelId,
-		PostByUserUuid:  rawDgraphPost.PostBy.Uuid,
-	}
-
-	openSearchPost := &openSearchStruct.OpenSearchPost{
-		Uuid:          rawDgraphPost.Uuid,
-		PostDeletedAt: helpers.Int64Pointer(currentTime.Unix()),
-	}
-
-	helpers.GoSafeNamed("domain.DeletePostWithAttachmentsInOpenSearch", func() { domain.DeletePostWithAttachmentsInOpenSearch(openSearchPost, rawDgraphPost.MediaObj) })
-	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
-		[]string{"comment_post_id", "attachment_post_id"},
-		rawDgraphPost.Uuid,
-		currentTime.Unix(),
-		[]string{"comments", "attachments"},
-		"cascade",
-	)
-
-	// Skip live MQTT/AI/webhook fan-out during bulk Slack import.
-	// Postgres + Dgraph + OpenSearch are already updated; we just don't
-	// want to push delete events for thousands of historical messages
-	// or trigger AI embedding deletions one-by-one (a re-embed pass
-	// after the import handles cleanup more efficiently).
+	// Its notices are taken back (business/Notify Retract): those sent are
+	// marked retracted, those still held never go. It never fails the delete.
+	notifyBusiness.Notices.Retract(ctx, rawDgraphPost.Uuid)
 	if helpers.IsBulkImport(ctx) {
 		return
 	}
-
-	helpers.GoSafeNamed("mqttBusiness.PublishPost", func() { mqttBusiness.PublishPost(&mqttPost, channelId) })
-
-	// Delete AI embedding (async)
-	helpers.GoSafeNamed("business/Post/postBusiness:DeletePost", func() {
-		bgCtx := context.Background()
-		if err := ai.DeleteEmbedding(bgCtx, "post", rawDgraphPost.Uuid); err != nil {
-			helpers.LogErrorWithContext(bgCtx, "business/DeletePost failed to delete AI embedding: %v", err)
-		}
-	})
-	// Cascade into the Workspace Memory layer: drop any decisions /
-	// commitments / questions the extractor derived from this post so
-	// deleted content can't linger in memory or resurface via AI.
-	ai.DeleteMemoryBySourceAsync("post", rawDgraphPost.Uuid)
-	// Cascade soft-delete to AI embeddings (post + its comments)
-	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
-		[]string{"content_uuid", "post_uuid"},
-		rawDgraphPost.Uuid,
-		currentTime.Unix(),
-		[]string{"ai_embeddings"},
-		"cascade",
-	)
 
 	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() {
 		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "post.deleted", map[string]interface{}{
@@ -1036,6 +958,8 @@ func DeleteCommentOnPost(ctx context.Context, commentUUID uuid.UUID, rawDgraphCo
 
 		return
 	}
+	// The reply's notices are taken back (business/Notify Retract).
+	notifyBusiness.Notices.Retract(ctx, commentUUID.String())
 
 	// A reply sent to its channel too: its copy there goes with it.
 	mirrorReplyDelete(ctx, commentUUID.String())

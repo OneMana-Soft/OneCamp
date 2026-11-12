@@ -91,40 +91,6 @@ func GetNotificationTypeByUserIdAndChannelId(query string, userId string, channe
 	return
 }
 
-func GetEligibleUsersForChannelActivity(query string, channelId string, excludeUserID string, mentionsList []string, limitToMentions bool) (userIds []string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, channelId, excludeUserID, mentionsList, limitToMentions)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetEligibleUsersForChannelActivity Failed to get user's notification err: %+v",
-			err)
-		return
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var uid string
-		if err := rows.Scan(&uid); err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/GetEligibleUsersForChannelActivity Failed to scan user_id err: %+v",
-				err)
-			return nil, err
-		}
-		userIds = append(userIds, uid)
-	}
-	// Iteration can stop on a mid-query failure (dropped connection, server-side
-	// error) rather than on end-of-rows. Without it this returns a PARTIAL result
-	// with a nil error, and the caller cannot tell truncated data from a short list.
-	if err = rows.Err(); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/UserChannelNotification rows iteration failed err: %+v", err)
-		return
-	}
-
-	return
-}
-
 // GetLevelsInChannel runs query, which takes the channel's id and a list of
 // user ids and answers (user_id, notification_type) rows, into a map by user
 // id. Any error, a row's included, answers no map: a partial list would read
@@ -161,4 +127,12 @@ func GetMemberIDs(ctx context.Context, query string, channelID string, limit int
 		err = r.Scan(&id)
 		return
 	}, channelID, limit)
+}
+
+// GetMembersOnAll is the ids query reads for channelID, every one of them.
+func GetMembersOnAll(ctx context.Context, query string, channelID string) ([]string, error) {
+	return pgexec.Query(ctx, query, func(r pgexec.Row) (id string, err error) {
+		err = r.Scan(&id)
+		return
+	}, channelID)
 }

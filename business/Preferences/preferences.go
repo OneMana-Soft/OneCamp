@@ -20,6 +20,7 @@ import (
 
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	models "github.com/akashc777/OneCamp/models/postgres/Preference"
 	"github.com/google/uuid"
 )
@@ -49,13 +50,16 @@ var (
 )
 
 // changeHook is what follows a change of a key (OnChange).
-type changeHook = func(ctx context.Context, user uuid.UUID, value json.RawMessage)
+type changeHook = func(ctx context.Context, user uuid.UUID, value json.RawMessage) error
 
-// OnChange calls fn after every Set of the key named that keeps a value or
+// OnChange calls fn in every Set of the key named that keeps a value or
 // clears one, with the value the key reads as now (its default once
 // cleared), from an init. The key may be another package's: notify.schedule
-// follows calendar.working_hours and zone so (business/Notification). The
-// change is made by then, so fn answers nothing; it logs what it couldn't do.
+// follows calendar.working_hours and zone so (business/Notification). fn
+// runs in the change's own transaction (ctx carries it): when fn fails, the
+// change isn't kept either and fn's error is Set's, so what follows a key is
+// never left behind it (V-532) and the person is told their save didn't
+// happen.
 func OnChange(name string, fn changeHook) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -161,22 +165,31 @@ func Set(ctx context.Context, user uuid.UUID, name string, value json.RawMessage
 		}
 	}
 	if clear {
-		err = models.Clear(ctx, user, name)
 		value = k.Default
-	} else {
-		err = models.Put(ctx, user, name, value)
 	}
-	if err != nil {
-		return err
-	}
-	// Their other devices follow, on their own activity topic only.
-	mqttBusiness.PublishMessageToUser(user.String(), mqttStruct.MESSAGE_PREFERENCE, map[string]any{"key": name, "value": value})
-	// And what follows the change (OnChange), even once the request that
-	// made it is gone: the change is made.
-	for _, fn := range changeHooks(name) {
-		fn(context.WithoutCancel(ctx), user, value)
-	}
-	return nil
+	// The value and what follows it (OnChange) are one change.
+	return pgexec.InTx(ctx, func(ctx context.Context) error {
+		var err error
+		if clear {
+			err = models.Clear(ctx, user, name)
+		} else {
+			err = models.Put(ctx, user, name, value)
+		}
+		if err != nil {
+			return err
+		}
+		// Their other devices follow once it is kept, on their own activity
+		// topic only.
+		pgexec.AfterCommit(ctx, func(context.Context) {
+			mqttBusiness.PublishMessageToUser(user.String(), mqttStruct.MESSAGE_PREFERENCE, map[string]any{"key": name, "value": value})
+		})
+		for _, fn := range changeHooks(name) {
+			if err := fn(ctx, user, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // changeHooks is what follows a change of the key named, in the order registered.

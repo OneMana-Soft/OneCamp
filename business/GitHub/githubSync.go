@@ -98,7 +98,9 @@ var botLoginCache = newTTLCache(30 * time.Minute)
 
 // githubHTTPClient is a shared HTTP client for all GitHub API calls.
 // Using a single client enables connection pooling and TLS session reuse.
-var githubHTTPClient = &http.Client{Timeout: 15 * time.Second}
+// Its calls carry the workspace's connection, so on the demo they write
+// nothing (workspaceWrites).
+var githubHTTPClient = &http.Client{Timeout: 15 * time.Second, Transport: workspaceWrites{}}
 
 // getGitHubBotLogin returns the GitHub login for the current OAuth token, cached.
 // Retries up to 3 times with backoff to tolerate transient failures.
@@ -231,9 +233,10 @@ func processSyncQueue() {
 			}
 		} else {
 			errStr := syncErr.Error()
-			// A task linked outside its project's repositories stays refused.
+			// A task linked outside its project's repositories stays refused,
+			// and the demo writes nothing to GitHub however often it's asked.
 			// item.Attempts already counts this try (the claim added it).
-			if errors.Is(syncErr, errOutsideProject) || item.Attempts >= githubSyncMaxRetries {
+			if errors.Is(syncErr, errOutsideProject) || errors.Is(syncErr, ErrDemoGitHubWrite) || item.Attempts >= githubSyncMaxRetries {
 				if err := githubSyncQueueDomain.MarkGitHubSyncQueueFailed(ctx, item.ID, errStr, nil); err != nil {
 					helpers.LogErrorWithContext(ctx, "GitHub sync worker failed to mark failed: %v", err)
 				}
@@ -390,6 +393,9 @@ func executeGitHubSync(taskID uuid.UUID, syncType string, payloadJSON string) er
 
 	if syncErr != nil {
 		errStr := syncErr.Error()
+		if errors.Is(syncErr, ErrDemoGitHubWrite) {
+			errStr = ErrDemoGitHubWrite.Error() // the reason, without the request it stopped
+		}
 		// If GitHub returns 404, the issue was deleted — clear GitHub fields from task
 		if strings.Contains(errStr, "GitHub API error 404") {
 			clearGitHubFieldsFromTask(taskID)
@@ -750,22 +756,6 @@ func fetchGitHubUserProfile(ctx context.Context, githubLogin string) githubUserP
 	return githubUserProfile{Login: githubLogin}
 }
 
-func ExtractGitHubIssueInfo(url string) (owner, repo string, number int, err error) {
-	url = strings.TrimPrefix(url, "https://github.com/")
-	url = strings.TrimPrefix(url, "http://github.com/")
-	parts := strings.Split(url, "/")
-	if len(parts) < 4 || (parts[2] != "issues" && parts[2] != "pull") {
-		return "", "", 0, fmt.Errorf("invalid GitHub issue/PR URL: %s", url)
-	}
-	owner = parts[0]
-	repo = parts[1]
-	fmt.Sscanf(parts[3], "%d", &number)
-	if owner == "" || repo == "" || number == 0 {
-		return "", "", 0, fmt.Errorf("invalid GitHub issue/PR URL: %s", url)
-	}
-	return owner, repo, number, nil
-}
-
 func syncIssueCommentToGitHub(owner, repo string, number int, commentBody string, token string) (githubCommentID int64, err error) {
 	bodyBytes, _ := json.Marshal(map[string]string{"body": commentBody})
 	req, _ := http.NewRequest(http.MethodPost,
@@ -1105,7 +1095,8 @@ func syncTaskFieldsFromGitHub(ctx context.Context, taskUUID uuid.UUID, dgraphTas
 
 	targetStatus := statusFromIssue(issue.State, issue.StateReason, dgraphTaskInfo.Status)
 	if targetStatus != "" && targetStatus != dgraphTaskInfo.Status {
-		if err := taskBusiness.UpdateTaskStatusByTaskUUID(ctx, taskUUID, targetStatus, dgraphTaskInfo, actor); err != nil {
+		// A sync is a data move: the issue's state is the task's, told to nobody.
+		if err := taskBusiness.UpdateTaskStatusByTaskUUID(taskBusiness.QuietMove(ctx), taskUUID, targetStatus, dgraphTaskInfo, actor); err != nil {
 			helpers.LogErrorWithContext(ctx, "RefreshFromGitHub status sync failed: %v", err)
 		} else {
 			dgraphTaskInfo.Status = targetStatus
@@ -1123,7 +1114,7 @@ func syncTaskFieldsFromGitHub(ctx context.Context, taskUUID uuid.UUID, dgraphTas
 					if dgraphTaskInfo.Assignee != nil {
 						oldUID = dgraphTaskInfo.Assignee.Uid
 					}
-					if err := taskBusiness.UpdateTaskAssigneeByTaskUUID(taskBusiness.DataMove(ctx), taskUUID, assigneeDgraphInfo, oldUID, dgraphTaskInfo.Uid, dgraphTaskInfo, actor); err != nil {
+					if err := taskBusiness.UpdateTaskAssigneeByTaskUUID(taskBusiness.QuietMove(ctx), taskUUID, assigneeDgraphInfo, oldUID, dgraphTaskInfo.Uid, dgraphTaskInfo, actor); err != nil {
 						helpers.LogErrorWithContext(ctx, "RefreshFromGitHub assignee sync failed: %v", err)
 					}
 				}
@@ -1230,7 +1221,7 @@ func syncCommentsFromGitHub(ctx context.Context, taskUUID uuid.UUID, owner, repo
 			UserDgraphInfo:   *userDgraphInfo,
 		}
 
-		createdComment, err := taskBusiness.CreateTaskComment(ctx, taskUUID, dgraphTaskInfo, userInfo, commentInput, nil)
+		createdComment, err := taskBusiness.CreateTaskComment(taskBusiness.QuietMove(ctx), taskUUID, dgraphTaskInfo, userInfo, commentInput, nil)
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "syncCommentsFromGitHub failed to create comment %d: %v", c.ID, err)
 			continue

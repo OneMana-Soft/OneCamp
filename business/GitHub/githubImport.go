@@ -551,12 +551,11 @@ func createTaskFromIssue(ctx context.Context, link *githubLinkModel.GitHubLink, 
 		ProjectUuid:     link.ProjectId.String(),
 		TaskName:        issue.Title,
 		TaskDescription: issue.Body,
-		Priority:        dgraphStruct.TASK_PRIORITY_MEDIUM,
 		Status:          dgraphStruct.TASK_STATUS_TODO,
 		GitHubIssueNum:  &issue.Number,
 		GitHubIssueURL:  &issue.HTMLURL,
 	}
-	taskUUID, err := taskBusiness.CreateTask(ctx, link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, nil)
+	taskUUID, err := taskBusiness.CreateTask(taskBusiness.QuietMove(ctx), link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, nil)
 	if err != nil {
 		return err
 	}
@@ -583,12 +582,11 @@ func createTaskFromPR(ctx context.Context, link *githubLinkModel.GitHubLink, use
 		ProjectUuid:     link.ProjectId.String(),
 		TaskName:        pr.Title,
 		TaskDescription: pr.Body,
-		Priority:        dgraphStruct.TASK_PRIORITY_MEDIUM,
 		Status:          dgraphStruct.TASK_STATUS_TODO,
 		GitHubPRNum:     &pr.Number,
 		GitHubPRURL:     &pr.HTMLURL,
 	}
-	taskUUID, err := taskBusiness.CreateTask(ctx, link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, nil)
+	taskUUID, err := taskBusiness.CreateTask(taskBusiness.QuietMove(ctx), link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, nil)
 	if err != nil {
 		return err
 	}
@@ -604,7 +602,8 @@ func createTaskFromPR(ctx context.Context, link *githubLinkModel.GitHubLink, use
 	if _, dgErr := taskDomain.CreateOrUpdateDgraphTask(ctx, dgraphTask); dgErr != nil {
 		helpers.LogErrorWithContext(ctx, "github/createTaskFromPR Dgraph fields update failed for task=%s: %v", taskUUID.String(), dgErr)
 	}
+	// The import made this task from the pull request, so it follows its edits.
 	_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "pr_opened",
-		nil, nil, nil, &pr.Title, &pr.Body, nil)
+		nil, nil, nil, &pr.Title, &pr.Body, githubTaskActivityDomain.MadeByPR(pr.HTMLURL))
 	return nil
 }

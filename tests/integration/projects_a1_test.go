@@ -106,10 +106,6 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		_, _, err := taskWriter.Tasks.Apply(ctx, &u, uuid.MustParse(task), []taskWriter.Op{{Kind: taskWriter.OpEstimate, Value: json.RawMessage(fmt.Sprint(minutes))}}, 0)
 		return err
 	}
-	role := func(by, who, to string) (int, string) {
-		t.Helper()
-		return call(by, projectController.SetMemberRole, map[string]string{"project_uuid": w.project, "user_uuid": w.people[who].String()}, map[string]string{"role": to})
-	}
 	// edges is who's place in the project as the graph has it.
 	edges := func(who string) (member, admin bool) {
 		t.Helper()
@@ -131,10 +127,6 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		t.Helper()
 		return call(who, taskController.CreateTaskComment, nil, map[string]string{"task_uuid": task, "task_comment_body": "<p>Looks good</p>"})
 	}
-	policy := func(by string, value any) (int, string) {
-		t.Helper()
-		return call(by, projectController.SetProjectPolicy, map[string]string{"project_uuid": w.project, "key": policyBusiness.ProjectsEditWho.Key}, map[string]any{"value": value})
-	}
 	// opsSite is the Ops team's project named as the Web team's (bug c).
 	var opsSite string
 	archive := func(who string, h http.HandlerFunc) (int, string) {
@@ -152,7 +144,7 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		}
 
 		// A viewer reads, and neither changes nor comments; the graph keeps them in.
-		code, body := role("ana", "ben", "viewer")
+		code, body := w.setRole("ana", "ben", "viewer")
 		expect("making a member a viewer", code, body, http.StatusOK, "")
 		if got := row("ben"); got != roleModel.Viewer {
 			t.Errorf("the viewer's row: %q", got)
@@ -178,7 +170,7 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		expect("the members, with their roles", code, body, http.StatusOK, `"user_project_role":"viewer"`)
 
 		// A commenter comments, and still changes nothing.
-		code, body = role("ana", "ben", "commenter")
+		code, body = w.setRole("ana", "ben", "commenter")
 		expect("making a viewer a commenter", code, body, http.StatusOK, "")
 		if got := level("ben", workAccess.KindProject, w.project); got != accessBusiness.LevelComment {
 			t.Errorf("a commenter: %s, want comment", got)
@@ -190,7 +182,7 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		}
 
 		// An admin is one in both stores, and stops being one in both.
-		code, body = role("ana", "ben", "admin")
+		code, body = w.setRole("ana", "ben", "admin")
 		expect("making a commenter an admin", code, body, http.StatusOK, "")
 		if member, admin := edges("ben"); !member || !admin || row("ben") != roleModel.Admin {
 			t.Errorf("an admin: member %v, admin %v, row %q", member, admin, row("ben"))
@@ -198,30 +190,30 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		if got := level("ben", workAccess.KindProject, w.project); got != accessBusiness.LevelFull {
 			t.Errorf("an admin: %s, want full", got)
 		}
-		code, body = role("ana", "ben", "member")
+		code, body = w.setRole("ana", "ben", "member")
 		expect("making an admin a member", code, body, http.StatusOK, "")
 		if member, admin := edges("ben"); !member || admin || row("ben") != roleModel.Member {
 			t.Errorf("a member again: member %v, admin %v, row %q", member, admin, row("ben"))
 		}
 
 		// Only the project's admins and its team's admins change roles.
-		code, body = role("ben", "ana", "viewer")
+		code, body = w.setRole("ben", "ana", "viewer")
 		expect("a member changing an admin's role", code, body, http.StatusForbidden, "")
-		code, body = role("ana", "ana", "viewer")
+		code, body = w.setRole("ana", "ana", "viewer")
 		expect("the creator stepping down", code, body, http.StatusForbidden, "")
-		code, body = role("dee", "ben", "commenter")
+		code, body = w.setRole("dee", "ben", "commenter")
 		expect("the team's admin changing a role", code, body, http.StatusOK, "")
-		code, body = role("dee", "ben", "member")
+		code, body = w.setRole("dee", "ben", "member")
 		expect("the team's admin changing it back", code, body, http.StatusOK, "")
-		code, body = role("cy", "ben", "viewer")
+		code, body = w.setRole("cy", "ben", "viewer")
 		expect("someone outside the project", code, body, http.StatusNotFound, "")
 	})
 
 	t.Run("who can change tasks is the project's to choose", func(t *testing.T) {
-		code, body := policy("ben", "admins")
+		code, body := w.setEditWho("ben", "admins")
 		expect("a member choosing", code, body, http.StatusForbidden, "Only the project's admins choose who can change its tasks.")
 
-		code, body = policy("ana", "admins")
+		code, body = w.setEditWho("ana", "admins")
 		expect("admins only", code, body, http.StatusOK, "")
 		if err := change("ben", w.task); !errors.Is(err, workAccess.ErrNotAllowed) || !strings.Contains(err.Error(), "Only this project's admins change its tasks.") {
 			t.Errorf("a member's change, admins only: %v", err)
@@ -234,7 +226,7 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		code, body = call("ben", projectController.ProjectPolicies, map[string]string{"project_uuid": w.project}, nil)
 		expect("the project's policies, read by a member", code, body, http.StatusOK, `"value":"admins"`)
 
-		code, body = policy("ana", "assigned")
+		code, body = w.setEditWho("ana", "assigned")
 		expect("members on the tasks assigned to them", code, body, http.StatusOK, "")
 		if err := change("ben", w.mine); err != nil {
 			t.Errorf("a member changing a task assigned to them: %v", err)
@@ -243,9 +235,9 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 			t.Errorf("a member changing a task assigned to someone else: %v", err)
 		}
 
-		code, body = policy("ana", "nobody")
+		code, body = w.setEditWho("ana", "nobody")
 		expect("a choice that isn't one", code, body, http.StatusBadRequest, "")
-		code, body = policy("ana", nil)
+		code, body = w.setEditWho("ana", nil)
 		expect("back to the workspace's", code, body, http.StatusOK, "")
 		if err := change("ben", w.task); err != nil {
 			t.Errorf("a member's change, the workspace's default again: %v", err)
@@ -305,11 +297,11 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		w.dg.Mutate(t, []map[string]any{{"uid": "_:board", "dgraph.type": "Board", "board_uuid": board, "board_title": "Sketches",
 			"board_private": false, "board_deleted_at": "0001-01-01T00:00:00Z"}})
 		link := map[string]string{"source_type": "task", "source_uuid": w.task, "ref_type": "board", "ref_uuid": board}
-		code, body := role("ana", "ben", "viewer")
+		code, body := w.setRole("ana", "ben", "viewer")
 		expect("making a member a viewer", code, body, http.StatusOK, "")
 		code, body = call("ben", entityLinkController.AddLink, nil, link)
 		expect("a viewer linking a board to a task", code, body, http.StatusForbidden, "")
-		code, body = role("ana", "ben", "member")
+		code, body = w.setRole("ana", "ben", "member")
 		expect("and a member again", code, body, http.StatusOK, "")
 		code, body = call("fay", entityLinkController.AddLink, nil, link)
 		expect("an admin outside the member list linking it", code, body, http.StatusOK, "")
@@ -350,7 +342,7 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 	})
 
 	t.Run("D5: a workspace admin takes a team's stewardship in one recorded step", func(t *testing.T) {
-		code, body := role("wes", "ben", "viewer")
+		code, body := w.setRole("wes", "ben", "viewer")
 		expect("a workspace admin outside the team", code, body, http.StatusNotFound, "")
 		code, body = call("ben", teamController.MakeMeTeamAdmin, map[string]string{"team_uuid": w.team}, nil)
 		expect("someone who isn't a workspace admin", code, body, http.StatusForbidden, "")
@@ -369,9 +361,9 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		if n := recorded(); n != 1 {
 			t.Errorf("the step is recorded %d times, want once", n)
 		}
-		code, body = role("wes", "ben", "viewer")
+		code, body = w.setRole("wes", "ben", "viewer")
 		expect("the new steward changing a role", code, body, http.StatusOK, "")
-		code, body = role("wes", "ben", "member")
+		code, body = w.setRole("wes", "ben", "member")
 		expect("and changing it back", code, body, http.StatusOK, "")
 
 		code, body = call("wes", teamController.MakeMeTeamAdmin, map[string]string{"team_uuid": w.team}, nil)
@@ -453,12 +445,12 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		if got := mine(); !strings.Contains(got, `"task_access":{"edit":true,"delete":false`) {
 			t.Errorf("a member's task, members changing tasks: %s", got)
 		}
-		code, body := policy("ana", "admins")
+		code, body := w.setEditWho("ana", "admins")
 		expect("admins only", code, body, http.StatusOK, "")
 		if got := mine(); !strings.Contains(got, `"task_access":{"edit":false,"delete":false`) {
 			t.Errorf("a member's task, admins only: %s", got)
 		}
-		code, body = policy("ana", nil)
+		code, body = w.setEditWho("ana", nil)
 		expect("back to the workspace's", code, body, http.StatusOK, "")
 	})
 
@@ -479,14 +471,14 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 				WithContext(context.WithValue(c, chi.RouteCtxKey, rc)))
 			return rec.Code, compact(rec.Body.Bytes())
 		}
-		code, body := policy("ana", "admins")
+		code, body := w.setEditWho("ana", "admins")
 		expect("admins only", code, body, http.StatusOK, "")
 		code, body = status(byToken("ana"), "inProgress")
 		expect("the project admin's token changing a task, admins only", code, body, http.StatusForbidden, "Only this project's admins change its tasks.")
 		if err := change("ana", w.task); err != nil {
 			t.Errorf("the project admin in the app, admins only: %v", err)
 		}
-		code, body = policy("ana", nil)
+		code, body = w.setEditWho("ana", nil)
 		expect("back to the workspace's", code, body, http.StatusOK, "")
 		code, body = status(byToken("ana"), "inProgress")
 		expect("the project admin's token, members changing tasks", code, body, http.StatusOK, "")

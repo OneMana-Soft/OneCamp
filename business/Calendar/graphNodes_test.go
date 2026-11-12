@@ -165,7 +165,7 @@ func TestAnAllHandsNodeIsWithItsFirst200(t *testing.T) {
 	for range maxWith + 50 {
 		guests = append(guests, uuid.New())
 	}
-	p, ok := meetingNode(e, guests, nil)
+	p, ok := meetingNode(e, guests, nil, nil)
 	if !ok || len(p.Edges["cal_event_with"]) != maxWith || p.Edges["cal_event_with"][0].UUID != guests[1].String() {
 		t.Fatalf("an all-hands: %d with, node %v", len(p.Edges["cal_event_with"]), ok)
 	}

@@ -19,7 +19,7 @@ package business
 // It is intentionally SINGLE-TABLE (no joins): the row model is a JSON cell bag,
 // so cross-table joins belong in a future connector/pushdown layer, not here.
 // Everything reuses aggregate.go's audited helpers (resolveField, groupLabels,
-// cellNumber, accumulator) and reads its filters as the grid does
+// fieldTypes.CellNumber, accumulator) and reads its filters as the grid does
 // (rowFilters.go), so there is no second, divergent data path. RunPlan is pure (fields+rows+plan → result) for exhaustive unit tests;
 // ExecutePlan wraps it with the same permission-checked, bounded row loading as
 // AggregateTable.
@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strings"
 
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -218,7 +219,7 @@ func RunPlan(fields []*model.Field, rows []*model.Row, plan QueryPlan) (*PlanRes
 			for i, vf := range valueFields {
 				b.accs[i].count++
 				if vf != nil {
-					if num, ok := cellNumber(values[vf.Id.String()]); ok {
+					if num, ok := fieldTypes.CellNumber(values[vf.Id.String()]); ok {
 						b.accs[i].addValue(num)
 					}
 				}

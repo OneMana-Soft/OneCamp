@@ -563,10 +563,8 @@ func (cw *compiledWorkflow) runAction(ctx context.Context, act WorkflowAction, e
 		if strings.TrimSpace(taskName) == "" {
 			taskName = "Workflow task"
 		}
+		// None given is none, as a task made in the app without one.
 		priority := act.Priority
-		if priority == "" {
-			priority = "medium"
-		}
 		// As the rule's owner, through the Task Writer: the same check as
 		// making it by hand, on both editions.
 		var owner *userModels.UserInfo

@@ -10,9 +10,13 @@
 // (business/Task TaskFor, Work Access's one check), and each op is the
 // business function its handler calls. Only the ops whose whole rule already lives in those functions are
 // here: status, estimate, rank, delete and restore, and the three rules make
-// (package 9, R1): priority (one of the priorities), assignee (a project
+// (package 9, R1): priority (one of the priorities, or none), assignee (a project
 // member, or nobody) and due (a time, or none), whose handlers' checks moved
-// here. The others answer
+// here; and parent (jira-01 J-H), the work hierarchy's one change: the task
+// goes under an epic or a task at the top, or out to the top
+// (business/Task Reparent); and relation, a typed link to another task
+// (relates, duplicates, clones; business/Task ChangeLink), never "blocks",
+// which is a dependency. The others answer
 // ErrUnavailable, because their rules still live in the handlers
 // (controllers/Task), and a copy here would be a second rule: A3 moves them
 // behind this interface and makes the handlers thin adapters over it.
@@ -35,6 +39,7 @@ import (
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -107,6 +112,8 @@ var (
 	isMember     = projectBusiness.HasMember
 	personByUUID = userDomain.GetDgraphUserInfoByUUID
 	reorder      = taskBusiness.Reorder
+	setParent    = taskBusiness.Reparent
+	setRelation  = taskBusiness.ChangeLink
 )
 
 // todaysWrites makes the ops today's handlers make, with their check.
@@ -114,13 +121,15 @@ type todaysWrites struct{}
 
 // made is the ops the default makes.
 var made = map[OpKind]bool{OpStatus: true, OpEstimate: true, OpDelete: true, OpRestore: true,
-	OpRank: true, OpPriority: true, OpAssignee: true, OpDue: true}
+	OpRank: true, OpPriority: true, OpAssignee: true, OpDue: true, OpParent: true, OpRelation: true}
 
 // prepared is an op's value read and checked before anything is changed.
 type prepared struct {
 	priority string
 	assignee *dgraphStruct.DgraphUser // nil: nobody
 	due      time.Time                // zero: none
+	parent   string                   // a task's uuid; "": the top
+	link     taskBusiness.LinkAsk
 }
 
 // prepare reads the values of the ops whose checks don't need the task.
@@ -128,8 +137,9 @@ func prepare(op Op) (prepared, error) {
 	var p prepared
 	switch op.Kind {
 	case OpPriority:
-		if json.Unmarshal(op.Value, &p.priority) != nil || !taskPriority.Is(p.priority) {
-			return p, fmt.Errorf("%w: a priority is urgent, high, medium or low", ErrBadValue)
+		// "" is No priority: it takes the priority off.
+		if json.Unmarshal(op.Value, &p.priority) != nil || !taskPriority.IsOrNone(p.priority) {
+			return p, fmt.Errorf("%w: a priority is urgent, high, medium, low or none", ErrBadValue)
 		}
 	case OpDue:
 		var s *string
@@ -154,6 +164,39 @@ func prepare(op Op) (prepared, error) {
 			}
 			p.assignee = &dgraphStruct.DgraphUser{Uuid: s}
 		}
+	case OpParent:
+		var s string
+		if json.Unmarshal(op.Value, &s) != nil {
+			return p, fmt.Errorf("%w: a parent is a task's id or empty", ErrBadValue)
+		}
+		if s != "" {
+			id, err := uuid.Parse(s)
+			if err != nil {
+				return p, fmt.Errorf("%w: a parent is a task's id or empty", ErrBadValue)
+			}
+			p.parent = id.String()
+		}
+	case OpRelation:
+		var v struct {
+			Kind      string `json:"kind"`
+			Task      string `json:"task"`
+			Direction string `json:"direction"`
+			Remove    bool   `json:"remove"`
+		}
+		if json.Unmarshal(op.Value, &v) != nil {
+			return p, fmt.Errorf("%w: a link is {kind, task, direction, remove}", ErrBadValue)
+		}
+		if err := taskBusiness.LinkKind(v.Kind); err != nil {
+			return p, err
+		}
+		id, err := uuid.Parse(v.Task)
+		if err != nil {
+			return p, fmt.Errorf("%w: a link names a task by its id", ErrBadValue)
+		}
+		if v.Direction != "in" {
+			v.Direction = "out"
+		}
+		p.link = taskBusiness.LinkAsk{Kind: v.Kind, Other: id.String(), Direction: v.Direction, Remove: v.Remove}
 	}
 	return p, nil
 }
@@ -226,6 +269,9 @@ func (todaysWrites) Apply(ctx context.Context, who *userModels.UserInfo, taskID 
 		values[i].assignee = person
 	}
 	me := &who.UserDgraphInfo
+	// A parent or a link's other task is read as who: one they can't see is
+	// not there.
+	asWho := taskread.ActingAs(ctx, *who)
 	changes := make([]Change, 0, len(ops))
 	for i, op := range ops {
 		var err error
@@ -272,6 +318,10 @@ func (todaysWrites) Apply(ctx context.Context, who *userModels.UserInfo, taskID 
 		case OpDue:
 			due := values[i].due
 			err = setDates(ctx, taskID, taskBusiness.TaskDates{Due: &due}, task, me)
+		case OpParent:
+			err = setParent(asWho, taskID, values[i].parent, me)
+		case OpRelation:
+			err = setRelation(asWho, taskID, values[i].link, me)
 		}
 		if err != nil {
 			return task, changes, err

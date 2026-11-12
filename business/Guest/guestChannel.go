@@ -330,12 +330,12 @@ func replyAsGuest(ctx context.Context, bot *userBusiness.BotIdentity, channelID 
 	if p == nil || p.Channel == nil || p.Channel.Uuid != channelID.String() || helpers.IsSoftDeleted(p.DeletedAt) {
 		return ErrNotFound
 	}
-	res, err := botpost.PostCommentToPostAsBot(ctx, postID, body, bot)
+	res, err := botpost.WriteCommentToPostAsBot(ctx, postID, body, bot)
 	if err != nil {
 		return err
 	}
 	if notifyDue(ctx, "thread", postID.String()) {
-		postBusiness.NotifyReplyFor(bot, who, p, res.CommentUUID, guestBody(text), text)
+		botpost.TellReply(bot, who, p, res.CommentUUID, guestBody(text), text, time.Now())
 	} else {
 		threadIndex.Replied(ctx, threadIndex.Reply{Thread: threadIndex.OfPost(p), At: time.Now()})
 	}

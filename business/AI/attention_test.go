@@ -1,13 +1,17 @@
 package business
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/AI"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	pendingModels "github.com/akashc777/OneCamp/models/postgres/PendingAction"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
+	"github.com/google/uuid"
 )
 
 // sortAttention must order by urgency tier first, then earliest due date within
@@ -141,5 +145,63 @@ func TestADocHighlightSendsItsTitleApartFromItsBody(t *testing.T) {
 	long := strings.Repeat("x", 300)
 	if h := toBriefingHighlight(ai.SimilarResult{ContentType: "task", ContentText: "Name\n\n" + long}); len([]rune(h.Excerpt)) > 161 {
 		t.Fatalf("excerpt not cut: %d runes", len([]rune(h.Excerpt)))
+	}
+}
+
+// An approval row on Home says which agent is waiting, read once for the rows
+// shown and not for the ones past the cap; one with no agent reads nothing
+// and keeps its plain line.
+func TestAttentionApprovalsSayWhichAgentWaits(t *testing.T) {
+	savedList, savedNames := listOpenActions, agentNamesByID
+	t.Cleanup(func() { listOpenActions, agentNamesByID = savedList, savedNames })
+
+	me := uuid.New()
+	info := &userModels.UserInfo{}
+	info.UserDgraphInfo.Uuid = me.String()
+
+	captain, late := uuid.New(), uuid.New()
+	listOpenActions = func(_ context.Context, user uuid.UUID) ([]*pendingModels.PendingAction, error) {
+		if user != me {
+			t.Fatalf("listed for %s, want the caller", user)
+		}
+		out := []*pendingModels.PendingAction{
+			{Id: uuid.New(), Description: "Post the notes", AgentID: &captain},
+			{Id: uuid.New(), Description: "Mark Q4-12 done"},
+		}
+		for len(out) < attentionMaxApprovals {
+			out = append(out, &pendingModels.PendingAction{Id: uuid.New(), Description: "Another"})
+		}
+		// Past the cap: never shown, so never named.
+		return append(out, &pendingModels.PendingAction{Id: uuid.New(), Description: "Hidden", AgentID: &late}), nil
+	}
+	reads := 0
+	agentNamesByID = func(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+		reads++
+		if len(ids) != 1 || ids[0] != captain {
+			t.Fatalf("named %v, want only the shown agent", ids)
+		}
+		return map[uuid.UUID]string{captain: "Release Captain"}, nil
+	}
+
+	items := gatherApprovalItems(context.Background(), info)
+	if reads != 1 || len(items) != attentionMaxApprovals {
+		t.Fatalf("%d reads, %d rows; want 1 read and %d rows", reads, len(items), attentionMaxApprovals)
+	}
+	if items[0].Subtitle != "Release Captain is waiting for you" {
+		t.Fatalf("agent row subtitle %q", items[0].Subtitle)
+	}
+	if items[1].Subtitle != "Waiting for you to approve or deny" {
+		t.Fatalf("plain row subtitle %q", items[1].Subtitle)
+	}
+
+	listOpenActions = func(context.Context, uuid.UUID) ([]*pendingModels.PendingAction, error) {
+		return []*pendingModels.PendingAction{{Id: uuid.New(), Description: "Mark Q4-12 done"}}, nil
+	}
+	agentNamesByID = func(context.Context, []uuid.UUID) (map[uuid.UUID]string, error) {
+		t.Fatal("no agent asked, so no read")
+		return nil, nil
+	}
+	if got := gatherApprovalItems(context.Background(), info); len(got) != 1 {
+		t.Fatalf("%d rows, want 1", len(got))
 	}
 }

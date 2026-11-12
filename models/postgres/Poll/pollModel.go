@@ -38,10 +38,24 @@ type Poll struct {
 	Anonymous bool
 	// ResultsHidden: only whoever runs the call sees the counts until shared.
 	ResultsHidden bool
+	// BoardID is the board a board's poll is on (miro-28 polls on a slide),
+	// and FrameID the frame on it; nil and "" for any other poll.
+	BoardID *uuid.UUID
+	FrameID string
 }
 
 // ErrNotFound is a poll id that does not exist.
 var ErrNotFound = errors.New("poll not found")
+
+// DeleteBoards removes for good the polls of boards purged past the trash
+// (business/Board retention.go), and their votes with them (poll_votes
+// cascades). boards are uuids, as uuids are written.
+func DeleteBoards(ctx context.Context, boards []string) (int64, error) {
+	if len(boards) == 0 {
+		return 0, nil
+	}
+	return pgexec.Exec(ctx, `DELETE FROM polls WHERE board_uuid = ANY($1::uuid[])`, pq.Array(boards))
+}
 
 func db() *sql.DB { return postgresInit.DBConn.SqlDB }
 
@@ -56,9 +70,11 @@ func Create(ctx context.Context, p *Poll) error {
 		return err
 	}
 	_, err = pgexec.Exec(ctx, `
-		INSERT INTO polls (id, channel_id, question, options, multiple, closes_at, created_by, session_id, anonymous, results_hidden)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		p.ID, p.ChannelID, p.Question, opts, p.Multiple, p.ClosesAt, p.CreatedBy, p.SessionID, p.Anonymous, p.ResultsHidden)
+		INSERT INTO polls (id, channel_id, question, options, multiple, closes_at, created_by, session_id, anonymous, results_hidden,
+			board_uuid, frame_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''))`,
+		p.ID, p.ChannelID, p.Question, opts, p.Multiple, p.ClosesAt, p.CreatedBy, p.SessionID, p.Anonymous, p.ResultsHidden,
+		p.BoardID, p.FrameID)
 	return err
 }
 
@@ -66,10 +82,21 @@ func Create(ctx context.Context, p *Poll) error {
 // than limit, and says whether it did.
 func CreateInSession(ctx context.Context, p *Poll, limit int) (bool, error) {
 	session := *p.SessionID
-	return pgexec.Capped(ctx, "call_polls:"+session.String(), limit,
-		func(ctx context.Context) (int, error) {
-			return pgexec.Scalar[int](ctx, `SELECT count(*) FROM polls WHERE session_id = $1`, session)
-		},
+	return createCapped(ctx, p, "call_polls:"+session.String(), limit, `SELECT count(*) FROM polls WHERE session_id = $1`, session)
+}
+
+// CreateOnBoard stores a board's poll (p.BoardID) when the board has fewer
+// than limit, and says whether it did.
+func CreateOnBoard(ctx context.Context, p *Poll, limit int) (bool, error) {
+	board := *p.BoardID
+	return createCapped(ctx, p, "board_polls:"+board.String(), limit, `SELECT count(*) FROM polls WHERE board_uuid = $1`, board)
+}
+
+// createCapped stores p when count, of owner, answers fewer than limit, one
+// create at a time under key.
+func createCapped(ctx context.Context, p *Poll, key string, limit int, count string, owner uuid.UUID) (bool, error) {
+	return pgexec.Capped(ctx, key, limit,
+		func(ctx context.Context) (int, error) { return pgexec.Scalar[int](ctx, count, owner) },
 		func(ctx context.Context) error { return Create(ctx, p) })
 }
 
@@ -92,15 +119,15 @@ func TakeBack(ctx context.Context, pollID uuid.UUID) error {
 }
 
 const pollColumns = `id, channel_id, post_id, question, options, multiple, closes_at, closed_at, created_by, created_at,
-	session_id, anonymous, results_hidden`
+	session_id, anonymous, results_hidden, board_uuid, coalesce(frame_id, '')`
 
 func scanPoll(row pgexec.Row) (*Poll, error) {
 	var p Poll
 	var opts []byte
-	var post, session sql.NullString
+	var post, session, board sql.NullString
 	var closes, closed sql.NullTime
 	err := row.Scan(&p.ID, &p.ChannelID, &post, &p.Question, &opts, &p.Multiple, &closes, &closed, &p.CreatedBy, &p.CreatedAt,
-		&session, &p.Anonymous, &p.ResultsHidden)
+		&session, &p.Anonymous, &p.ResultsHidden, &board, &p.FrameID)
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +142,11 @@ func scanPoll(row pgexec.Row) (*Poll, error) {
 	if session.Valid {
 		if id, perr := uuid.Parse(session.String); perr == nil {
 			p.SessionID = &id
+		}
+	}
+	if board.Valid {
+		if id, perr := uuid.Parse(board.String); perr == nil {
+			p.BoardID = &id
 		}
 	}
 	if closes.Valid {
@@ -138,6 +170,11 @@ func Get(ctx context.Context, pollID uuid.UUID) (*Poll, error) {
 // OfSession lists a call's polls, oldest first.
 func OfSession(ctx context.Context, session uuid.UUID) ([]*Poll, error) {
 	return pgexec.Query(ctx, `SELECT `+pollColumns+` FROM polls WHERE session_id = $1 ORDER BY created_at, id`, scanPoll, session)
+}
+
+// OfBoard lists a board's polls, oldest first.
+func OfBoard(ctx context.Context, board uuid.UUID) ([]*Poll, error) {
+	return pgexec.Query(ctx, `SELECT `+pollColumns+` FROM polls WHERE board_uuid = $1 ORDER BY created_at, id`, scanPoll, board)
 }
 
 // SetResultsHidden holds a call's poll's counts back for whoever runs the

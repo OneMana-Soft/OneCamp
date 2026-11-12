@@ -79,30 +79,6 @@ func GetNotificationTypeByUserIdAndChannelId(ctx context.Context, userId string,
 
 }
 
-func GetEligibleUsersForChannelActivity(ctx context.Context, channelId string, excludeUserID string, mentionsList []string, limitToMentions bool) (userIds []string, err error) {
-	query := `
-		SELECT 
-			user_id
-		FROM 
-			users_channel_notification
-		WHERE 
-			channel_id = $1
-			AND user_id != $2
-			AND (
-				  (notification_type = 'all' AND ($4 = false OR user_id = ANY($3))) OR
-				  (notification_type = 'mention' AND user_id = ANY($3))
-			  )
-	`
-	userIds, err = models.GetEligibleUsersForChannelActivity(query, channelId, excludeUserID, mentionsList, limitToMentions)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetEligibleUsersForChannelActivity Failed to get eligible users err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 // GetLevelsInChannel is the notification setting for the channel of each of
 // the people (by user id) who are in it, keyed by lower-case user id. Someone
 // with no setting isn't in the channel: a member has one from joining
@@ -145,6 +121,23 @@ func MemberIDs(ctx context.Context, channelID string, limit int) ([]string, erro
 		helpers.LogErrorWithContext(ctx,
 			"domain/MemberIDs Failed to get the channel's members err: %+v",
 			err)
+		return nil, err
+	}
+	return ids, nil
+}
+
+// MembersOnAll is who of the channel's members hears everything in it (on
+// "all"), by lower-case user id, every one of them (no cap: each hears of
+// every post). The Notification Router's all_posts and call audience
+// (business/Notify); whether a cause reaches someone is its levelLets'.
+func MembersOnAll(ctx context.Context, channelID string) ([]string, error) {
+	ids, err := models.GetMembersOnAll(ctx, `
+		SELECT lower(user_id::text)
+		FROM users_channel_notification
+		WHERE channel_id = $1 AND notification_type = 'all'
+	`, channelID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/MembersOnAll Failed to get the channel's members on all err: %+v", err)
 		return nil, err
 	}
 	return ids, nil

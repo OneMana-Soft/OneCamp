@@ -674,3 +674,88 @@ func TestABatchsRelationSentAgainIsTheOneItMade(t *testing.T) {
 		t.Errorf("Vendors has %d fields showing a relation's links; want the one pair's", n)
 	}
 }
+
+// A delete a send applied but whose record missed it (the record's write
+// failed after the item's commit) is answered, when the same batch is sent
+// again, as deleted before: it is in the trash already, and the resend must
+// not refuse the whole batch over it, nor write a second audit row. A first
+// send naming something already in the trash is refused as before: only a
+// send of the same batch knows the delete was its own (V-529 (1)).
+func TestABatchsDeleteSentAgainIsAnsweredAsDone(t *testing.T) {
+	w := newItemWorld(t)
+	budget := w.field(w.plan, "Budget", model.FieldNumber, nil)
+	info := userModels.UserInfo{}
+	info.UserPostgresInfo.Id = w.me.UserID
+	ctx := context.WithValue(w.ctx, helpers.UserInfoContextKey, info)
+	was := openItems
+	t.Cleanup(func() { openItems = was })
+	sends := 0
+	openItems = func(context.Context, string, string, string, string) (batchRecord, error) {
+		sends++
+		r := newRecord()
+		if sends == 1 {
+			r.failMark[0] = true // the delete is done, but its record misses it
+		} else {
+			r.again = true // a send of this batch came before (its record holds no item)
+		}
+		return r, nil
+	}
+	views := func(key string, args map[string]any) (any, error) {
+		args["id"], args["key"] = w.plan.Id.String(), key
+		return serveViewsBatch(ctx, v1api.Call{Args: args})
+	}
+	out, err := views("make-board", map[string]any{"create": []any{map[string]any{"name": "Board", "type": model.ViewBoard}}})
+	if err == nil {
+		t.Fatalf("the view's create answered %+v; want it stopped by its record's write", out)
+	}
+	var board uuid.UUID
+	if n := w.count(`SELECT count(*) FROM data_table_views WHERE table_id = $1 AND name = 'Board' AND deleted_at IS NULL`, w.plan.Id); n != 1 {
+		t.Fatalf("the view's create left %d Board views; want one", n)
+	}
+	if err := postgresInit.DBConn.SqlDB.QueryRowContext(w.ctx, `SELECT id FROM data_table_views WHERE table_id = $1 AND name = 'Board'`, w.plan.Id).Scan(&board); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		what  string
+		id    uuid.UUID
+		send  func(key string, args map[string]any) (any, error)
+		live  func() bool
+		audit string
+	}{
+		{"field", budget.Id, func(key string, args map[string]any) (any, error) {
+			args["id"], args["key"] = w.plan.Id.String(), key
+			return serveFieldsBatch(ctx, v1api.Call{Args: args})
+		}, func() bool { _, live := w.fieldName(budget.Id); return live }, "table.field.deleted"},
+		{"view", board, views, func() bool { _, live := w.viewName(board); return live }, "table.view.deleted"},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			sends = 0
+			del := map[string]any{"delete": []any{c.id.String()}}
+			if out, err := c.send("drop-"+c.what, del); err == nil {
+				t.Fatalf("the first send answered %+v; want it stopped by its record's write", out)
+			}
+			if c.live() {
+				t.Fatalf("the first send's delete didn't take: the %s is live", c.what)
+			}
+			out, err := c.send("drop-"+c.what, map[string]any{"delete": []any{c.id.String()}})
+			if err != nil {
+				t.Fatalf("the batch sent again: %v; want its delete answered as done before", err)
+			}
+			done, ok := out.(apiBatchDone)
+			if !ok || len(done.Deleted) != 1 {
+				t.Fatalf("the batch sent again answered %+v; want one delete", out)
+			}
+			var again apiDeleted
+			if err := json.Unmarshal(done.Deleted[0], &again); err != nil || !again.Deleted || !again.DeletedBefore || again.ID != c.id {
+				t.Errorf("sent again, the delete answered %s (%v); want deleted and deleted_before for %s", done.Deleted[0], err, c.id)
+			}
+			if actions, _ := w.rowsAbout(c.id); slices.Index(actions, c.audit) < 0 || len(slices.DeleteFunc(slices.Clone(actions), func(a string) bool { return a != c.audit })) != 1 {
+				t.Errorf("the %s's audit rows are %v; want one %s", c.what, actions, c.audit)
+			}
+			sends = 0 // a first send of another batch: nothing came before it
+			if out, err := c.send("drop-again-"+c.what, map[string]any{"delete": []any{c.id.String()}}); err == nil {
+				t.Errorf("a first send naming a %s in the trash answered %+v; want it refused", c.what, out)
+			}
+		})
+	}
+}

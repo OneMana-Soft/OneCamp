@@ -164,12 +164,36 @@ var (
 // API token they make them as one of the team's members: a team admin's
 // power stays theirs to use in the app, as asToken keeps a project's.
 func CanMakeProjects(ctx context.Context, team *dgraphStruct.DgraphTeam) bool {
-	if team != nil && viaToken(ctx) {
+	return makesAs(team, viaToken(ctx), makeWho(ctx))
+}
+
+// CanMakeProjectsIn is the teams among teams (each read for the person) they
+// may make projects in, in their order: CanMakeProjects for many, with one
+// read of the workspace's "Who can make projects". None is an empty list.
+func CanMakeProjectsIn(ctx context.Context, teams []*dgraphStruct.DgraphTeam) []*dgraphStruct.DgraphTeam {
+	out := []*dgraphStruct.DgraphTeam{}
+	if len(teams) == 0 {
+		return out
+	}
+	token, who := viaToken(ctx), makeWho(ctx)
+	for _, team := range teams {
+		if makesAs(team, token, who) {
+			out = append(out, team)
+		}
+	}
+	return out
+}
+
+// makesAs is MayMakeProjects for someone acting through an API token or not:
+// with one, as one of the team's members (a copy; team is left as read).
+// Pure.
+func makesAs(team *dgraphStruct.DgraphTeam, token bool, who string) bool {
+	if team != nil && token {
 		member := *team
 		member.IsAdmin = 0
 		team = &member
 	}
-	return MayMakeProjects(team, makeWho(ctx))
+	return MayMakeProjects(team, who)
 }
 
 // Of is how the person (userUUID) stands to p, as read for them: p's member

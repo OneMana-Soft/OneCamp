@@ -44,6 +44,7 @@ type eventReads struct {
 	mu       sync.Mutex
 	projects map[uuid.UUID]uuid.UUID
 	links    map[uuid.UUID][]*githubLinkModel.GitHubLink
+	keys     map[string]uuid.UUID // the task each key in code names (codeRefs.go)
 }
 
 type eventReadsKey struct{}
@@ -53,6 +54,7 @@ func withEventReads(ctx context.Context) context.Context {
 	return context.WithValue(ctx, eventReadsKey{}, &eventReads{
 		projects: map[uuid.UUID]uuid.UUID{},
 		links:    map[uuid.UUID][]*githubLinkModel.GitHubLink{},
+		keys:     map[string]uuid.UUID{},
 	})
 }
 
@@ -217,15 +219,32 @@ func leadTask(ctx context.Context, owner, name string, syncs func(*githubLinkMod
 	return "", uuid.Nil, nil, false
 }
 
+// branchTasks is the tasks carrying a branch in projects that link a
+// repository, the first to carry it first; a seam for tests.
+var branchTasks = taskDomain.FindTaskUUIDsByGitHubBranch
+
 // onBranch is a lead to the task on branch of a project that links owner/name
 // ("" for none, and for a read that failed, which the read logs).
+//
+// A ref (a key, closing words or a stored branch) reaches only a task the
+// integration's bot may read: a restricted task's branch neither attaches a
+// pull request nor moves it, and nothing about it goes out (no
+// github.pr.opened, no AI review, no project MQTT). So the lead is the first
+// task carrying the branch that the bot may read (botReads, as codeTask
+// checks a key's task), and a restricted one carrying it hides no other: the
+// task a pull request from its branch made carries that branch too.
 func onBranch(ctx context.Context, owner, name, branch string) func() string {
 	return func() string {
 		if branch == "" {
 			return ""
 		}
-		taskUUIDStr, _ := taskDomain.FindTaskUUIDByGitHubBranch(ctx, owner, name, branch)
-		return taskUUIDStr
+		tasks, _ := branchTasks(ctx, owner, name, branch)
+		for _, task := range tasks {
+			if id, err := uuid.Parse(task); err == nil && botReads(ctx, id) {
+				return task
+			}
+		}
+		return ""
 	}
 }
 

@@ -96,37 +96,40 @@ func (o *OllamaProvider) resolveThink(want *bool) *bool {
 	return &v
 }
 
-// ollamaThinkingModelHints are substrings of Ollama model names whose families
-// support a "thinking"/reasoning trace. Only these receive the `think` flag
-// (see resolveThink). Extendable at deploy time via OLLAMA_THINKING_MODELS
-// (comma-separated substrings) so a newly-released thinking model can be enabled
-// without a code change.
-var ollamaThinkingModelHints = []string{
-	"deepseek-r1", "qwq", "qwen3", "magistral", "phi4-reasoning",
-	"phi4-mini-reasoning", "gpt-oss", "cogito", "smallthinker", "granite3.2",
+// thinking is a call's think field and its num_predict for an ask of want, resolved together so what the
+// model is told and the room it is given agree: the flag through resolveThink (off when the call asks to think
+// least), and the room through the one rule both providers follow (callThinks), since Ollama's thinking is
+// generated tokens spent from num_predict like the answer. The flag is sent only to a model the engine says
+// can think, so a flag at all is that answer. gpt-oss gets the room with any flag: it thinks whatever it is
+// told, and it ignores false, so with thinking off it is sent its family's least effort as a level ("low",
+// V-811b), as an OpenAI-family host is. think is nil (the field omitted), a bool or that level.
+func (o *OllamaProvider) thinking(model string, opts ChatOptions, want int) (think any, numPredict int) {
+	ask := opts.Think
+	if opts.LeastThinking {
+		off := false
+		ask = &off
+	}
+	flag := o.resolveThink(ask)
+	numPredict = withThinkingRoom(want, callThinks(ProviderOllama, model, flag != nil && *flag, flag != nil))
+	if flag == nil {
+		return nil, numPredict
+	}
+	if level := leastEffort(model, o.host); !*flag && level != "" && level != effortNone {
+		return level, numPredict
+	}
+	return *flag, numPredict
 }
 
-// modelSupportsThinking reports whether an Ollama model name belongs to a known
-// reasoning-capable family (built-in hints plus any from OLLAMA_THINKING_MODELS).
-// Case-insensitive substring match so dated/sized variants (e.g.
-// "qwen3:8b-instruct") are covered. Unknown models are treated as NON-thinking
-// (the safe default: thinking off, and never a 400).
-func modelSupportsThinking(model string) bool {
-	m := strings.ToLower(strings.TrimSpace(model))
-	if m == "" {
-		return false
-	}
-	for _, h := range ollamaThinkingModelHints {
-		if strings.Contains(m, h) {
-			return true
-		}
-	}
-	for _, h := range strings.Split(getEnvStr("OLLAMA_THINKING_MODELS", ""), ",") {
-		if h = strings.ToLower(strings.TrimSpace(h)); h != "" && strings.Contains(m, h) {
-			return true
-		}
-	}
-	return false
+// canThinkLess reports whether a call to model at the least thinking (LeastThinking) is another request than
+// the one sent with opts, whose think field and num_predict were think and numPredict: LeastThinking changes
+// those two and nothing else (thinking), so it is another request exactly when either differs. It doesn't with
+// thinking off (gpt-oss already went at its level, a family that can stop already sent false) or for a model
+// the engine says can't think (chatStatusError).
+func (o *OllamaProvider) canThinkLess(model string, opts ChatOptions, think any, numPredict int) bool {
+	least := opts
+	least.LeastThinking = true
+	t, n := o.thinking(model, least, opts.MaxTokens)
+	return t != think || n != numPredict
 }
 
 // --- Ollama API request/response types ---
@@ -137,9 +140,10 @@ type ollamaChatRequest struct {
 	Stream    bool                `json:"stream"`
 	Options   *ollamaOptions      `json:"options,omitempty"`
 	KeepAlive string              `json:"keep_alive,omitempty"`
-	// Think disables/enables the reasoning trace on thinking models. Pointer
-	// so it's only sent when set; nil omits the field (model default).
-	Think *bool `json:"think,omitempty"`
+	// Think disables/enables the reasoning trace on thinking models: a bool,
+	// or a level ("low") for a family that takes levels and ignores false
+	// (gpt-oss). nil omits the field (model default). Set by thinking.
+	Think any `json:"think,omitempty"`
 }
 
 type ollamaChatMessage struct {
@@ -198,17 +202,18 @@ func (o *OllamaProvider) Chat(ctx context.Context, messages []ChatMessage, opts 
 		ollamaMessages[i] = ollamaChatMessage{Role: m.Role, Content: m.Content}
 	}
 
+	think, numPredict := o.thinking(model, opts, opts.MaxTokens)
 	reqBody := ollamaChatRequest{
 		Model:     model,
 		Messages:  ollamaMessages,
 		Stream:    false,
 		KeepAlive: o.keepAlive,
-		Think:     o.resolveThink(opts.Think),
+		Think:     think,
 	}
 
 	reqBody.Options = &ollamaOptions{
 		Temperature: opts.Temperature,
-		NumPredict:  opts.MaxTokens,
+		NumPredict:  numPredict,
 		TopP:        opts.TopP,
 		Seed:        opts.Seed,
 		NumThread:   o.numThread,
@@ -235,7 +240,7 @@ func (o *OllamaProvider) Chat(ctx context.Context, messages []ChatMessage, opts 
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", providerStatusError("ollama: API returned", resp.StatusCode, respBody)
+		return "", chatStatusError("ollama: API returned", resp.StatusCode, respBody, func() bool { return o.canThinkLess(model, opts, think, numPredict) })
 	}
 
 	var chatResp ollamaChatResponse
@@ -276,17 +281,18 @@ func (o *OllamaProvider) ChatStream(ctx context.Context, messages []ChatMessage,
 		ollamaMessages[i] = ollamaChatMessage{Role: m.Role, Content: m.Content}
 	}
 
+	think, numPredict := o.thinking(model, opts, opts.MaxTokens)
 	reqBody := ollamaChatRequest{
 		Model:     model,
 		Messages:  ollamaMessages,
 		Stream:    true,
 		KeepAlive: o.keepAlive,
-		Think:     o.resolveThink(opts.Think),
+		Think:     think,
 	}
 
 	reqBody.Options = &ollamaOptions{
 		Temperature: opts.Temperature,
-		NumPredict:  opts.MaxTokens,
+		NumPredict:  numPredict,
 		TopP:        opts.TopP,
 		Seed:        opts.Seed,
 		NumThread:   o.numThread,

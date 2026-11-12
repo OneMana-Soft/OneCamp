@@ -4,7 +4,16 @@ package Calendar
 // made on demand by whoever may change the event (its organiser, or a guest
 // the organiser lets change it: mayChange) and is held in the event's
 // call_room. A series has one call for every instance; an instance asks for
-// its series'. Taking it off, or deleting the event, ends it.
+// its series'. Taking it off ends it. Deleting the event closes it and keeps
+// it in the event's call_room, and bringing the event back from the trash
+// opens it again at the same address (V-641), as Google's restored event
+// keeps its Meet link; one taken off before the delete stays off.
+//
+// The call is the event's it was made for. "This and following" gives the new
+// series its series' call to share, but only the series ends it or opens it
+// again: a new series deleted, or its call taken off, leaves the series' call
+// answering, and one back from the trash comes back without it (main, 6 Nov),
+// offering to add its own, as does an instance back on its own.
 //
 // The call is a meeting on business/CallRoom's machinery: the organiser runs
 // it, members come in as themselves at its address and never wait (D-CL-5),
@@ -30,18 +39,32 @@ import (
 
 // EventCalls is how the calendar makes, ends and finds an event's call.
 type EventCalls struct {
-	// Make makes the call of the event (its id) that its organiser runs,
-	// named for it: its room and where its guests come in.
-	Make func(ctx context.Context, event, organiser uuid.UUID, title string) (*dgraphStruct.EventCall, error)
-	// End ends the call in a room; a room that is no event's call, or ended
-	// already, is left as it is.
-	End func(ctx context.Context, room string) error
+	// Make gives the event (its id) the guest link of its call that its
+	// organiser runs, named for it: its room and where its guests come in. It
+	// goes on room, the event's room (roomOf), when that room's call is the
+	// event's own, so a call members are in is never split (gcal-15 head B);
+	// else on the event's own room.
+	Make func(ctx context.Context, event, organiser uuid.UUID, title, room string) (*dgraphStruct.EventCall, error)
+	// Ready makes the event's own room ready for its first join (gcal-15 head
+	// B): its meeting, the event's, with no link, made once. A room that is a
+	// call made before is ready as it is.
+	Ready func(ctx context.Context, event, organiser uuid.UUID, title, room string) error
+	// End ends the call in a room that was made for the event (its id); a
+	// room that is another event's call, or no event's, or ended already, is
+	// left as it is.
+	End func(ctx context.Context, event uuid.UUID, room string) error
 	// Calls is each room's call as its readers see it, for those whose
 	// address answers now, in one read.
 	Calls func(ctx context.Context, rooms []string) (map[string]*dgraphStruct.EventCall, error)
 	// Lobby makes the invitees of the event call in room knock (true) or come
 	// in by their own invitation again, answering whether it is an open one.
 	Lobby func(ctx context.Context, room string, inviteesWait bool) (bool, error)
+	// Reopen opens again the call in a room that was made for the event (its
+	// id) and ended with it, at the address it had, as the event comes back
+	// from the trash, answering whether the room is the event's call. A room
+	// that is open is left as it is; one that is another event's call, or no
+	// event's, is left as it is and answered false.
+	Reopen func(ctx context.Context, event uuid.UUID, room string) (bool, error)
 }
 
 var eventCalls EventCalls
@@ -58,9 +81,10 @@ var ErrNoEventCalls = errors.New("Calls aren't available on this server.")
 var ErrNoEventCall = errors.New("This event has no call.")
 
 // AddCall gives an event its own call, or answers the one it has while its
-// address answers. Someone who may not change the event is refused as for any
-// change. Two at once make one: the second finds the first's, and its own is
-// ended.
+// address answers: the guest link of the room its members are in (gcal-15
+// head B), the same room when a link stopped answering. Someone who may not
+// change the event is refused as for any change. Two at once make one: the
+// second finds the first's, and its own is ended unless it is that room.
 func (s *service) AddCall(ctx context.Context, who *model.UserInfo, id string) (*dgraphStruct.EventCall, error) {
 	if err := s.ready(ctx); err != nil {
 		return nil, err
@@ -79,26 +103,29 @@ func (s *service) AddCall(ctx context.Context, who *model.UserInfo, id string) (
 	if call := s.liveCall(ctx, e.CallRoom); call != nil {
 		return call, nil
 	}
-	call, err := eventCalls.Make(ctx, e.ID, e.CreatedBy, e.Title)
+	call, err := eventCalls.Make(ctx, e.ID, e.CreatedBy, e.Title, roomOf(e))
 	if err != nil {
 		return nil, err
 	}
 	took, err := s.store.setCallRoom(ctx, e.ID, call.Room, e.CallRoom, s.now())
 	if err != nil || !took {
-		// Nothing holds this call: end it, and answer the one that won.
-		s.endCall(ctx, call.Room)
+		// Answer the call that won; end this one unless it is the same room.
+		cur, gerr := s.store.get(ctx, e.ID)
+		if gerr != nil || cur == nil || cur.CallRoom != call.Room {
+			s.endCall(ctx, e.ID, call.Room)
+		}
 		if err != nil {
 			return nil, err
 		}
-		if cur, err := s.store.get(ctx, e.ID); err == nil && cur != nil {
+		if cur != nil {
 			if won := s.liveCall(ctx, cur.CallRoom); won != nil {
 				return won, nil
 			}
 		}
 		return nil, ErrEventNotFound
 	}
-	if was := e.CallRoom; was != "" {
-		s.endCall(ctx, was)
+	if was := e.CallRoom; was != "" && was != call.Room {
+		s.endCall(ctx, e.ID, was)
 	}
 	e.CallRoom = call.Room
 	s.announce(ctx, who, resourceEventBusiness.CalendarEventUpdated, e, guestIDs(guests), map[string]string{"changed": "call"})
@@ -127,7 +154,7 @@ func (s *service) RemoveCall(ctx context.Context, who *model.UserInfo, id string
 	if err != nil || !took {
 		return err
 	}
-	s.endCall(ctx, e.CallRoom)
+	s.endCall(ctx, e.ID, e.CallRoom)
 	e.CallRoom = ""
 	s.announce(ctx, who, resourceEventBusiness.CalendarEventUpdated, e, guestIDs(guests), map[string]string{"changed": "call"})
 	s.tellCallChanged(ctx, who, e, guests)
@@ -195,24 +222,56 @@ func (s *service) liveCall(ctx context.Context, room string) *dgraphStruct.Event
 	return calls[room]
 }
 
-// endCall ends the call in room, saying so in the log when it can't: the
-// event no longer holds it either way.
-func (s *service) endCall(ctx context.Context, room string) {
+// endCall ends the call in room made for the event (its id), saying so in
+// the log when it can't: the event no longer holds it either way. A call it
+// shares but wasn't made for (a new series' of "this and following") answers
+// on, for the event it was made for.
+func (s *service) endCall(ctx context.Context, event uuid.UUID, room string) {
 	if room == "" || eventCalls.End == nil {
 		return
 	}
-	if err := eventCalls.End(ctx, room); err != nil {
+	if err := eventCalls.End(ctx, event, room); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Calendar: the call in %s wasn't ended: %v", room, err)
 	}
+}
+
+// callBack opens again the call that closed with e, as e comes back from the
+// trash, at its address (V-641). A call e held but wasn't made for (its
+// series' call, for a new series of "this and following" or an instance back
+// on its own) is never reached: e comes back without it, offering to add its
+// own, so nobody is pulled back into a call a deleted part of a series shared
+// (main, 6 Nov). It says so in the log when it can't: e is back either way.
+func (s *service) callBack(ctx context.Context, e *models.Event) {
+	if e.CallRoom == "" || eventCalls.Reopen == nil {
+		return
+	}
+	mine, err := eventCalls.Reopen(ctx, e.ID, e.CallRoom)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Calendar: the call in %s wasn't opened again: %v", e.CallRoom, err)
+		return
+	}
+	if mine {
+		return
+	}
+	if _, err := s.store.setCallRoom(ctx, e.ID, "", e.CallRoom, s.now()); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Calendar: the call in %s wasn't taken off %s: %v", e.CallRoom, e.ID, err)
+		return
+	}
+	e.CallRoom = ""
 }
 
 // withCalls gives each event read its call, in one read for them
 // all, and takes off a call whose address doesn't answer now (guest access or
 // its rooms off, the link turned off): no event offers a link that leads
-// nowhere.
+// nowhere. Each room says whether a guest link may be added to it now
+// (gcal-15 head B), by one read of the switch.
 func (s *service) withCalls(ctx context.Context, out []*dgraphStruct.DgraphEvent) {
+	guestLinks := guestLinksOn()
 	var rooms []string
 	for _, ev := range out {
+		if ev.Room != nil {
+			ev.Room.GuestLinks = guestLinks
+		}
 		if ev.Call != nil {
 			rooms = append(rooms, ev.Call.Room)
 		}

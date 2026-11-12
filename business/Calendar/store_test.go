@@ -42,6 +42,9 @@ type memStore struct {
 	calendarEdits map[uuid.UUID][2]string
 	// ooo is each out-of-office event's decline rule (head 5b).
 	ooo map[uuid.UUID]models.OOORule
+	// files are each event's files, removed ones kept and marked
+	// (eventFiles.go).
+	files map[uuid.UUID][]memFile
 	// feeds are secret feeds, in the order made; revoked ones stay, marked.
 	feeds []memFeed
 	// subscribed are calendars read from addresses, by id; unsubscribed are
@@ -53,6 +56,22 @@ type memStore struct {
 	// reads counts the reads a test pins, by the store's method.
 	readMu sync.Mutex
 	reads  map[string]int
+	// applies counts the batches written (apply).
+	applies int
+	// failNext is what the next write of each kind answers ("apply" or
+	// "update"), once: a write that doesn't land.
+	failNext map[string]error
+	// beforeApply runs once as the next batch begins, outside the lock: a
+	// person's edit landing between a read and the batch written from it.
+	beforeApply func()
+}
+
+// failing is the error a write of kind answers, once (failNext). Called with
+// m.mu held.
+func (m *memStore) failing(kind string) error {
+	err := m.failNext[kind]
+	delete(m.failNext, kind)
+	return err
 }
 
 // countRead counts one call of a store read.
@@ -81,7 +100,13 @@ func (m *memStore) resetReads() {
 func newMemStore() *memStore {
 	return &memStore{events: map[uuid.UUID]*models.Event{}, guests: map[uuid.UUID][]models.Attendee{},
 		calendars: map[uuid.UUID]uuid.UUID{}, hints: map[uuid.UUID]models.ZoneHints{}, noAccount: map[uuid.UUID]bool{},
-		notMembers: map[uuid.UUID]bool{}, addresses: map[string]uuid.UUID{}}
+		notMembers: map[uuid.UUID]bool{}, addresses: map[string]uuid.UUID{}, files: map[uuid.UUID][]memFile{}}
+}
+
+// memFile is a file on an event, removed when gone is set.
+type memFile struct {
+	models.EventFile
+	gone bool
 }
 
 func copyEvent(e *models.Event) *models.Event {
@@ -639,16 +664,52 @@ func (m *memStore) rangeOf(_ context.Context, person uuid.UUID, w models.Window,
 	}, limit), nil
 }
 
-func (m *memStore) trashOf(_ context.Context, person uuid.UUID, before *time.Time, limit int) ([]*models.Event, error) {
+// trashKey is a trash row's key as models.TrashOf orders by it: its event's
+// id or its series', then its start as an instance (none first).
+func trashKey(e *models.Event) (string, time.Time) {
+	id, rid := e.ID, time.Time{}
+	if e.SeriesID != nil {
+		id = *e.SeriesID
+	}
+	if e.RecurrenceID != nil {
+		rid = *e.RecurrenceID
+	}
+	return id.String(), rid
+}
+
+// trashAfter is whether a row comes after the cursor (models.TrashOf's keyset).
+func trashAfter(e *models.Event, c *models.TrashCursor) bool {
+	if c == nil || e.DeletedAt.Before(c.DeletedAt) {
+		return true
+	}
+	if c.Event == uuid.Nil || !e.DeletedAt.Equal(c.DeletedAt) {
+		return false
+	}
+	id, rid := trashKey(e)
+	var at time.Time
+	if c.Recurrence != nil {
+		at = *c.Recurrence
+	}
+	return id > c.Event.String() || (id == c.Event.String() && rid.After(at))
+}
+
+func (m *memStore) trashOf(_ context.Context, person uuid.UUID, since time.Time, after *models.TrashCursor, limit int) ([]*models.Event, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []*models.Event
 	for _, e := range m.events {
-		if e.CreatedBy == person && e.DeletedAt != nil && (before == nil || e.DeletedAt.Before(*before)) {
+		if e.CreatedBy == person && e.DeletedAt != nil && !e.DeletedAt.Before(since) && trashAfter(e, after) {
 			out = append(out, copyEvent(e))
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].DeletedAt.After(*out[j].DeletedAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].DeletedAt.Equal(*out[j].DeletedAt) {
+			return out[i].DeletedAt.After(*out[j].DeletedAt)
+		}
+		a, ra := trashKey(out[i])
+		b, rb := trashKey(out[j])
+		return a < b || (a == b && ra.Before(rb))
+	})
 	if len(out) > limit {
 		out = out[:limit]
 	}
@@ -737,18 +798,78 @@ func (m *memStore) membersNow(_ context.Context, ids []uuid.UUID) (map[uuid.UUID
 	return out, nil
 }
 
-func (m *memStore) create(_ context.Context, e *models.Event, guests []models.Attendee) error {
+func (m *memStore) create(_ context.Context, e *models.Event, guests []models.Attendee, files []models.EventFile) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.writes++
 	m.events[e.ID] = copyEvent(e)
 	m.guests[e.ID] = slices.Clone(guests)
+	for _, f := range files {
+		m.files[e.ID] = append(m.files[e.ID], memFile{EventFile: f})
+	}
 	return nil
+}
+
+func (m *memStore) filesOf(_ context.Context, events []uuid.UUID) (map[uuid.UUID][]models.EventFile, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[uuid.UUID][]models.EventFile{}
+	for _, id := range events {
+		for _, f := range m.files[id] {
+			if !f.gone {
+				out[id] = append(out[id], f.EventFile)
+			}
+		}
+	}
+	return out, nil
+}
+
+// addFile is the store's: a file taken off comes back as the last put on, as
+// its row's new added_at orders it there.
+func (m *memStore) addFile(_ context.Context, f models.EventFile, most int) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rows := m.files[f.EventID]
+	others, gone := 0, -1
+	for i, r := range rows {
+		same := r.Kind == f.Kind && r.Ref == f.Ref
+		switch {
+		case same && !r.gone:
+			return false, nil
+		case same:
+			gone = i
+		case !r.gone:
+			others++
+		}
+	}
+	if others >= most {
+		return false, models.ErrFilesFull
+	}
+	if gone >= 0 {
+		rows = slices.Delete(rows, gone, gone+1)
+	}
+	m.files[f.EventID] = append(rows, memFile{EventFile: f})
+	return true, nil
+}
+
+func (m *memStore) removeFile(_ context.Context, event uuid.UUID, kind string, ref, _ uuid.UUID, _ time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, r := range m.files[event] {
+		if r.Kind == kind && r.Ref == ref && !r.gone {
+			m.files[event][i].gone = true
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *memStore) update(_ context.Context, e *models.Event, expect *int, w guestWrites) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.failing("update"); err != nil {
+		return 0, err
+	}
 	have := m.events[e.ID]
 	if have == nil {
 		return 0, models.ErrNotFound
@@ -877,7 +998,18 @@ func (m *memStore) overrideAt(_ context.Context, series uuid.UUID, recurrence ti
 // roll back, then writes as the model does.
 func (m *memStore) apply(_ context.Context, b batch) error {
 	m.mu.Lock()
+	before := m.beforeApply
+	m.beforeApply = nil
+	m.mu.Unlock()
+	if before != nil {
+		before()
+	}
+	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.applies++
+	if err := m.failing("apply"); err != nil {
+		return err
+	}
 	if g := b.guard; g != nil {
 		have := m.events[g.id]
 		if have == nil {
@@ -924,6 +1056,11 @@ func (m *memStore) apply(_ context.Context, b batch) error {
 		m.events[u.e.ID] = next
 		m.writes++
 	}
+	for _, f := range b.files {
+		if !slices.ContainsFunc(m.files[f.EventID], func(r memFile) bool { return !r.gone && r.Kind == f.Kind && r.Ref == f.Ref }) {
+			m.files[f.EventID] = append(m.files[f.EventID], memFile{EventFile: f})
+		}
+	}
 	m.addGuests(b.guests)
 	for event, people := range b.drop {
 		m.dropGuests(event, people, nil)
@@ -967,6 +1104,19 @@ func (m *memStore) setCallRoom(_ context.Context, id uuid.UUID, room, was string
 		}
 	}
 	return true, nil
+}
+
+func (m *memStore) holdingRoom(_ context.Context, room string) ([]*models.Event, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*models.Event
+	for _, e := range m.events {
+		if room != "" && e.CallRoom == room && e.DeletedAt == nil && e.SeriesID == nil {
+			c := *e
+			out = append(out, &c)
+		}
+	}
+	return out, nil
 }
 
 func (m *memStore) setGoogleID(_ context.Context, id uuid.UUID, googleID string) error {
