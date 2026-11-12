@@ -226,6 +226,14 @@ func Dispatch(ctx context.Context, evt Event) int {
 		if user.IsExternal || user.EmailID == "" {
 			continue
 		}
+		// The demo's own people are never emailed (helpers.IsDemoPerson): the
+		// shared visitor's address is everyone who opens the demo, so an AI's
+		// every reply to them would spend the free allowance the store and
+		// every workspace share (100 a day), and the cast's and bots' addresses
+		// take no mail at all.
+		if helpers.IsDemoPerson(user.EmailID) {
+			continue
+		}
 		if reason, ok := suppressed[strings.ToLower(strings.TrimSpace(user.EmailID))]; ok && reason != "" {
 			continue
 		}
@@ -391,7 +399,7 @@ func eventEnabledForPref(t EventType, p *prefModels.UserNotificationPreference) 
 	switch t {
 	case EventChatDM:
 		return p.EmailDMs
-	case EventChannelMention, EventGroupChatMention, EventCheckIn, EventDocMention, EventTableMention:
+	case EventChannelMention, EventGroupChatMention, EventCheckIn, EventDocMention, EventTableMention, EventTaskMention:
 		// A check-in asks each of its people directly, as a mention does, and
 		// so does an @ in a doc's body or in a comment on a table's row.
 		return p.EmailMentions
@@ -407,6 +415,16 @@ func eventEnabledForPref(t EventType, p *prefModels.UserNotificationPreference) 
 		return p.EmailComments
 	case EventChannelCall, EventChatCall:
 		return p.EmailCalls
+	// The calendar's emails by kind, as Google lets each person choose. A
+	// booking of their time is an invitation, a cancellation a change. A
+	// reminder by email (EventCalendarReminder) is the person's own ask, on
+	// the event or as a default, so it has no switch here.
+	case EventCalendarInvited, EventCalendarBooking:
+		return p.EmailCalendarInvites
+	case EventCalendarUpdated, EventCalendarCancelled:
+		return p.EmailCalendarChanges
+	case EventCalendarAnswered:
+		return p.EmailCalendarAnswers
 	default:
 		return true
 	}

@@ -26,6 +26,10 @@ type fakeRecord struct {
 	done     map[int]json.RawMessage
 	marked   []int
 	failMark map[int]bool
+	// again: a send of the batch came before this one.
+	again bool
+	// forgot: the batch dropped its record (it stopped before any item began).
+	forgot bool
 }
 
 func newRecord() *fakeRecord {
@@ -43,6 +47,10 @@ func (r *fakeRecord) Mark(_ context.Context, i int, a json.RawMessage) error {
 }
 
 func (r *fakeRecord) Release(context.Context) {}
+
+func (r *fakeRecord) Again() bool { return r.again }
+
+func (r *fakeRecord) Forget(context.Context) { r.forgot = true }
 
 // batchRun is a batch of three fake items (create[0], update[0], delete[0])
 // and the trail of what the engine did with them, in order: each item's
@@ -172,6 +180,9 @@ func TestABatchIsCheckedWholeBeforeAnyItemIsApplied(t *testing.T) {
 	if got := b.did(""); !slices.Equal(got, []string{"check create[0]", "check update[0]", "check delete[0]"}) || len(rec.marked) != 0 {
 		t.Errorf("a refused batch did %v and recorded %v; want the three checks alone", got, rec.marked)
 	}
+	if !rec.forgot {
+		t.Error("a batch refused at its checks kept its record: its key is used up for the batch corrected (CR-220 F1)")
+	}
 }
 
 // Checked whole, a batch is applied in order, creates then updates then
@@ -261,6 +272,9 @@ func TestABatchStoppedByTheStoreNamesWhatItDid(t *testing.T) {
 	}
 	if strings.Contains(e.Message, "failed to update field") || slices.Contains(b.trail, "apply delete[0]") || !slices.Equal(rec.marked, []int{0}) {
 		t.Errorf("a stopped batch said %q, did %v and recorded %v; want the API's words, nothing after the failure", e.Message, b.trail, rec.marked)
+	}
+	if rec.forgot {
+		t.Error("a batch stopped part way forgot its record: its resend would apply again what it did")
 	}
 }
 
@@ -403,8 +417,9 @@ func TestABatchsCreatesTakeIDsFromItsKey(t *testing.T) {
 	if id != k.createID("create", 0) || id.Version() != 5 {
 		t.Fatalf("the same create took %s then %s (version %d)", id, k.createID("create", 0), id.Version())
 	}
-	for _, other := range []batchKeys{{"tok-2", k.route, k.key, k.hash}, {k.caller, "tables.views.batch", k.key, k.hash},
-		{k.caller, k.route, "k2", k.hash}, {k.caller, k.route, k.key, "h2"}} {
+	for _, other := range []batchKeys{{caller: "tok-2", route: k.route, key: k.key, hash: k.hash},
+		{caller: k.caller, route: "tables.views.batch", key: k.key, hash: k.hash},
+		{caller: k.caller, route: k.route, key: "k2", hash: k.hash}, {caller: k.caller, route: k.route, key: k.key, hash: "h2"}} {
 		if other.createID("create", 0) == id {
 			t.Errorf("%+v gives create[0] the id %+v's does", other, k)
 		}

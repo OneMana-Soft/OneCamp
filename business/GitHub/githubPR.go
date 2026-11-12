@@ -5,10 +5,12 @@ package business
 // the server opens the PR from that branch). Reads (files, tree, PR diffs) reuse
 // the existing helpers.
 //
-// Auth reuses the workspace's authenticated GitHub client (GitHubHTTPClient,
-// auto-refreshed OAuth user-to-server token) — the same credential every other
-// write in this package uses. It never force-pushes and never targets a base
-// branch directly (the caller always supplies a fresh head branch). The request
+// Auth is the run's own credential, the token its branch was pushed with, never
+// the workspace's GitHub connection: that is an admin's personal OAuth token
+// across every organisation they belong to, and a pull request opened with it
+// is theirs, on whatever repository it reaches (see business/CodePR's
+// credential.go). It never force-pushes and never targets a base branch
+// directly (the caller always supplies a fresh head branch). The request
 // construction is split from the client fetch so it is unit-testable against a
 // mock transport with no network.
 
@@ -37,11 +39,14 @@ type PullRequestResult struct {
 // non-fatal (surface the existing PR) rather than an error.
 var ErrPullRequestExists = fmt.Errorf("a pull request already exists for this branch")
 
-// CreatePullRequest opens a PR from head → base on owner/repo with the given
-// title/body, optionally as a draft. Uses the workspace's authenticated GitHub
-// client. Returns a typed result, or ErrPullRequestExists when one already
-// exists, or a sanitized error otherwise.
-func CreatePullRequest(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (*PullRequestResult, error) {
+// CreatePullRequestWithToken opens a PR from head → base on owner/repo with the
+// given title/body, optionally as a draft, as the identity token belongs to.
+// Returns a typed result, or ErrPullRequestExists when one already exists, or a
+// sanitized error otherwise.
+func CreatePullRequestWithToken(ctx context.Context, token, owner, repo, head, base, title, body string, draft bool) (*PullRequestResult, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, fmt.Errorf("a token is required")
+	}
 	if strings.TrimSpace(owner) == "" || strings.TrimSpace(repo) == "" {
 		return nil, fmt.Errorf("owner and repo are required")
 	}
@@ -51,11 +56,7 @@ func CreatePullRequest(ctx context.Context, owner, repo, head, base, title, body
 	if strings.EqualFold(strings.TrimSpace(head), strings.TrimSpace(base)) {
 		return nil, fmt.Errorf("head and base branches must differ")
 	}
-	client, err := GitHubHTTPClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return createPullRequestWithClient(ctx, client, owner, repo, head, base, title, body, draft)
+	return createPullRequestWithClient(ctx, tokenAuthClient(token), owner, repo, head, base, title, body, draft)
 }
 
 // createPullRequestWithClient builds and sends the create-PR request using the

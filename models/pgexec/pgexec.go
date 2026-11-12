@@ -86,14 +86,11 @@ func statementCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	if inTx(ctx) {
 		return ctx, func() {}
 	}
-	d := postgresInit.DBConn.DBTimeout
-	if d <= 0 {
-		d = 3 * time.Second
-	}
-	return context.WithTimeout(ctx, d)
+	return context.WithTimeout(ctx, statementTimeout())
 }
 
 // Exec runs a statement that returns no rows, and says how many it touched.
+// WithoutWorkers run in a transaction marks it (plannedForItsRun).
 func Exec(ctx context.Context, q string, args ...any) (int64, error) {
 	ctx, cancel := statementCtx(ctx)
 	defer cancel()
@@ -104,6 +101,9 @@ func Exec(ctx context.Context, q string, args ...any) (int64, error) {
 	res, err := d.ExecContext(ctx, q, args...)
 	if err != nil {
 		return 0, err
+	}
+	if tx, ok := d.(*sql.Tx); ok && q == WithoutWorkers {
+		markWithoutWorkers(tx)
 	}
 	return res.RowsAffected()
 }
@@ -191,44 +191,62 @@ const flushPoll = 20 * time.Millisecond
 
 // Query runs a statement and reads every row it returns with scan. A
 // failure partway (rows.Err) is an error, never a short list. No rows is an
-// empty (nil) slice.
+// empty (nil) slice. A read that runs out of shared memory before its first
+// row runs once more without parallel workers (againWithoutWorkers).
 func Query[T any](ctx context.Context, q string, scan func(Row) (T, error), args ...any) ([]T, error) {
-	ctx, cancel := statementCtx(ctx)
-	defer cancel()
-	d, err := db(ctx)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := d.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var out []T
-	for rows.Next() {
-		v, err := scan(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, v)
-	}
-	if err := rows.Err(); err != nil {
+	err := againWithoutWorkers(ctx, q, func(ctx context.Context) (handed bool, err error) {
+		out, handed, err = queryOnce(ctx, q, scan, args...)
+		return handed, err
+	})
+	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
+// queryOnce is one run of Query's statement; handed says scan was given a row.
+func queryOnce[T any](ctx context.Context, q string, scan func(Row) (T, error), args ...any) (out []T, handed bool, err error) {
+	ctx, cancel := statementCtx(ctx)
+	defer cancel()
+	d, err := db(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	rows, err := d.QueryContext(ctx, q, plannedForItsRun(ctx, args)...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		handed = true
+		v, err := scan(rows)
+		if err != nil {
+			return nil, true, err
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, handed, err
+	}
+	return out, handed, nil
+}
+
 // QueryOne reads the first row a statement returns with scan: found false,
 // and no error, when there is none.
 func QueryOne[T any](ctx context.Context, q string, scan func(Row) (T, error), args ...any) (T, bool, error) {
-	ctx, cancel := statementCtx(ctx)
-	defer cancel()
-	var zero T
-	d, err := db(ctx)
-	if err != nil {
-		return zero, false, err
-	}
-	v, err := scan(d.QueryRowContext(ctx, q, args...))
+	var zero, v T
+	// A row's error is Postgres's before the row: Scan hands back none.
+	err := againWithoutWorkers(ctx, q, func(ctx context.Context) (bool, error) {
+		ctx, cancel := statementCtx(ctx)
+		defer cancel()
+		d, err := db(ctx)
+		if err != nil {
+			return false, err
+		}
+		v, err = scan(d.QueryRowContext(ctx, q, plannedForItsRun(ctx, args)...))
+		return false, err
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return zero, false, nil
 	}
@@ -247,14 +265,16 @@ func Text(r Row) (s string, err error) {
 // Scalar reads the one value a statement returns (a count, an id, an
 // EXISTS). sql.ErrNoRows when it returns no row.
 func Scalar[T any](ctx context.Context, q string, args ...any) (T, error) {
-	ctx, cancel := statementCtx(ctx)
-	defer cancel()
 	var v T
-	d, err := db(ctx)
-	if err != nil {
-		return v, err
-	}
-	err = d.QueryRowContext(ctx, q, args...).Scan(&v)
+	err := againWithoutWorkers(ctx, q, func(ctx context.Context) (bool, error) {
+		ctx, cancel := statementCtx(ctx)
+		defer cancel()
+		d, err := db(ctx)
+		if err != nil {
+			return false, err
+		}
+		return false, d.QueryRowContext(ctx, q, plannedForItsRun(ctx, args)...).Scan(&v)
+	})
 	return v, err
 }
 

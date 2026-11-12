@@ -47,8 +47,9 @@ func UpdateTaskInOpenSearch(ctx context.Context, openSearchTask *openSearchStruc
 }
 
 // bulkUpdateBody is the NDJSON of a bulk request that updates each task's
-// search document with its fields set. Pure.
-func bulkUpdateBody(tasks []*openSearchStruct.OpenSearchTask) (string, error) {
+// search document with its fields set, and each field in clear emptied
+// (null): a field an update leaves out is kept as it was. Pure.
+func bulkUpdateBody(tasks []*openSearchStruct.OpenSearchTask, clear ...string) (string, error) {
 	var b strings.Builder
 	for _, t := range tasks {
 		if t == nil || t.Uuid == "" {
@@ -58,7 +59,11 @@ func bulkUpdateBody(tasks []*openSearchStruct.OpenSearchTask) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		doc, err := json.Marshal(openSearchStruct.BulkUpdate{Doc: t})
+		fields, err := withCleared(t, clear)
+		if err != nil {
+			return "", err
+		}
+		doc, err := json.Marshal(openSearchStruct.BulkUpdate{Doc: fields})
 		if err != nil {
 			return "", err
 		}
@@ -70,13 +75,34 @@ func bulkUpdateBody(tasks []*openSearchStruct.OpenSearchTask) (string, error) {
 	return b.String(), nil
 }
 
+// withCleared is t's fields with each one in clear set to null, or t itself
+// when there's none to clear.
+func withCleared(t *openSearchStruct.OpenSearchTask, clear []string) (any, error) {
+	if len(clear) == 0 {
+		return t, nil
+	}
+	b, err := json.Marshal(t)
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]any{}
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return nil, err
+	}
+	for _, f := range clear {
+		fields[f] = nil
+	}
+	return fields, nil
+}
+
 // UpdateTasksInOpenSearch updates many tasks' search documents in one bulk
-// request (PR2): a status renamed across a project, a bulk change.
-func UpdateTasksInOpenSearch(ctx context.Context, tasks []*openSearchStruct.OpenSearchTask) error {
+// request (PR2): a status renamed across a project, a bulk change. Each field
+// in clear is emptied (a priority taken off).
+func UpdateTasksInOpenSearch(ctx context.Context, tasks []*openSearchStruct.OpenSearchTask, clear ...string) error {
 	if opensearchInit.OpenSearchClient == nil {
 		return errors.New("search is not connected")
 	}
-	body, err := bulkUpdateBody(tasks)
+	body, err := bulkUpdateBody(tasks, clear...)
 	if err != nil || body == "" {
 		return err
 	}

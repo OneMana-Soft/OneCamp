@@ -2,10 +2,14 @@ package business
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	taskFieldModel "github.com/akashc777/OneCamp/models/postgres/TaskField"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -82,5 +86,67 @@ func TestShowForTheWorkspaceAsksWhetherTheAccountMayBeGivenWork(t *testing.T) {
 	}
 	if got := Show(context.Background(), Template{Shape: Shape{Assignee: "nobody"}}, uuid.Nil); got.AssigneeWho != nil {
 		t.Fatalf("someone OneCamp doesn't know shows as %+v", *got.AssigneeWho)
+	}
+}
+
+// A project's template shows a money field's preset only to a reader the
+// money judge (business/TaskField Hidden) lets read it: the server reads every
+// project's money, as a project's admin reads theirs, while a reader the judge
+// names admin of nothing (a bare context, as a member of a project they don't
+// run is to it) gets the plain field's preset and not the money one. When the
+// project's fields can't be read, no preset shows at all, to anyone. The
+// caller's template keeps every preset: the task it makes still takes them.
+// (Which person is a project's admin is the judge's: TaskField money_test.)
+func TestShowKeepsMoneyPresetsFromWhoeverMayNotReadThem(t *testing.T) {
+	project := uuid.New()
+	budget := &taskFieldModel.Field{ID: uuid.New(), ProjectID: project, Name: "Budget", Type: taskFieldModel.TypeMoney}
+	notes := &taskFieldModel.Field{ID: uuid.New(), ProjectID: project, Name: "Notes", Type: taskFieldModel.TypeText}
+	money, plain := json.RawMessage(`{"amount":1200,"currency":"INR"}`), json.RawMessage(`"Ask the vendor first"`)
+	presets := func() map[string]json.RawMessage {
+		return map[string]json.RawMessage{budget.ID.String(): money, notes.ID.String(): plain}
+	}
+	whoSeams(t, func(string, uuid.UUID) *dgraphStruct.DgraphUser { return nil }, nil)
+	was := projectFields
+	t.Cleanup(func() { projectFields = was })
+	var asked []uuid.UUID
+	var readErr error
+	projectFields = func(_ context.Context, p uuid.UUID) ([]*taskFieldModel.Field, error) {
+		asked = append(asked, p)
+		if readErr != nil {
+			return nil, readErr
+		}
+		return []*taskFieldModel.Field{budget, notes}, nil
+	}
+	server, member := taskread.WithSystem(context.Background()), context.Background()
+	tpl := Template{ID: "t1", ProjectID: project.String(), Shape: Shape{Fields: presets()}}
+
+	got := Show(server, tpl, project).Shape.Fields
+	if len(got) != 2 || string(got[budget.ID.String()]) != string(money) || string(got[notes.ID.String()]) != string(plain) {
+		t.Fatalf("the reader who may read money sees presets %s, want the budget and the notes", got)
+	}
+	got = Show(member, tpl, project).Shape.Fields
+	if _, ok := got[budget.ID.String()]; ok {
+		t.Fatalf("a reader who may not read money sees the budget's preset %s", got[budget.ID.String()])
+	}
+	if len(got) != 1 || string(got[notes.ID.String()]) != string(plain) {
+		t.Fatalf("a reader who may not read money sees presets %s, want the notes alone", got)
+	}
+	if len(tpl.Shape.Fields) != 2 || string(tpl.Shape.Fields[budget.ID.String()]) != string(money) {
+		t.Fatalf("showing the template changed its presets to %s", tpl.Shape.Fields)
+	}
+	for _, p := range asked {
+		if p != project {
+			t.Fatalf("the fields were read of project %v, want %v", p, project)
+		}
+	}
+
+	readErr = errors.New("postgres down")
+	for name, ctx := range map[string]context.Context{"the server": server, "a member": member} {
+		if got := Show(ctx, tpl, project).Shape.Fields; len(got) != 0 {
+			t.Fatalf("with the fields unread, %s sees presets %s, want none", name, got)
+		}
+	}
+	if len(asked) != 4 {
+		t.Fatalf("the project's fields were read %d times over four shows, want 4", len(asked))
 	}
 }

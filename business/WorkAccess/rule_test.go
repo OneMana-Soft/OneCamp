@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -389,5 +390,78 @@ func TestManyProjectsReadTheirPoliciesTogether(t *testing.T) {
 	}
 	if len(primed) != 1 || len(primed[0]) != 2 {
 		t.Fatalf("one priming of the two projects they're in: %v", primed)
+	}
+}
+
+// UX-PROJECTS-H2-BE: whether someone may add tasks to a project now is one
+// rule, asked by New task's list and by a template's use alike: whoever may
+// make a task there (NeedCreateTask), and never in an archived project.
+func TestAddsTasksIsMakingATaskInALiveProject(t *testing.T) {
+	for _, c := range []struct {
+		what string
+		s    Standing
+		want bool
+	}{
+		{"a member", Standing{Role: RoleMember, EditWho: EditMembers}, true},
+		{"a member on assigned work", Standing{Role: RoleMember, EditWho: EditAssigned}, true},
+		{"an admin where admins change tasks", Standing{Role: RoleAdmin, EditWho: EditAdmins}, true},
+		{"a member where admins change tasks", Standing{Role: RoleMember, EditWho: EditAdmins}, false},
+		{"a commenter", Standing{Role: RoleCommenter, EditWho: EditMembers}, false},
+		{"a viewer", Standing{Role: RoleViewer, EditWho: EditMembers}, false},
+		{"the team's admin outside it", Standing{Steward: true}, false},
+		{"an admin of an archived one", Standing{Role: RoleAdmin, Archived: true}, false},
+		{"someone outside it", Standing{}, false},
+	} {
+		if got := c.s.AddsTasks(); got != c.want {
+			t.Errorf("%s: %v, want %v", c.what, got, c.want)
+		}
+	}
+}
+
+// UX-PROJECTS-H2-BE: New project's teams are CanMakeProjects for many teams,
+// with one read of the workspace's "Who can make projects" however many
+// there are: a team's admins always, everyone in it under "Team members", a
+// deleted team never, and through an API token as one of its members. In
+// their order; none is an empty list.
+func TestCanMakeProjectsInReadsTheRuleOnce(t *testing.T) {
+	oldWho, oldTok := makeWho, viaToken
+	t.Cleanup(func() { makeWho, viaToken = oldWho, oldTok })
+	reads, rule, token := 0, MakeTeamAdmins, false
+	makeWho = func(context.Context) string { reads++; return rule }
+	viaToken = func(context.Context) bool { return token }
+	gone := time.Now()
+	teams := []*dgraphStruct.DgraphTeam{
+		{Uuid: "admin", IsAdmin: 1, IsMember: 1},
+		{Uuid: "member", IsMember: 1},
+		{Uuid: "deleted", IsAdmin: 1, IsMember: 1, DeletedAt: &gone},
+		nil,
+	}
+	ids := func() string {
+		var out []string
+		for _, team := range CanMakeProjectsIn(context.Background(), teams) {
+			out = append(out, team.Uuid)
+		}
+		return strings.Join(out, ",")
+	}
+	for _, c := range []struct {
+		what, rule string
+		token      bool
+		want       string
+	}{
+		{"team admins", MakeTeamAdmins, false, "admin"},
+		{"team members", MakeTeamMembers, false, "admin,member"},
+		{"team admins, through a token", MakeTeamAdmins, true, ""},
+		{"team members, through a token", MakeTeamMembers, true, "admin,member"},
+	} {
+		reads, rule, token = 0, c.rule, c.token
+		if got := ids(); got != c.want || reads != 1 {
+			t.Errorf("%s: %q in %d reads of the rule, want %q in 1", c.what, got, reads, c.want)
+		}
+	}
+	if CanMakeProjectsIn(context.Background(), nil) == nil {
+		t.Error("none is an empty list, not null")
+	}
+	if teams[0].IsAdmin != 1 {
+		t.Error("a token's answer changed the team it was asked of")
 	}
 }

@@ -3,8 +3,10 @@ package Calendar
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	business "github.com/akashc777/OneCamp/business/Calendar"
@@ -12,7 +14,8 @@ import (
 
 // Each way a calendar call fails has its own answer: a store being moved, or
 // not on here, is a 503 the web can name by its code, never a fault; a
-// change someone else made first is a 409 carrying the event as it is now.
+// change someone else made first is a 409 carrying the event as it is now;
+// a refusal (a file its writer can't open) is a 403 in its own words.
 func TestACalendarCallSaysHowItFailed(t *testing.T) {
 	current := &business.Event{ID: "e1", Title: "Design review", Sequence: 3}
 	for _, c := range []struct {
@@ -26,6 +29,8 @@ func TestACalendarCallSaysHowItFailed(t *testing.T) {
 		{"stale", &business.StaleError{Current: current}, http.StatusConflict, ""},
 		{"not there", business.ErrEventNotFound, http.StatusNotFound, ""},
 		{"not theirs to change", business.ErrOnlyCreatorChanges, http.StatusForbidden, ""},
+		{"a file they can't open", business.ErrFileUnreadable, http.StatusForbidden, ""},
+		{"a file they can't open, wrapped", fmt.Errorf("create: %w", business.ErrFileUnreadable), http.StatusForbidden, ""},
 		{"not readable", &business.EventInputError{}, http.StatusBadRequest, ""},
 		{"a yes before answers", business.ErrUnavailable, http.StatusBadRequest, ""},
 		{"down", errors.New("dial tcp: connection refused"), http.StatusServiceUnavailable, ""},
@@ -46,6 +51,11 @@ func TestACalendarCallSaysHowItFailed(t *testing.T) {
 		}
 		if c.name == "down" && body.Msg != "Something went wrong. Try again in a moment." {
 			t.Errorf("a fault says %q", body.Msg)
+		}
+		// A file its writer can't open is refused in the refusal's own words,
+		// however far down it was said.
+		if strings.HasPrefix(c.name, "a file") && body.Msg != business.ErrFileUnreadable.Error() {
+			t.Errorf("%s says %q", c.name, body.Msg)
 		}
 	}
 	// The /event routes say a move the same way.

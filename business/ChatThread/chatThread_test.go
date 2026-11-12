@@ -44,6 +44,8 @@ type world struct {
 	allowed  bool
 	resolves int
 	batches  int // how many times many conversations were asked about at once
+	// liveReads is how many reads of the graph asked which roots are live.
+	liveReads int
 }
 
 func stubWorld(t *testing.T) *world {
@@ -54,6 +56,7 @@ func stubWorld(t *testing.T) *world {
 		resolveAll func(context.Context, *userModels.UserInfo, []conversationBusiness.Ref) (map[conversationBusiness.Ref]accessBusiness.Decision, error)
 		getThread  func(context.Context, uuid.UUID) (*models.Row, error)
 		readRoots  func(context.Context, bool, []string) ([]domain.Message, error)
+		liveOf     func(context.Context, []string, []string) (map[string]bool, error)
 		adopt      func(context.Context, threadIndex.Thread) (uuid.UUID, error)
 		setFollow  func(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error
 		markRead   func(context.Context, uuid.UUID, uuid.UUID, time.Time) (bool, error)
@@ -61,10 +64,10 @@ func stubWorld(t *testing.T) *world {
 		choiceOf   func(context.Context, uuid.UUID, uuid.UUID) (string, bool, *time.Time, error)
 		allowWrite func(context.Context, uuid.UUID) bool
 		now        func() time.Time
-	}{resolve, resolveAll, getThread, readRoots, adopt, setFollow, markRead, markUnread, choiceOf, allowWrite, now}
+	}{resolve, resolveAll, getThread, readRoots, liveOf, adopt, setFollow, markRead, markUnread, choiceOf, allowWrite, now}
 	t.Cleanup(func() {
-		resolve, resolveAll, getThread, readRoots, adopt, setFollow, markRead, markUnread, choiceOf, allowWrite, now =
-			old.resolve, old.resolveAll, old.getThread, old.readRoots, old.adopt, old.setFollow, old.markRead, old.markUnread, old.choiceOf, old.allowWrite, old.now
+		resolve, resolveAll, getThread, readRoots, liveOf, adopt, setFollow, markRead, markUnread, choiceOf, allowWrite, now =
+			old.resolve, old.resolveAll, old.getThread, old.readRoots, old.liveOf, old.adopt, old.setFollow, old.markRead, old.markUnread, old.choiceOf, old.allowWrite, old.now
 	})
 	resolve = func(_ context.Context, _ *userModels.UserInfo, ref conversationBusiness.Ref) (accessBusiness.Decision, error) {
 		w.resolves++
@@ -95,6 +98,18 @@ func stubWorld(t *testing.T) *world {
 		for _, id := range ids {
 			if m, ok := w.roots[id]; ok && (m.In == "launch") == channel {
 				out = append(out, m)
+			}
+		}
+		return out, nil
+	}
+	liveOf = func(_ context.Context, posts, chats []string) (map[string]bool, error) {
+		w.liveReads++
+		out := map[string]bool{}
+		for channel, ids := range map[bool][]string{true: posts, false: chats} {
+			for _, id := range ids {
+				if m, ok := w.roots[id]; ok && (m.In == "launch") == channel && (m.DeletedAt == nil || m.DeletedAt.Year() <= 1970) {
+					out[id] = true
+				}
 			}
 		}
 		return out, nil
@@ -223,8 +238,8 @@ func TestReadingAndMarkingUnread(t *testing.T) {
 // others since they read it, and shows its newest two.
 func TestAPageOfThreads(t *testing.T) {
 	w := stubWorld(t)
-	oldMine, oldCount, oldReplies := mineOf, unreadCount, readReplies
-	t.Cleanup(func() { mineOf, unreadCount, readReplies = oldMine, oldCount, oldReplies })
+	oldMine, oldUnread, oldReplies := mineOf, unreadOf, readReplies
+	t.Cleanup(func() { mineOf, unreadOf, readReplies = oldMine, oldUnread, oldReplies })
 	ids := []string{rootID, "00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000003", "00000000-0000-4000-8000-000000000004"}
 	read := today.Add(-2 * time.Hour)
 	mineOf = func(_ context.Context, user uuid.UUID, kinds []string, limit, offset int) ([]models.Mine, error) {
@@ -238,7 +253,16 @@ func TestAPageOfThreads(t *testing.T) {
 			{ThreadID: uuid.MustParse(ids[3]), Kind: "group", Conversation: "grp", Follow: "auto"},
 		}, nil
 	}
-	unreadCount = func(context.Context, uuid.UUID, []string) (int, error) { return 2, nil }
+	// Two unread, but secret's she can't read: the list's count is 1.
+	unreadOf = func(_ context.Context, _ uuid.UUID, kinds []string, limit int) ([]models.Mine, error) {
+		if limit != MaxThreads || !slices.Equal(kinds, Kinds) {
+			t.Errorf("unread asked %d of %v", limit, kinds)
+		}
+		return []models.Mine{
+			{ThreadID: uuid.MustParse(ids[0]), Kind: "channel", Conversation: "launch", LastReadAt: &read, Unread: true, Follow: "auto"},
+			{ThreadID: uuid.MustParse(ids[1]), Kind: "channel", Conversation: "secret", Unread: true, Follow: "auto"},
+		}, nil
+	}
 	w.canRead["channel:launch"] = true
 	w.canRead["group:grp"] = true
 	gone := today.Add(-time.Minute)
@@ -264,7 +288,7 @@ func TestAPageOfThreads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Unread != 2 || page.Next != 0 {
+	if page.Unread != 1 || page.Next != 0 {
 		t.Errorf("unread %d, next %d", page.Unread, page.Next)
 	}
 	if len(page.Threads) != 2 || page.Threads[0].Root != ids[0] || page.Threads[1].Root != ids[3] {
@@ -274,6 +298,9 @@ func TestAPageOfThreads(t *testing.T) {
 	if first.New != 2 || first.NewMore || first.Replies != 9 || len(first.Latest) != 2 || first.Latest[0].ID != "r4" || first.Place.Name != "launch" || first.Message.HTML != "<p>Launch plan</p>" {
 		t.Errorf("first %+v", first)
 	}
+	if w.liveReads != 1 {
+		t.Errorf("asked which roots are live in %d reads of the graph, want one for both kinds", w.liveReads)
+	}
 	if w.resolves != 3 || w.batches != 1 {
 		t.Errorf("asked about %d conversations in %d asks, want each of three once, in one ask", w.resolves, w.batches)
 	}
@@ -282,14 +309,14 @@ func TestAPageOfThreads(t *testing.T) {
 // A full page says where the next starts, up to MaxThreads.
 func TestThreadsPage(t *testing.T) {
 	stubWorld(t)
-	oldMine, oldCount := mineOf, unreadCount
-	t.Cleanup(func() { mineOf, unreadCount = oldMine, oldCount })
+	oldMine, oldUnread := mineOf, unreadOf
+	t.Cleanup(func() { mineOf, unreadOf = oldMine, oldUnread })
 	var asked []int
 	mineOf = func(_ context.Context, _ uuid.UUID, _ []string, limit, offset int) ([]models.Mine, error) {
 		asked = append(asked, offset)
 		return make([]models.Mine, limit), nil
 	}
-	unreadCount = func(context.Context, uuid.UUID, []string) (int, error) { return 0, nil }
+	unreadOf = func(context.Context, uuid.UUID, []string, int) ([]models.Mine, error) { return nil, nil }
 	page, err := Mine(context.Background(), person(maya), 40)
 	if err != nil || page.Next != 60 {
 		t.Errorf("next %d, err %v", page.Next, err)
@@ -329,5 +356,38 @@ func TestNewReplies(t *testing.T) {
 		if n != tc.n || more != tc.more {
 			t.Errorf("%s: %d %v, want %d %v", tc.name, n, more, tc.n, tc.more)
 		}
+	}
+}
+
+// The Threads count is its list's (NOTIF-H4): of the unread threads someone
+// follows, only those the list shows, never one in a conversation they can't
+// read or whose root is deleted.
+func TestTheThreadsCountIsItsLists(t *testing.T) {
+	w := stubWorld(t)
+	old := unreadOf
+	t.Cleanup(func() { unreadOf = old })
+	ids := []string{rootID, "00000000-0000-4000-8000-000000000012", "00000000-0000-4000-8000-000000000013", "00000000-0000-4000-8000-000000000014"}
+	unreadOf = func(context.Context, uuid.UUID, []string, int) ([]models.Mine, error) {
+		return []models.Mine{
+			{ThreadID: uuid.MustParse(ids[0]), Kind: "channel", Conversation: "launch", Unread: true},
+			{ThreadID: uuid.MustParse(ids[1]), Kind: "channel", Conversation: "secret", Unread: true},
+			{ThreadID: uuid.MustParse(ids[2]), Kind: "channel", Conversation: "launch", Unread: true},
+			{ThreadID: uuid.MustParse(ids[3]), Kind: "group", Conversation: "grp", Unread: true},
+		}, nil
+	}
+	w.canRead["channel:launch"] = true
+	w.canRead["group:grp"] = true
+	gone := today.Add(-time.Minute)
+	w.roots[ids[0]] = domain.Message{ID: ids[0], In: "launch"}
+	w.roots[ids[1]] = domain.Message{ID: ids[1], In: "secret"}
+	w.roots[ids[2]] = domain.Message{ID: ids[2], In: "launch", DeletedAt: &gone}
+	w.roots[ids[3]] = domain.Message{ID: ids[3], In: "grp"}
+	n, err := UnreadCount(context.Background(), person(maya))
+	if err != nil || n != 2 {
+		t.Errorf("the count %d (%v); want 2 (launch's and the group's): never secret's (can't read) or a deleted root's", n, err)
+	}
+	// A channel's root and a group's, asked of the graph in one read.
+	if w.liveReads != 1 {
+		t.Errorf("the count asked which roots are live in %d reads of the graph, want 1", w.liveReads)
 	}
 }

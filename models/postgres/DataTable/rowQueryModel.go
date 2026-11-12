@@ -45,7 +45,7 @@ var walkSettings = []string{
 	"SET LOCAL enable_sort = off",
 	"SET LOCAL enable_bitmapscan = off",
 	"SET LOCAL enable_hashjoin = off",
-	"SET LOCAL max_parallel_workers_per_gather = 0",
+	pgexec.WithoutWorkers,
 	// Too little memory to hash a filter's every entry: each walked row's
 	// cells are probed by the primary key, so a window costs its own rows.
 	"SET LOCAL work_mem = '64kB'",
@@ -69,7 +69,10 @@ var ErrSummariesTooLong = errors.New("the summaries ran past their budget")
 // /dev/shm, and several big reads at once run it out, where a read without
 // workers keeps its hashes in its own memory (V-525: three 100,000-row
 // summaries reads at once lost about half their sums). So fn may run twice,
-// and each run starts from nothing.
+// and each run starts from nothing. pgexec does the same for every read
+// outside a transaction (V-583); a budgeted read has a transaction of its
+// own, so its owner, inBudget, runs it again. Every session names the refused
+// read in the log by its caller (postgresInit's spaceTracer), once.
 func inBudget(ctx context.Context, settings []string, budget time.Duration, fn func(ctx context.Context) error) (stopped bool, err error) {
 	start := time.Now()
 	stopped, err = budgetedTx(ctx, settings, budget, fn)
@@ -81,8 +84,7 @@ func inBudget(ctx context.Context, settings []string, budget time.Duration, fn f
 			return true, err
 		}
 	}
-	helpers.LogWarnWithContext(ctx, "models: a read ran out of shared memory; reading it again without parallel workers: %v", err)
-	return budgetedTx(ctx, append(append([]string{}, settings...), "SET LOCAL max_parallel_workers_per_gather = 0"), budget, fn)
+	return budgetedTx(ctx, append(append([]string{}, settings...), pgexec.WithoutWorkers), budget, fn)
 }
 
 // budgetedTx is one run of inBudget's transaction.

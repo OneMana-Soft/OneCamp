@@ -56,7 +56,7 @@ func SetMine(w http.ResponseWriter, r *http.Request) {
 	case errors.As(err, &refused):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": refused.Msg, "status": "failed"})
 	case err != nil:
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't save that. Try again.", "status": "failed"})
+		helpers.WriteWriteFailure(w, r, err, "Couldn't save that.", "preferences/SetMine")
 	default:
 		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success"})
 	}

@@ -208,15 +208,24 @@ func Upsert(ctx context.Context, in UpsertInput) (uuid.UUID, error) {
 }
 
 // QueryFilter scopes a list query. Empty slices/strings mean "no
-// constraint on that dimension". Permission filtering is the caller's
-// responsibility: pass the user's accessible channel/project UUIDs.
+// constraint on that dimension", except the scope sets: an item is listed
+// only when its channel, project or DM is in one of them, and with none of
+// them nothing is listed. Permission filtering is the caller's
+// responsibility: fill the scope sets from where the reader is now
+// (business/AI memoryScopes.filter), never from ownership.
 type QueryFilter struct {
 	Kinds              []string
 	Statuses           []string
 	AccessibleChannels []string
 	AccessibleProjects []string
 	AccessibleGrpIDs   []string
-	OwnerID            *uuid.UUID
+	// OwnedBy narrows the visible items to one person's own. It never
+	// widens them: an item they own from a place they have left stays out.
+	OwnedBy *uuid.UUID
+	// UnscopedOwnedBy also lists this person's own items that live nowhere
+	// (no channel, project or DM): there is no place to have left, so such an
+	// item is its owner's alone. It never reaches an item that has a scope.
+	UnscopedOwnedBy *uuid.UUID
 	// SourceType and CreatedBy narrow the visible items before the limit
 	// applies: only items from that source, and only items written by one of
 	// those people. Empty means any.
@@ -226,11 +235,11 @@ type QueryFilter struct {
 }
 
 // List returns memory items visible under the permission filter, newest
-// first. An item is visible if it is scoped to one of the caller's
-// accessible channels/projects/groups, OR owned by the caller. Items with
-// no scope at all are treated as workspace-wide readable (rare; only
-// glossary tends to be unscoped) — callers that want strict scoping should
-// not request the glossary kind.
+// first. An item is visible only if it is scoped to one of the caller's
+// accessible channels/projects/groups, or has no scope and is
+// UnscopedOwnedBy's (and, with OwnedBy, is that person's). The check is in
+// the query, so the page is cut after it: a page is never short while
+// visible items remain. Ownership never reaches an item that has a scope.
 func List(ctx context.Context, f QueryFilter) ([]*MemoryItem, error) {
 	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -267,8 +276,8 @@ func List(ctx context.Context, f QueryFilter) ([]*MemoryItem, error) {
 		args = append(args, arg)
 	}
 
-	// Permission OR-group: visible if scoped to an accessible resource,
-	// or owned by the caller.
+	// Permission OR-group: visible only if scoped to an accessible resource,
+	// or scoped to nothing and the reader's own.
 	var perm []string
 	if len(f.AccessibleChannels) > 0 {
 		clause, arg := uuidAny(&n, "channel_uuid", f.AccessibleChannels)
@@ -285,9 +294,9 @@ func List(ctx context.Context, f QueryFilter) ([]*MemoryItem, error) {
 		perm = append(perm, "chat_grp_id IN ("+ph+")")
 		args = append(args, vals...)
 	}
-	if f.OwnerID != nil {
-		perm = append(perm, fmt.Sprintf("owner_user_id = $%d", n))
-		args = append(args, *f.OwnerID)
+	if f.UnscopedOwnedBy != nil {
+		perm = append(perm, fmt.Sprintf("(owner_user_id = $%d AND channel_uuid IS NULL AND project_uuid IS NULL AND COALESCE(chat_grp_id, '') = '')", n))
+		args = append(args, *f.UnscopedOwnedBy)
 		n++
 	}
 	if len(perm) == 0 {
@@ -295,6 +304,11 @@ func List(ctx context.Context, f QueryFilter) ([]*MemoryItem, error) {
 		return []*MemoryItem{}, nil
 	}
 	where = append(where, "("+strings.Join(perm, " OR ")+")")
+	if f.OwnedBy != nil {
+		where = append(where, fmt.Sprintf("owner_user_id = $%d", n))
+		args = append(args, *f.OwnedBy)
+		n++
+	}
 
 	query := `
 		SELECT id, kind, content, status, owner_user_id, due_at,
@@ -926,7 +940,8 @@ func CountByScope(ctx context.Context, f QueryFilter) (map[string]int, error) {
 		AccessibleChannels: f.AccessibleChannels,
 		AccessibleProjects: f.AccessibleProjects,
 		AccessibleGrpIDs:   f.AccessibleGrpIDs,
-		OwnerID:            f.OwnerID,
+		OwnedBy:            f.OwnedBy,
+		UnscopedOwnedBy:    f.UnscopedOwnedBy,
 		Limit:              500,
 	})
 	if err != nil {

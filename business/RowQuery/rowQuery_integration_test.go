@@ -508,7 +508,7 @@ func TestRowQueryMeansWhatItsEvaluatorMeans(t *testing.T) {
 		}
 	}
 	for i := 0; i < 20; i++ {
-		if err := dataTable.DeleteRow(ctx, tb.Id, ids[rnd.Intn(len(ids))].Id, owner); err != nil && !dataTable.IsRowNotFound(err) {
+		if _, err := dataTable.DeleteRow(ctx, tb.Id, ids[rnd.Intn(len(ids))].Id, owner); err != nil && !dataTable.IsRowNotFound(err) {
 			t.Fatalf("delete: %v", err)
 		}
 		if _, err := dataTable.CreateRow(ctx, tb.Id, dataTable.RowInput{Values: map[string]interface{}{

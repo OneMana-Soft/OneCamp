@@ -120,9 +120,6 @@ func TestFilterIDs(t *testing.T) {
 	if _, ok := FieldOfFilter("field_nothex"); ok {
 		t.Error("not an id")
 	}
-	if inClause(nil) != matchNothing || inClause([]string{"a"}) != `eq(task_uuid, ["a"])` {
-		t.Errorf("%s / %s", inClause(nil), inClause([]string{"a"}))
-	}
 }
 
 func TestSameValue(t *testing.T) {

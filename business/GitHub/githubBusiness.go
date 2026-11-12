@@ -12,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
@@ -21,6 +20,7 @@ import (
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
@@ -510,6 +510,12 @@ func HandleGitHubWebhookEvent(ctx context.Context, eventType string, body []byte
 		return handlePullRequestReviewEvent(ctx, body)
 	case "check_run":
 		return handleCheckRunEvent(ctx, body)
+	case "release":
+		return handleReleaseEvent(ctx, body)
+	case "deployment_status":
+		return reportStage(ctx, body, deployStage)
+	case "workflow_run":
+		return reportStage(ctx, body, runStage)
 	default:
 		helpers.MessageLogs.InfoLog.Printf("Ignoring unhandled GitHub event: %s", eventType)
 		return nil
@@ -521,6 +527,18 @@ func HandleGitHubWebhookEvent(ctx context.Context, eventType string, body []byte
 // We use the cached, pre-parsed rules map keyed by (owner, name) to
 // avoid a json.Unmarshal of the same blob on every webhook event.
 func applyAutomationRules(ctx context.Context, link *githubLinkModel.GitHubLink, taskUUIDStr string, trigger string) {
+	moveByRule(ctx, link, taskUUIDStr, trigger,
+		func(l *githubLinkModel.GitHubLink) string { return ruleTarget(parseAutomationRules(l), trigger) })
+}
+
+// moveByRule moves the task to the status target reads from a link's rules
+// ("" for none), as the integration's bot, when the task's own project links
+// the repository: through that project's link and rules, whoever calls
+// (taskRepoLink.go). GitHub made the change, not the person who linked the
+// repository, so the task's history says the bot did. A task already there
+// is left as it is, with no line in its history.
+func moveByRule(ctx context.Context, link *githubLinkModel.GitHubLink, taskUUIDStr string, trigger string,
+	target func(*githubLinkModel.GitHubLink) string) {
 	if link == nil || taskUUIDStr == "" {
 		return
 	}
@@ -537,7 +555,7 @@ func applyAutomationRules(ctx context.Context, link *githubLinkModel.GitHubLink,
 		return
 	}
 	link = own
-	targetStatus := ruleTarget(parseAutomationRules(link), trigger)
+	targetStatus := target(link)
 	if targetStatus == "" {
 		return
 	}
@@ -548,7 +566,7 @@ func applyAutomationRules(ctx context.Context, link *githubLinkModel.GitHubLink,
 	if errors.Is(err, taskStatusBusiness.ErrUnknownStatus) {
 		if fresh, ferr := GetGitHubLinkById(ctx, link.Id); ferr == nil && fresh != nil {
 			invalidateLinkByLink(fresh)
-			if targetStatus = ruleTarget(parseAutomationRules(fresh), trigger); targetStatus == "" {
+			if targetStatus = target(fresh); targetStatus == "" {
 				return
 			}
 			to, err = taskStatusBusiness.Resolve(ctx, link.ProjectId.String(), targetStatus)
@@ -559,30 +577,41 @@ func applyAutomationRules(ctx context.Context, link *githubLinkModel.GitHubLink,
 			trigger, link.RepoOwner, link.RepoName, targetStatus, err)
 		return
 	}
-	// Through the same path as every other status change, acting as the person
-	// who linked the repository. This used to write only the Postgres column,
-	// which nothing in the app reads, so a rule never visibly moved a task.
-	actor, err := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
+	if err := moveAsBot(ctx, taskUUID, link.ProjectId, to, trigger); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/applyAutomationRules %v", err)
+	}
+}
+
+// moveAsBot moves a task of project to the status to as the integration's
+// bot, through the same path as every other status change, and writes the
+// line its GitHub activity shows. This used to write only the Postgres
+// column, which nothing in the app reads, so a rule never visibly moved a
+// task. A task already there is left as it is, with no line. moveByRule and
+// RecordLanded (landed.go) move tasks through it.
+func moveAsBot(ctx context.Context, taskUUID, project uuid.UUID, to taskStatusBusiness.Resolved, trigger string) error {
+	taskUUIDStr := taskUUID.String()
+	actor, err := integrationBot(ctx)
 	if err != nil || actor == nil {
-		helpers.LogErrorWithContext(ctx, "business/applyAutomationRules Failed to load the linking user: %v", err)
-		return
+		return fmt.Errorf("failed to load whom the %s rule acts as: %v", trigger, err)
 	}
 	dgraphTaskInfo, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, actor.Uid)
 	if err != nil || dgraphTaskInfo == nil {
-		helpers.LogErrorWithContext(ctx, "business/applyAutomationRules Failed to load task: %v", err)
-		return
+		return fmt.Errorf("failed to load task %s: %v", taskUUIDStr, err)
+	}
+	if dgraphTaskInfo.Status == to.Value() {
+		return nil
 	}
 	if err := taskBusiness.UpdateTaskStatusByTaskUUID(ctx, taskUUID, to.Value(), dgraphTaskInfo, actor); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/applyAutomationRules Failed to update task status: %v", err)
-		return
+		return fmt.Errorf("failed to update task status: %w", err)
 	}
 
 	// The activity says the status as people know it, "QA", not an id.
 	shown := to.Display()
 	_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "status_synced",
 		nil, nil, nil, &shown, nil, nil)
-	publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "status_synced", statusSyncPayload(to))
+	publishGitHubSyncMqtt(taskUUIDStr, project.String(), "status_synced", statusSyncPayload(to))
 	helpers.MessageLogs.InfoLog.Printf("Applied automation rule %s -> %s for task %s", trigger, shown, taskUUIDStr)
+	return nil
 }
 
 func handleIssueEvent(ctx context.Context, body []byte) error {
@@ -695,7 +724,6 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 			ProjectUuid:     link.ProjectId.String(),
 			TaskName:        event.Issue.Title,
 			TaskDescription: event.Issue.Body,
-			Priority:        dgraphStruct.TASK_PRIORITY_MEDIUM,
 			Status:          defaultStatus,
 			GitHubIssueNum:  &event.Issue.Number,
 			GitHubIssueURL:  &event.Issue.HTMLURL,
@@ -703,7 +731,7 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 
 		var mentionsUsers []*dgraphStruct.DgraphUser
 		// A sync is a data move: the issue's state is the task's status (DataMove).
-		taskUUID, err := taskBusiness.CreateTask(taskBusiness.DataMove(ctx), link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, mentionsUsers)
+		taskUUID, err := taskBusiness.CreateTask(taskBusiness.QuietMove(ctx), link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, mentionsUsers)
 		if err != nil {
 			return fmt.Errorf("failed to auto-create task from issue: %v", err)
 		}
@@ -850,7 +878,21 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		if dgraphTaskInfo.Assignee != nil {
 			oldAssigneeUID = dgraphTaskInfo.Assignee.Uid
 		}
-		if err := taskBusiness.UpdateTaskAssigneeByTaskUUID(taskBusiness.DataMove(ctx), taskUUID, userDgraphInfo, oldAssigneeUID, dgraphTaskInfo.Uid, dgraphTaskInfo, userDgraphInfo); err != nil {
+		// Given on GitHub by whoever sent the event, as the person they are
+		// here: their own assignment tells nobody, as one made here, and
+		// anyone else's tells whom it's given to once (the assignment's key),
+		// as theirs. A sender with no account here is provisioned as an
+		// external person (MapGitHubUserToOneCampUser, as a GitHub commenter
+		// or assignee is) and named by their login; the act is no one's
+		// (nil: "Someone") only if that provisioning fails. Never the link's
+		// maker, who did nothing.
+		var assigner *dgraphStruct.DgraphUser
+		if senderUUID := MapGitHubUserToOneCampUser(event.Sender.Login); senderUUID != "" {
+			if sender, err := userBusiness.GetDgraphUserInfoByUUID(ctx, senderUUID); err == nil && sender != nil {
+				assigner = sender
+			}
+		}
+		if err := taskBusiness.UpdateTaskAssigneeByTaskUUID(taskBusiness.DataMove(ctx), taskUUID, userDgraphInfo, oldAssigneeUID, dgraphTaskInfo.Uid, dgraphTaskInfo, assigner); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Failed to update assignee: %v", err)
 		}
 		publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "assignee_synced", map[string]interface{}{
@@ -1010,14 +1052,17 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 	}
 
 	// The task on the pull request's branch in a project linking this
-	// repository, else one its body names (Linear-style magic linking). Only a
+	// repository, else the one its branch's name names, else one its title or
+	// body names (Linear-style magic linking: a key or an address). Only a
 	// task in a project that linked this repository, through that project's
 	// own link, which decides what the event does to the task and who is
-	// told: the branch and the body are the author's words.
+	// told: the branch, the title and the body are the author's words.
 	owner, repo := event.Repository.Owner.Login, event.Repository.Name
+	textRefs := taskKeys.RefsIn(event.PullRequest.Title + "\n" + event.PullRequest.Body)
 	taskUUIDStr, taskUUID, link, _ := leadTask(ctx, owner, repo, syncsPRs,
 		onBranch(ctx, owner, repo, event.PullRequest.Head.Ref),
-		func() string { return findTaskUUIDInText(ctx, event.PullRequest.Body) })
+		namedIn(ctx, owner, repo, taskKeys.BranchRefs(event.PullRequest.Head.Ref)),
+		namedIn(ctx, owner, repo, textRefs))
 
 	// Determine PR state for tracking
 	prState := event.PullRequest.State
@@ -1088,14 +1133,13 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 						ProjectUuid:     link.ProjectId.String(),
 						TaskName:        event.PullRequest.Title,
 						TaskDescription: event.PullRequest.Body,
-						Priority:        dgraphStruct.TASK_PRIORITY_MEDIUM,
 						Status:          dgraphStruct.TASK_STATUS_INPROGRESS,
 						GitHubPRNum:     &event.PullRequest.Number,
 						GitHubPRURL:     &event.PullRequest.HTMLURL,
 					}
 					var mentionsUsers []*dgraphStruct.DgraphUser
 					// A sync is a data move: the pull request's state is the task's status (DataMove).
-					taskUUID, err := taskBusiness.CreateTask(taskBusiness.DataMove(ctx), link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, mentionsUsers)
+					taskUUID, err := taskBusiness.CreateTask(taskBusiness.QuietMove(ctx), link.ProjectId, userInfo, dgraphProjectInfo, nil, createTaskInput, mentionsUsers)
 					if err != nil {
 						helpers.LogErrorWithContext(ctx, "business/handlePullRequestEvent Failed to auto-create task for PR #%d: %v", event.PullRequest.Number, err)
 					} else {
@@ -1106,8 +1150,10 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 							helpers.LogErrorWithContext(ctx, "business/handlePullRequestEvent Failed to update PR state on auto-created task: %v", err)
 							markInboundSyncFailed(ctx, taskUUID, "GitHub PR state sync failed")
 						}
+						// The pull request made this task, so the task follows its edits.
 						_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "pr_opened",
-							&event.PullRequest.User.Login, nil, nil, &event.PullRequest.Title, nil, nil)
+							&event.PullRequest.User.Login, nil, nil, &event.PullRequest.Title, nil,
+							githubTaskActivityDomain.MadeByPR(event.PullRequest.HTMLURL))
 						publishGitHubSyncMqtt(taskUUID.String(), link.ProjectId.String(), "pr_opened", map[string]interface{}{
 							"pr_state":    prState,
 							"pr_is_draft": isDraft,
@@ -1181,6 +1227,9 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 			})
 			applyAutomationRules(ctx, link, taskUUIDStr, trigger)
 		}
+		if event.PullRequest.Merged {
+			closeMergedRefs(ctx, owner, repo, textRefs, taskUUID, event.PullRequest.User.Login, event.PullRequest.Title)
+		}
 	case "reopened":
 		if taskUUIDStr != "" {
 			if err := taskDomain.UpdateTaskPRState(ctx, taskUUID, prState, "", "", boolPtr(isDraft)); err != nil {
@@ -1193,7 +1242,15 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 			})
 		}
 	case "edited":
+		// Only the task the pull request made (MadeByPR) follows its title
+		// and body. Any pull request can name a person's task, by its key,
+		// its address or its branch, and that task keeps its own name and
+		// description, as does one whose mark can't be read (logged).
+		made := false
 		if taskUUIDStr != "" {
+			made, _ = githubTaskActivityDomain.PRMadeTask(ctx, taskUUID, event.PullRequest.HTMLURL)
+		}
+		if made {
 			userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
 			if err == nil && userDgraphInfo != nil {
 				dgraphTaskInfo, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, userDgraphInfo.Uid)
@@ -1227,7 +1284,7 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 						if dgraphTaskInfo.Assignee != nil {
 							oldAssigneeUID = dgraphTaskInfo.Assignee.Uid
 						}
-						_ = taskBusiness.UpdateTaskAssigneeByTaskUUID(taskBusiness.DataMove(ctx), taskUUID, assigneeDgraphInfo, oldAssigneeUID, dgraphTaskInfo.Uid, dgraphTaskInfo, assigneeDgraphInfo)
+						_ = taskBusiness.UpdateTaskAssigneeByTaskUUID(taskBusiness.QuietMove(ctx), taskUUID, assigneeDgraphInfo, oldAssigneeUID, dgraphTaskInfo.Uid, dgraphTaskInfo, assigneeDgraphInfo)
 						publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "assignee_synced", map[string]interface{}{
 							"assignee_uuid":  assigneeDgraphInfo.Uuid,
 							"assignee_name":  assigneeDgraphInfo.DisplayName(),
@@ -1706,6 +1763,11 @@ func handleCreateEvent(ctx context.Context, body []byte) error {
 		return nil
 	}
 
+	// A tag ships its release in each project syncing the repository, as a
+	// published GitHub release of it does (releases.go).
+	if event.RefType == "tag" {
+		return shipTag(ctx, event.Repository.Owner.Login, event.Repository.Name, event.Ref)
+	}
 	if event.RefType != "branch" {
 		return nil
 	}
@@ -1721,11 +1783,11 @@ func handleCreateEvent(ctx context.Context, body []byte) error {
 	branchName := strings.TrimPrefix(event.Ref, "refs/heads/")
 
 	// The task already on this branch in a project linking this repository,
-	// else the task whose id the branch's name carries.
+	// else the task the branch's name names, by its key or its address.
 	owner, repo := event.Repository.Owner.Login, event.Repository.Name
 	taskUUIDStr, taskUUID, own, ok := leadTask(ctx, owner, repo, syncsPRs,
 		onBranch(ctx, owner, repo, branchName),
-		func() string { return findTaskUUIDInText(ctx, branchName) })
+		namedIn(ctx, owner, repo, taskKeys.BranchRefs(branchName)))
 	if !ok {
 		helpers.MessageLogs.InfoLog.Printf("New branch %s on %s: it names no task of a project syncing it", branchName, event.Repository.FullName)
 		return nil
@@ -1900,7 +1962,8 @@ func registerGitHubWebhook(link *githubLinkModel.GitHubLink, secret string) {
 	// What the webhook sends, each event HandleGitHubWebhookEvent handles. A
 	// webhook registered before one was added doesn't send it until it is
 	// registered again (StartWebhookRefresh does at each start).
-	desiredEvents := []string{"issues", "pull_request", "push", "issue_comment", "create", "delete", "pull_request_review", "check_run"}
+	desiredEvents := []string{"issues", "pull_request", "push", "issue_comment", "create", "delete", "pull_request_review", "check_run",
+		"release", "deployment_status", "workflow_run"}
 
 	// Idempotency: check if our webhook already exists
 	listURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/hooks?per_page=100", link.RepoOwner, link.RepoName)
@@ -2128,21 +2191,6 @@ func deleteGitHubWebhookWithClient(ctx context.Context, link *githubLinkModel.Gi
 	}
 }
 
-// taskUUIDRegex matches OneCamp task URLs to extract UUIDs.
-var taskUUIDRegex = regexp.MustCompile(`task/([0-9a-fA-F\-]{36})`)
-
-// findTaskUUIDInText scans text for OneCamp task URLs and returns the first matching task UUID.
-func findTaskUUIDInText(ctx context.Context, text string) string {
-	if text == "" {
-		return ""
-	}
-	matches := taskUUIDRegex.FindStringSubmatch(text)
-	if len(matches) >= 2 {
-		return matches[1]
-	}
-	return ""
-}
-
 func handlePushEvent(ctx context.Context, body []byte) error {
 	var event struct {
 		Ref     string `json:"ref"`
@@ -2160,7 +2208,8 @@ func handlePushEvent(ctx context.Context, body []byte) error {
 			Owner    struct {
 				Login string `json:"login"`
 			} `json:"owner"`
-			Name string `json:"name"`
+			Name          string `json:"name"`
+			DefaultBranch string `json:"default_branch"`
 		} `json:"repository"`
 		Sender struct {
 			Login string `json:"login"`
@@ -2199,31 +2248,39 @@ func handlePushEvent(ctx context.Context, body []byte) error {
 	var tells []tell
 	told := map[tell]bool{}
 
-	// Magic words: parse commit messages for task references
+	// Each task a commit names (TaskKeys RefsIn: its key, an alias or its
+	// address) that the push may change (codeTask) takes a line; a commit
+	// that says it fixes or closes one, landing on the default branch, moves
+	// it, once however many commits say so.
+	branchName := strings.TrimPrefix(event.Ref, "refs/heads/")
+	lands := event.Repository.DefaultBranch != "" && branchName == event.Repository.DefaultBranch
+	closed := map[uuid.UUID]bool{}
 	for _, commit := range event.Commits {
-		refs := parseCommitMessageForTaskRefs(commit.Message)
-		for _, ref := range refs {
-			if ref.TaskUUID == "" {
-				continue
-			}
-			refTaskUUID, own, ok := eventTask(ctx, ref.TaskUUID, owner, repo, syncsPRs)
+		named := map[uuid.UUID]bool{}
+		for _, ref := range taskKeys.RefsIn(commit.Message) {
+			refTaskUUID, own, ok := codeTask(ctx, ref, owner, repo)
 			if !ok {
 				continue
 			}
-			line(refTaskUUID, "commit_linked", &commit.Message, &commit.URL)
-			if ref.Action == "close" || ref.Action == "fix" {
-				applyAutomationRules(ctx, own, ref.TaskUUID, "commit_linked")
+			if !named[refTaskUUID] {
+				named[refTaskUUID] = true
+				line(refTaskUUID, "commit_linked", &commit.Message, &commit.URL)
 			}
-			if t := (tell{ref.TaskUUID, own.ProjectId.String(), "commit_linked"}); !told[t] {
+			if ref.Close && lands && !closed[refTaskUUID] {
+				closed[refTaskUUID] = true
+				closeByRef(ctx, own, refTaskUUID)
+			}
+			if t := (tell{refTaskUUID.String(), own.ProjectId.String(), "commit_linked"}); !told[t] {
 				told[t] = true
 				tells = append(tells, t)
 			}
 		}
 	}
 
-	// The task on the pushed branch in a project linking this repository.
-	branchName := strings.TrimPrefix(event.Ref, "refs/heads/")
-	if taskUUIDStr, taskUUID, own, ok := leadTask(ctx, owner, repo, syncsPRs, onBranch(ctx, owner, repo, branchName)); ok {
+	// The task on the pushed branch in a project linking this repository: the
+	// one carrying the branch, else the one its name names ("web-12-export").
+	if taskUUIDStr, taskUUID, own, ok := leadTask(ctx, owner, repo, syncsPRs, onBranch(ctx, owner, repo, branchName),
+		namedIn(ctx, owner, repo, taskKeys.BranchRefs(branchName))); ok {
 		for _, commit := range event.Commits {
 			line(taskUUID, "commit_pushed", &commit.Message, &commit.URL)
 		}
@@ -2237,47 +2294,6 @@ func handlePushEvent(ctx context.Context, body []byte) error {
 		publishGitHubSyncMqtt(t.task, t.project, t.kind, nil)
 	}
 	return nil
-}
-
-// magicWordPatterns maps closing keywords to their action type.
-var magicWordPatterns = []struct {
-	regex  *regexp.Regexp
-	action string
-}{
-	{regexp.MustCompile(`task/([0-9a-fA-F\-]{36})`), "ref"},
-}
-
-type commitTaskRef struct {
-	TaskUUID string
-	Action   string
-}
-
-// parseCommitMessageForTaskRefs extracts task UUID references from a commit message.
-// Only task/UUID patterns are included; issue numbers are skipped because we cannot
-// reliably map them to OneCamp tasks without the linked repo context.
-func parseCommitMessageForTaskRefs(msg string) []commitTaskRef {
-	var refs []commitTaskRef
-	seen := make(map[string]bool)
-	for _, pattern := range magicWordPatterns {
-		matches := pattern.regex.FindAllStringSubmatch(msg, -1)
-		for _, m := range matches {
-			if len(m) < 2 {
-				continue
-			}
-			ref := m[1]
-			// Validate that the capture group is a valid UUID (skip plain issue numbers like "123")
-			if _, err := uuid.Parse(ref); err != nil {
-				continue
-			}
-			key := ref + "-" + pattern.action
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			refs = append(refs, commitTaskRef{TaskUUID: ref, Action: pattern.action})
-		}
-	}
-	return refs
 }
 
 func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {

@@ -117,6 +117,22 @@ func feedNotices(ctx context.Context, userUUID string, before time.Time, limit i
 	return noticeItems(rows, readable, titles, byID), nil
 }
 
+// noticeTimes is NoticeTimes: the same notices as feedNotices, bare (their
+// kind and time, nobody named, nothing titled or opened), for the Inbox badge
+// to count by the rule the Inbox marks them by. One indexed read; none of the
+// access, title and people reads the Inbox draws them with.
+func noticeTimes(ctx context.Context, userUUID string, before time.Time, limit int) ([]dgraphModels.UnifiedActivityItem, error) {
+	me, err := uuid.Parse(userUUID)
+	if err != nil {
+		return nil, nil
+	}
+	rows, err := noticesFor(ctx, me, before, limit)
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	return noticeItems(rows, nil, nil, nil), nil
+}
+
 // noticeItems are notices as the feed lists them, for their reader: readable
 // is what they may open now and titles what those are called, both keyed by
 // noticeKey (a doc by its lower-case uuid). Pure.

@@ -24,10 +24,12 @@ import (
 	"github.com/google/uuid"
 )
 
-// readableTasks is the task read that checks access, and uidOf a reader's
-// uid in the work graph, by which it decides; seams for tests.
+// readableTasks is the task read that checks access, blockTasks the same
+// read for blocks with what each task waits on, and uidOf a reader's uid in
+// the work graph, by which they decide; seams for tests.
 var (
 	readableTasks = taskBusiness.ReadableTasks
+	blockTasks    = taskBusiness.ReadableBlockTasks
 	uidOf         = accessBusiness.UIDOf
 )
 
@@ -106,7 +108,8 @@ func (s *service) blockedTask(ctx context.Context, who *model.UserInfo, id strin
 }
 
 // tasksOf is each block's task among events, by task uuid, as the reader may
-// read it: one read for them all. A task the reader may no longer read is
+// read it, with what it waits on (blockTasks): one read for them all. A
+// task the reader may no longer read is
 // named by its uuid alone, so its block still says it is a task block. A read
 // that fails leaves the blocks with their uuids: a task's name never fails
 // the calendar's read.
@@ -128,14 +131,18 @@ func (s *service) tasksOf(ctx context.Context, reader accessBusiness.Subject, ev
 		helpers.LogErrorWithContext(ctx, "business/Calendar tasksOf: no graph uid: %v", err)
 		return out
 	}
-	found, err := readableTasks(ctx, ids, uid)
+	found, err := blockTasks(ctx, ids, uid, reader.UserUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Calendar tasksOf: tasks not read: %v", err)
 		return out
 	}
 	for id, t := range out {
 		if r, ok := found[id.String()]; ok {
-			t.Name, t.Status, t.ProjectUUID, t.ProjectName = r.Name, r.Status, r.ProjectUUID, r.ProjectName
+			t.Name, t.Status, t.ProjectUUID, t.ProjectName, t.BlockedOpen = r.Name, r.Status, r.ProjectUUID, r.ProjectName, r.BlockedOpen
+			// What it waits on, named only when the reader may read that too.
+			if b := r.FirstBlocker; b != nil {
+				t.BlockedBy = []*dgraphStruct.EventTask{{UUID: b.UUID, Name: b.Name}}
+			}
 		}
 	}
 	return out

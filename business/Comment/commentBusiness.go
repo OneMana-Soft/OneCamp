@@ -54,9 +54,11 @@ func CreateCommentInTask(ctx context.Context, dgraphTask *dgraphStruct.DgraphTas
 
 	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.DisplayName())
 	notificationBody := plainText
-	helpers.GoSafeNamed("sendNewTaskCommentNotification", func() {
-		sendNewTaskCommentNotification(notificationTitle, notificationBody, commentUUID.String(), mentionList, rawDgraphTaskInfo, &userInfo.UserDgraphInfo)
-	})
+	if !helpers.Quiet(ctx) { // a move of data tells nobody (taskBusiness.QuietMove)
+		helpers.GoSafeNamed("sendNewTaskCommentNotification", func() {
+			sendNewTaskCommentNotification(notificationTitle, notificationBody, commentUUID.String(), mentionList, rawDgraphTaskInfo, &userInfo.UserDgraphInfo)
+		})
+	}
 
 	return
 
@@ -71,6 +73,9 @@ var (
 	taskCommentDeliver  = notificationBusiness.Deliver
 	taskCommentEmail    = notificationBusiness.DispatchTaskComment
 	taskCommentIcon     = userBusiness.GetSignedProfileURL
+	taskCommentInbox    = func(ctx context.Context, n notificationBusiness.Notice, to []notificationBusiness.NoticeRecipient) {
+		notificationBusiness.Tell(ctx, n, to)
+	}
 )
 
 // sendNewTaskCommentNotification tells of a comment on a task: a push, with the
@@ -114,8 +119,9 @@ func sendNewTaskCommentNotification(title string, body string, commentUUID strin
 	// The push, as every push goes (Deliver): through the push gate, with the
 	// desktop app's notice beside it. It looked devices up for itself, so a
 	// desktop-only reader heard of no task comment.
-	if told := taskCommentPushedTo(ctx, dgraphTask, userDgraph.Uuid, thread, forThem); len(told) > 0 {
-		taskCommentDeliver(ctx, told, map[string]string{
+	pushed := taskCommentPushedTo(ctx, dgraphTask, userDgraph.Uuid, thread, forThem)
+	if len(pushed) > 0 {
+		taskCommentDeliver(ctx, pushed, map[string]string{
 			firebaseInit.FIREBASE_PUSH_DATA_TYPE:      firebaseInit.FIREBASE_PUSH_DATA_TYPE_TASK_COMMENT,
 			firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:   dgraphTask.Project.Uuid,
 			firebaseInit.FIREBASE_PUSH_DATA_TITLE:     title,
@@ -130,6 +136,87 @@ func sendNewTaskCommentNotification(title string, body string, commentUUID strin
 	// dispatcher keeps it to who may read the task, by their email settings.
 	emailRecipients := append(append([]string{}, thread...), forThem...)
 	taskCommentEmail(userDgraph.Uuid, userDgraph.DisplayName(), icon, dgraphTask.Uuid, dgraphTask.Name, body, commentUUID, emailRecipients)
+
+	tellTaskCommentInbox(ctx, dgraphTask, userDgraph, commentUUID, mentionsDgraphUsersList, pushed, emailRecipients)
+}
+
+// tellTaskCommentInbox is told means listed for a task's comment: everyone
+// it was pushed or emailed to who may read the task now, but whom the feed
+// lists it for already (its Addressee, who owns it in the graph, and the
+// people it mentions) and its writer, gets an inbox item of it alone, once
+// (keyed by the comment, as a doc's comment is). The thread and the people
+// who hear of everything were pushed and emailed and found nothing after a
+// reload (NOTIF-H2). An answer of who may read it that can't be read gives
+// nobody one.
+func tellTaskCommentInbox(ctx context.Context, task *dgraphStruct.DgraphTask, writer *dgraphStruct.DgraphUser, commentUUID string, mentioned []*dgraphStruct.DgraphUser, pushed, emailed []string) {
+	listed := map[string]bool{writer.Uuid: true}
+	if to := Addressee(task); to != nil {
+		listed[to.Uuid] = true
+	}
+	for _, m := range mentioned {
+		if m != nil {
+			listed[m.Uuid] = true
+		}
+	}
+	var asked []string
+	seen := map[string]bool{}
+	for _, id := range append(append([]string{}, pushed...), emailed...) {
+		if id != "" && !seen[id] && !listed[id] {
+			seen[id] = true
+			asked = append(asked, id)
+		}
+	}
+	if len(asked) == 0 {
+		return
+	}
+	readers, err := taskCommentReaders(ctx, task.Uuid, asked)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/tellTaskCommentInbox could not check who may read task %s, listing it for nobody else: %+v", task.Uuid, err)
+		return
+	}
+	var told []notificationBusiness.NoticeRecipient
+	for _, id := range asked {
+		if readers[id] {
+			told = append(told, notificationBusiness.NoticeRecipient{UserUUID: id, Reason: "participant"})
+		}
+	}
+	to := notificationBusiness.InboxForTheRest(told, func(id string) bool { return listed[id] })
+	if len(to) == 0 {
+		return
+	}
+	taskCommentInbox(ctx, notificationBusiness.Notice{
+		Kind:          TaskCommented,
+		ResourceKind:  "task",
+		ResourceUUID:  task.Uuid,
+		ResourceTitle: task.Name,
+		Actor:         writer,
+		Data:          map[string]string{"comment_uuid": commentUUID},
+		DedupKey:      "comment|" + commentUUID,
+		Title:         writer.DisplayName() + " commented on " + task.Name,
+		Path:          "/app/task/" + task.Uuid,
+	}, to)
+}
+
+// TaskCommented is the notice kind of a comment on a task, in the inbox of
+// whom it was told to but not addressed to (tellTaskCommentInbox).
+const TaskCommented = "task.commented"
+
+// Addressee is whom a task's comments are addressed to: its assignee, or its
+// creator when nobody is assigned; nil when it names neither. The live item
+// (business/Task commentRecipient), the comment's owner in the graph (which
+// the feed and the badge list it by) and the inbox for everyone else told
+// (tellTaskCommentInbox) all read it, so the person a comment reached live finds
+// it listed after a reload (NOTIF-H2). Pure.
+func Addressee(task *dgraphStruct.DgraphTask) *dgraphStruct.DgraphUser {
+	switch {
+	case task == nil:
+		return nil
+	case task.Assignee != nil && task.Assignee.Uuid != "":
+		return task.Assignee
+	case task.CreatedBy != nil && task.CreatedBy.Uuid != "":
+		return task.CreatedBy
+	}
+	return nil
 }
 
 // taskCommentPushedTo is who is pushed a comment on the task: those of its

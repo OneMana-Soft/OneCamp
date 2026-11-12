@@ -9,6 +9,7 @@ package domain
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -110,6 +111,56 @@ func read(ctx context.Context, query string) ([]Message, error) {
 		msgs = append(msgs, r.message())
 	}
 	return msgs, nil
+}
+
+// Live answers which of posts (a channel's messages) and chats (a DM's or
+// group's) are there and not deleted, by id: ONE read of the graph however
+// many ids of either kind there are, two blocks of one query, each only the
+// ids that are live. The Threads count asks it of up to business/ChatThread's
+// MaxThreads roots, past what a full read takes (MaxRead).
+func Live(ctx context.Context, posts, chats []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	q := liveQuery(dgraphquery.UUIDList(posts), len(posts), dgraphquery.UUIDList(chats), len(chats))
+	if q == "" {
+		return out, nil
+	}
+	var got struct {
+		P []struct {
+			ID string `json:"id"`
+		} `json:"p"`
+		C []struct {
+			ID string `json:"id"`
+		} `json:"c"`
+	}
+	if err := dgraphInit.ReadInto(ctx, q, nil, &got); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/Message Live err: %+v", err)
+		return nil, err
+	}
+	for _, m := range got.P {
+		out[m.ID] = true
+	}
+	for _, m := range got.C {
+		out[m.ID] = true
+	}
+	return out, nil
+}
+
+// liveQuery is Live's one query: a block for the posts and one for the chats
+// it names (an empty list has no block), "" when it names none. Pure.
+func liveQuery(posts string, nPosts int, chats string, nChats int) string {
+	var blocks []string
+	if posts != "" {
+		blocks = append(blocks, fmt.Sprintf(`p(func: eq(post_uuid, [%s]), first: %d) @filter(type(Post) AND %s) { id: post_uuid }`,
+			posts, nPosts, dgraphquery.Live("post_deleted_at")))
+	}
+	if chats != "" {
+		blocks = append(blocks, fmt.Sprintf(`c(func: eq(chat_uuid, [%s]), first: %d) @filter(type(Chat) AND %s) { id: chat_uuid }`,
+			chats, nChats, dgraphquery.Live("chat_deleted_at")))
+	}
+	if len(blocks) == 0 {
+		return ""
+	}
+	return "{\n\t\t" + strings.Join(blocks, "\n\t\t") + "\n\t}"
 }
 
 func posts(ctx context.Context, list string) ([]Message, error) {

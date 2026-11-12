@@ -96,8 +96,23 @@ func partInCall(ctx context.Context, room, identity string) string {
 // tells the room their part in it, and checks, in the background, that they
 // may be in it now.
 func OnJoined(ctx context.Context, room, roomSID string, p *livekit.ParticipantInfo, at time.Time) {
+	// Another device of a person (meet-04): no attendee of its own, it may
+	// share as its person may under the call's holds, and it may stay only
+	// while its person may (stayCheck).
+	if person, ok := livekitInit.CompanionOf(p.Identity); ok {
+		seatCompanion(ctx, room, person)
+		admit(room, p.Identity)
+		return
+	}
 	if !livekitInit.IsPerson(p) {
 		return
+	}
+	// A companion stays with the call's own room: its person going into a
+	// breakout room takes it out of the call, told why.
+	if parentRoom, _, ok := callStateBusiness.ParentOfBreakout(room); ok && liveKitBusiness.IsMemberIdentity(p.Identity) {
+		helpers.GoSafeNamed("calls.companions", func() {
+			liveKitBusiness.RemoveCompanions(context.WithoutCancel(ctx), parentRoom, p.Identity, liveKitBusiness.RemovedWentToRoom)
+		})
 	}
 	roomLocks.Acquire(room, 0)
 	s, person, err := callStateBusiness.Joined(ctx, eventOf(ctx, room, roomSID, p, at), roleRule)
@@ -120,6 +135,22 @@ func seat(s *callStateBusiness.Session, p *livekit.ParticipantInfo, person *call
 	if sources := liveKitBusiness.PublishSources(s.Held, person.Allowed, model.RunsCall(person.Role)); !livekitInit.PublishesOnly(p, sources) {
 		tellSources(s.Room, p.Identity, sources)
 	}
+}
+
+// seatCompanion gives a companion connecting to a call what its person may
+// share under the call's holds now: its token was minted under the holds as
+// they were then (livekitInit keeps it to a screen whatever this gives).
+func seatCompanion(ctx context.Context, room, person string) {
+	s, err := callStateBusiness.InRoom(ctx, room)
+	if err != nil || s == nil {
+		return
+	}
+	var allowed []string
+	runs := false
+	if q := s.Person(person); q != nil {
+		allowed, runs = q.Allowed, model.RunsCall(q.Role)
+	}
+	tellSources(s.Room, person, liveKitBusiness.PublishSources(s.Held, allowed, runs))
 }
 
 // connectedPeople is who is connected to a room now (LiveKit's listing, the
@@ -247,19 +278,32 @@ func tellAttrs(room, identity string, attrs map[string]string) {
 }
 
 // tellSources sets, in the background, what someone in the call may publish
-// (business/LiveKit's PublishSources), as their part or a hold changed it.
+// (business/LiveKit's PublishSources), as their part or a hold changed it, on
+// every device of theirs (devicesOf: a companion never more than a screen).
 func tellSources(room, identity string, sources []string) {
 	helpers.GoSafeNamed("calls.sources", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		p, err := livekitInit.LiveKitService.Participant(ctx, room, identity)
-		if err == nil && p != nil {
-			_, err = giveSources(ctx, room, p, sources)
+		devices, err := devicesOf(ctx, room, identity)
+		for _, p := range devices {
+			if _, e := giveSources(ctx, room, p, sources); e != nil {
+				err = e
+			}
 		}
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/CallControl could not set what %s may publish in %s: %+v", identity, room, err)
 		}
 	})
+}
+
+// devicesOf is a person's connections to a room now: their own and their
+// companions' (meet-04, livekitInit.DevicesOf).
+func devicesOf(ctx context.Context, room, person string) ([]*livekit.ParticipantInfo, error) {
+	people, err := connectedPeople(ctx, room)
+	if err != nil {
+		return nil, err
+	}
+	return livekitInit.DevicesOf(people, person, true), nil
 }
 
 // tellPart sets, in the background, what the room sees of someone: their part
@@ -331,6 +375,8 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // stayCheck is one asking of mayStay: may stay, or why not; an error when a
 // store didn't answer.
 func stayCheck(ctx context.Context, room, identity string) (bool, string, error) {
+	// A companion may stay while its person may (meet-04).
+	identity = livekitInit.PersonOf(identity)
 	// Whoever may stay in a call may stay in the breakout rooms of it they
 	// may be in, and nobody else.
 	if parentRoom, n, ok := callStateBusiness.ParentOfBreakout(room); ok {

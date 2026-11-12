@@ -205,12 +205,13 @@ func TestAPurgeThatFailsRemovesNothingItCantStandBehind(t *testing.T) {
 
 // The purged boards' sinks forget only boards gone from the graph: their
 // search entries (the board's, its comments', its AI text), and what
-// Postgres and object storage hold of them. The resolver releases a purge's
-// held events only when its boards did go.
+// Postgres and object storage hold of them, their presenter notes and polls
+// included.
+// The resolver releases a purge's held events only when its boards did go.
 func TestPurgedSinksForgetOnlyBoardsGoneFromTheGraph(t *testing.T) {
-	oldIn, oldForget, oldArchive, oldSnaps, oldObj, oldPlaces, oldRows := boardsInGraph, forgetSearchWhere, archiveBoardFiles, dropSnapshots, removeObjects, forgetPlaces, forgetRows
+	oldIn, oldForget, oldArchive, oldNotes, oldPolls, oldSnaps, oldObj, oldPlaces, oldRows := boardsInGraph, forgetSearchWhere, archiveBoardFiles, dropNotes, dropPolls, dropSnapshots, removeObjects, forgetPlaces, forgetRows
 	t.Cleanup(func() {
-		boardsInGraph, forgetSearchWhere, archiveBoardFiles, dropSnapshots, removeObjects, forgetPlaces, forgetRows = oldIn, oldForget, oldArchive, oldSnaps, oldObj, oldPlaces, oldRows
+		boardsInGraph, forgetSearchWhere, archiveBoardFiles, dropNotes, dropPolls, dropSnapshots, removeObjects, forgetPlaces, forgetRows = oldIn, oldForget, oldArchive, oldNotes, oldPolls, oldSnaps, oldObj, oldPlaces, oldRows
 	})
 	left := map[string]bool{"b2": true}
 	boardsInGraph = func(context.Context, []string) (map[string]bool, error) { return left, nil }
@@ -222,6 +223,14 @@ func TestPurgedSinksForgetOnlyBoardsGoneFromTheGraph(t *testing.T) {
 	archiveBoardFiles = func(_ context.Context, src string, ids []string, _ time.Time) (int64, error) {
 		got = append(got, "files "+src+"="+strings.Join(ids, ","))
 		return 0, nil
+	}
+	dropNotes = func(_ context.Context, ids []string) error {
+		got = append(got, "notes "+strings.Join(ids, ","))
+		return nil
+	}
+	dropPolls = func(_ context.Context, ids []string) error {
+		got = append(got, "polls "+strings.Join(ids, ","))
+		return nil
 	}
 	dropSnapshots = func(_ context.Context, ids []string) ([]string, error) {
 		got = append(got, "snapshots "+strings.Join(ids, ","))
@@ -247,6 +256,10 @@ func TestPurgedSinksForgetOnlyBoardsGoneFromTheGraph(t *testing.T) {
 		// One delete over the three indices, each entry matched by the field that names its board (the store-loop guard).
 		"search boards+comments+ai_embeddings _id|comment_board_id|board_uuid=b1",
 		"files board=b1",
+		// The presenter notes before the snapshots, so a failed notes delete strands no object key.
+		"notes b1",
+		// Its polls on a slide, their votes with them.
+		"polls b1",
 		"snapshots b1",
 		// The snapshots' objects and the live drawing's, removed in one call.
 		"objects boardSnapshot/b1/s1.gz,boardState/b1.gz",
@@ -270,6 +283,14 @@ func TestPurgedSinksForgetOnlyBoardsGoneFromTheGraph(t *testing.T) {
 	left = map[string]bool{"b2": true}
 	if written, err := resolvePurged(context.Background(), ev); err != nil || !written {
 		t.Errorf("resolver with b1 gone = %v, %v; want true (release)", written, err)
+	}
+
+	// A notes delete that fails stops the sink before the snapshots, so its
+	// retry finds their rows and object keys again.
+	dropNotes = func(context.Context, []string) error { return errors.New("postgres is down") }
+	got = nil
+	if err := forgetPurgedFiles(context.Background(), ev); err == nil || strings.Join(got, ",") != "files board=b1" {
+		t.Errorf("a failed notes delete: %v after %v; want an error after files board=b1 alone", err, got)
 	}
 }
 

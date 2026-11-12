@@ -18,6 +18,9 @@ func mountCalendarAnswers(rt calendarRouters) {
 	rt.Member.Post("/calendar/events/{eventId}/call", eventController.AddCalendarEventCall)
 	rt.Member.Delete("/calendar/events/{eventId}/call", eventController.RemoveCalendarEventCall)
 	rt.Member.Post("/calendar/events/{eventId}/call/lobby", eventController.SetCalendarEventCallLobby)
+	// Every event's call room (gcal-15 head B): read and joined by whoever may read its details.
+	rt.Member.Get("/calendar/events/{eventId}/room", eventController.GetCalendarEventRoom)
+	rt.Member.Post("/calendar/events/{eventId}/room/join", eventController.JoinCalendarEventRoom)
 	rt.Member.Get("/calendar/events/{eventId}/call/artefacts", eventController.GetCalendarEventCallArtefacts)
 	rt.Member.Get("/calendar/events/{eventId}/call/artefacts/{key}/recording", eventController.GetCalendarEventCallRecording)
 	rt.Member.Get("/calendar/events/{eventId}/call/artefacts/{key}/transcript", eventController.GetCalendarEventCallTranscript)

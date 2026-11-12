@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -50,7 +51,7 @@ var projectTaskFields = `
 							user_name
 							user_profile_object_key
 						}
-						task_sub_task_count: count(task_sub_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` @@hidden_tasks@@))
+						` + taskread.SubTaskCounts + `
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
 						task_team {
 							team_name
@@ -208,6 +209,46 @@ func GetDgraphProjectListByAdminDgraphUID(ctx context.Context, userDgraphUID str
 	}
 
 	return
+}
+
+// GetDgraphProjectsForNewTask reads the live projects the person (their graph
+// uid) is a member or an admin of, each with their member and admin counts
+// and its team's admin count (as Work Access's Of reads them), its team and
+// its people (none from outside): what New task picks a project from.
+func GetDgraphProjectsForNewTask(ctx context.Context, userDgraphUID string) ([]*dgraphStruct.DgraphProject, error) {
+	variables := map[string]string{"$user_id": userDgraphUID}
+	query := `query ProjectsForNewTask($user_id: string){
+				var(func: uid($user_id)) {
+					member as ~project_members
+					admin as ~project_admins
+				}
+				projectInfo(func: uid(member, admin)) @filter(has(project_uuid) AND ` + dgraphquery.Live("project_deleted_at") + `) {
+					uid
+					project_uuid
+					project_name
+					project_status
+					project_deleted_at
+					project_is_member: count(project_members @filter(uid($user_id)))
+					project_is_admin: count(project_admins @filter(uid($user_id)))
+					project_team {
+						uid
+						team_uuid
+						team_name
+						team_is_admin: count(team_admins @filter(uid($user_id)))
+					}
+					project_members @filter(NOT eq(is_external, true)) {
+						user_uuid
+						user_name
+						user_full_name
+						user_profile_object_key
+					}
+				}
+			}`
+	projects, err := dgraphModels.GetDgraphProjectList(ctx, query, variables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetDgraphProjectsForNewTask couldn't read the projects err: %+v", err)
+	}
+	return projects, err
 }
 
 // GetDgraphProjectBoardPlaces reads a project's board without its cards, in
@@ -418,7 +459,7 @@ func taskListQuery(ctx context.Context, projectUUID, userDgraphUID, filterQuery,
 							user_name
 							user_profile_object_key
 						}
-						task_sub_task_count: count(task_sub_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` @@hidden_tasks@@))
+						`+taskread.SubTaskCounts+`
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
 						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {
@@ -1094,7 +1135,9 @@ func HardDeleteProject(ctx context.Context, projectUUID uuid.UUID) (err error) {
 }
 
 // GetDgraphProjectTasksForTemplate returns what a template keeps of a
-// project: its live top-level tasks, each with its live subtasks, and how many
+// project: its live tasks at the top, each with the live tasks under it and
+// theirs (an epic's tasks and their sub-tasks: the hierarchy is three deep,
+// domain/Task hierarchy.go), and how many
 // top-level tasks it has. Both lists come in the order the tasks were made
 // (uid order), not by task_created_at: a project made from a template has its
 // creation times rewritten to read newest first (business/ProjectTemplate
@@ -1126,31 +1169,40 @@ func GetDgraphProjectTasksForTemplate(ctx context.Context, projectUUID string, f
 					task_due_date
 					task_created_at
 					task_sub_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` @@hidden_tasks@@) (first: %d) {
+						task_uuid
 						task_name
+						task_description
 						task_status
+						task_custom_status
+						task_custom_status_name
+						task_priority
+						task_label
+						task_start_date
 						task_due_date
+						task_sub_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` @@hidden_tasks@@) (first: %d) {
+							task_name
+							task_status
+							task_due_date
+						}
 					}
 				}
 			}
-		}`, first, first))
+		}`, first, first, first))
 	return dgraphModels.GetDgraphProjectInfoByUUID(taskread.WithSystem(ctx), query, map[string]string{"$id": projectUUID})
 }
 
-// GetDgraphProjectTimeline returns what a project's timeline draws: its live
-// top-level tasks with their dates, status, priority and assignee, and none of
-// the heavier fields (descriptions, comments, GitHub) a list needs. The newest
-// first ones when there are more; project_task_count says how many there are.
-func GetDgraphProjectTimeline(ctx context.Context, projectUUID, userDgraphUID string, first int) (*dgraphStruct.DgraphProject, error) {
-	tr, err := taskread.From(ctx)
-	if err != nil {
-		return nil, err
-	}
-	query := tr.Fill(fmt.Sprintf(`query Timeline($id: string, $user: string){`+dgraphStruct.ReaderProjectsVar(taskread.ReaderOf(ctx))+`
+// timelineQuery is the timeline's query: topBlock and top are domain/Task
+// TopLevel's block and clause (a task at the top or in an epic), readerVar
+// the reader's projects (dgraphStruct.ReaderProjectsVar) and first how many
+// tasks it reads; tr is the reader's filter it is filled with. Pure.
+func timelineQuery(tr taskread.Filter, topBlock, top, readerVar string, first int) string {
+	return tr.Fill(fmt.Sprintf(`query Timeline($id: string, $user: string){`+readerVar+`
+			`+topBlock+`
 			projectInfo(func: eq(project_uuid, $id)) {
 				project_uuid
 				project_is_admin: count(project_admins @filter(uid($user)))
-				project_task_count: count(project_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` AND NOT has(task_parent_task) @@hidden_tasks@@))
-				project_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` AND NOT has(task_parent_task) @@hidden_tasks@@) (orderdesc: task_created_at, first: %d) {
+				project_task_count: count(project_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` AND `+top+` @@hidden_tasks@@))
+				project_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` AND `+top+` @@hidden_tasks@@) (orderdesc: task_created_at, first: %d) {
 					task_uuid
 					task_name
 					task_status
@@ -1165,12 +1217,28 @@ func GetDgraphProjectTimeline(ctx context.Context, projectUUID, userDgraphUID st
 						user_name
 						user_profile_object_key
 					}
-					task_sub_task_count: count(task_sub_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` @@hidden_tasks@@))
+					`+taskread.SubTaskCounts+`
 					task_blocked_by @facets(kind, lag) @filter(%s) { task_uuid }
 					%s
 				}
 			}
 		}`, first, dgraphStruct.TASK_LIVE_FILTER, dgraphStruct.TASK_BLOCKED_OPEN))
+}
+
+// GetDgraphProjectTimeline returns what a project's timeline draws: its live
+// top-level tasks (at the top or in an epic: domain/Task TopLevel) with their dates, status, priority and assignee, and none of
+// the heavier fields (descriptions, comments, GitHub) a list needs. The newest
+// first ones when there are more; project_task_count says how many there are.
+func GetDgraphProjectTimeline(ctx context.Context, projectUUID, userDgraphUID string, first int) (*dgraphStruct.DgraphProject, error) {
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	block, top, err := taskDomain.TopLevel(ctx, projectUUID)
+	if err != nil {
+		return nil, err
+	}
+	query := timelineQuery(tr, block, top, dgraphStruct.ReaderProjectsVar(taskread.ReaderOf(ctx)), first)
 	return dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, map[string]string{"$id": projectUUID, "$user": userDgraphUID})
 }
 

@@ -769,7 +769,7 @@ func (c *computed) apply(ctx context.Context, rows []*model.Row) {
 			}
 			v := c.stampOf[j](f, pr.row)
 			out[fid] = v
-			values[fid] = cellValue(f.Type, v)
+			values[fid] = fieldTypes.FormulaValue(f.Type, v)
 		}
 		for _, r := range c.rollups {
 			v := c.rollUp(r, row)
@@ -1063,7 +1063,7 @@ func (c *computed) load(ctx context.Context, t *target, ids []uuid.UUID, now tim
 			// itself (its number, when it was made and last changed).
 			cell := func(id string) (formula.Value, int) {
 				if f := stamps[id]; f != nil {
-					return cellValue(f.Type, rowStamp(f)(f, r)), 1
+					return fieldTypes.FormulaValue(f.Type, rowStamp(f)(f, r)), 1
 				}
 				return pr.cell(id, types[id])
 			}
@@ -1456,12 +1456,12 @@ func (p *pageRow) raw(id string) interface{} {
 func (p *pageRow) cell(id, fieldType string) (formula.Value, int) {
 	i, ok := p.at[id]
 	if !ok {
-		return cellValue(fieldType, nil), 0
+		return fieldTypes.FormulaValue(fieldType, nil), 0
 	}
 	raw := p.row.Values[p.cells[i].value:p.cells[i].end]
 	var v interface{}
 	_ = json.Unmarshal([]byte(raw), &v)
-	return cellValue(fieldType, v), formula.ReadCost(raw)
+	return fieldTypes.FormulaValue(fieldType, v), formula.ReadCost(raw)
 }
 
 // presentComputedFields gives each computed field's config as readers want

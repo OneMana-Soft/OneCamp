@@ -57,7 +57,11 @@ func TestAColumnIsTheNarrowestKindAllItsCellsFit(t *testing.T) {
 		{"percents", []string{"12%", "7.5 %"}, plain, model.FieldNumber, "map[format:map[percent:true]]", "12%", "12"},
 		{"dollars", []string{"$1,200", "$3.50"}, plain, model.FieldNumber, "map[format:map[currency:USD]]", "$3.50", "3.5"},
 		{"rupees, grouped as in India", []string{"₹1,00,000", "₹50"}, plain, model.FieldNumber, "map[format:map[currency:INR]]", "₹1,00,000", "100000"},
-		{"euros, a sign no column shows", []string{"€12", "€3"}, plain, model.FieldNumber, "map[]", "€12", "12"},
+		{"euros", []string{"€12", "€3"}, plain, model.FieldNumber, "map[format:map[currency:EUR]]", "€12", "12"},
+		{"pounds, the sign before or after", []string{"£1,200.50", "30 £"}, plain, model.FieldNumber, "map[format:map[currency:GBP]]", "£1,200.50", "1200.5"},
+		{"euros and dollars, so no one currency", []string{"€12", "$3"}, plain, model.FieldNumber, "map[]", "€12", "12"},
+		{"euros and plain numbers, so no currency", []string{"€12", "3"}, plain, model.FieldNumber, "map[]", "€12", "12"},
+		{"cents, a sign that names no currency", []string{"¢12", "¢3"}, plain, model.FieldNumber, "map[]", "¢12", "12"},
 		{"numbers with a comma for the decimal sign", []string{"1.234,5", "2,5"}, SheetOptions{Signs: formula.NumberSigns{Decimal: ",", Group: "."}}, model.FieldNumber, "map[]", "1.234,5", "1234.5"},
 		{"ids with leading zeros stay text", []string{"00123", "00456"}, plain, model.FieldText, "map[]", "00123", "00123"},
 		{"yes and no", []string{"yes", "no", "Yes"}, plain, model.FieldCheckbox, "map[]", "Yes", "true"},
@@ -262,6 +266,7 @@ func TestATypedCellIsTakenAsItIs(t *testing.T) {
 		return cell{Kind: contentIOBusiness.CellNumber, Number: n, Text: text}
 	}
 	usd := func(n float64) cell { c := num(n, "$"+fmt.Sprint(n)); c.Currency = "USD"; return c }
+	in := func(cur string, n float64) cell { c := num(n, fmt.Sprint(n)+" "+cur); c.Currency = cur; return c }
 	pct := func(n float64) cell { c := num(n, fmt.Sprint(n)+"%"); c.Percent = true; return c }
 	box := func(b bool) cell { return cell{Kind: contentIOBusiness.CellBool, Bool: b, Text: fmt.Sprint(b)} }
 	day := func(s string) cell {
@@ -283,6 +288,10 @@ func TestATypedCellIsTakenAsItIs(t *testing.T) {
 		notes  string
 	}{
 		{"amounts in dollars", []cell{usd(1200.5), usd(30)}, model.FieldNumber, "map[format:map[currency:USD]]", usd(30), "30", "[]"},
+		{"amounts in euros", []cell{in("EUR", 1200.5), in("EUR", 30)}, model.FieldNumber, "map[format:map[currency:EUR]]", in("EUR", 30), "30", "[]"},
+		{"amounts in pounds", []cell{in("GBP", 9), in("GBP", 30)}, model.FieldNumber, "map[format:map[currency:GBP]]", in("GBP", 30), "30", "[]"},
+		{"amounts in euros and in dollars", []cell{in("EUR", 9), usd(30)}, model.FieldNumber, "map[]", usd(30), "30", "[]"},
+		{"amounts in a sign that names no currency", []cell{in("other", 9), in("other", 30)}, model.FieldNumber, "map[]", in("other", 30), "30", "[]"},
 		{"percents as they show", []cell{pct(12.5), pct(7)}, model.FieldNumber, "map[format:map[percent:true]]", pct(7), "7", "[]"},
 		{"a number whose text reads otherwise", []cell{num(1234.5, "1.234,50 €"), num(2, "2,00 €")}, model.FieldNumber, "map[]", num(1234.5, "1.234,50 €"), "1234.5", "[]"},
 		{"checkboxes", []cell{box(true), box(false)}, model.FieldCheckbox, "map[]", box(false), "<nil>", "[]"},

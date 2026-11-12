@@ -241,10 +241,12 @@ func TestPullRequestsClaimOnlyTheirProjectsTasks(t *testing.T) {
 	// lookup returned first: when that link didn't sync what the event is
 	// about, the event was dropped, even for a task whose own project's link
 	// syncs it, and so was what an event does without a task (a task made for
-	// a new issue, a review or a comment told to the workspace).
+	// a new issue, a review or a comment told to the workspace). quiet's link
+	// has a secret, as every link made in the app has: one with no secret and
+	// no sync reaches nothing, and every live read leaves it out (V-841).
 	quiet := func(project, repo string, autoCreate bool) {
-		w.exec(`INSERT INTO github_links (project_id, repo_owner, repo_name, sync_issues, sync_prs, auto_create_tasks, automation_rules, created_by)
-			VALUES ($1, 'acme', $2, false, false, $3, '{}'::jsonb, $4)`, project, repo, autoCreate, w.people["ana"])
+		w.exec(`INSERT INTO github_links (project_id, repo_owner, repo_name, webhook_secret, sync_issues, sync_prs, auto_create_tasks, automation_rules, created_by)
+			VALUES ($1, 'acme', $2, 'quiet-secret', false, false, $3, '{}'::jsonb, $4)`, project, repo, autoCreate, w.people["ana"])
 	}
 
 	t.Run("an issue event reaches its task past another project's link that doesn't sync issues", func(t *testing.T) {

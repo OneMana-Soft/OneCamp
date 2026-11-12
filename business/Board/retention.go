@@ -137,6 +137,8 @@ var (
 	}
 	forgetSearchWhere = globalSearchModels.ForgetWhere
 	archiveBoardFiles = attachmentModels.ArchivePlaces
+	dropNotes         = forgetBoardsNotes
+	dropPolls         = forgetBoardsPolls
 	dropSnapshots     = snapshotModels.DeleteBoardsSnapshots
 	removeObjects     = removeSnapshotObjects
 	forgetPlaces      = placesBusiness.Forget
@@ -248,8 +250,9 @@ func forgetPurgedSearch(ctx context.Context, ev outboxBusiness.Event) error {
 
 // forgetPurgedFiles is the files sink: what Postgres and object storage hold
 // of purged boards. Their files are archived, so the attachments purge takes
-// the bytes as it does a doc's; their snapshots and live drawing go now; and
-// so do people's places, views, saves and guest links on them.
+// the bytes as it does a doc's; their presenter notes, polls (with their
+// votes), snapshots and live drawing go now; and so do people's places, views, saves and guest links on
+// them.
 func forgetPurgedFiles(ctx context.Context, ev outboxBusiness.Event) error {
 	gone, err := gonePurged(ctx, ev)
 	if err != nil || len(gone) == 0 {
@@ -257,6 +260,14 @@ func forgetPurgedFiles(ctx context.Context, ev outboxBusiness.Event) error {
 	}
 	if _, err := archiveBoardFiles(ctx, postgressStruct.ATTACHMENT_SRC_BOARD, gone, time.Now()); err != nil {
 		return fmt.Errorf("the files of %d purged boards: %w", len(gone), err)
+	}
+	// The notes before the snapshots: a failed notes delete then retries with
+	// the snapshots' rows, and so their object keys, still there.
+	if err := dropNotes(ctx, gone); err != nil {
+		return fmt.Errorf("the presenter notes of %d purged boards: %w", len(gone), err)
+	}
+	if err := dropPolls(ctx, gone); err != nil {
+		return fmt.Errorf("the polls of %d purged boards: %w", len(gone), err)
 	}
 	keys, err := dropSnapshots(ctx, gone)
 	if err != nil {

@@ -27,7 +27,7 @@ var tableReads = map[string]string{
 	"TableTrash":       "the trash's list",
 	"PickRows":         "choosing rows to link",
 	"ListTableFields":  "its fields, for a link",
-	"RowsByID":         "rows a link names",
+	"rowsByID":         "rows a link names, or a live message's cells (RowsByID, CellsByID)",
 	"PrepareExport":    "an export, which reads",
 	"SetPresence":      "who is on the table, which changes no row",
 	"tableForQuery":    "totals and row queries",

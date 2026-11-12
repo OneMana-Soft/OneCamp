@@ -333,19 +333,14 @@ func ProjectTime(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// Time on a restricted task the reader may not see is named as that,
-		// never by its title, nor as a deleted task, and the notes typed about
-		// it are left out (models/taskread). Not knowing is no report.
+		// never by its title or id, nor as a deleted task, and the notes typed
+		// about it are left out (models/taskread). Not knowing is no report.
 		tr, err := taskread.From(r.Context())
 		if err != nil {
 			fail(w, r, "ProjectTime", err)
 			return
 		}
-		for i := range entries {
-			if tr.Hides(entries[i].TaskUUID.String()) {
-				names.Tasks[entries[i].TaskUUID] = "A task you can't see"
-				entries[i].Note = ""
-			}
-		}
+		names.Hide(entries, func(id uuid.UUID) bool { return tr.Hides(id.String()) })
 	}
 	if q.Get("format") == "csv" {
 		loc, err := time.LoadLocation(q.Get("tz"))

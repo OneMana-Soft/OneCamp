@@ -1026,48 +1026,38 @@ func PublishChannelCallStop(channelId string) {
 	helpers.GoSafeNamed("mqttBusiness.PublishChannelCall", func() { mqttBusiness.PublishChannelCall(&mqttChannelCall, channelId) })
 }
 
+// tellCall is the router's notice of a call started in a channel (business/
+// Notify Tell, with cause chat.call: those who hear everything in it, by push
+// and desktop notice, each recorded once), answering whom it told. The router
+// can't be imported here (it reads business/Reach, which reads this package),
+// so business/Post gives it at init (TellCallsWith); until then nobody is
+// told.
+var tellCall = func(context.Context, string, string, string, map[string]string) []string { return nil }
+
+// TellCallsWith gives this package the router's call notice.
+func TellCallsWith(tell func(ctx context.Context, eventID, channelID, actor string, push map[string]string) []string) {
+	tellCall = tell
+}
+
+// sendChannelCallNotification tells a channel's people a call started,
+// through the one door (tellCall; each call rings anew, so its notice is
+// named by when it started), and emails those it told.
 func sendChannelCallNotification(title string, body string, channelId string, channelName string, userDgraph *dgraphStruct.DgraphUser) {
-
-	mentionsUUIDList := []string{}
-
 	ctx := context.Background()
-
-	// 1. Get eligible users for notifications (based on preferences)
-	eligibleUserIDs, err := userChannelNotificationBusiness.GetEligibleUsersForChannelActivity(ctx, channelId, userDgraph.Uuid, mentionsUUIDList, false)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendChannelCallNotification Failed to get eligible users err: %+v",
-			err)
+	icon := userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
+	told := tellCall(ctx, fmt.Sprintf("channel_call:%s:%d", channelId, time.Now().UnixMilli()), channelId, userDgraph.Uuid, map[string]string{
+		firebaseInit.FIREBASE_PUSH_DATA_TYPE:     firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHANNEL_CALL,
+		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:  channelId,
+		firebaseInit.FIREBASE_PUSH_DATA_TITLE:    title,
+		firebaseInit.FIREBASE_PUSH_DATA_BODY:     body,
+		firebaseInit.FIREBASE_PUSH_DATA_USERNAME: userDgraph.DisplayName(),
+		firebaseInit.FIREBASE_PUSH_DATA_ICON:     icon,
+	})
+	if len(told) == 0 {
 		return
 	}
-
-	if len(eligibleUserIDs) == 0 {
-		return
-	}
-
-	// 2. The push, and the desktop app's notice, to those of them the push
-	// gate lets through (business/Notification Deliver). Each call rings
-	// anew, so its notice is named by when it started.
-	pushData := make(map[string]string)
-
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHANNEL_CALL
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = channelId
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
-
-	notificationBusiness.Deliver(ctx, eligibleUserIDs, pushData, fmt.Sprintf("channel_call:%s:%d", channelId, time.Now().UnixMilli()))
-
-	// Email fan-out for channel call.
-	notificationBusiness.DispatchChannelCall(
-		userDgraph.Uuid,
-		userDgraph.DisplayName(),
-		userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
-		channelId,
-		channelName,
-		eligibleUserIDs,
-	)
+	// Email stays the site's.
+	notificationBusiness.DispatchChannelCall(userDgraph.Uuid, userDgraph.DisplayName(), icon, channelId, channelName, told)
 }
 
 // GetDiscoverableChannels is a page of the public channels the person could

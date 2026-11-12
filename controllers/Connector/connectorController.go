@@ -38,7 +38,7 @@ func ListConnectors(w http.ResponseWriter, r *http.Request) {
 	}
 	uid := userInfo.UserPostgresInfo.Id
 
-	providers := connectorBusiness.Providers()
+	providers := connectorBusiness.Offered()
 	out := make([]connectorStatusView, 0, len(providers))
 	for _, p := range providers {
 		out = append(out, connectorStatusView{

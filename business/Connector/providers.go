@@ -49,6 +49,29 @@ func init() {
 		},
 	})
 
+	// Outlook Calendar (calendar B7) — two-way calendar sync through
+	// Microsoft Graph, on the admin's own free Microsoft (Entra) app. The
+	// "common" endpoint signs in work accounts and Outlook.com alike. Offered
+	// only once that app is set (hideUnconfigured).
+	register(Provider{
+		ID:          ProviderOutlookCalendar,
+		Name:        "Outlook Calendar",
+		Description: "Move your Outlook calendars into OneCamp and keep both in step.",
+		IconKey:     "outlook",
+		reuseClient: "microsoft",
+		AuthURL:     oauth.MicrosoftEndpoint.AuthURL,
+		TokenURL:    oauth.MicrosoftEndpoint.TokenURL,
+		// Microsoft has no endpoint to revoke one token: disconnecting
+		// deletes it (people can also remove the app from their account).
+		RevokeURL: "",
+		Scopes:    []string{"offline_access", "User.Read", "Calendars.ReadWrite"},
+		Permissions: []ScopeInfo{
+			{Capability: CapabilityRead, Description: "Read your calendars and events"},
+			{Capability: CapabilityWrite, Description: "Create, change and delete the events you change in OneCamp"},
+		},
+		hideUnconfigured: true,
+	})
+
 	// GitHub — per-user PRs, issues, repos. Distinct from the GitHub App.
 	register(Provider{
 		ID:          ProviderGitHub,

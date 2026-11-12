@@ -2,6 +2,8 @@ package entityLinkBusiness
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 
@@ -15,6 +17,7 @@ const (
 	SourceProject = domain.SourceProject
 	RefDoc        = domain.RefDoc
 	RefBoard      = domain.RefBoard
+	RefTask       = domain.RefTask
 )
 
 func AddLink(ctx context.Context, sourceType, sourceUUID, refType, refUUID string) error {
@@ -25,21 +28,61 @@ func RemoveLink(ctx context.Context, sourceType, sourceUUID, refType, refUUID st
 	return domain.RemoveLink(ctx, sourceType, sourceUUID, refType, refUUID)
 }
 
-// CanReadRef reports whether the viewer may see the doc/board being linked or
-// inspected (used to gate add and the reverse read). A doc is named to them
-// only when they may open it (business/Access ReadableTitles, read as its
-// chip is, by the Access Resolver's rule); a board, by its own rule.
+// CanReadRef reports whether the viewer may open the doc, board or task
+// being linked or inspected (used to gate add and the reverse read): ReadableRefs
+// for one.
 func CanReadRef(ctx context.Context, refType, refUUID, userDgraphUID, userUUID string) (bool, error) {
-	if refType != RefDoc {
-		return domain.CanReadRef(ctx, refType, refUUID, userDgraphUID, userUUID)
-	}
-	ref := accessBusiness.ItemRef{Kind: accessBusiness.KindDoc, ID: refUUID}
-	named, err := accessBusiness.ReadableTitles(ctx, []accessBusiness.Subject{{UserUID: userDgraphUID, UserUUID: userUUID}}, []accessBusiness.ItemRef{ref})
+	ref := Ref{Kind: refType, ID: refUUID}
+	open, err := ReadableRefs(ctx, accessBusiness.Subject{UserUID: userDgraphUID, UserUUID: userUUID}, []Ref{ref})
 	if err != nil {
 		return false, err
 	}
-	_, ok := named[ref]
-	return ok, nil
+	return open[ref], nil
+}
+
+// ReadableRefs is which of refs (a doc, a board or a task each) who may open
+// now, keyed as asked: the rule that gates every link to one, and every read
+// of a link. A doc and a task are named to them only when they may open it,
+// read as its chip is (business/Access ReadableTitles: the Access Resolver's
+// rule for a doc, the task view's for a task, readTasks), one read per kind
+// however many are asked; boards by their own rule, in one read; any other
+// kind is an error. Any error is the whole answer.
+func ReadableRefs(ctx context.Context, who accessBusiness.Subject, refs []Ref) (map[Ref]bool, error) {
+	out := make(map[Ref]bool, len(refs))
+	var titled []accessBusiness.ItemRef
+	var boards []string
+	for _, r := range refs {
+		switch r.Kind {
+		case RefDoc, RefTask:
+			titled = append(titled, accessBusiness.ItemRef{Kind: r.Kind, ID: r.ID})
+		case RefBoard:
+			boards = append(boards, r.ID)
+		default:
+			return nil, fmt.Errorf("invalid reference type %q", r.Kind)
+		}
+	}
+	if len(boards) > 0 {
+		open, err := domain.CanReadRefs(ctx, RefBoard, boards, who.UserUID, who.UserUUID)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range boards {
+			if open[strings.ToLower(id)] {
+				out[Ref{Kind: RefBoard, ID: id}] = true
+			}
+		}
+	}
+	if len(titled) == 0 {
+		return out, nil
+	}
+	named, err := accessBusiness.ReadableTitles(ctx, []accessBusiness.Subject{who}, titled)
+	if err != nil {
+		return nil, err
+	}
+	for ref := range named {
+		out[Ref{Kind: ref.Kind, ID: ref.ID}] = true
+	}
+	return out, nil
 }
 
 func boardVisible(b *dgraphStruct.DgraphBoard, userUUID string) bool {

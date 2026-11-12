@@ -57,6 +57,17 @@ func HeldFields(ctx context.Context, table uuid.UUID, ids []uuid.UUID) (map[uuid
 	return heldIDs(ctx, `SELECT id FROM data_table_fields WHERE table_id=$1 AND id = ANY($2)`, table, ids)
 }
 
+// FieldsInTrash is which of ids are the table's fields in its trash, in one
+// read: a batch sent again finds the deletes a send of it before made.
+func FieldsInTrash(ctx context.Context, table uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	return heldIDs(ctx, `SELECT id FROM data_table_fields WHERE table_id=$1 AND id = ANY($2) AND deleted_at IS NOT NULL`, table, ids)
+}
+
+// ViewsInTrash is FieldsInTrash for views.
+func ViewsInTrash(ctx context.Context, table uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	return heldIDs(ctx, `SELECT id FROM data_table_views WHERE table_id=$1 AND id = ANY($2) AND deleted_at IS NOT NULL`, table, ids)
+}
+
 // HeldViews is HeldFields for views.
 func HeldViews(ctx context.Context, table uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
 	return heldIDs(ctx, `SELECT id FROM data_table_views WHERE table_id=$1 AND id = ANY($2)`, table, ids)

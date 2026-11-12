@@ -69,13 +69,16 @@ func TestCreatePullRequestWithClient_ErrorBounded(t *testing.T) {
 
 func TestCreatePullRequest_InputValidation(t *testing.T) {
 	ctx := context.Background()
-	if _, err := CreatePullRequest(ctx, "", "r", "h", "b", "t", "body", false); err == nil {
+	if _, err := CreatePullRequestWithToken(ctx, "tok", "", "r", "h", "b", "t", "body", false); err == nil {
 		t.Fatal("expected error for missing owner")
 	}
-	if _, err := CreatePullRequest(ctx, "o", "r", "main", "main", "t", "body", false); err == nil {
+	if _, err := CreatePullRequestWithToken(ctx, "tok", "o", "r", "main", "main", "t", "body", false); err == nil {
 		t.Fatal("head==base must be rejected (never open a PR onto itself)")
 	}
-	if _, err := CreatePullRequest(ctx, "o", "r", "", "b", "t", "body", false); err == nil {
+	if _, err := CreatePullRequestWithToken(ctx, "tok", "o", "r", "", "b", "t", "body", false); err == nil {
 		t.Fatal("expected error for missing head branch")
+	}
+	if _, err := CreatePullRequestWithToken(ctx, " ", "o", "r", "h", "b", "t", "body", false); err == nil {
+		t.Fatal("expected error for a missing token: there is no fallback to another identity")
 	}
 }

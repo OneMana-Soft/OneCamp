@@ -297,7 +297,11 @@ type pgServer struct {
 // TestTheTestsThatApplyMigrationsGetADatabaseMigratedFromBlank reads the test
 // files and fails when this list and theirs differ.
 var migratesItself = map[string]bool{
+	"TestTaskFieldFormulaMigrationUpDownUp":                     true,
 	"TestCalendarReminderEmailMigrationUpDownUp":                true,
+	"TestCalendarEmailKindsMigrationUpDownUp":                   true,
+	"TestCalendarEventFilesMigrationUpDownUp":                   true,
+	"TestCalendarEventTaskLinksMigrationUpDownUp":               true,
 	"TestChangeSetOperationsMigrationDownUp":                    true,
 	"TestContentIOJobsWaitReadyForAChoice":                      true,
 	"TestComputedStoreMigrationUpDownUp":                        true,
@@ -309,7 +313,9 @@ var migratesItself = map[string]bool{
 	"TestCalendarImportMigrationUpDownUp":                       true,
 	"TestCallStateMigrationUpDownUp":                            true,
 	"TestCallAdmissionsMigrationUpDownUp":                       true,
+	"TestCallDeclinesMigrationUpDownUp":                         true,
 	"TestCallRoomsMigrationUpDownUp":                            true,
+	"TestEventsCallRoomIndexMigrationUpDownUp":                  true,
 	"TestCallHandsMigrationUpDownUp":                            true,
 	"TestCallLobbyMigrationUpDownUp":                            true,
 	"TestCallLobbyInviteesMigrationUpDownUp":                    true,
@@ -318,6 +324,7 @@ var migratesItself = map[string]bool{
 	"TestCallATakesOnePostOnce":                                 true,
 	"TestCallHoldsMigrationUpDownUp":                            true,
 	"TestCallActivitiesMigrationUpDownUp":                       true,
+	"TestBoardPollsMigrationUpDownUp":                           true,
 	"TestCallBoardMigrationUpDownUp":                            true,
 	"TestCallBoardSlideMigrationUpDownUp":                       true,
 	"TestCallRecordingByMigrationUpDownUp":                      true,
@@ -371,6 +378,15 @@ var migratesItself = map[string]bool{
 	"TestTableRowPages":                           true,
 	"TestThreadsMigrationUpDownUp":                true,
 	"TestWebhookTokensMigrationUpDownUp":          true,
+
+	// Migration 577 (calendar head D) clears Google's cursors; its test applies it itself.
+	"TestCalendarGoogleWholeReadMigrationClearsOnlyGooglesCursors": true,
+
+	// Migration 579 (calendar V-613) clears Google's and Outlook's cursors; its test applies it itself.
+	"TestCalendarInstancePrivacyMigrationClearsGooglesAndOutlooksCursors": true,
+
+	// Migration 584 (V-698) takes money values off the kept change log; its "kept log" step applies it itself.
+	"TestV698MoneyFieldsAreForProjectAdminsOnly": true,
 }
 
 var thePostgres shared[pgServer]
@@ -387,7 +403,7 @@ func (s *pgServer) dsn(database string) string {
 // extensions production's bootstrap creates, then every migration.
 func startPostgres() (*pgServer, func(), error) {
 	ctx := context.Background()
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	c, err := StartContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image: "postgres:12-alpine",
 			Env: map[string]string{

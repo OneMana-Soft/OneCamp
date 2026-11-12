@@ -12,13 +12,16 @@ package business
 // the reply's text. And the post's author was always sent the live Activity
 // item.
 //
-// Now one audience is worked out, from the channel's members as they are when
-// the reply is written, and push, email and the live Activity items all go to
-// it (notificationBusiness.ThreadAudience, which DM and group threads use too).
+// Now the Notification Router (business/Notify, A4 H2 "One door for chat")
+// plans it, by the thread's rule (notificationBusiness.ThreadAudience, which
+// DM and group threads use too) over the channel's members as they are when
+// the reply is written, and records each delivery once; push, email and the
+// live Activity items all go to whom it told. The router can't be imported
+// here (it reads business/Reach, which reads this package), so business/Post
+// gives it at init (RouteRepliesWith); until then nobody is told.
 
 import (
 	"context"
-	"slices"
 	"time"
 
 	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
@@ -26,13 +29,11 @@ import (
 	threadIndex "github.com/akashc777/OneCamp/business/ThreadIndex"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	domain "github.com/akashc777/OneCamp/domain/Comment"
-	channelNotificationDomain "github.com/akashc777/OneCamp/domain/UserChannelNotification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
-	"github.com/google/uuid"
 )
 
 // ThreadReply is a reply in a channel thread, as its notices tell of it.
@@ -69,23 +70,55 @@ func replyRecord(r ThreadReply) threadIndex.Reply {
 // (business/ThreadIndex, chat P2): seams for tests.
 var (
 	threadOfPost     = domain.GetDgraphPostCommentsInfoByUUID
-	levelsInChannel  = channelNotificationDomain.GetLevelsInChannel
 	recordReply      = threadIndex.Replied
-	threadFollows    = threadIndex.Following
-	deliverReply     = notificationBusiness.Deliver
 	emailPostComment = notificationBusiness.DispatchPostComment
 	publishToUser    = activityBusiness.PublishActivityToUser
 	signedProfileURL = userBusiness.GetSignedProfileURL
 )
 
-// threadReplyAudience works out who hears of r (ThreadAudience): those who
-// replied before are read from the thread, who follows it or turned it off
-// from its index, and everyone's setting for the channel, which says who is
-// in it, in one read.
-func threadReplyAudience(ctx context.Context, r ThreadReply) (notificationBusiness.Audience, error) {
+// ReplyNotice is a reply in a channel thread as the router plans it: an event
+// with cause message in the thread of PostID in ChannelID, by Actor, answering
+// Author, with those who replied before and those it mentions. ID names it
+// (one row per person and delivery), MessageID is the reply's own id (its
+// delete retracts it), Push is its push.
+type ReplyNotice struct {
+	ID, MessageID      string
+	Actor, Author      string
+	ChannelID, PostID  string
+	Repliers, Mentions []string
+	Push               map[string]string
+}
+
+// ReplyTold is whom the router told of a reply, newly: Thread is who the
+// thread's rule told (the post's author, those mentioned, those who replied
+// before or follow it), the email's people; RepliedTo is the post's author
+// told of it as an answer to them, Mentioned those told of it as a mention:
+// the live Activity items' people.
+type ReplyTold struct {
+	Thread, RepliedTo, Mentioned []string
+}
+
+// The router's notice of a reply (business/Notify Tell) and its Inbox answer
+// for one person (Explain): given by business/Post at init.
+var (
+	tellReply    = func(context.Context, ReplyNotice) ReplyTold { return ReplyTold{} }
+	inReplyInbox = func(context.Context, ReplyNotice, string) bool { return false }
+)
+
+// RouteRepliesWith gives this package the router: tell is Plan then Deliver
+// for a reply's notice, answering whom it told; inbox says whether the plan
+// puts the reply in who's Inbox as an answer to them or a mention.
+func RouteRepliesWith(tell func(ctx context.Context, n ReplyNotice) ReplyTold, inbox func(ctx context.Context, n ReplyNotice, who string) bool) {
+	tellReply, inReplyInbox = tell, inbox
+}
+
+// replyNotice is r as the router plans it: those who replied before are read
+// from the thread (who follows it, or turned it off, the router reads from
+// its index, and everyone's setting for the channel).
+func replyNotice(ctx context.Context, r ThreadReply) (ReplyNotice, error) {
 	thread, err := threadOfPost(ctx, r.Post.Uuid)
 	if err != nil {
-		return notificationBusiness.Audience{}, err
+		return ReplyNotice{}, err
 	}
 	var repliers []string
 	for _, c := range thread.Comments {
@@ -93,57 +126,49 @@ func threadReplyAudience(ctx context.Context, r ThreadReply) (notificationBusine
 			repliers = append(repliers, c.CommentBy.Uuid)
 		}
 	}
-	mentioned := dgraphStruct.UUIDsOf(r.Mentioned)
-	on, off, err := threadFollows(ctx, r.Post.Uuid)
+	return ReplyNotice{Actor: r.By.Uuid, Author: r.Post.PostBy.Uuid, ChannelID: r.Post.Channel.Uuid, PostID: r.Post.Uuid,
+		Repliers: repliers, Mentions: dgraphStruct.UUIDsOf(r.Mentioned)}, nil
+}
+
+// InThreadInbox says whether telling r puts it in who's Inbox, counted: the
+// live Activity item NotifyThreadReply sends the post's author and those r
+// mentions, by the router's plan for who alone (business/Notify Explain).
+// False when it can't be worked out.
+func InThreadInbox(ctx context.Context, r ThreadReply, who string) bool {
+	if r.By == nil || r.Post == nil || r.Post.PostBy == nil || r.Post.Channel == nil || who == "" {
+		return false
+	}
+	n, err := replyNotice(ctx, r)
 	if err != nil {
-		return notificationBusiness.Audience{}, err
+		return false
 	}
-	// Each person is asked about once, and only by a well-formed id: one
-	// malformed id would fail the whole read, and tell nobody.
-	var ask []string
-	for _, id := range slices.Concat([]string{r.Post.PostBy.Uuid}, repliers, on, mentioned) {
-		if _, err := uuid.Parse(id); err == nil && !slices.Contains(ask, id) {
-			ask = append(ask, id)
-		}
-	}
-	levels, err := levelsInChannel(ctx, r.Post.Channel.Uuid, ask)
-	if err != nil {
-		return notificationBusiness.Audience{}, err
-	}
-	return notificationBusiness.ThreadAudience(levels, r.By.Uuid, r.Post.PostBy.Uuid, repliers, mentioned,
-		notificationBusiness.Follows{On: on, Off: off}), nil
+	return inReplyInbox(ctx, n, who)
 }
 
 // NotifyThreadReply records a reply in its thread's index (business/ThreadIndex)
-// and tells the thread's people of it: a push, an email and,
-// to the post's author and those mentioned, the live Activity item, all to the
-// one audience worked out from the channel's members now (threadReplyAudience).
-// When that can't be worked out, nobody is told: a missed notice costs less
-// than the reply's text in the wrong inbox. It takes its time; run it on its
-// own goroutine.
+// and tells the thread's people of it through the one door (tellReply): the
+// push and the desktop notice, each delivery recorded once; then the email
+// and, to the post's author and those mentioned, the live Activity item, to
+// whom it told. When the thread can't be read, nobody is told: a missed
+// notice costs less than the reply's text in the wrong inbox. It takes its
+// time; run it on its own goroutine.
 func NotifyThreadReply(r ThreadReply) {
 	if r.By == nil || r.Post == nil || r.Post.PostBy == nil || r.Post.Channel == nil {
 		return
 	}
 	ctx := context.Background()
 	// The thread's index first: its latest reply, the writer and those
-	// mentioned as its people, so the Threads view has it and the audience
+	// mentioned as its people, so the Threads view has it and the plan
 	// counts who follows it now.
 	recordReply(ctx, replyRecord(r))
-	aud, err := threadReplyAudience(ctx, r)
+	n, err := replyNotice(ctx, r)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/NotifyThreadReply Failed to work out who hears of the reply, telling nobody err: %+v", err)
-		return
-	}
-	if len(aud.Told) == 0 {
+		helpers.LogErrorWithContext(ctx, "business/NotifyThreadReply Failed to read the thread, telling nobody err: %+v", err)
 		return
 	}
 	icon := signedProfileURL(ctx, r.By.ProfileKey)
-
-	// The push, and the desktop app's notice, to those of them the push gate
-	// lets through (business/Notification Deliver). A failure here costs the
-	// push only, never the email.
-	pushData := map[string]string{
+	n.ID, n.MessageID = "post_comment:"+r.Post.Uuid+":"+r.CommentUUID, r.CommentUUID
+	n.Push = map[string]string{
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE:      firebaseInit.FIREBASE_PUSH_DATA_TYPE_POST_COMMENT,
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:   r.Post.Channel.Uuid,
 		firebaseInit.FIREBASE_PUSH_DATA_TITLE:     "Comment - " + r.By.DisplayName(),
@@ -152,11 +177,13 @@ func NotifyThreadReply(r ThreadReply) {
 		firebaseInit.FIREBASE_PUSH_DATA_USERNAME:  r.By.DisplayName(),
 		firebaseInit.FIREBASE_PUSH_DATA_ICON:      icon,
 	}
-	deliverReply(ctx, aud.Told, pushData, "post_comment:"+r.Post.Uuid+":"+r.CommentUUID)
+	told := tellReply(ctx, n)
 
 	// Email, by each one's own email settings (business/Notification).
-	emailPostComment(r.By.Uuid, r.By.DisplayName(), icon,
-		r.Post.Channel.Uuid, r.Post.Uuid, r.PlainText, r.CommentUUID, aud.Told)
+	if len(told.Thread) > 0 {
+		emailPostComment(r.By.Uuid, r.By.DisplayName(), icon,
+			r.Post.Channel.Uuid, r.Post.Uuid, r.PlainText, r.CommentUUID, told.Thread)
+	}
 
 	// The live Activity items.
 	comment := func() *dgraphStruct.DgraphComment {
@@ -169,14 +196,14 @@ func NotifyThreadReply(r ThreadReply) {
 			CreatedAt: &at,
 		}
 	}
-	if aud.Author != "" {
-		publishToUser(aud.Author, &dgraphModels.UnifiedActivityItem{
+	for _, id := range told.RepliedTo {
+		publishToUser(id, &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Comment:      comment(),
 		})
 	}
-	for _, id := range aud.Mentioned {
+	for _, id := range told.Mentioned {
 		at := r.At
 		publishToUser(id, &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,

@@ -307,14 +307,12 @@ func CheckForm(in Input) (formModel.Form, error) {
 		return f, err
 	}
 	f.CoverID, f.LogoID = cover, logo
-	switch {
-	case in.Priority == "":
-		f.Priority = dgraphStruct.TASK_PRIORITY_MEDIUM
-	case taskPriority.Is(in.Priority):
-		f.Priority = in.Priority
-	default:
-		return f, &FormError{"Pick urgent, high, medium or low priority."}
+	// A form's tasks have the priority it picks, or none, as a task made
+	// without one; the forms saved before keep their medium.
+	if !taskPriority.IsOrNone(in.Priority) {
+		return f, &FormError{"Pick urgent, high, medium or low priority, or none."}
 	}
+	f.Priority = in.Priority
 	if table {
 		// A row has no priority or assignee.
 		f.Priority, in.AssigneeUUID = dgraphStruct.TASK_PRIORITY_MEDIUM, ""

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	projectTemplate "github.com/akashc777/OneCamp/business/ProjectTemplate"
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	taskWriter "github.com/akashc777/OneCamp/business/TaskWriter"
 	workTaxonomy "github.com/akashc777/OneCamp/business/WorkTaxonomy"
@@ -166,5 +167,44 @@ func TestChoosingTaskMeetsATemplatesRequiredType(t *testing.T) {
 	}
 	if calls.task == nil || calls.task.Type == nil || *calls.task.Type != workTaxonomy.TypeTask {
 		t.Errorf("the task was made as %+v, want a Task", calls.task)
+	}
+}
+
+// V-698: Make asks the shared judge (business/TaskField MaySet) whether the
+// maker may set money, as who they are, once; a member's typed budget is
+// left off, an admin's is kept.
+func TestMakeAsksWhetherTheMakerMaySetMoney(t *testing.T) {
+	budget := &taskFieldModel.Field{ID: uuid.New(), Name: "Budget", Type: taskFieldModel.TypeMoney}
+	calls := project(t, uuid.New(), budget, "", "")
+	was := maySet
+	t.Cleanup(func() { maySet = was })
+	admin, asked := "0xa", 0
+	maySet = func(_ context.Context, r taskFieldBusiness.Reader, f *taskFieldModel.Field) error {
+		asked++
+		if f != budget || r.System {
+			t.Errorf("asked of %+v for %v", r, f)
+		}
+		if r.UID != admin {
+			return taskFieldBusiness.ErrMoneyAdminsOnly
+		}
+		return nil
+	}
+	tpl := kept(t, Template{Name: "Spend", Shape: Shape{Task: projectTemplate.Task{Name: "Spend"}}})
+	typed := Typed{Fields: map[string]json.RawMessage{budget.ID.String(): json.RawMessage(`99`)}}
+	for _, c := range []struct {
+		uid  string
+		kept bool
+	}{{"0xb", false}, {admin, true}} {
+		who := &userModels.UserInfo{UserDgraphInfo: dgraphStruct.DgraphUser{Uid: c.uid}}
+		res, err := Make(context.Background(), who, uuid.New(), tpl, typed, today)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := calls.task.Fields[budget.ID] != nil; got != c.kept || (len(res.LeftOff) == 0) == !c.kept {
+			t.Errorf("%s: budget kept %v, left off %v", c.uid, got, res.LeftOff)
+		}
+	}
+	if asked != 2 {
+		t.Errorf("asked %d times, want once per make", asked)
 	}
 }

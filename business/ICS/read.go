@@ -297,6 +297,8 @@ func readEvent(lines []contentLine, cal *Calendar, zones map[string]*time.Locati
 			ev.Status = strings.ToUpper(strings.TrimSpace(cl.value))
 		case "TRANSP":
 			ev.Transparent = strings.EqualFold(strings.TrimSpace(cl.value), "TRANSPARENT")
+		case "CLASS":
+			ev.Class = strings.ToUpper(strings.TrimSpace(cl.value))
 		case "RRULE":
 			if ev.RRule == "" {
 				ev.RRule = strings.TrimSpace(cl.value)

@@ -264,14 +264,36 @@ func UpdateExistingTasksReturning(ctx context.Context, set *dgraphStruct.DgraphT
 	return uuids, nil
 }
 
+// Clearing is a Dgraph delete taking each named predicate off the node uid (a
+// uid, or "uid(v)" for the nodes in var v). It is nil when it names none: a
+// delete of the uid alone would take the node itself.
+func Clearing(uid string, predicates []string) map[string]any {
+	var del map[string]any
+	for _, p := range predicates {
+		if p == "" {
+			continue
+		}
+		if del == nil {
+			del = map[string]any{"uid": uid}
+		}
+		del[p] = nil
+	}
+	return del
+}
+
 // SetDgraphTasks writes many tasks already in the graph, each named by its
-// uid, in one mutation (PR2's bulk writes). A task without a uid isn't
-// written: a bulk write never makes a task.
-func SetDgraphTasks(ctx context.Context, tasks []*dgraphStruct.DgraphTask) error {
+// uid, in one request (PR2's bulk writes), first taking each predicate in
+// clear off them (a priority taken off: "" written would keep the old one).
+// A task without a uid isn't written: a bulk write never makes a task.
+func SetDgraphTasks(ctx context.Context, tasks []*dgraphStruct.DgraphTask, clear ...string) error {
 	var nodes []*dgraphStruct.DgraphTask
+	var del []map[string]any
 	for _, t := range tasks {
 		if t != nil && strings.HasPrefix(t.Uid, "0x") {
 			nodes = append(nodes, forDgraph(t))
+			if d := Clearing(t.Uid, clear); d != nil {
+				del = append(del, d)
+			}
 		}
 	}
 	if len(nodes) == 0 {
@@ -281,6 +303,14 @@ func SetDgraphTasks(ctx context.Context, tasks []*dgraphStruct.DgraphTask) error
 	if err != nil {
 		return err
 	}
-	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{Mutations: []*api.Mutation{{SetJson: pb}}})
+	mutations := []*api.Mutation{{SetJson: pb}}
+	if len(del) > 0 {
+		db, err := json.Marshal(del)
+		if err != nil {
+			return err
+		}
+		mutations = append([]*api.Mutation{{DeleteJson: db}}, mutations...)
+	}
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{Mutations: mutations})
 	return err
 }

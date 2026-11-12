@@ -286,17 +286,15 @@ func tellDocCommentInbox(ctx context.Context, doc *dgraphStruct.DgraphDoc, autho
 	for _, id := range docCommentRecipients(doc, nil, author.Uuid, readable) {
 		takesPart[id] = true
 	}
-	var to []notificationBusiness.NoticeRecipient
+	var told []notificationBusiness.NoticeRecipient
 	for _, id := range recipients {
-		if listed[id] {
-			continue
-		}
 		reason := "participant"
 		if !takesPart[id] && follows[id] == followModels.ModeAll {
 			reason = "follower"
 		}
-		to = append(to, notificationBusiness.NoticeRecipient{UserUUID: id, Reason: reason, InboxOnly: true})
+		told = append(told, notificationBusiness.NoticeRecipient{UserUUID: id, Reason: reason})
 	}
+	to := notificationBusiness.InboxForTheRest(told, func(id string) bool { return listed[id] })
 	if len(to) == 0 {
 		return
 	}

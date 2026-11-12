@@ -182,6 +182,29 @@ func TestABulkChangesLiveMessageNamesItsRowsUpToAPoint(t *testing.T) {
 	}
 }
 
+// A row's own live message (a cell edit, an AI fill) names the cells its
+// change set changed, by id alone, so an open view reads those cells and no
+// more (tables L1); a row created, or moved, is read whole.
+func TestARowsLiveMessageNamesTheCellsItChanged(t *testing.T) {
+	row := uuid.New()
+	r := &model.Row{Id: row}
+	cs := &model.ChangeSet{ID: uuid.New(), Changes: []model.Change{
+		cellChange(row, "amount", `1`, `2`), cellChange(row, "note", `"a"`, ""), cellChange(row, "amount", `2`, `3`),
+		cellChange(uuid.New(), "other", `1`, `2`),
+	}}
+	want := map[string]interface{}{"action": "updated", "row_id": row.String(), "fields": []string{"amount", "note"}}
+	if msg := rowMessage("updated", r, cs); !reflect.DeepEqual(msg, want) {
+		t.Errorf("a cell edit's message is %v, want %v", msg, want)
+	}
+	moved := &model.ChangeSet{ID: uuid.New(), Changes: append(append([]model.Change{}, cs.Changes...), cellChange(row, model.FieldPosition, `"a0"`, `"a1"`))}
+	if msg := rowMessage("updated", r, moved); msg["fields"] != nil {
+		t.Errorf("a row moved is read whole, but its message is %v", msg)
+	}
+	if msg := rowMessage("created", r, nil); len(msg) != 2 || msg["fields"] != nil {
+		t.Errorf("a row made is read whole, but its message is %v", msg)
+	}
+}
+
 // A row's history says each change as its reader can show it: a cell's value
 // before and after, or what happened to the row.
 func TestAHistorysChanges(t *testing.T) {

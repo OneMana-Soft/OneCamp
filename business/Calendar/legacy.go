@@ -95,6 +95,8 @@ func legacyOf(e *models.Event, guests []models.Attendee, names map[string]*dgrap
 		// Its address comes with the read's others (withCalls).
 		ev.Call = &dgraphStruct.EventCall{Room: e.CallRoom}
 	}
+	// Whether its room takes a guest link comes with the read's calls (withCalls).
+	ev.Room = roomView(e, ev.Uuid, false)
 	return ev
 }
 
@@ -220,7 +222,7 @@ func (s *service) legacyCreate(ctx context.Context, who *model.UserInfo, in adap
 	if err := keepKind(e, "", personOf(who), nil, &wanted); err != nil {
 		return nil, err
 	}
-	created, guests, err := s.create(ctx, who, e, wanted, in.SyncToGoogleCalendar)
+	created, guests, err := s.create(ctx, who, e, wanted, nil, in.SyncToGoogleCalendar)
 	if err != nil {
 		return nil, err
 	}
@@ -352,6 +354,7 @@ func (s *service) legacyLeaveAt(ctx context.Context, ref string, who *model.User
 func legacyOfInstance(inst instance, occ map[string][]models.Attendee, names map[string]*dgraphStruct.DgraphUser, reader uuid.UUID, at allDayAt) *dgraphStruct.DgraphEvent {
 	ev := legacyOf(inst.Event, occ[inst.ref], names, reader, at)
 	ev.Uuid = inst.ref
+	ev.Room = roomView(inst.owner(), inst.ref, false)
 	return ev
 }
 

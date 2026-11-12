@@ -46,6 +46,13 @@ var (
 	}
 )
 
+// How long a meeting may run, in minutes. find_time's schema
+// (business/CalendarAPI) says it from these.
+const (
+	MinMeetingMinutes = 15
+	MaxMeetingMinutes = 8 * 60
+)
+
 // Suggestions answers a request for times between in.From and in.To: the
 // asker and everyone it names, each in their own hours and zone, ranked
 // with reasons (Rank).
@@ -64,7 +71,7 @@ func Suggestions(ctx context.Context, askerUUID string, in calendarBusiness.Find
 	if len(ids) > maxPeople {
 		return nil, refused(fmt.Sprintf("Find a time for up to %d people.", maxPeople))
 	}
-	if in.DurationMinutes < 15 || in.DurationMinutes > 8*60 {
+	if in.DurationMinutes < MinMeetingMinutes || in.DurationMinutes > MaxMeetingMinutes {
 		return nil, refused("Meetings run from 15 minutes to 8 hours.")
 	}
 	from, to := in.From, in.To
@@ -78,11 +85,38 @@ func Suggestions(ctx context.Context, askerUUID string, in calendarBusiness.Find
 		to = from.Add(maxRange)
 	}
 
+	people, zone, res, err := readPeople(ctx, askerUUID, ids, from, to, in.Hours)
+	if err != nil {
+		return nil, err
+	}
+	res.Suggestions = Rank(people, Ask{
+		Duration: time.Duration(in.DurationMinutes) * time.Minute,
+		Step:     15 * time.Minute,
+		From:     from,
+		To:       to,
+		// From the quarter hour after now, so the first isn't 10:07.
+		Earliest: now.Truncate(15 * time.Minute).Add(15 * time.Minute),
+		Zone:     zone,
+		PerDay:   3,
+		Limit:    12,
+	})
+	if res.Suggestions == nil {
+		res.Suggestions = []Suggestion{}
+	}
+	return res, nil
+}
+
+// readPeople is the engine's read for ids (the asker first) between from and
+// to: those the asker may see, each with their busy times, hours and name,
+// and the asker's zone; asked stands for the asker's hours until they keep
+// their own. The answer carries who is private and whose Google calendar
+// went unread. Suggestions and PlanWeek both read through it.
+func readPeople(ctx context.Context, askerUUID string, ids []string, from, to time.Time, asked calendarBusiness.WorkingHours) ([]Person, *time.Location, *Ranked, error) {
 	// Only those the asker may see when they're busy count (the calendar's
 	// one rule, as for Find a time): the rest are named private, unread.
 	ids, private, err := peopleSeenBy(ctx, askerUUID, ids)
 	if err != nil {
-		return nil, errors.New("couldn't read calendars")
+		return nil, nil, nil, errors.New("couldn't read calendars")
 	}
 	uuids := make([]uuid.UUID, len(ids))
 	for i, id := range ids {
@@ -90,13 +124,17 @@ func Suggestions(ctx context.Context, askerUUID string, in calendarBusiness.Find
 	}
 	hours, err := hoursOf(ctx, uuids)
 	if err != nil {
-		return nil, errors.New("couldn't read working hours")
+		return nil, nil, nil, errors.New("couldn't read working hours")
 	}
+	// Names are for the reasons, which name only the others: none read for
+	// the asker alone (a plan).
 	names := map[string]string{}
-	if found, err := peopleOf(ctx, ids); err == nil {
-		for _, u := range found {
-			if u != nil {
-				names[u.Uuid] = u.DisplayName()
+	if len(ids) > 1 {
+		if found, err := peopleOf(ctx, ids); err == nil {
+			for _, u := range found {
+				if u != nil {
+					names[u.Uuid] = u.DisplayName()
+				}
 			}
 		}
 	}
@@ -114,7 +152,7 @@ func Suggestions(ctx context.Context, askerUUID string, in calendarBusiness.Find
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return nil, errors.New("couldn't read calendars")
+		return nil, nil, nil, errors.New("couldn't read calendars")
 	}
 	res := &Ranked{Private: private}
 	people := make([]Person, len(ids))
@@ -133,8 +171,8 @@ func Suggestions(ctx context.Context, askerUUID string, in calendarBusiness.Find
 			p.Hours = &h
 		} else if i == 0 {
 			// The asker's hours as the request sends them, until they keep their own.
-			if _, err := in.Hours.Check(); err == nil {
-				h := in.Hours
+			if _, err := asked.Check(); err == nil {
+				h := asked
 				p.Hours = &h
 			}
 		}
@@ -145,21 +183,7 @@ func Suggestions(ctx context.Context, askerUUID string, in calendarBusiness.Find
 		}
 		people[i] = p
 	}
-	res.Suggestions = Rank(people, Ask{
-		Duration: time.Duration(in.DurationMinutes) * time.Minute,
-		Step:     15 * time.Minute,
-		From:     from,
-		To:       to,
-		// From the quarter hour after now, so the first isn't 10:07.
-		Earliest: now.Truncate(15 * time.Minute).Add(15 * time.Minute),
-		Zone:     zone,
-		PerDay:   3,
-		Limit:    12,
-	})
-	if res.Suggestions == nil {
-		res.Suggestions = []Suggestion{}
-	}
-	return res, nil
+	return people, zone, res, nil
 }
 
 // refused is a request answered with words for the person.

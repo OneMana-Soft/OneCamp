@@ -29,7 +29,7 @@ func TestWhatTheAtListIsTold(t *testing.T) {
 	zonesOf = func(context.Context, []string) (map[string]string, error) {
 		return map[string]string{jonas: "Europe/Berlin"}, nil
 	}
-	defaultChannel = func(string) bool { return false }
+	defaultChannel = func(context.Context, string) (bool, error) { return false, nil }
 	me := &userModels.UserInfo{UserDgraphInfo: dgraphStruct.DgraphUser{Uid: "0xa1", Uuid: maya}}
 	ch := &dgraphStruct.DgraphChannel{Uuid: "c-1", Name: "launch", MemberCount: 3}
 	ctx := context.Background()

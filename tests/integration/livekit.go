@@ -39,7 +39,7 @@ func SetupLiveKit(t *testing.T) *LiveKitEnv {
 	ensureLoggers()
 	ctx := context.Background()
 
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	c, err := StartContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "livekit/livekit-server:v1.11.0",
 			Cmd:          []string{"--dev", "--bind", "0.0.0.0"},

@@ -14,6 +14,7 @@ import (
 
 	formula "github.com/akashc777/OneCamp/business/Formula"
 	rowQuery "github.com/akashc777/OneCamp/business/RowQuery"
+	"github.com/akashc777/OneCamp/helpers/currency"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 )
 
@@ -164,9 +165,13 @@ func resultFormat(raw interface{}) (map[string]interface{}, error) {
 	for k, v := range m {
 		switch k {
 		case "currency":
-			if v != "INR" && v != "USD" {
-				return nil, fmt.Errorf("A result's currency is INR or USD")
+			// Any ISO 4217 code, kept in capitals.
+			s, _ := v.(string)
+			code := currency.Code(s)
+			if code == "" {
+				return nil, fmt.Errorf("A result's currency is a three-letter code, like EUR")
 			}
+			v = code
 		case "decimals":
 			n, ok := v.(float64)
 			if !ok || n < 0 || n > 6 || n != float64(int(n)) {

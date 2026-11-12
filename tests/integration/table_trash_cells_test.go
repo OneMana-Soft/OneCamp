@@ -119,7 +119,7 @@ func TestAFieldInTheTrashKeepsItsCells(t *testing.T) {
 	}
 
 	// A deleted row in the table's trash shows only the live fields' cells.
-	if err := dataTableBusiness.DeleteRow(w.ctx, deals.Id, globex, amara); err != nil {
+	if _, err := dataTableBusiness.DeleteRow(w.ctx, deals.Id, globex, amara); err != nil {
 		t.Fatalf("delete Globex: %v", err)
 	}
 	trashed := func() map[string]interface{} {

@@ -8,6 +8,7 @@ package business
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -25,8 +26,20 @@ const MaxRowsByID = query.MaxPage
 // something that isn't a row id in it.
 var ErrBadRowIDs = errors.New("rows: name 1 to 500 row ids, separated by commas")
 
+// ErrBadFieldIDs is a ?fields= that isn't a list of field ids: empty, too
+// long, or with something that isn't an id in it.
+var ErrBadFieldIDs = errors.New("rows: name 1 to 500 field ids, separated by commas")
+
 // ParseRowIDs reads ?ids= (comma-separated row ids), each once, in order.
-func ParseRowIDs(s string) ([]uuid.UUID, error) {
+func ParseRowIDs(s string) ([]uuid.UUID, error) { return parseIDList(s, ErrBadRowIDs) }
+
+// ParseFieldIDs reads ?fields= (comma-separated field ids), each once, in
+// order: the cells a live message named (tables L1).
+func ParseFieldIDs(s string) ([]uuid.UUID, error) { return parseIDList(s, ErrBadFieldIDs) }
+
+// parseIDList reads 1 to MaxRowsByID comma-separated ids, each once, in
+// order, or answers bad.
+func parseIDList(s string, bad error) ([]uuid.UUID, error) {
 	var out []uuid.UUID
 	seen := map[uuid.UUID]bool{}
 	for _, p := range strings.Split(s, ",") {
@@ -35,7 +48,7 @@ func ParseRowIDs(s string) ([]uuid.UUID, error) {
 		}
 		id, err := uuid.Parse(p)
 		if err != nil {
-			return nil, ErrBadRowIDs
+			return nil, bad
 		}
 		if !seen[id] {
 			seen[id] = true
@@ -43,7 +56,7 @@ func ParseRowIDs(s string) ([]uuid.UUID, error) {
 		}
 	}
 	if len(out) == 0 || len(out) > MaxRowsByID {
-		return nil, ErrBadRowIDs
+		return nil, bad
 	}
 	return out, nil
 }
@@ -52,19 +65,72 @@ func ParseRowIDs(s string) ([]uuid.UUID, error) {
 // in the order named, each as actor may see it. A row deleted since, or never
 // the table's, is left out: the reader drops it from what it holds.
 func RowsByID(ctx context.Context, table uuid.UUID, actor Actor, ids []uuid.UUID) ([]*model.Row, error) {
+	rows, _, err := rowsByID(ctx, table, actor, ids)
+	return rows, err
+}
+
+// rowsByID is RowsByID with the table's fields it read to work the rows out.
+func rowsByID(ctx context.Context, table uuid.UUID, actor Actor, ids []uuid.UUID) ([]*model.Row, []*model.Field, error) {
 	if len(ids) == 0 || len(ids) > MaxRowsByID {
-		return nil, ErrBadRowIDs
+		return nil, nil, ErrBadRowIDs
 	}
 	ctx = asViewer(ctx, actor)
 	if _, err := loadViewable(ctx, table, actor); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	found, err := model.RowsByIDs(ctx, table, ids)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/DataTable RowsByID: %v", err)
-		return nil, errRowsUnavailable
+		return nil, nil, errRowsUnavailable
 	}
-	return readWithComputed(ctx, table, inOrder(found, ids))
+	return readWorkedOut(ctx, table, inOrder(found, ids))
+}
+
+// CellsByID is RowsByID narrowed to the cells a live message named (tables
+// L1, Live Rows #65): an open view reads the cells that changed, under its
+// reader's own access, and puts them in the rows it holds, never reading its
+// windows again. The message carries ids alone, as every reader of a table's
+// topic gets the same message; the values come here, read as actor.
+func CellsByID(ctx context.Context, table uuid.UUID, actor Actor, ids, fields []uuid.UUID) ([]*model.Row, error) {
+	rows, all, err := rowsByID(ctx, table, actor, ids)
+	if err != nil || len(rows) == 0 {
+		return rows, err
+	}
+	return narrowCells(all, rows, fields), nil
+}
+
+// narrowCells keeps in each row's values the cells of the fields named that
+// the table has, and of every field worked out on each read (readsWorkOut),
+// which may follow from them; a kept cell that is empty is null, so the
+// reader clears it where it holds the row. Pure.
+func narrowCells(fields []*model.Field, rows []*model.Row, named []uuid.UUID) []*model.Row {
+	asked := make(map[uuid.UUID]bool, len(named))
+	for _, id := range named {
+		asked[id] = true
+	}
+	var keep []string
+	for _, f := range fields {
+		if asked[f.Id] || readsWorkOut(f) {
+			keep = append(keep, f.Id.String())
+		}
+	}
+	for _, r := range rows {
+		var cells map[string]json.RawMessage
+		if json.Unmarshal([]byte(r.Values), &cells) != nil {
+			cells = nil
+		}
+		out := make(map[string]json.RawMessage, len(keep))
+		for _, k := range keep {
+			if v, ok := cells[k]; ok {
+				out[k] = v
+			} else {
+				out[k] = json.RawMessage("null")
+			}
+		}
+		b, _ := json.Marshal(out)
+		r.Values = string(b)
+	}
+	return rows
 }
 
 // RowAsRead is a row just written as a read of it answers: worked out for

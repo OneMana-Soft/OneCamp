@@ -40,3 +40,14 @@ func TestOnePriorityScale(t *testing.T) {
 		}
 	}
 }
+
+// An answer that a task was made says its priority, and says nothing of one
+// for a task with none: the API's create answered "(priority: )" (CR-B61 F1).
+func TestAnAnswerSaysAPriorityOnlyWhenThereIsOne(t *testing.T) {
+	if got := Noted("urgent"); got != " (priority: urgent)" {
+		t.Fatalf("urgent: %q", got)
+	}
+	if got := Noted(""); got != "" {
+		t.Fatalf("none: %q, want nothing", got)
+	}
+}

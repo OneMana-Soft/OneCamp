@@ -81,7 +81,7 @@ var theRedis shared[redisServer]
 // startRedis starts the binary's Redis.
 func startRedis() (*redisServer, func(), error) {
 	ctx := context.Background()
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	c, err := StartContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			// The image production runs (see final-compose.yml).
 			Image:        "redis:7-alpine",

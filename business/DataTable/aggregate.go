@@ -150,31 +150,6 @@ func parseRowValues(raw string) map[string]interface{} {
 	return m
 }
 
-// cellNumber attempts to read a numeric value from a cell (number column, or a
-// numeric string, read as formula.ParseNumber reads one in en-US's signs).
-// Returns (value, true) only on success. Text was read by dropping its
-// commas, so "1,5" summed as 15, and "NaN" as a number no answer could hold.
-// Totals and formulas read cells so; a filter reads them as the grid does
-// (rowFilters.go), where a number written as text is no number.
-func cellNumber(v interface{}) (float64, bool) {
-	switch t := v.(type) {
-	case float64:
-		return t, true
-	case json.Number:
-		if f, err := t.Float64(); err == nil {
-			return f, true
-		}
-	case bool:
-		if t {
-			return 1, true
-		}
-		return 0, true
-	case string:
-		return formula.ParseNumber(t, formula.PlainSigns)
-	}
-	return 0, false
-}
-
 // isDateField is whether a field's cells are dates: a date, a rollup's
 // earliest or latest, or when a row was made or last changed.
 func isDateField(f *model.Field) bool {
@@ -336,7 +311,7 @@ func Aggregate(fields []*model.Field, rows []*model.Row, spec QuerySpec) (*AggRe
 		var num float64
 		var hasNum bool
 		if valueField != nil {
-			num, hasNum = cellNumber(values[valueField.Id.String()])
+			num, hasNum = fieldTypes.CellNumber(values[valueField.Id.String()])
 		}
 
 		for _, lbl := range labels {

@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -44,13 +45,20 @@ func FirstLocation(names ...string) (*time.Location, bool) {
 // SameZone is whether two zone names name one zone, never by spelling
 // (V-135): Asia/Kolkata and Asia/Calcutta, Europe/Kyiv and Europe/Kiev, UTC
 // and Etc/UTC. Equal names are one zone, a blank one too: nothing changed.
-// Otherwise a blank name, "Local" or one Go doesn't know is no zone. Go keeps
-// a zone's name as given, so two names are one zone when their records have
-// agreed since 1970, change for change through 2037: the same offset under the
-// same abbreviation, as a second name linked to one record does. London and
-// Dublin, whose clocks have agreed since 1970, stay two: British Summer Time
-// isn't Irish Standard Time. The web asks its runtime (lib/utils/sameZone.ts).
+// A name the zone database links to another (zoneLinks) is that one, with
+// no zone data read at all: a host may keep those names in a package of
+// their own (Ubuntu's tzdata-legacy), and Go then reads them from its own,
+// older copy. Otherwise a blank name, "Local" or one Go doesn't know is no
+// zone, and two names are one zone when their records have agreed since
+// 1970, change for change through 2037: the same offset under the same
+// abbreviation. London and Dublin, whose clocks have agreed since 1970, stay
+// two: British Summer Time isn't Irish Standard Time. The web asks its
+// runtime (lib/utils/sameZone.ts).
 func SameZone(a, b string) bool {
+	if a == b {
+		return true
+	}
+	a, b = linkedZone(a), linkedZone(b)
 	if a == b {
 		return true
 	}
@@ -62,14 +70,24 @@ func SameZone(a, b string) bool {
 	return ok && ra == rb
 }
 
+// linkedZone is a zone name without the spaces around it, and the zone it
+// names when it is one of the database's other names for a zone. Pure.
+func linkedZone(name string) string {
+	name = strings.TrimSpace(name)
+	if zone, ok := zoneLinks[name]; ok {
+		return zone
+	}
+	return name
+}
+
 // zoneRecords keeps zoneRecord's answer for each name Go knows, and only
 // those: at most the zone database's few hundred names, whatever names
 // requests bring.
 var zoneRecords sync.Map
 
-// zoneRecord is a zone's offset and abbreviation from 1970, and each change
-// of either through 2037 at its instant, read from Go's own zone data; false
-// for a blank name, "Local" or one Go doesn't know.
+// zoneRecord is zoneRecordOf the zone of that name, as this host's zone data
+// has it (Go's own copy when the host has none); false for a blank name,
+// "Local" or one Go doesn't know.
 func zoneRecord(name string) (string, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" || name == "Local" {
@@ -82,13 +100,23 @@ func zoneRecord(name string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	r, _ := zoneRecords.LoadOrStore(name, zoneRecordOf(loc))
+	return r.(string), true
+}
+
+// zoneRecordOf is a zone's offset and abbreviation from 1970, and each change
+// of either through 2037 at its instant. The same however the data spells
+// it: a "fat" zone file lists each change through 2037, a "slim" one (Go's
+// own copy) stops listing and leaves the later years to the zone's rule.
+// Pure.
+func zoneRecordOf(loc *time.Location) string {
 	at, until := time.Unix(0, 0).In(loc), time.Date(2038, 1, 1, 0, 0, 0, 0, time.UTC)
 	abbr, off := at.Zone()
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s%+d", abbr, off)
 	for {
-		_, next := at.ZoneBounds()
-		if next.IsZero() || !next.After(at) || !next.Before(until) {
+		next := NextZoneChange(at)
+		if next.IsZero() || !next.Before(until) {
 			break
 		}
 		at = next
@@ -97,8 +125,32 @@ func zoneRecord(name string) (string, bool) {
 			fmt.Fprintf(&b, " %d:%s%+d", at.Unix(), abbr, off)
 		}
 	}
-	r, _ := zoneRecords.LoadOrStore(name, b.String())
-	return r.(string), true
+	return b.String()
+}
+
+// NextZoneChange is the next instant after t at which t's zone may change
+// its offset or abbreviation: always after t, never t itself, or the zero
+// Time when the zone never changes again. Between t and it the zone's clock
+// runs evenly. Every walk over a zone's changes steps by it (zoneRecordOf,
+// business/WeekHours NextOpen). Pure.
+//
+// It is Go's ZoneBounds end, but for one stretch. For the years a zone file
+// leaves to the zone's rule (its "TZ footer": every year of a slim file
+// after its last listed change, and of any file after 2037), Go (time's
+// tzset) ends a year's last stretch 365 days after the year starts, counting
+// the year in UTC. In a leap year that is 31 December 00:00 UTC, so from
+// then until the year ends ZoneBounds' end is t itself or before it: a walk
+// taking it stops there or never moves on. There the next change can come
+// no sooner than the next year, whose rule Go works out afresh, so the
+// answer is that year's start in UTC (in the zone's own time, a zone east of
+// UTC starts its year before Go does, still in the old one).
+func NextZoneChange(t time.Time) time.Time {
+	_, end := t.ZoneBounds()
+	if end.IsZero() || end.After(t) {
+		return end
+	}
+	y := t.UTC().Year()
+	return time.Date(y+1, 1, 1, 0, 0, 0, 0, time.UTC).In(t.Location())
 }
 
 // DayStart is the midnight that starts t's day in loc. Days are counted in
@@ -123,4 +175,46 @@ func PlaceName(loc *time.Location) string {
 		name = name[i+1:]
 	}
 	return strings.ReplaceAll(name, "_", " ")
+}
+
+type zoneKey struct{}
+
+// WithZone carries the time zone the request's reader is in (an IANA name,
+// such as "Asia/Kolkata"), where a formula's TODAY() is and which day a
+// date falls on. An empty or unknown zone leaves ctx as it is: ZoneOf is
+// then UTC, as Airtable's formulas default to.
+func WithZone(ctx context.Context, tz string) context.Context {
+	if tz == "" {
+		return ctx
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return ctx
+	}
+	return WithLocation(ctx, loc)
+}
+
+// WithLocation is WithZone for a zone already read; nil leaves ctx as it is.
+func WithLocation(ctx context.Context, loc *time.Location) context.Context {
+	if loc == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, zoneKey{}, loc)
+}
+
+// ZoneOf is the reader's time zone WithZone carries, else UTC.
+func ZoneOf(ctx context.Context) *time.Location {
+	if loc, ok := ctx.Value(zoneKey{}).(*time.Location); ok {
+		return loc
+	}
+	return time.UTC
+}
+
+// PriorityLabel is a task's priority as people read it ("high" is High),
+// none for none.
+func PriorityLabel(p string) string {
+	if p == "" {
+		return ""
+	}
+	return strings.ToUpper(p[:1]) + p[1:]
 }

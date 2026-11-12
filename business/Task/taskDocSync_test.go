@@ -166,8 +166,8 @@ func TestATodoBecomesATaskTiedToItsDoc(t *testing.T) {
 	if err != nil || got != syncTask {
 		t.Fatalf("got %v %v", got, err)
 	}
-	// As "Add task" makes it: the to-do's words, medium priority, in To do.
-	if w.made == nil || w.made.TaskName != "Write the launch post" || w.made.Priority != dgraphStruct.TASK_PRIORITY_MEDIUM || w.made.Status != "" {
+	// As "Add task" makes it: the to-do's words, no priority (UX-PROJECTS-H1-BE), in To do.
+	if w.made == nil || w.made.TaskName != "Write the launch post" || w.made.Priority != "" || w.made.Status != "" {
 		t.Fatalf("made %+v", w.made)
 	}
 	if !reflect.DeepEqual(w.tiedNew, []uuid.UUID{syncDoc, syncTask}) {

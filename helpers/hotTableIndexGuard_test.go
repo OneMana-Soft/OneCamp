@@ -22,6 +22,11 @@ var hotTableUnindexed = map[string]string{
 	// A task by its key (task keys): always with its project, and
 	// tasks_project_number (project_id, task_number) leads with project_id.
 	"tasks.task_number": "read with project_id = …, which tasks_project_number (project_id, task_number) leads with",
+	// Not a tasks column: TaskKey's insertMany sets the epic type with
+	// UPDATE tasks … (SELECT id FROM task_types WHERE builtin = 'epic')
+	// WHERE id = ANY($1): builtin is task_types' (seven built-in rows), and
+	// tasks are found by their primary key.
+	"tasks.builtin": "task_types' column in a subquery; tasks are read there by id = ANY, their primary key",
 }
 
 var (

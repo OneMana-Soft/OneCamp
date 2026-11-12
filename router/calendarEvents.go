@@ -20,8 +20,8 @@ func mountCalendarEvents(rt calendarRouters) {
 	rt.Member.Get("/calendar/repeats", eventController.ListCalendarRepeats)
 	// Your week (B3): where the asker's own time went.
 	rt.Member.Get("/calendar/insights", eventController.YourWeek)
-	rt.Member.Get("/calendar/sync/google", eventController.GoogleSyncStatus)
-	rt.Member.Post("/calendar/sync/google/move", eventController.MoveFromGoogle)
+	rt.Member.Get("/calendar/sync/{provider}", eventController.SyncStatus)
+	rt.Member.Post("/calendar/sync/{provider}/move", eventController.MoveFrom)
 	rt.Member.Post("/calendar/projects/{projectId}/calendar", eventController.ProjectCalendar)
 	rt.Member.Get("/calendar/calendars", eventController.ListCalendars)
 	rt.Member.Get("/calendar/calendars/events", eventController.ListEventsOnCalendars)
@@ -43,4 +43,8 @@ func mountCalendarEvents(rt calendarRouters) {
 	rt.Member.Patch("/calendar/events/{eventId}", eventController.UpdateCalendarEvent)
 	rt.Member.Delete("/calendar/events/{eventId}", eventController.DeleteCalendarEvent)
 	rt.Member.Post("/calendar/events/{eventId}/restore", eventController.RestoreCalendarEvent)
+	// Its files (gcal-1a head B): OneCamp docs and boards, by reference, put
+	// on and taken off by whoever may change the event.
+	rt.Member.Post("/calendar/events/{eventId}/files", eventController.AddCalendarEventFile)
+	rt.Member.Delete("/calendar/events/{eventId}/files/{kind}/{uuid}", eventController.RemoveCalendarEventFile)
 }

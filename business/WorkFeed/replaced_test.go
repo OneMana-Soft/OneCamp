@@ -74,3 +74,13 @@ func TestReplacedReadsTheChangesOwnFieldsBeforeIt(t *testing.T) {
 		t.Errorf("a read that failed answered %v, want its error", err)
 	}
 }
+
+// V-698: a change that tells no value (a money field's, {"field_id",
+// "refetch": true}) replaced nothing anyone is told, and reads nothing.
+func TestAChangeThatTellsNoValueReplacedNothingTold(t *testing.T) {
+	r := readsReplaced(t, map[string]json.RawMessage{"field_id": json.RawMessage(`"other"`)}, json.RawMessage(`125000`), true, nil)
+	got, err := Replaced(context.Background(), Entry{Sequence: 9, ResourceUUID: "t1", Diff: json.RawMessage(`{"field_id":"budget","refetch":true}`)})
+	if err != nil || len(got) != 0 || r.fields != nil || r.fieldIDs != nil {
+		t.Errorf("replaced %v, %v; read fields %v, field ids %v", got, err, r.fields, r.fieldIDs)
+	}
+}

@@ -26,10 +26,15 @@ var (
 // field's change ({"field_id", "value"}, business/TaskField SetValue)
 // answers {"field_id", "value"} with the value it had. A field no kept entry
 // names (set before the log began, or pruned since) is left out, so an empty
-// answer is "not known", never "empty". One read; an error is the read's.
+// answer is "not known", never "empty". A change that tells no value
+// ({"refetch": true}: a money field's, business/TaskField ForEveryone)
+// replaced nothing anyone is told. One read; an error is the read's.
 func Replaced(ctx context.Context, e Entry) (map[string]json.RawMessage, error) {
 	var diff map[string]json.RawMessage
 	if json.Unmarshal(e.Diff, &diff) != nil || len(diff) == 0 {
+		return map[string]json.RawMessage{}, nil
+	}
+	if _, refetch := diff["refetch"]; refetch {
 		return map[string]json.RawMessage{}, nil
 	}
 	if id, ok := customFieldOf(diff); ok {

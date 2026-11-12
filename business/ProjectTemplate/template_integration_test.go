@@ -162,7 +162,7 @@ func TestProjectAsTemplateQuery(t *testing.T) {
 	if subs := p.Tasks[0].SubTasks; len(subs) != 2 || subs[0].Name != "step one" || subs[1].Name != "step two" {
 		t.Fatalf("live subtasks under their task, in the order they were made: %+v", subs)
 	}
-	tpl := FromProject("Launch", "", nil, p.Tasks, time.UTC)
+	tpl := FromProject("Launch", "", nil, p.Tasks, nil, time.UTC)
 	if tpl.Size() != 4 || tpl.Tasks[0].Name != "Plan" || *tpl.Tasks[0].DueDay != 0 || tpl.Tasks[0].Subtasks[1].Name != "step two" {
 		t.Fatalf("as a template: %+v", tpl)
 	}

@@ -80,8 +80,8 @@ func TestAnAnswerKeepsOnlyWhatTheReaderMaySee(t *testing.T) {
 		t.Fatalf("the project's lists keep the hidden task: %+v", p.Tasks)
 	}
 	got := p.Tasks[0]
-	if got.ParentTask == nil || !got.ParentTask.Hidden || got.ParentTask.Name != "" || got.ParentTask.Uuid != secret {
-		t.Fatalf("a hidden parent is a stub, its id and nothing more: %+v", got.ParentTask)
+	if got.ParentTask == nil || !got.ParentTask.Hidden || got.ParentTask.Name != "" || got.ParentTask.Uuid != "" {
+		t.Fatalf("a hidden parent is a stub, saying a task is there and nothing more, not its id: %+v", got.ParentTask)
 	}
 	if len(got.SubTasks) != 1 || got.SubTasks[0].Uuid != other {
 		t.Fatalf("a hidden sub-task leaves the list: %+v", got.SubTasks)
@@ -91,6 +91,11 @@ func TestAnAnswerKeepsOnlyWhatTheReaderMaySee(t *testing.T) {
 	}
 	if c := got.Comments[0].Task; c == nil || !c.Hidden || c.Name != "" {
 		t.Fatalf("a comment's hidden task is a stub: %+v", c)
+	}
+	// V-678, main's C1: a stub names no task, in any read (a list, a board,
+	// the timeline, the task read): nothing answered carries the hidden id.
+	if raw, err := json.Marshal(p); err != nil || strings.Contains(string(raw), secret) {
+		t.Fatalf("what's answered names the hidden task (%v): %s", err, raw)
 	}
 }
 

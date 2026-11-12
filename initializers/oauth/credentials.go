@@ -27,6 +27,9 @@ const (
 	cfgGoogleClientSecret = "google_oauth_client_secret" // encrypted
 	cfgGithubClientID     = "github_login_client_id"
 	cfgGithubClientSecret = "github_login_client_secret" // encrypted
+	// The admin's Microsoft (Entra) app, for Outlook calendar sync.
+	cfgMicrosoftClientID     = "microsoft_oauth_client_id"
+	cfgMicrosoftClientSecret = "microsoft_oauth_client_secret" // encrypted
 )
 
 type resolvedCreds struct {
@@ -36,6 +39,10 @@ type resolvedCreds struct {
 	GithubClientSecret string
 	GoogleFromDB       bool
 	GithubFromDB       bool
+	// The Microsoft app's, read as Google's are.
+	MicrosoftClientID     string
+	MicrosoftClientSecret string
+	MicrosoftFromDB       bool
 }
 
 func resolveCreds() resolvedCreds {
@@ -44,6 +51,7 @@ func resolveCreds() resolvedCreds {
 	if postgresInit.DBConn != nil && postgresInit.DBConn.SqlDB != nil {
 		rows, err := configModel.GetMultipleConfigsByKeys([]string{
 			cfgGoogleClientID, cfgGoogleClientSecret, cfgGithubClientID, cfgGithubClientSecret,
+			cfgMicrosoftClientID, cfgMicrosoftClientSecret,
 		})
 		if err == nil {
 			for _, row := range rows {
@@ -68,6 +76,16 @@ func resolveCreds() resolvedCreds {
 						c.GithubClientSecret = dec
 						c.GithubFromDB = true
 					}
+				case cfgMicrosoftClientID:
+					if row.Value != "" {
+						c.MicrosoftClientID = row.Value
+						c.MicrosoftFromDB = true
+					}
+				case cfgMicrosoftClientSecret:
+					if dec, derr := helpers.DecryptSecret(row.Value); derr == nil && dec != "" {
+						c.MicrosoftClientSecret = dec
+						c.MicrosoftFromDB = true
+					}
 				}
 			}
 		}
@@ -86,6 +104,12 @@ func resolveCreds() resolvedCreds {
 	if c.GithubClientSecret == "" {
 		c.GithubClientSecret = os.Getenv("GITHUB_CLIENT_SECRET")
 	}
+	if c.MicrosoftClientID == "" {
+		c.MicrosoftClientID = os.Getenv("MICROSOFT_CLIENT_ID")
+	}
+	if c.MicrosoftClientSecret == "" {
+		c.MicrosoftClientSecret = os.Getenv("MICROSOFT_CLIENT_SECRET")
+	}
 	return c
 }
 
@@ -99,6 +123,11 @@ type OAuthConfigStatus struct {
 	GithubHasClientSecret bool   `json:"github_has_client_secret"`
 	GithubConfigured      bool   `json:"github_configured"`
 	GithubSource          string `json:"github_source"`
+	// The Microsoft app's: its id, never its secret, only whether it is set.
+	MicrosoftClientID        string `json:"microsoft_client_id"`
+	MicrosoftHasClientSecret bool   `json:"microsoft_has_client_secret"`
+	MicrosoftConfigured      bool   `json:"microsoft_configured"`
+	MicrosoftSource          string `json:"microsoft_source"`
 }
 
 // GetOAuthConfigStatus returns the redacted login-OAuth config for the admin UI.
@@ -122,6 +151,11 @@ func GetOAuthConfigStatus() OAuthConfigStatus {
 		GithubHasClientSecret: c.GithubClientSecret != "",
 		GithubConfigured:      c.GithubClientID != "" && c.GithubClientSecret != "",
 		GithubSource:          src(c.GithubFromDB, c.GithubClientID, c.GithubClientSecret),
+
+		MicrosoftClientID:        c.MicrosoftClientID,
+		MicrosoftHasClientSecret: c.MicrosoftClientSecret != "",
+		MicrosoftConfigured:      c.MicrosoftClientID != "" && c.MicrosoftClientSecret != "",
+		MicrosoftSource:          src(c.MicrosoftFromDB, c.MicrosoftClientID, c.MicrosoftClientSecret),
 	}
 }
 
@@ -129,19 +163,8 @@ func GetOAuthConfigStatus() OAuthConfigStatus {
 // credentials (encrypted), then reloads the OAuth providers so the change
 // takes effect without a restart. omit=keep / ""=clear / value=set.
 func SaveGoogleOAuthConfig(clientID, clientSecret *string) error {
-	if clientID != nil {
-		if err := configModel.UpsertConfig(cfgGoogleClientID, *clientID); err != nil {
-			return err
-		}
-	}
-	if clientSecret != nil {
-		enc, err := helpers.EncryptSecret(*clientSecret)
-		if err != nil {
-			return err
-		}
-		if err := configModel.UpsertConfig(cfgGoogleClientSecret, enc); err != nil {
-			return err
-		}
+	if err := saveClient(cfgGoogleClientID, cfgGoogleClientSecret, clientID, clientSecret); err != nil {
+		return err
 	}
 	return ReloadOAuth()
 }
@@ -149,8 +172,25 @@ func SaveGoogleOAuthConfig(clientID, clientSecret *string) error {
 // SaveGithubLoginConfig persists admin-entered GitHub *login* credentials
 // (distinct from the GitHub App integration), then reloads OAuth providers.
 func SaveGithubLoginConfig(clientID, clientSecret *string) error {
+	if err := saveClient(cfgGithubClientID, cfgGithubClientSecret, clientID, clientSecret); err != nil {
+		return err
+	}
+	return ReloadOAuth()
+}
+
+// SaveMicrosoftOAuthConfig keeps the admin's Microsoft app for Outlook
+// calendar sync, its secret encrypted; nil leaves a field as it is. Nothing
+// is reloaded: connectors read the app on each use.
+func SaveMicrosoftOAuthConfig(clientID, clientSecret *string) error {
+	return saveClient(cfgMicrosoftClientID, cfgMicrosoftClientSecret, clientID, clientSecret)
+}
+
+// saveClient keeps an OAuth client the admin entered under its two settings:
+// the id as it is, the secret encrypted. nil leaves a field as it is, ""
+// clears it.
+func saveClient(idKey, secretKey string, clientID, clientSecret *string) error {
 	if clientID != nil {
-		if err := configModel.UpsertConfig(cfgGithubClientID, *clientID); err != nil {
+		if err := configModel.UpsertConfig(idKey, *clientID); err != nil {
 			return err
 		}
 	}
@@ -159,11 +199,36 @@ func SaveGithubLoginConfig(clientID, clientSecret *string) error {
 		if err != nil {
 			return err
 		}
-		if err := configModel.UpsertConfig(cfgGithubClientSecret, enc); err != nil {
+		if err := configModel.UpsertConfig(secretKey, enc); err != nil {
 			return err
 		}
 	}
-	return ReloadOAuth()
+	return nil
+}
+
+// ConfiguredClients is which of the admin's OAuth clients are set ("google",
+// "github", "microsoft"), read once.
+func ConfiguredClients() map[string]bool {
+	c := resolveCreds()
+	return map[string]bool{
+		"google":    c.GoogleClientID != "" && c.GoogleClientSecret != "",
+		"github":    c.GithubClientID != "" && c.GithubClientSecret != "",
+		"microsoft": c.MicrosoftClientID != "" && c.MicrosoftClientSecret != "",
+	}
+}
+
+// MicrosoftClientCreds is the admin's Microsoft app (from the admin's
+// settings, else MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET).
+func MicrosoftClientCreds() (clientID, clientSecret string) {
+	c := resolveCreds()
+	return c.MicrosoftClientID, c.MicrosoftClientSecret
+}
+
+// MicrosoftEndpoint is Microsoft's sign-in for any account ("common"):
+// work and school accounts and Outlook.com alike.
+var MicrosoftEndpoint = oauth2.Endpoint{
+	AuthURL:  "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+	TokenURL: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
 }
 
 // httpProtocol picks http for local/dev, https otherwise — shared by the

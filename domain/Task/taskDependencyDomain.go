@@ -97,7 +97,7 @@ func ChangeTaskDependency(ctx context.Context, taskUUID, blockerUUID, userDgraph
 	changed := false
 	err := dgraphInit.InTxn(ctx, func(txn *dgo.Txn) error {
 		changed = false
-		pair, err := readDependencyPair(ctx, txn, taskUUID, blockerUUID, userDgraphUID, !remove)
+		pair, err := readDependencyPair(ctx, dgoReader(ctx, txn), taskUUID, blockerUUID, userDgraphUID, !remove)
 		if err != nil {
 			return err
 		}
@@ -165,8 +165,22 @@ func sameKind(a, b string) bool {
 	return norm(a) == norm(b)
 }
 
-// readDependencyPair reads a DependencyPair in txn; upstream only when adding.
-func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID, userDgraphUID string, upstream bool) (*DependencyPair, error) {
+// pairReader is a transaction's read of a query into out: a dependency's,
+// a move in the hierarchy's (dgoReader) or a link's (execReader).
+type pairReader func(q string, vars map[string]string, out any) error
+
+// dgoReader is txn's read, as readDependencyPair takes it.
+func dgoReader(ctx context.Context, txn *dgo.Txn) pairReader {
+	return func(q string, vars map[string]string, out any) error {
+		return dgraphInit.ReadIntoTxn(ctx, txn, q, vars, out)
+	}
+}
+
+// readDependencyPair reads a DependencyPair, and with it any two tasks a
+// change judges, in a transaction (read); upstream only when adding. Each
+// project carries its archiving (project_deleted_at): an archived project's
+// tasks are read-only, so Work Access refuses a change to them.
+func readDependencyPair(ctx context.Context, read pairReader, taskUUID, blockerUUID, userDgraphUID string, upstream bool) (*DependencyPair, error) {
 	const fields = `uid task_uuid task_name task_deleted_at task_parent_task { task_uuid }`
 	up := ""
 	if upstream {
@@ -182,6 +196,7 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 			task_project {
 				uid
 				project_uuid
+				project_deleted_at
 				project_is_member: count(project_members @filter(uid($u)))
 				project_is_admin: count(project_admins @filter(uid($u)))
 			}
@@ -194,17 +209,13 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 			task_project {
 				uid
 				project_uuid
+				project_deleted_at
 				project_is_member: count(project_members @filter(uid($u)))
 				project_is_admin: count(project_admins @filter(uid($u)))
 			}
 		}
 		` + up + `
 	}`
-	resp, err := txn.QueryWithVars(ctx, query, map[string]string{"$t": taskUUID, "$b": blockerUUID, "$u": userDgraphUID})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/readDependencyPair err: %+v", err)
-		return nil, err
-	}
 	var out struct {
 		T []struct {
 			dgraphStruct.DgraphTask
@@ -217,7 +228,8 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 		B  []*dgraphStruct.DgraphTask `json:"b"`
 		Up []upstreamNode             `json:"up"`
 	}
-	if err := json.Unmarshal(resp.Json, &out); err != nil {
+	if err := read(query, map[string]string{"$t": taskUUID, "$b": blockerUUID, "$u": userDgraphUID}, &out); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/readDependencyPair err: %+v", err)
 		return nil, err
 	}
 	// A task the person may not see isn't there to link, from either end
@@ -244,23 +256,26 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 	return pair, nil
 }
 
-// DownstreamSchedule is the moved task and every live top-level task that
+// downstreamQuery reads the moved task ($m) and every live task waiting on
+// it, however indirectly, as the reader $u stands to them: a dependency hop
+// (planHop).
+const downstreamQuery = `query q($m: string, $u: string) {
+		var(func: eq(task_uuid, $m)) @recurse(loop: false) { d as ~task_blocked_by }
+		moved(func: eq(task_uuid, $m)) { ` + planFields + ` }
+		down(func: uid(d)) @filter(` + planHop + `) {
+			` + planFields + `
+			task_blocked_by @facets(kind, lag) @filter(` + dgraphStruct.TASK_LIVE_FILTER + `) { task_uuid }
+		}
+	}`
+
+// DownstreamSchedule is the moved task and every live task that
 // waits on it, however indirectly and in any project, with their dates and
 // the tasks each waits on: what moving the tasks waiting on it along reads.
 // Each carries how the reader of ctx (taskread.ReaderOf) stands to it and its
 // project, so Work Access can say which they may move (DG10). Nothing else is
 // read, so a task nothing waits on costs one small query.
 func DownstreamSchedule(ctx context.Context, movedUUID string) ([]*dgraphStruct.DgraphTask, error) {
-	const fields = planFields
-	query := `query q($m: string, $u: string) {
-		var(func: eq(task_uuid, $m)) @recurse(loop: false) { d as ~task_blocked_by }
-		moved(func: eq(task_uuid, $m)) { ` + fields + ` }
-		down(func: uid(d)) @filter(` + dgraphStruct.TASK_LIVE_FILTER + ` AND NOT has(task_parent_task)) {
-			` + fields + `
-			task_blocked_by @facets(kind, lag) @filter(` + dgraphStruct.TASK_LIVE_FILTER + `) { task_uuid }
-		}
-	}`
-	resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx, query, map[string]string{"$m": movedUUID, "$u": taskread.ReaderOf(ctx)})
+	resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx, downstreamQuery, map[string]string{"$m": movedUUID, "$u": taskread.ReaderOf(ctx)})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/DownstreamSchedule err: %+v", err)
 		return nil, err

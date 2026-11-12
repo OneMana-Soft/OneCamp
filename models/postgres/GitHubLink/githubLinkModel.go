@@ -46,10 +46,31 @@ func CreateGitHubLink(ctx context.Context, id uuid.UUID, projectId uuid.UUID, re
 	return err
 }
 
+// Online is the SQL condition, on the github_links row named alias ("" for
+// an unnamed one), that leaves out a link with nothing to reach GitHub with:
+// no installation, no webhook secret and no sync (the demo's fixture link,
+// business/DemoSeed CodeLinked, V-841). A link made in the app always has a
+// secret (business/GitHub LinkRepositoryToProject), so it is never offline.
+// Every read of live links keeps to it but GetLinksForRepair: no list shows
+// an offline link, no id of one reaches a client, no task's ask or branch
+// finds it, and nothing calls GitHub for it. A read that wants a sync on
+// (TasksOnBranch: sync_prs) leaves it out already.
+func Online(alias string) string {
+	if alias != "" {
+		alias += "."
+	}
+	return ` AND NOT (` + alias + `installation_id IS NULL AND COALESCE(` + alias + `webhook_secret, '') = ''` +
+		` AND NOT COALESCE(` + alias + `sync_issues, false) AND NOT COALESCE(` + alias + `sync_prs, false)` +
+		` AND NOT COALESCE(` + alias + `auto_create_tasks, false))`
+}
+
+// online is Online for a read of github_links alone.
+var online = Online("")
+
 // GetGitHubLinkById is the link with this id (only a live one when live),
 // or nil.
 func GetGitHubLinkById(ctx context.Context, id uuid.UUID, live bool) (*GitHubLink, error) {
-	q := `SELECT ` + GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1`
+	q := `SELECT ` + GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1` + online
 	if live {
 		q += ` AND deleted_at IS NULL`
 	}
@@ -66,12 +87,7 @@ func GetGitHubLinkById(ctx context.Context, id uuid.UUID, live bool) (*GitHubLin
 
 // GetGitHubLinksByProjectId is a project's live links, the newest first.
 func GetGitHubLinksByProjectId(ctx context.Context, projectId uuid.UUID) ([]*GitHubLink, error) {
-	links, err := pgexec.Query(ctx, `SELECT `+GITHUB_LINK_COLS+` FROM github_links WHERE project_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC`,
-		func(r pgexec.Row) (*GitHubLink, error) { return scanLink(r) }, projectId)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/GetGitHubLinksByProjectId Failed err: %+v", err)
-	}
-	return links, err
+	return liveLinks(ctx, "GetGitHubLinksByProjectId", &projectId, online)
 }
 
 // GetGitHubLinksByRepo is every project's live link to the repository
@@ -82,7 +98,7 @@ func GetGitHubLinksByRepo(ctx context.Context, repoOwner string, repoName string
 	defer cancel()
 
 	links, err := queryLinks(dbCtx, `SELECT `+GITHUB_LINK_COLS+` FROM github_links
-		WHERE lower(repo_owner) = lower($1) AND lower(repo_name) = lower($2) AND deleted_at IS NULL
+		WHERE lower(repo_owner) = lower($1) AND lower(repo_name) = lower($2) AND deleted_at IS NULL`+online+`
 		ORDER BY created_at, id`, repoOwner, repoName)
 	if err != nil {
 		helpers.LogErrorWithContext(dbCtx, "models/GetGitHubLinksByRepo Failed err: %+v", err)
@@ -91,12 +107,36 @@ func GetGitHubLinksByRepo(ctx context.Context, repoOwner string, repoName string
 	return links, nil
 }
 
+// GetLinksForRepair is project's live links (every project's when project is
+// uuid.Nil), the newest first, offline ones included: what the start's repair
+// (business/GitHub repairTaskLinks) checks tasks' issues and pull requests
+// against, so it keeps the demo's seeded pull request. Its only callers are
+// that repair and the seed's own once-check (business/DemoSeed
+// linkFixtureRepo); neither ever hands a link to a client.
+func GetLinksForRepair(ctx context.Context, project uuid.UUID) ([]*GitHubLink, error) {
+	if project == uuid.Nil {
+		return liveLinks(ctx, "GetLinksForRepair", nil, "")
+	}
+	return liveLinks(ctx, "GetLinksForRepair", &project, "")
+}
+
 // GetAllGitHubLinks is every live link, the newest first.
 func GetAllGitHubLinks(ctx context.Context) ([]*GitHubLink, error) {
-	links, err := pgexec.Query(ctx, `SELECT `+GITHUB_LINK_COLS+` FROM github_links WHERE deleted_at IS NULL ORDER BY created_at DESC`,
-		func(r pgexec.Row) (*GitHubLink, error) { return scanLink(r) })
+	return liveLinks(ctx, "GetAllGitHubLinks", nil, online)
+}
+
+// liveLinks is the one read of not-deleted links, the newest first: project's
+// when project is set, every project's when it is nil, each also matching
+// filter (online, or "" for the repair's read). name is the caller, for the
+// error log.
+func liveLinks(ctx context.Context, name string, project *uuid.UUID, filter string) ([]*GitHubLink, error) {
+	q, args := `SELECT `+GITHUB_LINK_COLS+` FROM github_links WHERE deleted_at IS NULL`+filter, []any{}
+	if project != nil {
+		q, args = q+` AND project_id = $1`, append(args, *project)
+	}
+	links, err := pgexec.Query(ctx, q+` ORDER BY created_at DESC`, func(r pgexec.Row) (*GitHubLink, error) { return scanLink(r) }, args...)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/GetAllGitHubLinks Failed err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "models/%s Failed err: %+v", name, err)
 	}
 	return links, err
 }
@@ -259,13 +299,15 @@ func UnsetBranch(ctx context.Context, tasks []uuid.UUID, branch string) ([]taskM
 
 // TasksLinkingRepos is which asks, by their index, name a repository their
 // task's own project links: tasks[i] with owners[i]/names[i], the names
-// matched in any case. A deleted task, or one in no project, links none.
+// matched in any case. A deleted task, or one in no project, links none, and
+// an offline link (Online) is none, as for one task (business/GitHub
+// TaskRepoLink).
 func TasksLinkingRepos(ctx context.Context, tasks []uuid.UUID, owners, names []string) ([]int, error) {
 	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `SELECT u.i - 1 FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY AS u(task, owner, name, i)
-		WHERE EXISTS (SELECT 1 FROM tasks t JOIN github_links l ON l.project_id = t.project_id AND l.deleted_at IS NULL
+		WHERE EXISTS (SELECT 1 FROM tasks t JOIN github_links l ON l.project_id = t.project_id AND l.deleted_at IS NULL`+Online("l")+`
 			WHERE t.id = u.task AND t.deleted_at IS NULL AND lower(l.repo_owner) = lower(u.owner) AND lower(l.repo_name) = lower(u.name))`,
 		pq.Array(tasks), pq.Array(owners), pq.Array(names))
 	if err != nil {

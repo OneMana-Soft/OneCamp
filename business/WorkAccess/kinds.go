@@ -94,13 +94,20 @@ func projectStandings(ctx context.Context, who accessBusiness.Subject, ids []str
 // their roles, so a read across projects asks once however many it names.
 // Ids that name no project are left out.
 func ProjectsViewable(ctx context.Context, userUUID, userUID string, ids []string) (map[string]bool, error) {
+	return ProjectsWhere(ctx, userUUID, userUID, NeedView, ids)
+}
+
+// ProjectsWhere is which of ids the person may do need on, by lower-case
+// id: ProjectsViewable for any need, in the same two reads (NeedManage: the
+// projects they are an admin of, whose money they may read).
+func ProjectsWhere(ctx context.Context, userUUID, userUID string, need Need, ids []string) (map[string]bool, error) {
 	standings, err := projectStandings(ctx, accessBusiness.Subject{UserUUID: userUUID, UserUID: userUID}, ids)
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]bool, len(standings))
 	for key, s := range standings {
-		if s.Can(NeedView) {
+		if s.Can(need) {
 			out[key] = true
 		}
 	}

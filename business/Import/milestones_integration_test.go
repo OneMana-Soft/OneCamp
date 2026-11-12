@@ -85,7 +85,7 @@ func TestImportedMilestones(t *testing.T) {
 	for _, f := range fields {
 		if f.Name == "Milestone" && f.Type == taskField.TypeSelect && len(f.Options) == 1 && f.Options[0].Label == "Alpha" {
 			alpha = f.Options[0].ID
-			values, err := taskFieldModel.ValuesFor(ctx, []uuid.UUID{issue})
+			values, _, err := taskFieldModel.ReadValues(ctx, []uuid.UUID{issue})
 			if err != nil {
 				t.Fatal(err)
 			}

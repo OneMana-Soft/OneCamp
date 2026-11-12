@@ -41,6 +41,16 @@ var CompanyControls = []PlanFeature{FeatureSSO, FeatureLDAP, FeatureSCIM, Featur
 // PlanUpgradeURL is where a refusal sends an admin.
 const PlanUpgradeURL = "https://onemana.dev/buy"
 
+// Each way past the free plan, on the storefront, so the web app names no
+// host of its own. The checkout opens on the licence unless the link says
+// plan=cloud (the storefront's planFromParams).
+const (
+	PlanLicenceURL = "https://onemana.dev/buy?plan=lifetime"
+	PlanCloudURL   = "https://onemana.dev/buy?plan=cloud"
+	PlanAccountURL = "https://onemana.dev/account"
+	PlanPricingURL = "https://onemana.dev/pricing"
+)
+
 // OnFreePlan reports whether this binary is the free release.
 func OnFreePlan() bool { return MemberSeatLimit() > 0 }
 

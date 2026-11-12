@@ -36,6 +36,12 @@ func readerCtx(r *http.Request) context.Context {
 	return business.WithZone(r.Context(), r.URL.Query().Get("tz"))
 }
 
+// writeErr answers a table's refused write or read: read-only (403, saying
+// so), no access (403), not there (404), the store's failure or a part of it
+// out of reach (503, to try again), or the refusal's own words (400). It is
+// the one mapping of tables' errors to statuses: Row Ledger's routes answer
+// through it too (WriteErr), after their own batch and conflict answers, so a
+// status changes here once for every table route.
 func writeErr(w http.ResponseWriter, err error) {
 	switch {
 	case business.IsReadOnly(err):
@@ -54,6 +60,10 @@ func writeErr(w http.ResponseWriter, err error) {
 		helpers.WriteRetryLater(w, "Couldn't load the rows.")
 	case business.IsViewsUnavailable(err):
 		helpers.WriteRetryLater(w, "Couldn't reach the table's views.")
+	// The store's failure is the server's, never the person's: nothing of the
+	// write was written, and the web keeps the edit and offers Retry (V-583).
+	case business.IsStoreFailed(err):
+		helpers.WriteRetryLater(w, "The table couldn't be read or changed just now.")
 	default:
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 	}
@@ -202,7 +212,8 @@ func DeleteTable(w http.ResponseWriter, r *http.Request) {
 
 // ListRows GET /tables/{id}/rows?limit&offset, or ?ids= (comma-separated,
 // at most 500) for the rows a live message named, in that order, without
-// those deleted since.
+// those deleted since; with &fields= (at most 500), only the cells it named
+// and those worked out on every read (CellsByID).
 func ListRows(w http.ResponseWriter, r *http.Request) {
 	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
@@ -216,6 +227,22 @@ func ListRows(w http.ResponseWriter, r *http.Request) {
 		ids, perr := business.ParseRowIDs(q.Get("ids"))
 		if perr != nil {
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": perr.Error()})
+			return
+		}
+		if q.Has("fields") {
+			// A live message's changed cells (tables L1): those cells alone,
+			// read as the reader, with no counts or pages.
+			fields, ferr := business.ParseFieldIDs(q.Get("fields"))
+			if ferr != nil {
+				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ferr.Error()})
+				return
+			}
+			rows, err = business.CellsByID(ctx, id, actorFrom(r), ids, fields)
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
+			helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": rows})
 			return
 		}
 		rows, err = business.RowsByID(ctx, id, actorFrom(r), ids)
@@ -395,11 +422,13 @@ func DeleteRow(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid id"})
 		return
 	}
-	if err := business.DeleteRow(ctx, id, rowId, actorFrom(r)); err != nil {
+	set, err := business.DeleteRow(ctx, id, rowId, actorFrom(r))
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "deleted"})
+	// change_set names the delete for the web's one undo order (V-360).
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "deleted", "change_set": set})
 }
 
 // FillAIColumn POST /tables/{id}/fields/{fieldId}/ai-fill — evaluate an AI
@@ -696,3 +725,7 @@ func ActorFrom(r *http.Request) business.Actor { return actorFrom(r) }
 
 // ReaderCtx is the request's context with the reader's zone (?tz=).
 func ReaderCtx(r *http.Request) context.Context { return readerCtx(r) }
+
+// WriteErr answers a table's refused write or read as this controller does
+// (writeErr), for the controllers beside this one (Row Ledger's).
+func WriteErr(w http.ResponseWriter, err error) { writeErr(w, err) }

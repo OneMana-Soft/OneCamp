@@ -54,6 +54,11 @@ func TestAWorkspaceExportHoldsEveryBoardItsAdminMayRead(t *testing.T) {
 	diaryBytes := pictureOf(t, color.RGBA{R: 0xd9, G: 0x3b, B: 0x6a, A: 0xff})
 	diaryPicture := w.upload(t, "maya", "board", diary, "diary.png", diaryBytes)
 	deleted := w.board(t, "maya", "Old ideas", false)
+	// A presenter note on the plan (miro-28 2a) is its presenter's alone: no export carries it.
+	const presenterNote = "Presenter only: the budget is 40k"
+	if rec := w.call(boardController.SaveFrameNote, "maya", `{"board_uuid":"`+plan+`","frame_id":"r1","body":"`+presenterNote+`","version":0}`, ""); rec.Code != http.StatusOK {
+		t.Fatalf("maya's note on the plan answers %d: %s", rec.Code, rec.Body)
+	}
 	if rec := w.call(boardController.DeleteBoard, "maya", `{"board_uuid":"`+deleted+`"}`, ""); rec.Code != http.StatusOK {
 		t.Fatalf("deleting the board: %d %s", rec.Code, rec.Body)
 	}
@@ -118,6 +123,9 @@ func TestAWorkspaceExportHoldsEveryBoardItsAdminMayRead(t *testing.T) {
 	for name, content := range files {
 		if strings.Contains(content, string(diaryBytes)) || strings.Contains(content, base64.StdEncoding.EncodeToString(diaryBytes)) {
 			t.Fatalf("%s holds the private diary's picture", name)
+		}
+		if strings.Contains(content, presenterNote) {
+			t.Fatalf("%s holds the plan's presenter note", name)
 		}
 	}
 

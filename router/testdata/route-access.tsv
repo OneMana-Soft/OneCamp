@@ -3,8 +3,9 @@
 GET	/activity/comments	session	none	member	TODO(activity)	-	
 GET	/activity/mentions	session	none	member	TODO(activity)	-	
 GET	/activity/reactions	session	none	member	TODO(activity)	-	
-POST	/activity/seen	session	none	member	TODO(activity)	-	
+POST	/activity/seen	session	none	member	self	TestInboxBadgeIsTheInboxsUnreadItems	moves the caller's own last look and tells their own topic alone (read.moved inbox); answers their own badge
 GET	/activity/unified	session	none	member	TODO(activity)	-	
+GET	/activity/unread	session	none	member	self	TestTheInboxBadgeCountsWhatTheInboxShows	the caller's own Inbox badge, counted from their own feed and notices through keepReadable: a private channel they aren't in, or a deleted message, is never counted. API tokens read it as their member through /v1/unread, by the same count
 POST	/admin/activateUser	admin	none	refused	gate	gate	
 POST	/admin/addInvitation	admin	none	refused	gate	gate	
 GET	/admin/ai/activity	admin	none	refused	gate	gate	
@@ -205,6 +206,7 @@ POST	/admin/onboarding/dismiss	admin	none	refused	gate	gate
 POST	/admin/onboarding/sample	admin	none	refused	gate	gate	
 POST	/admin/onboarding/sample/remove	admin	none	refused	gate	gate	
 POST	/admin/onboarding/skip	admin	none	refused	gate	gate	
+GET	/admin/plan	admin	none	refused	gate	gate	the plan (free, licensed, Cloud, source), seats against the limit, the company controls it includes, the running release and the ways past the limit; /admin/seats is the same answer
 GET	/admin/policies	admin	none	refused	gate	gate	
 PUT	/admin/policies/{key}	admin	none	refused	gate	gate	
 DELETE	/admin/push	admin	none	refused	gate	gate	
@@ -227,7 +229,7 @@ GET	/admin/retention/rules/{kind}/preview	admin	none	refused	gate	gate
 GET	/admin/scim/tokens	admin	none	refused	gate	gate	
 POST	/admin/scim/tokens	admin	none	refused	gate	gate	
 POST	/admin/scim/tokens/{id}/revoke	admin	none	refused	gate	gate	
-GET	/admin/seats	admin	none	refused	gate	gate	
+GET	/admin/seats	admin	none	refused	gate	gate	the same answer as /admin/plan, kept for older web builds
 GET	/admin/settings	admin	none	refused	gate	gate	
 POST	/admin/settings	admin	none	refused	gate	gate	
 DELETE	/admin/slack-bridge	admin	none	refused	gate	gate	
@@ -300,6 +302,7 @@ POST	/ai/ask	session	none	member	TODO(ai)	-
 POST	/ai/ask/stream	session	none	member	TODO(ai)	-	
 GET	/ai/attention	session	none	member	TODO(ai)	-	
 GET	/ai/briefing	session	none	member	TODO(ai)	-	
+POST	/ai/call-background	session	none	member	member	gate	any member whose workspace AI is on: their own model makes a recipe (colours, a built-in layout, extras) from their words, painted and kept in their browser; nothing is stored or sent to anyone else
 POST	/ai/catch-up	session	none	member	TODO(ai)	-	
 POST	/ai/code/analyze	session	none	member	TODO(ai)	-	
 POST	/ai/doc/complete	session	none	member	TODO(ai)	-	
@@ -390,16 +393,24 @@ POST	/board/commentMention	session	none	member	TODO(board)	-
 POST	/board/createBoard	session	none	member	TODO(board)	-	
 POST	/board/deleteBoard	session	none	member	TODO(board)	-	
 GET	/board/getBoardAttachment/{board_uuid}/{obj_uuid}	session	none	member	TODO(board)	-	
+GET	/board/getBoardCalls/{board_uuid}	session	none	member	object:board	TestABoardsCallsFollowTheBoardsAndTheCallsRules	A board's calls (miro-27): who may read the board (business/Board ReadableBoardsFor; else 404) sees the calls that showed it whose conversation they can open (CallState MayReadAll, read afresh, never as a call's invitee); refused (403) through an API token or to a bot
 GET	/board/getBoardInfo/{board_uuid}	session	none	member	TODO(board)	-	
 GET	/board/getBoardList	session	none	member	TODO(board)	-	
 GET	/board/getBoardPermissions	session	none	member	TODO(board)	-	
 GET	/board/getBoardSnapshots	session	none	member	TODO(board)	-	
+GET	/board/getFrameNotes/{board_uuid}	session	none	member	object:board	TestPresenterNotesReachOnlyWhoMayPresent	Presenter notes (miro-28 2a): who may present the board reads them (business/Board CanPresent, the board's edit right, as the web's Present and a call's present_board): 403 for a viewer or commenter, 404 for a board the caller can't read; only for frames on the board. Share-link and call guests never pass the gate; no export, AI, search or MCP reads them (TestOnlyTheBoardsNotesReadTheNotesStore)
 GET	/board/getViewers	session	none	member	TODO(board)	-	
+POST	/board/polls	session	none	member	object:board	TestBoardPollsReachOnlyWhoMayOpenTheBoard	Polls on a slide (miro-28 to_win 4): who may edit the board (business/Board CanEdit) starts one on a frame its stored document holds (409 frame_not_on_board otherwise): 403 for a viewer or commenter, 404 for a board the caller can't open; chat's one poll engine (business/Poll), no channel and no post; told on the board's own topic. Votes and closes go through /poll/{id}, which asks the board
+GET	/board/polls/{board_uuid}	session	none	member	object:board	TestBoardPollsReachOnlyWhoMayOpenTheBoard	A board's polls (miro-28 to_win 4), to whoever may open it (CanRead): 404 for anyone else and for a deleted board
 POST	/board/protect	session	none	member	object:board	TestAnEditorIsRefusedAndTheRefusalIsInTheLog	Protected objects (miro-44): only the board's owner or a workspace admin locks and lifts (403 for anyone else, recorded as refused); a board the caller cannot read answers 404; every lock and lift is in the admin audit log before it is made
-POST	/board/recordExport	session	none	member	object:board	TestRecordBoardExportTellsOnlyAReadableBoardsExport	An export the canvas made in the browser, told to the admin audit log (miro-44); a board the caller cannot read answers 404
+POST	/board/recordExport	session	none	member	object:board	TestRecordBoardExportTellsOnlyAReadableBoardsExport	An export the canvas made in the browser, told to the admin audit log (miro-44); a board the caller cannot read answers 404; past its 60 a member in the limiter's window, the first held tell writes one board.export_held row naming the member (miro-44 (a))
 POST	/board/recordView	session	none	member	TODO(board)	-	
+POST	/board/restore	session	none	member	object:board	TestDeletedBoardsComeBackAndNeverOneARuleRemoved	A deleted board back (UX-TB-H2-BE): its maker, or a workspace admin for a board that isn't private; 404 for anyone else, as for a missing board, and for a board a retention rule removed (never written back: TestARestoreNeverWritesBackABoardARuleRemoved); 409 for one back already; one board.restored row in the admin audit log
 POST	/board/restoreBoardSnapshot	session	none	member	TODO(board)	-	
+POST	/board/saveFrameNote	session	none	member	object:board	TestPresenterNotesReachOnlyWhoMayPresent	A frame's presenter note (miro-28 2a): the board's edit right (CanEdit) writes it, on the version it read (409 stale_note with the note as it now is); at most 10,000 characters; an empty note is its soft delete
 POST	/board/searchUsers	session	none	member	TODO(board)	-	
+GET	/board/trash	session	none	member	self	TestDeletedBoardsComeBackAndNeverOneARuleRemoved	Deleted boards (UX-TB-H2-BE): the caller's own deleted boards, and for a workspace admin every deleted board that isn't private; an editor of someone else's board sees none of theirs
+GET	/board/trash/{board_uuid}	session	none	member	object:board	TestDeletedBoardsComeBackAndNeverOneARuleRemoved	One of the caller's Deleted boards, for a link to a deleted board (UX-TB-H2-BE): 404 unless they may restore it (its maker, or an admin for a board that isn't private)
 POST	/board/updateBoard	session	none	member	TODO(board)	-	
 POST	/board/updateBoardPermissions	session	none	member	TODO(board)	-	
 POST	/boardColab/authorize	session	none	member	object:board	TestTheLiveSessionChecksTakeOnlyTheirOwnTokens	the collaboration service asks, with the member's own access token, whether they may join the board's live canvas: read access lets them in, read-only unless they may edit
@@ -430,12 +441,16 @@ GET	/calendar/events/{eventId}/call/artefacts/{key}/recording	session	none	membe
 POST	/calendar/events/{eventId}/call/artefacts/{key}/restore	session	none	member	object:event	TestOnlyWhoMayChangeAnEventDeletesItsCallsRecordings	whoever may change it, as its delete
 GET	/calendar/events/{eventId}/call/artefacts/{key}/transcript	session	none	member	object:event	TestOnlyWhoMayReadAnEventReadsItsCallsTranscript	whoever may read it; a transcript filed under another event is not found
 POST	/calendar/events/{eventId}/call/lobby	session	none	member	object:event	TestOnlyWhoMayChangeAnEventMakesItsInviteesKnock	whoever may change it
+POST	/calendar/events/{eventId}/files	session	none	member	object:event	TestAnEventsFilesOverHTTP	whoever may change it (mayChange: its organiser, or a guest it lets change it), and only a doc or board they may open (entityLinkBusiness.CanReadRef); at most 25
+DELETE	/calendar/events/{eventId}/files/{kind}/{uuid}	session	none	member	object:event	TestAnEventsFilesOverHTTP	whoever may change it; soft: adding it again brings its row back
 POST	/calendar/events/{eventId}/guest-link	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its organiser
 POST	/calendar/events/{eventId}/nudge	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its organiser
 POST	/calendar/events/{eventId}/proposal/dismiss	session	none	member	object:event	TestOnlyWhoMayChangeAnEventDismissesAProposal	whoever may change the event (mayChange: its organiser, or a guest it lets change it); an instance's id dismisses that instance's
 GET	/calendar/events/{eventId}/reminders	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own reminders on an event they are on
 PUT	/calendar/events/{eventId}/reminders	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own reminders on an event they are on
 POST	/calendar/events/{eventId}/restore	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	someone on it
+GET	/calendar/events/{eventId}/room	session	none	member	object:event	TestEveryEventHasACallRoomOverHTTP	whoever may read its details (the calendar's event decision); nothing made, no token
+POST	/calendar/events/{eventId}/room/join	session	none	member	object:event	TestEveryEventHasACallRoomOverHTTP	whoever may read its details (the calendar's event decision); busy-only and not-on-it 404
 POST	/calendar/events/{eventId}/snooze	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own reminder on an event they are on
 GET	/calendar/insights	session	none	member	self	TestYourWeekIsOnlyTheAskersOwn	the caller's own week: takes no person, reads only events they are on
 GET	/calendar/people/{userId}/calendar	session	none	member	member	gate	any member may name a member's calendar; its events read busy-only until shared (TestAPersonsCalendarIsBusyUntilTheyShareIt)
@@ -445,8 +460,8 @@ GET	/calendar/subscriptions	session	none	member	self	TestASubscribedCalendarIsRe
 POST	/calendar/subscriptions	session	none	member	self	TestASubscribedCalendarIsReadOnlyAndItsPersonsAlone	a subscription of the caller's own, read by the server's outbound guard
 DELETE	/calendar/subscriptions/{calendarId}	session	none	member	self	TestUnsubscribingRemovesTheCalendarAndEverythingOnIt	the caller's own subscription
 POST	/calendar/subscriptions/{calendarId}/refresh	session	none	member	self	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own subscription
-GET	/calendar/sync/google	session	none	member	self	gate	the caller's own Google link
-POST	/calendar/sync/google/move	session	none	member	self	gate	the caller's own Google events
+GET	/calendar/sync/{provider}	session	none	member	self	gate	the caller's own Google or Outlook link
+POST	/calendar/sync/{provider}/move	session	none	member	self	gate	the caller's own Google or Outlook events
 GET	/calls/current	session	none	member	TODO(calls)	-	
 POST	/calls/door	session	none	member	TODO(calls)	-	
 POST	/calls/invite	session	none	member	TODO(calls)	-	
@@ -462,8 +477,11 @@ POST	/calls/{session_id}/act	session	none	member	TODO(calls)	-
 GET	/calls/{session_id}/activities	session	none	member	object:call	TestCallPollsAndQuestionsInACall	someone in the call: here now while it's live, or in it once it has ended; never removed, never through a token (ActivitiesFor)
 POST	/calls/{session_id}/activities	session	none	member	object:call	TestCallPollsAndQuestionsInACall	someone here in the live call, never through a token; polls and Q&A are run only by whoever runs the call (TestOnlyWhoRunsTheCallRunsItsActivities)
 POST	/calls/{session_id}/breakout-token	session	none	member	object:call	TestCallBreakoutRoomTokensAreForTheRoomYouMayBeIn	someone in the call or one of its open breakout rooms now, never through a token; answers a LiveKit token for an open room of that call only: their own room, any while the call lets people choose, any for whoever runs the call (MayTakeRoom)
+POST	/calls/{session_id}/companion-token	session	none	member	object:call	TestCallACompanionGoesWithItsPerson	a signed-in member who may be in the live call (its conversation's member, its meeting's host or invitee), not put out of it and not new to it while it is locked, never through a token, while someone is in its own room (meet-04); answers a LiveKit token for another device of theirs in the call's own room, on an identity the server draws, that may publish only a screen under the call's holds (never a microphone or a camera, never room admin); the companion goes when its person may not stay, is put out, or goes into a breakout room
+POST	/calls/{session_id}/decline	session	none	member	object:call	TestADeclineStopsTheRingAndTellsTheStarter	a member of the call's DM or group who is not in the call declines its ring for themselves, never through a token; a stranger, a channel's call or a closed one answers 404, someone in the call 409 (CallState Decline, memberCall); kept for good
 GET	/calls/{session_id}/quality	session	none	member	object:call	TestWhoReadsWhyACallStuttered	whoever runs the call, or an admin; never through a token
 POST	/calls/{session_id}/quality	session	none	member	object:call	TestOnlySomeoneInTheCallSendsItsSamples	someone in the live call sends their own samples, never through a token; a stranger or someone who left is not in it
+POST	/calls/{session_id}/ring	session	none	member	object:call	TestSomeoneInTheCallRingsItsPeopleAgain	someone in the call who is a member of its DM or group rings its people again, never through a token; at most 3 times and never while a ring is live (429); a member not in it 409, anyone else 404 (CallState MayRingAgain, memberCall)
 GET	/calls/{session_id}/thread	session	none	member	object:call	TestTheCallsThreadIsNothingOutsideTheCall	someone the call's thread is open to while the call is live (the conversation resolver); nothing for anyone else
 POST	/calls/{session_id}/thread	session	none	member	object:call	TestNoReplyOutsideTheCall	someone who may reply in the call's thread while it's live; a reader reads it as closed
 POST	/cards/act	session	none	member	TODO(cards)	-	
@@ -647,7 +665,7 @@ POST	/doc/mentionAccess	session	none	member	TODO(doc)	-
 POST	/doc/move	session	none	member	TODO(doc)	-	
 POST	/doc/move/preview	session	none	member	TODO(doc)	-	
 POST	/doc/purge	session	none	member	TODO(doc)	-	
-POST	/doc/recordExport	session	none	member	TODO(doc)	-	
+POST	/doc/recordExport	session	none	member	TODO(doc)	-	An export the browser made, told to the admin audit log after the export policy and the caller's access to the doc; past its 60 a member in the limiter's window, the first held tell writes one doc.export_held row naming the member (miro-44 (a))
 POST	/doc/recordView	session	none	member	TODO(doc)	-	
 POST	/doc/removeComment	session	none	member	TODO(doc)	-	
 POST	/doc/removeReactionOnComment	session	none	member	TODO(doc)	-	
@@ -693,6 +711,7 @@ GET	/event/getEvent/{eventId}	session	none	member	object:event	TestOnlyThePeople
 GET	/event/getEvents	session	none	member	self	TestEveryReadOfTheStoreKeepsAnEventToItsPeople	the events the caller is on
 POST	/event/hours	session	none	member	object:calendar	TestWorkingHoursAreSeenByTheCalendarsOneRule	working hours of the people whose busy times the asker may see (PeopleSeenBy); the rest named private. Given a day, also where each works (their working location; shown to those who see only busy times, as Google does; a private one to its owner alone: TestWhereSomeoneWorksIsTheirWorkingLocationThatDay)
 POST	/event/leaveEvent/{eventId}	session	none	member	object:event	TestOnlyThePeopleOnAnEventSeeItAndOnlyItsMakerChangesIt	a guest on it; its maker can't leave
+POST	/event/planWeek	session	none	member	self	TestCAL52PlanMyWeek	proposals for the caller's own open tasks in their own free time (the open=1 read's checks), never stored; a blocker the caller may not read is counted, never named
 GET	/event/status/{user_uuid}	session	none	member	object:calendar	TestAStatusIsSeenByTheCalendarsOneRule	a person's status (in a meeting, focus, away), only when the asker may see when they are busy (PeopleSeenBy); else marked private and empty
 POST	/event/suggestTimes	session	none	member	object:calendar	TestSuggestionsLeaveOutWhoseBusyTimesAreKeptPrivate	ranked times over the people whose busy times the asker may see (PeopleSeenBy); the rest unread and named private
 POST	/event/updateEvent/{eventId}	session	none	member	object:event	TestOnlyThePeopleOnAnEventSeeItAndOnlyItsMakerChangesIt	its maker
@@ -736,6 +755,7 @@ POST	/groupChat/startCallRecording	session	none	member	TODO(groupchat)	-
 POST	/groupChat/stopCallRecording	session	none	member	TODO(groupchat)	-	
 POST	/groupChat/updateChat	session	none	member	TODO(groupchat)	-	
 GET	/guest/board-attachment/{token}/{obj_uuid}	public	none	public	link:guest	-	share-link grant scopes the attachment
+GET	/guest/board-polls/{token}	public	none	public	link:guest	-	share-link token (or a call's board token, the board on its stage): the board's polls' questions and tallies, never whose a vote is; read only, a guest never votes
 POST	/guest/calls/act	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, the call in its room); only their own hand and feedback; rate-limited
 GET	/guest/calls/activities	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room); reads the call's polls and questions as a guest sees them (no counts held back for whoever runs the call, no anonymous asker or voter); votes, asks and upvotes only, each limited per call identity; reads and writes rate-limited per address
 POST	/guest/calls/activities	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room); reads the call's polls and questions as a guest sees them (no counts held back for whoever runs the call, no anonymous asker or voter); votes, asks and upvotes only, each limited per call identity; reads and writes rate-limited per address
@@ -831,6 +851,8 @@ POST	/message/scheduled/sendNow	session	none	member	TODO(message)	-
 POST	/message/scheduled/update	session	none	member	TODO(message)	-	
 GET	/notices	session	none	member	TODO(notices)	-	
 POST	/notices/{key}/seen	session	none	member	TODO(notices)	-	
+POST	/notify/test	session	none	refused	self	TestSendMeATestIsTheSessionsOwnAndAnswersEachStep	A4 H3 "Send me a test": a test notice through the router to the caller's own devices alone, never anyone the request names; one a minute (the record's unique key), a second answered 429 with Retry-After; no body. The demo's shared visitor is refused (NoDeviceTestsInDemo): its devices are every visitor's
+GET	/notify/why/{message_id}	session	none	member	self	TestWhyOfAnItemThatIsntYoursIs404	A4 H3 "Why am I seeing this?": the caller's own notification_deliveries rows of the message, one trace per event; another person's item, or none, answers the same 404 (never 403); ids and verdicts, never a body
 GET	/oauth_callback/oidc	public	none	public	link:oauth-state	-	receives the OIDC redirect
 GET	/oauth_callback/{oauth_provider}	public	none	public	link:oauth-state	-	receives the OAuth redirect
 GET	/oauth_login/oidc	public	none	public	public	-	starts an OIDC redirect
@@ -841,6 +863,8 @@ PUT	/people/who-knows/me	session	none	member	TODO(people)	-
 DELETE	/places	session	none	member	TODO(places)	-	
 GET	/places	session	none	member	TODO(places)	-	
 POST	/places	session	none	member	TODO(places)	-	
+GET	/places/recent	session	none	member	self	TestABoardIsAPlace	the things of one kind the caller opened lately (their own view log), each named by its kind's resolver: a board they may no longer read, or a kind no resolver knows (400), is never listed (miro-46)
+GET	/plan/prices	session	none	member	admin	TestPricesRefuseAMember	the storefront's prices, which this server fetches only when asked (an hour's cache): an admin's, or the demo's shared visitor's for the demo's plan card (AdminOrDemoVisitor); every other member 403 admin_required
 POST	/po/addReaction	session	none	member	TODO(po)	-	
 POST	/po/addReactionToComment	session	none	member	TODO(po)	-	
 GET	/po/allComments/{post_uuid}	session	none	member	TODO(po)	-	
@@ -881,6 +905,7 @@ POST	/project/dashboards/{dashboard_id}/widgets/{widget_id}	session	none	member	
 POST	/project/dashboards/{dashboard_id}/widgets/{widget_id}/delete	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404); only its keepers remove widgets (403); removing is soft
 POST	/project/dashboards/{dashboard_id}/widgets/{widget_id}/restore	session	none	member	object:dashboard	TestDashboardsOverHTTP	the dashboard's own check (business/Dashboard MayRead/MayKeep; a project's checks Work Access in its project first): another's own, one not shared yet, or a project the caller isn't in finds nothing (404); only its keepers put widgets back
 POST	/project/deleteProject	session	none	member	object:project	TestA1WorkAccessThroughTheHandlers	the project's admins and its team's admins (NeedArchive): a member 403, someone outside 404
+GET	/project/forNewTask	session	none	member	self	TestNewTaskListsTheProjectsYouMayAddTasksTo	the projects the caller may add tasks to (Work Access: a member's as well as an admin's), read for them: New task picks from it
 GET	/project/forecasts	session	none	member	object:project	TestLinear20BForecastsInOneRead	each listed project the caller may see (NeedView, the single forecast route's check, made for every listed project in one read: workAccess.ProjectsViewable): a viewer reads it; one they cannot see, an id that names nothing and a string that is not an id are left out without a word; at most 100 distinct ids, more refused whole (400)
 GET	/project/getFile/{project_uuid}/{obj_uuid}	session	none	member	object:project	TestOnlyThoseWhoMaySeeAPlaceHaveItsFiles	FileAccess: the project's people; a restricted task's files only for its readers
 GET	/project/info/{project_uuid}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (ReaderIsIn); someone outside it is told they may not (403), the app's "You can't see this project"
@@ -937,6 +962,7 @@ GET	/project/{project_uuid}/estimates	session	none	member	object:project	TestLin
 POST	/project/{project_uuid}/estimates	session	none	member	object:project	TestLinear05AProjectsScaleIsItsAdminsToSet	the project's admins (NeedManage): a member, or someone outside it, is refused (403); kind hours puts it back on hours
 GET	/project/{project_uuid}/fields	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
 POST	/project/{project_uuid}/fields	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/fields/preview	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404). It checks a formula without saving it
 POST	/project/{project_uuid}/fields/reorder	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
 POST	/project/{project_uuid}/fields/{field_id}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
 POST	/project/{project_uuid}/fields/{field_id}/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
@@ -975,6 +1001,16 @@ PUT	/project/{project_uuid}/policies/{key}	session	none	member	object:project	Te
 GET	/project/{project_uuid}/rates	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
 POST	/project/{project_uuid}/rates	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
 POST	/project/{project_uuid}/rates/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); money is for project admins
+GET	/project/{project_uuid}/releases	session	none	member	object:project	TestAProjectsReleasesAreReadAsTheReaderAndChangedByItsAdmins	the project's people in a live project (NeedView); progress counts only the live tasks of the project the reader may see (taskread)
+POST	/project/{project_uuid}/releases	session	none	member	object:project	TestAProjectsReleasesAreReadAsTheReaderAndChangedByItsAdmins	the project's admins (NeedManage), live project
+GET	/project/{project_uuid}/releases/{release_id}	session	none	member	object:project	TestAProjectsReleasesAreReadAsTheReaderAndChangedByItsAdmins	the project's people in a live project (NeedView); lists only the live tasks of the project the reader may see (taskread)
+GET	/project/{project_uuid}/releases/{release_id}/burndown	session	none	member	object:project	TestJ04AReleaseBurndownCountsWhatTheReaderSees	the project's people in a live project (NeedView); counts only the live tasks of the project the reader may see (taskread); hours and points, never money
+POST	/project/{project_uuid}/releases/{release_id}/delete	session	none	member	object:project	TestAProjectsReleasesAreReadAsTheReaderAndChangedByItsAdmins	the project's admins (NeedManage); soft, POST /restore/release/{id} brings it back
+POST	/project/{project_uuid}/releases/{release_id}/edit	session	none	member	object:project	TestAProjectsReleasesAreReadAsTheReaderAndChangedByItsAdmins	the project's admins (NeedManage)
+POST	/project/{project_uuid}/releases/{release_id}/notes/draft	session	none	member	object:project	TestATagShipsEachLinkedProjectsReleaseWithItsTasksAndStages	the project's admins (NeedManage; it spends AI); the AI edition only (404 without the drafter); drafted from the tasks the caller may see (taskread)
+POST	/project/{project_uuid}/releases/{release_id}/ship	session	none	member	object:project	TestAProjectsReleasesAreReadAsTheReaderAndChangedByItsAdmins	the project's admins (NeedManage)
+POST	/project/{project_uuid}/releases/{release_id}/tasks	session	none	member	object:project	TestAProjectsReleasesAreReadAsTheReaderAndChangedByItsAdmins	the project's admins (NeedManage); each task read as the caller: only live tasks of that project they may see go in
+POST	/project/{project_uuid}/releases/{release_id}/tasks/{task_uuid}/remove	session	none	member	object:project	TestAProjectsReleasesAreReadAsTheReaderAndChangedByItsAdmins	the project's admins (NeedManage)
 GET	/project/{project_uuid}/rules	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
 POST	/project/{project_uuid}/rules	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
 GET	/project/{project_uuid}/rules/runs	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
@@ -1049,6 +1085,7 @@ GET	/public/rsvp/{token}	public	none	public	link:rsvp	-	a guest invited by email
 POST	/public/rsvp/{token}	public	none	public	link:rsvp	-	a guest invited by email reads and answers their invitation through their link's token; rate-limited
 POST	/query/parse	session	none	member	TODO(query)	-	
 POST	/query/search	session	none	member	member	TestAnOutsidersCountNeverMoves	any member; every hit and count is read as the asker
+GET	/recording-stage/{ticket}	public	none	public	link:recording-stage	-	the recorder's ticket IS the credential — LiveKit's recorder entering the web's layout page for one recording: a sealed ticket bound to its room, five minutes, once, revoked when the recording ends or the room records again; a good one is a 302 with a two-minute hidden, subscribe-only recorder token in the fragment, anything else a bare 404; rate-limited per address.
 GET	/refreshToken	refresh	none	n/a	gate	gate	
 POST	/restore/{kind}/{id}	session	none	member	object:project	TestEveryDeletedProjectPartComesBackWhole	V-78: brings back a soft-deleted row, each kind checked as its delete: a project's field, status, cycle, milestone, form or draft invoice by its project's admins (Work Access NeedManage; a member is refused 403, someone outside it finds nothing); a table's form by the table's managers; a time entry by its own person (anyone else: 404)
 POST	/saml/acs	public	none	public	signed:saml	-	SAML assertion consumer; assertion is signature-verified
@@ -1151,11 +1188,16 @@ GET	/task/github-search-prs/{task_uuid}	session	none	member	TODO(task)	-
 GET	/task/github-sync-status/{task_uuid}	session	none	member	TODO(task)	-	
 POST	/task/github-unlink/{task_uuid}	session	none	member	TODO(task)	-	
 GET	/task/info/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/link	session	none	member	object:task	TestJHWorkHierarchyAndTypedLinks	someone who may edit the task (NeedEditTask) and see the other task (Work Access MayLink: across projects, edit tasks there too; either end in an archived project is 403 in words); both ids are read as live tasks in the change (MayChange); an other task they can't see is not found; "blocks" is refused, pointing to dependencies
+POST	/task/link/delete	session	none	member	object:task	TestJHWorkHierarchyAndTypedLinks	as POST /task/link (MayLink on both ends); the link is kept, stamped with who removed it (soft)
 POST	/task/milestone	session	none	member	object:task	TestLinear16ATaskJoinsAMilestoneItsProjectShows	whoever may edit the task (NeedEditTask, RequireTask: a restricted one 404); into a milestone its project shows (400 otherwise), the project read from the task
 GET	/task/milestone/{task_uuid}	session	none	member	object:task	TestLinear16ATaskJoinsAMilestoneItsProjectShows	whoever may read the task (NeedView, RequireTask)
 POST	/task/moveTask	session	none	member	TODO(task)	-	
+POST	/task/parent	session	none	member	object:task	TestJHWorkHierarchyAndTypedLinks	someone who may edit the task (NeedEditTask) and see the parent (Work Access MayLink), within the hierarchy's rules (MayParent: its own project, epic -> task -> sub-task); out to the top needs edit only (MayUnlink); an archived project's tasks are 403 in words
 POST	/task/recurrence	session	none	member	TODO(task)	-	
 GET	/task/recurrence/{task_uuid}	session	none	member	TODO(task)	-	
+POST	/task/release	session	none	member	object:task	TestJ04ATaskReleaseFieldIsTheTasksEditorsAndTheFilterFindsIt	someone who may edit the task (NeedEditTask), live project; each id a live release of the task's own project; a release already out by the project's admins (NeedManage); removes are soft
+GET	/task/release/{task_uuid}	session	none	member	object:task	TestJ04ATaskReleaseFieldIsTheTasksEditorsAndTheFilterFindsIt	someone who may read the task (NeedView); its project's releases only to the project's people
 POST	/task/removeReactionFromComment	session	none	member	TODO(task)	-	
 GET	/task/resolve/{ref}	session	none	member	TODO(task)	-	
 POST	/task/time/entry/{entry_id}/delete	session	none	member	TODO(task)	-	
@@ -1185,10 +1227,12 @@ POST	/task/views/delete	session	none	member	TODO(task)	-
 GET	/task/{task_ref}/restriction	session	none	member	TODO(task)	-	
 PUT	/task/{task_ref}/restriction	session	none	member	TODO(task)	-	
 GET	/task/{task_uuid}/impact	session	none	member	TODO(task)	-	
+GET	/task/{task_uuid}/links	session	none	member	object:task	TestJHWorkHierarchyAndTypedLinks	someone who may read the task (NeedView); a linked task they may not see now is left out and not counted
 POST	/team/addAdminRole	session	none	member	TODO(team)	-	
 POST	/team/addMember	session	none	member	TODO(team)	-	
 GET	/team/checkTeamNameExist	session	none	member	TODO(team)	-	
 POST	/team/createTeam	session	none	member	TODO(team)	-	
+GET	/team/forNewProject	session	none	member	self	TestNewProjectListsTheTeamsYouMayStartProjectsIn	the teams the caller may start projects in (Work Access: "Who can make projects"), read for them: New project picks from it
 GET	/team/info/{team_uuid}	session	none	member	TODO(team)	-	
 GET	/team/membersInfo/{team_uuid}	session	none	member	TODO(team)	-	
 GET	/team/projectList/{team_uuid}	session	none	member	TODO(team)	-	
@@ -1253,10 +1297,18 @@ GET	/user/usersListNotBelongToChannelId/{channel_id}	session	none	member	TODO(us
 GET	/user/usersListWhoDontBelongToTheDM/{grp_id}	session	none	member	TODO(user)	-	
 GET	/user/usersListWhoDontBelongToTheProjectButBelongToTheTeam/{project_uuid}	session	none	member	TODO(user)	-	
 GET	/user/usersListWhoDontBelongToTheTeam/{team_uuid}	session	none	member	TODO(user)	-	
+GET	/v1/calendars	token	as-member	n/a	self	TestCAL53G15CalendarAPI	the calendars the token's member may see (calendar:read), as the calendar lists them; an app's token is refused
 GET	/v1/docs	token	as-member	n/a	object:doc	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/docs	token	as-member	n/a	object:doc	TestATokenActsAsAMemberAcrossTheAPI	
 GET	/v1/docs/{id}	token	as-member	n/a	object:doc	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/docs/{id}/append	token	as-member	n/a	object:doc	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/events	token	as-member	n/a	object:event	TestCAL53G15CalendarAPI	the member's events, or one calendar's as they may see it (calendar:read): busy-only calendars answer Busy blocks, never titles or notes
+POST	/v1/events	token	as-member	n/a	object:event	TestCAL53G15CalendarAPI	makes an event as the token's member (calendar:write) on their calendar or one they may edit (the calendar's write rule)
+POST	/v1/events/find-time	token	as-member	n/a	member	TestCAL53G15CalendarAPI	free times for the member and the people named (calendar:read), from the Availability Engine as in the app: private busy times are never counted or shown
+DELETE	/v1/events/{id}	token	as-member	n/a	object:event	TestCAL53G15CalendarAPI	moves an event the member may change to the trash (calendar:write; soft, restore_event brings it back); 404 for one they aren't on
+GET	/v1/events/{id}	token	as-member	n/a	object:event	TestCAL53G15CalendarAPI	one event the member is on (calendar:read); a private event is 404 to anyone not on it
+PATCH	/v1/events/{id}	token	as-member	n/a	object:event	TestCAL53G15CalendarAPI	changes an event the member may change (calendar:write), at the sequence they read
+POST	/v1/events/{id}/restore	token	as-member	n/a	object:event	TestCAL53G15CalendarAPI	brings an event the member deleted back from the trash (calendar:write)
 POST	/v1/mcp	token	as-member	n/a	member	TestATokenActsAsAMemberAcrossTheAPI	each tool call is authorised as the token's member (AuthorizeToolCall), the agent's kill switch asked per request (BoundAgent)
 GET	/v1/me	token	as-member	n/a	self	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/messages/channel	token	as-member	n/a	object:channel	TestATokenActsAsAMemberAcrossTheAPI	
@@ -1301,6 +1353,7 @@ DELETE	/v1/tables/{id}/views/{view}	token	as-member	n/a	object:table	TestATokenA
 PATCH	/v1/tables/{id}/views/{view}	token	as-member	n/a	object:table	TestATokenActsAsAMemberAcrossTheAPI	changes a view, with its audit row in one transaction: the caller's own view, or a shared one for a manager of the table (403); another person's own view is 404, a locked view 409
 GET	/v1/tasks	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/tasks	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	
+GET	/v1/tasks/{id}/links	token	as-member	n/a	object:task	TestJHWorkHierarchyAndTypedLinks	a token acts as a member: someone who may read the task (NeedView); a linked task they may not see is left out and not counted
 POST	/v1/tasks/{id}/status	token	as-member	n/a	object:task	TestATokenActsAsAMemberAcrossTheAPI	
 GET	/v1/unread	token	as-member	n/a	self	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/webhook/incoming/{token}	public	none	public	link:webhook	-	the 32-byte path token IS the credential — It only posts messages: its own slash commands (and their relay to a caller's response_url) were removed in P-API part 3; a payload naming a command is answered with where they went (business/Webhook SlashCommandsMoved).

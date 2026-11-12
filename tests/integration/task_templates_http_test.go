@@ -184,8 +184,17 @@ func TestTaskTemplatesOverHTTP(t *testing.T) {
 	if got := typesOf(project); got[bug] != "Bug" || got[own.ID.String()] != "Incident" {
 		t.Errorf("the project's types: %v, want the built-in Bug and its own Incident", got)
 	}
-	if got := typesOf(shared); got[bug] != "Bug" || got[own.ID.String()] != "" || len(got) != 6 {
-		t.Errorf("the workspace's types: %v, want the six built-in ones alone", got)
+	// The built-in ones come from the package's one list, never a count here:
+	// a count went stale when Epic (582) made them seven (V-879).
+	got := typesOf(shared)
+	builtins := workTaxonomy.Builtins()
+	if got[bug] != "Bug" || got[own.ID.String()] != "" || len(got) != len(builtins) {
+		t.Errorf("the workspace's types: %v, want the %d built-in ones alone", got, len(builtins))
+	}
+	for _, id := range builtins {
+		if got[id.String()] == "" {
+			t.Errorf("the workspace's types: %v, want the built-in %s among them", got, id)
+		}
 	}
 	// The project's own read of its types answers them the same way.
 	code, out = call("ana", http.MethodGet, "/project/"+w.project+"/types", nil)

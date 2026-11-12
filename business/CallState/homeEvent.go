@@ -4,7 +4,10 @@ package business
 // readable by whoever may read the event (the calendar's own rule), and its
 // recap goes to the ONE conversation of the event's people (main's ruling 4
 // (a)). business/LiveKit, which this package imports, learns from here which
-// event a room's call is (OnCallEvent), so it keeps that call's transcript.
+// event a room's call is (OnCallEvent), so it keeps that call's transcript,
+// and who may be in an event's call (OnEventCallMember: whoever may read the
+// event's details, the calendar's own rule; gcal-15 head B), so a member in
+// an event's room with no link stays in it on connect and reads its session.
 
 import (
 	"context"
@@ -17,11 +20,35 @@ import (
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
 
 func init() {
 	liveKitBusiness.OnCallEvent(eventOfRoom)
+	liveKitBusiness.OnEventCallMember(memberOfEventCall)
+}
+
+// mayJoinCallIn is the calendar's rule for who may be in an event's call (a
+// seam for tests).
+var mayJoinCallIn = calendarBusiness.MayJoinCallIn
+
+// memberOfEventCall is whether a member may be in the call going on in a
+// room that is an event's (its meeting knows the event: HomeOf), by the
+// calendar's rule (business/Calendar MayJoinCallIn). A breakout room is its
+// call's. No for any other room.
+func memberOfEventCall(ctx context.Context, room string, u *dgraphStruct.DgraphUser) (bool, error) {
+	if u == nil {
+		return false, nil
+	}
+	home, err := HomeOf(ctx, room)
+	if errors.Is(err, ErrNotACallRoom) {
+		return false, nil
+	}
+	if err != nil || home.Ref.Kind != KindMeeting || home.Event == uuid.Nil {
+		return false, err
+	}
+	return mayJoinCallIn(ctx, &userModels.UserInfo{UserDgraphInfo: *u}, RoomOf(home.Ref), home.Event)
 }
 
 // eventOfRoom is the calendar event whose call is going on in a room (its

@@ -25,7 +25,9 @@ func TestTaskGitHubRoutesCheckTheTaskFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	routes := regexp.MustCompile(`r\.(Get|Post|Put|Patch|Delete)\("(/(?:github-[a-z-]+|create-branch)[^"]*)",\s*taskController\.(\w+)\)`).
+	// A route may carry its own middleware (r.With(...).Post: the demo's
+	// refusal of a GitHub write), and is held to the rule all the same.
+	routes := regexp.MustCompile(`r\.(?:With\([\w.]+\)\.)?(Get|Post|Put|Patch|Delete)\("(/(?:github-[a-z-]+|create-branch)[^"]*)",\s*taskController\.(\w+)\)`).
 		FindAllStringSubmatch(string(src), -1)
 	if len(routes) < 13 {
 		t.Fatalf("found %d task GitHub routes in the router, want at least 13: has the route list moved?", len(routes))

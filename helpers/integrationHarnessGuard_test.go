@@ -637,3 +637,85 @@ func TestNoIntegrationCleanupSetsAClientBackToNil(t *testing.T) {
 			"integration.UseOpenSearchClient), or the client the test found.", f)
 	}
 }
+
+// TestEveryContainerStartsThroughTheHarnessStarter: the only call that starts
+// a testcontainers container (testcontainers.GenericContainer or .Run, or a
+// testcontainers module's Run) is tests/integration/start.go's
+// StartContainer. Each binary of a `go test` over several packages shares
+// one reaper, and a binary that starts its first container while the last
+// one's reaper is going fails before its test begins unless the start is
+// tried again (V-856: four gates RED on 9-10 Nov 2026). A start anywhere else
+// would not be.
+func TestEveryContainerStartsThroughTheHarnessStarter(t *testing.T) {
+	const tc = "github.com/testcontainers/testcontainers-go"
+	const starter = "tests/integration/start.go"
+	var files, starterCalls int
+	var found []string
+	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); path != ".." && (strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "testdata") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		files++
+		starts := map[string]bool{} // the name an import is used by -> it starts containers
+		for _, im := range f.Imports {
+			ip, _ := strconv.Unquote(im.Path.Value)
+			if ip != tc && !strings.HasPrefix(ip, tc+"/modules/") {
+				continue
+			}
+			n := ip[strings.LastIndex(ip, "/")+1:]
+			if ip == tc {
+				n = "testcontainers"
+			}
+			if im.Name != nil {
+				n = im.Name.Name
+			}
+			starts[n] = true
+		}
+		if len(starts) == 0 {
+			return nil
+		}
+		rel := filepath.ToSlash(strings.TrimPrefix(path, "../"))
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			x, ok := sel.X.(*ast.Ident)
+			if !ok || !starts[x.Name] || (sel.Sel.Name != "GenericContainer" && sel.Sel.Name != "Run") {
+				return true
+			}
+			if rel == starter {
+				starterCalls++
+				return true
+			}
+			found = append(found, fmt.Sprintf("%s: %s.%s", strings.TrimPrefix(fset.Position(sel.Pos()).String(), "../"), x.Name, sel.Sel.Name))
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files < 100 || starterCalls == 0 {
+		t.Fatalf("read %d Go files and found %d container starts in %s: this check stopped looking", files, starterCalls, starter)
+	}
+	sort.Strings(found)
+	for _, f := range found {
+		t.Errorf("%s starts a container itself; start it with StartContainer (%s), which tries again while the "+
+			"run's reaper is going, so the test can't fail before it begins", f, starter)
+	}
+}

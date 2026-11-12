@@ -52,7 +52,7 @@ func (h *harness) onCalendar(calendar uuid.UUID, by *model.UserInfo, title strin
 	}
 	e.ID, e.CalendarID, e.CreatedBy, e.ICalUID = uuid.New(), calendar, personOf(by), uuid.NewString()+"@onecamp"
 	e.CreatedAt, e.UpdatedAt = h.clock, h.clock
-	if err := h.store.create(context.Background(), e, nil); err != nil {
+	if err := h.store.create(context.Background(), e, nil, nil); err != nil {
 		h.t.Fatal(err)
 	}
 	return e

@@ -6,7 +6,9 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
+	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -388,5 +390,49 @@ func TestAThroughHoldsRecipientIsPushedPastTheirHolds(t *testing.T) {
 	}
 	if !slices.Equal(w.through, []string{sam}) || !slices.Equal(w.delivered, []string{maya}) {
 		t.Errorf("through holds %v, within them %v", w.through, w.delivered)
+	}
+}
+
+// A notice's own words from the thing (an agent's reply where it was asked)
+// reach only a reader who may open the thing now: one who has left the channel
+// keeps the notice, untitled, without the words.
+func TestANoticesWordsReachOnlyWhoMayOpenTheThing(t *testing.T) {
+	row := &followModels.Notice{ID: uuid.New(), Kind: "agent.replied", ResourceKind: "channel", ResourceUUID: "ch1",
+		Data: map[string]string{NoticeWords: "The numbers are in.", "post_id": "p1"}, CreatedAt: time.Now()}
+	open := NoticeItem(row, nil, nil, "launch", true)
+	if open.Notice.Data[NoticeWords] != "The numbers are in." || open.Notice.Title != "launch" {
+		t.Errorf("a reader who may open the channel reads %+v; want its title and the words", open.Notice)
+	}
+	shut := NoticeItem(row, nil, nil, "launch", false)
+	if _, ok := shut.Notice.Data[NoticeWords]; ok || shut.Notice.Title != "" || shut.Notice.Data["post_id"] != "p1" {
+		t.Errorf("a reader who can't open the channel reads %+v; want no title and no words, the ids kept", shut.Notice)
+	}
+	if row.Data[NoticeWords] != "The numbers are in." {
+		t.Error("leaving the words out changed the stored row")
+	}
+}
+
+// V-701: a request asking for the reader's answer is Priority, in the feed
+// and live alike (both are NoticeItem); other notices, and a request on a
+// task the reader may no longer open, are normal.
+func TestARequestWaitingOnTheReaderIsAPriorityNotice(t *testing.T) {
+	notice := func(kind string) *followModels.Notice {
+		return &followModels.Notice{ID: uuid.New(), Kind: kind, ResourceKind: "task", ResourceUUID: "t1", Reason: "approver",
+			Data: map[string]string{"approval_id": uuid.NewString(), "to_status": "done"}, CreatedAt: time.Now()}
+	}
+	cases := []struct {
+		name    string
+		row     *followModels.Notice
+		canOpen bool
+		want    string
+	}{
+		{"a request to approve", notice("work.approval.requested"), true, activityBusiness.PriorityHigh},
+		{"a request on a task they may no longer open", notice("work.approval.requested"), false, activityBusiness.PriorityNormal},
+		{"its decision told to the requester", notice("work.approval.decided"), true, activityBusiness.PriorityNormal},
+	}
+	for _, c := range cases {
+		if got := NoticeItem(c.row, nil, nil, "Ship the page", c.canOpen).Priority; got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
 	}
 }

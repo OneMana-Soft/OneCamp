@@ -214,7 +214,7 @@ func apiErr(err error) error {
 		return v1api.Errorf(http.StatusBadRequest, "invalid_argument", "a query's filter and sorts are a view's, as the reference shows",
 			"%s", rowQuery.Refusal(err))
 	// The store's failure is the server's, the app's words aside (storeFailed).
-	case errors.As(err, new(storeFailed)), errors.Is(err, errViewsUnavailable):
+	case IsStoreFailed(err), errors.Is(err, errViewsUnavailable):
 		e := v1api.Errorf(http.StatusServiceUnavailable, "unavailable", "send it again in a few seconds", "the table couldn't be read or changed just now")
 		e.RetryAfter = retryRows
 		return e
@@ -280,9 +280,12 @@ func rowErrors(rows BatchErrors) []apiRowError {
 }
 
 // storeFailed is a read or write the store didn't take, in the app's words
-// ("failed to load fields"): the server's to answer (the API's 503), where a
-// plain error is the app's refusal of what was sent. The app's controller
-// words both as before (writeErr).
+// ("failed to load fields"): the server's to answer, a 503 to try again in
+// the API and the app alike (writeErr), where a plain error is the app's
+// refusal of what was sent. Nothing of a write it refused was written.
 type storeFailed string
 
 func (e storeFailed) Error() string { return string(e) }
+
+// IsStoreFailed is whether err is the store's failure (storeFailed).
+func IsStoreFailed(err error) bool { return errors.As(err, new(storeFailed)) }

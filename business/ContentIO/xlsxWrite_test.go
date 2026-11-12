@@ -349,3 +349,113 @@ func TestALengthOfTimeWithSecondsCountsHoursPastADay(t *testing.T) {
 		}
 	}
 }
+
+// An amount is written with its own currency's sign, quoted in its number
+// format as the dollar and the rupee always were (a quoted sign is plain
+// text to Excel, LibreOffice and Google Sheets alike), and reads back as
+// money in that currency. The dollar's and the rupee's formats are the ones
+// these files had before any currency could be chosen.
+func TestAWorkbookKeepsEachAmountsCurrency(t *testing.T) {
+	codes := []string{"USD", "INR", "EUR", "GBP", "AUD", "CHF", "JPY", "VES"}
+	var row []Cell
+	var cols []WorkbookColumn
+	for _, code := range codes {
+		row = append(row, Cell{Kind: CellNumber, Number: 1250.5, Currency: code})
+		cols = append(cols, WorkbookColumn{Name: code, Fixed: true, Places: 2})
+	}
+	// A sign that names no currency, and a currency that isn't one, are
+	// numbers.
+	row = append(row, Cell{Kind: CellNumber, Number: 7, Currency: "other"}, Cell{Kind: CellNumber, Number: 7, Currency: "XYZ"})
+	cols = append(cols, WorkbookColumn{Name: "other"}, WorkbookColumn{Name: "XYZ"})
+	notes, book := writeBook(t, WorkbookSheet{Name: "Money", Columns: cols, Rows: rowsOfCells([][]Cell{row})})
+	if len(notes) != 0 {
+		t.Errorf("a workbook of amounts noted %q", notes)
+	}
+	styles := partOf(t, book, "xl/styles.xml")
+	for _, code := range []string{`&quot;$&quot;#,##0.00`, `&quot;₹&quot;#,##0.00`, `&quot;€&quot;#,##0.00`, `&quot;£&quot;#,##0.00`,
+		`&quot;A$&quot;#,##0.00`, `&quot;CHF &quot;#,##0.00`, `&quot;JP¥&quot;#,##0.00`, `&quot;VES &quot;#,##0.00`} {
+		if !strings.Contains(styles, `formatCode="`+code+`"`) {
+			t.Errorf("the styles have no format %s: %s", code, styles)
+		}
+	}
+	if n := strings.Count(styles, "<numFmt "); n != len(codes) {
+		t.Errorf("the styles hold %d number formats, want one a currency: %s", n, styles)
+	}
+	sheets, err := ReadSheets(sheetOf("Money.xlsx", book))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cellsRead(t, sheets[0])
+	if len(got) != 2 || len(got[1]) != len(row) {
+		t.Fatalf("read %+v", got)
+	}
+	for i, code := range codes {
+		if c := got[1][i]; c.Kind != CellNumber || c.Number != 1250.5 || c.Currency != code {
+			t.Errorf("%s reads back as %+v", code, c)
+		}
+	}
+	for _, c := range got[1][len(codes):] {
+		if c.Kind != CellNumber || c.Number != 7 || c.Currency != "" {
+			t.Errorf("a number with no currency reads back as %+v", c)
+		}
+	}
+}
+
+// A number format's sign says which currency its amounts are in: a sign or
+// a code, quoted or in Excel's own tag with or without a locale. A dollar
+// sign with letters before it is that country's dollar; text that names no
+// currency is "other" when it is a currency's sign, else no money at all.
+func TestANumberFormatsSignNamesItsCurrency(t *testing.T) {
+	for code, want := range map[string]string{
+		`"$"#,##0.00`:          "USD $12",
+		`[$$-409]#,##0.00`:     "USD $12",
+		`"US$"#,##0.00`:        "USD $12",
+		`"USD "#,##0`:          "USD 12 USD",
+		`"₹"\ #,##0.00`:        "INR ₹12",
+		`"Rs."#,##0`:           "INR Rs.12",
+		`[$€-407]#,##0.00`:     "EUR €12",
+		`#,##0.00\ [$€-1]`:     "EUR €12",
+		`"€"#,##0.00`:          "EUR €12",
+		`[$EUR]\ #,##0.00`:     "EUR 12 EUR",
+		`"eur "0`:              "EUR 12 eur",
+		`[$£-809]#,##0.00`:     "GBP £12",
+		`£#,##0`:               "GBP £12",
+		`[$A$-C09]#,##0.00`:    "AUD A$12",
+		`"A$"#,##0.00`:         "AUD A$12",
+		`[$CHF-807]\ #,##0.00`: "CHF 12 CHF",
+		`"CHF "#,##0.00`:       "CHF 12 CHF",
+		`"JP¥"#,##0`:           "JPY ¥12",
+		`"¢"0`:                 "other ¢12",
+		`0" km"`:               " 12",
+		`0" pcs"`:              " 12",
+		`#,##0.00`:             " 12",
+	} {
+		c := NumberCell(12, code)
+		if got := c.Currency + " " + c.Text; got != want {
+			t.Errorf("%s reads 12 as %q, want %q", code, got, want)
+		}
+	}
+}
+
+// An OpenDocument amount says its currency by code, in any case; one whose
+// code names no currency is still an amount, in a sign no column shows.
+func TestAnOpenDocumentAmountKeepsItsCurrency(t *testing.T) {
+	var cells strings.Builder
+	for _, cur := range []string{"EUR", "gbp", "USD", "INR", "ZZZ"} {
+		fmt.Fprintf(&cells, `<table:table-cell office:value-type="currency" office:currency="%s" office:value="12.5"><text:p>12.50</text:p></table:table-cell>`, cur)
+	}
+	cells.WriteString(`<table:table-cell office:value-type="currency" office:value="12.5"><text:p>12.50</text:p></table:table-cell>`)
+	sheets, err := ReadSheets(odsOf(t, `<table:table table:name="Money"><table:table-row>`+cells.String()+`</table:table-row></table:table>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cellsRead(t, sheets[0])
+	if len(got) != 1 || len(got[0]) != 6 {
+		t.Fatalf("read %+v", got)
+	}
+	for i, want := range []string{"EUR", "GBP", "USD", "INR", "other", ""} {
+		if c := got[0][i]; c.Kind != CellNumber || c.Number != 12.5 || c.Currency != want {
+			t.Errorf("amount %d reads %+v, want its currency %q", i, c, want)
+		}
+	}
+}

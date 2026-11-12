@@ -86,40 +86,6 @@ func BulkCreateChatNotification(query string, values ...interface{}) (err error)
 	return nil
 }
 
-func GetEligibleUsersForChatActivity(query string, grpId string, userId string, mentionsList []string, limitToMentions bool) (userIds []string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, grpId, userId, mentionsList, limitToMentions)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetEligibleUsersForChatActivity Failed to get user's notification err: %+v",
-			err)
-		return
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var uid string
-		if err := rows.Scan(&uid); err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/GetEligibleUsersForChatActivity Failed to scan user_id err: %+v",
-				err)
-			return nil, err
-		}
-		userIds = append(userIds, uid)
-	}
-	// Iteration can stop on a mid-query failure (dropped connection, server-side
-	// error) rather than on end-of-rows. Without it this returns a PARTIAL result
-	// with a nil error, and the caller cannot tell truncated data from a short list.
-	if err = rows.Err(); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/UserChatNotification rows iteration failed err: %+v", err)
-		return
-	}
-
-	return
-}
-
 // GetLevelsInConversation runs query ($1 the conversation, $2 the people) and
 // answers each person's setting by the id the query reads back.
 func GetLevelsInConversation(query string, grpID string, userIDs []string) (map[string]string, error) {

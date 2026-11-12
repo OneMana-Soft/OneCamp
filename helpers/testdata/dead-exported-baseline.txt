@@ -25,7 +25,6 @@ ConnectedProviderNames
 CountByScope
 CountOpenForUser
 CreatePendingAction
-CreatePullRequest
 DeleteBySource
 DeleteMemoryItem
 DictationAvailable
@@ -185,3 +184,21 @@ models/postgres/WorkspaceNudge.UpsertMany
 models/redis/store.GetInt64Many
 models/redis/store.GetSetMembers
 models/redis/store.IncrMany
+#   (v1.65.0) Each called on main only from business/AI, business/AIAgent, business/CodePR or
+#   controllers/AI: the Inbox badge's nudge setter and reads (MarkUnread, UrgentRaisedFor), the
+#   nudge engine's settles (LiveByIDs, ListOpenOfKind, SupersedeByIDs, QuietUnraisedSince), Plan my
+#   week's AI orderer hook (RegisterPlanOrderer), an agent's status post (TellEditedCommentToPostAsBot,
+#   InboxOfTold), the code agent's pull request (CreatePullRequestWithToken), and the in-call
+#   assistant's and the recap's transcript gates (ConnectedCall, NewestTranscriptOpenTo).
+business/Activity.MarkUnread
+business/Availability.RegisterPlanOrderer
+business/BotPost.InboxOfTold
+business/BotPost.TellEditedCommentToPostAsBot
+business/GitHub.CreatePullRequestWithToken
+business/LiveKit.ConnectedCall
+business/LiveKit.NewestTranscriptOpenTo
+models/postgres/WorkspaceMemory.LiveByIDs
+models/postgres/WorkspaceNudge.ListOpenOfKind
+models/postgres/WorkspaceNudge.QuietUnraisedSince
+models/postgres/WorkspaceNudge.SupersedeByIDs
+models/postgres/WorkspaceNudge.UrgentRaisedFor

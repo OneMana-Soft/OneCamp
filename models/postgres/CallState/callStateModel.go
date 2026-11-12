@@ -337,6 +337,65 @@ func EndSession(ctx context.Context, id uuid.UUID, reason string, at time.Time) 
 	return true, tx.Commit()
 }
 
+// ShownBoard is a board a call showed: who put it on the call's stage (their
+// call identity) and when.
+type ShownBoard struct {
+	Board uuid.UUID
+	By    string
+	At    time.Time
+}
+
+// KeepEndedSession writes a call that is over as it went, whole, for a call
+// the writers above never saw go on (the demo's seeded call,
+// business/DemoSeed): its row by s.ID, everyone in it with their role and
+// times as given, and the boards it showed, in one transaction. Writing it
+// again puts its times, its people's and its boards' back to what it is
+// given, so a call made to move moves whole and a board shown again is still
+// shown once; a board shown before and not now stays shown, as a call's
+// boards do. A call with no end, or whose id a call still going on has, is
+// refused.
+func KeepEndedSession(ctx context.Context, s Session, people []Attendee, shown []ShownBoard) error {
+	if s.ID == uuid.Nil || s.EndedAt == nil || s.EndedAt.Before(s.StartedAt) {
+		return errors.New("callstate: a call that is over has an id, a start and an end after it")
+	}
+	return pgexec.InTx(ctx, func(ctx context.Context) error {
+		n, err := pgexec.Exec(ctx, `
+			INSERT INTO call_sessions (id, room, room_sid, kind, resource_kind, resource_id, started_by, started_at, ended_at, ended_reason)
+			VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, $9, $10)
+			ON CONFLICT (id) DO UPDATE SET room = EXCLUDED.room, room_sid = EXCLUDED.room_sid, kind = EXCLUDED.kind,
+				resource_kind = EXCLUDED.resource_kind, resource_id = EXCLUDED.resource_id, started_by = EXCLUDED.started_by,
+				started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at, ended_reason = EXCLUDED.ended_reason
+			WHERE call_sessions.ended_at IS NOT NULL`,
+			s.ID, s.Room, s.RoomSID, s.Kind, s.ResourceKind, s.ResourceID, s.StartedBy, s.StartedAt, s.EndedAt, s.EndedReason)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errors.New("callstate: a call still going on has that id")
+		}
+		for _, a := range people {
+			if _, err := pgexec.Exec(ctx, `
+				INSERT INTO call_attendance (session_id, identity, user_uuid, name, role, joined_at, last_joined_at, left_at, seconds_in)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				ON CONFLICT (session_id, identity) DO UPDATE SET user_uuid = EXCLUDED.user_uuid, name = EXCLUDED.name,
+					role = EXCLUDED.role, joined_at = EXCLUDED.joined_at, last_joined_at = EXCLUDED.last_joined_at,
+					left_at = EXCLUDED.left_at, seconds_in = EXCLUDED.seconds_in`,
+				s.ID, a.Identity, a.UserUUID, a.Name, a.Role, a.JoinedAt, a.LastJoinedAt, a.LeftAt, a.SecondsIn); err != nil {
+				return err
+			}
+		}
+		for _, b := range shown {
+			if _, err := pgexec.Exec(ctx, `
+				INSERT INTO call_session_boards (session_id, board_uuid, shown_by, first_shown_at) VALUES ($1, $2, $3, $4)
+				ON CONFLICT (session_id, board_uuid) DO UPDATE SET shown_by = EXCLUDED.shown_by, first_shown_at = EXCLUDED.first_shown_at`,
+				s.ID, b.Board, b.By, b.At); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // Joined records that someone joined a call at a time, answering whether it
 // was their first join and whether it was a return after leaving. A join that
 // is older than their latest leave, or that repeats one already recorded,
@@ -668,6 +727,15 @@ func RecordingEnded(ctx context.Context, egressID, status string, at time.Time) 
 	ctx, cancel := timeout(ctx)
 	defer cancel()
 	_, err = conn.ExecContext(ctx, `UPDATE call_recordings SET ended_at = $3, status = $2 WHERE egress_id = $1`, egressID, status, at)
+	return err
+}
+
+// RecordingMoved moves a running recording on its call's record onto the
+// egress that records the call on in its place (business/LiveKit's
+// RecordAgainOnGrid): who started it and when stay. One the record doesn't
+// list, or that has ended, moves nothing.
+func RecordingMoved(ctx context.Context, from, to string) error {
+	_, err := pgexec.Exec(ctx, `UPDATE call_recordings SET egress_id = $2 WHERE egress_id = $1 AND ended_at IS NULL`, from, to)
 	return err
 }
 

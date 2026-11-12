@@ -3,8 +3,7 @@
 package business
 
 // Changing some of a row's cells, against Postgres 12 with every migration:
-// the rest of the row and its place stay as they are, and an AI fill holding
-// an old copy of the row doesn't undo what changed meanwhile.
+// the rest of the row and its place stay as they are.
 // Run: go test -tags=integration ./business/DataTable/ -run TestChangingSomeCells -v
 
 import (
@@ -88,7 +87,7 @@ func TestChangingSomeCellsLeavesTheRest(t *testing.T) {
 	}
 
 	// A deleted row isn't brought back by a change.
-	if err := DeleteRow(ctx, table.Id, row.Id, actor); err != nil {
+	if _, err := DeleteRow(ctx, table.Id, row.Id, actor); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := PatchRow(ctx, table.Id, row.Id, map[string]interface{}{stage: "Lost"}, actor); err == nil {

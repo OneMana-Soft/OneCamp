@@ -119,6 +119,10 @@ func GetClientConfig(w http.ResponseWriter, r *http.Request) {
 			// sending key. The client uses it to warn, because nothing else will:
 			// password reset and invitations both fail silently by design.
 			"email_enabled": business.EmailEnabled(),
+			// Where the workspace runs (self, cloud or demo), so a screen
+			// claims self-hosting, Cloud or the shared demo only when true.
+			// The same answer /auth/providers gives the sign-in page.
+			"hosting": business.Hosting(),
 		},
 	})
 }

@@ -57,6 +57,11 @@ var (
 	}
 	drawBoard   = boardBusiness.DrawBoard
 	deleteBoard = boardBusiness.DeleteBoard
+	// discardBoard takes away a board a try made but couldn't record: never
+	// the importer's, so never in their Deleted boards (V-865).
+	discardBoard = boardBusiness.DiscardBoard
+	// rememberBoard records the board a try made, before its pictures.
+	rememberBoard = importModels.RecordMapping
 	// boardIsLive is whether the board is live here for the importer. An error
 	// is the check failing (the graph out of reach), never an answer.
 	boardIsLive = func(ctx context.Context, boardUUID, userUUID string) (bool, error) {
@@ -161,9 +166,9 @@ func processBoardChunk(ctx context.Context, prov importProvider.Provider, job *i
 		made = uuid.MustParse(boardUUID)
 		// Recorded, for this import and the workspace's later ones, before its
 		// pictures, which can take minutes.
-		if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName, importModels.EntityBoard, id, made, nil,
+		if err := rememberBoard(ctx, job.Id, job.Provider, job.SourceWorkspaceName, importModels.EntityBoard, id, made, nil,
 			mustMarshal(map[string]any{"title": title, "drawing": true}), true); err != nil {
-			if derr := deleteBoard(ctx, boardUUID); derr != nil {
+			if derr := discardBoard(ctx, boardUUID); derr != nil {
 				importModels.LogImportError(ctx, job.Id, &chunk.Id, importModels.EntityBoard, id, importModels.SeverityWarning,
 					"BOARD_LEFT_BEHIND", "A board made before the import stopped couldn't be taken away; delete it if the board comes over again.", nil)
 			}

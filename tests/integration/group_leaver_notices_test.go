@@ -283,10 +283,13 @@ func TestSomeoneWhoLeftAGroupIsToldNothingMoreOfIt(t *testing.T) {
 					d[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] == msg
 			}
 		}
-		waitFor(t, "the reaction's push to ada", func() bool { return len(pushedTo(reactionTo(adaMsg))) >= 1 })
+		// A reaction reaches its author's Activity alone (A4 H2, D2:
+		// reactions never push or badge), so ada's Activity item is what says
+		// she was told, and nobody is pushed.
+		waitFor(t, "the reaction's Activity item to ada", func() bool { return reactionItem("ada", since) })
 		settle()
-		if got := pushedTo(reactionTo(adaMsg)); !slices.Equal(got, []string{"ada"}) {
-			t.Errorf("a reaction to ada's message was pushed to %v, want ada", got)
+		if got := pushedTo(reactionTo(adaMsg)); len(got) != 0 {
+			t.Errorf("a reaction to ada's message was pushed to %v: a reaction never pushes (D2)", got)
 		}
 		if got := pushedTo(reactionTo(cyMsg)); len(got) != 0 {
 			t.Errorf("a reaction to cy's message was pushed to %v: cy left the group", got)

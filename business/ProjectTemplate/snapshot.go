@@ -9,6 +9,7 @@ import (
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	statusModel "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
@@ -19,7 +20,7 @@ import (
 //
 //   - its own statuses, all of them, so the board has the same columns;
 //   - its tasks and their subtasks, except cancelled ones, with their names,
-//     descriptions, priorities and tags;
+//     descriptions, priorities and tags; an epic with its tasks and theirs;
 //   - their dates, as days from the earliest date in the project, so the
 //     spacing between them carries over to whenever the next project starts;
 //   - not who they're assigned to, their comments, files or time: a template
@@ -31,21 +32,41 @@ import (
 
 // FromProject is a project's tasks and statuses as a template. Dates are read
 // as days in loc, the zone of the person saving it. Pure.
-func FromProject(name, description string, statuses []*statusModel.TaskStatus, tasks []*dgraphStruct.DgraphTask, loc *time.Location) Template {
+// epics names the tasks that are epics (by uuid): each keeps the tasks under
+// it, with their sub-tasks.
+func FromProject(name, description string, statuses []*statusModel.TaskStatus, tasks []*dgraphStruct.DgraphTask, epics map[string]bool, loc *time.Location) Template {
 	t := Template{Name: name, Description: description, Tasks: []Task{}}
 	for _, s := range statuses {
 		if s != nil {
 			t.Statuses = append(t.Statuses, Status{Name: s.Name, Category: s.Category, Color: s.Color})
 		}
 	}
+	keep := planOrder(tasks)
+	zero := earliest(keep)
+	for _, task := range keep {
+		out := taskOf(task, zero, loc)
+		if epics[task.Uuid] {
+			// An epic holds tasks, each with its sub-tasks.
+			out.Epic, out.Subtasks = true, nil
+			for _, in := range planOrder(task.SubTasks) {
+				out.Tasks = append(out.Tasks, taskOf(in, zero, loc))
+			}
+		}
+		t.Tasks = append(t.Tasks, out)
+	}
+	return t
+}
+
+// planOrder is the tasks a template keeps, in the order a plan is read:
+// those with a due date first, soonest first; then the rest in the order
+// they were made. Pure.
+func planOrder(tasks []*dgraphStruct.DgraphTask) []*dgraphStruct.DgraphTask {
 	keep := make([]*dgraphStruct.DgraphTask, 0, len(tasks))
 	for _, task := range tasks {
 		if kept(task) {
 			keep = append(keep, task)
 		}
 	}
-	// Tasks with a due date first, soonest first; then the rest in the order
-	// they were made. That's the order a plan is read in.
 	sort.SliceStable(keep, func(i, j int) bool {
 		a, b := dateOf(keep[i].DueDate), dateOf(keep[j].DueDate)
 		switch {
@@ -55,30 +76,32 @@ func FromProject(name, description string, statuses []*statusModel.TaskStatus, t
 			return a.Before(*b)
 		}
 	})
-	zero := earliest(keep)
-	for _, task := range keep {
-		out := Task{Name: taskName(task.Name), Status: restart(task)}
-		if taskPriority.IsOrNone(task.Priority) {
-			out.Priority = task.Priority
-		}
-		if task.Description != nil {
-			out.Description = *task.Description
-		}
-		if task.Label != nil {
-			out.Tags = *task.Label
-		}
-		out.StartDay, out.DueDay = daysFrom(zero, task.StartDate, loc), daysFrom(zero, task.DueDate, loc)
-		if out.StartDay != nil && out.DueDay != nil && *out.StartDay > *out.DueDay {
-			out.StartDay = nil
-		}
-		for _, sub := range task.SubTasks {
-			if kept(sub) {
-				out.Subtasks = append(out.Subtasks, Subtask{Name: taskName(sub.Name), DueDay: daysFrom(zero, sub.DueDate, loc)})
-			}
-		}
-		t.Tasks = append(t.Tasks, out)
+	return keep
+}
+
+// taskOf is one task as a template keeps it, with its subtasks, its days
+// counted from zero in loc. Pure.
+func taskOf(task *dgraphStruct.DgraphTask, zero *time.Time, loc *time.Location) Task {
+	out := Task{Name: taskName(task.Name), Status: restart(task)}
+	if taskPriority.IsOrNone(task.Priority) {
+		out.Priority = task.Priority
 	}
-	return t
+	if task.Description != nil {
+		out.Description = *task.Description
+	}
+	if task.Label != nil {
+		out.Tags = *task.Label
+	}
+	out.StartDay, out.DueDay = daysFrom(zero, task.StartDate, loc), daysFrom(zero, task.DueDate, loc)
+	if out.StartDay != nil && out.DueDay != nil && *out.StartDay > *out.DueDay {
+		out.StartDay = nil
+	}
+	for _, sub := range task.SubTasks {
+		if kept(sub) {
+			out.Subtasks = append(out.Subtasks, Subtask{Name: taskName(sub.Name), DueDay: daysFrom(zero, sub.DueDate, loc)})
+		}
+	}
+	return out
 }
 
 // kept: a template keeps every task and subtask that wasn't cancelled.
@@ -116,7 +139,8 @@ func dateOf(d *time.Time) *time.Time {
 	return d
 }
 
-// earliest is the first date on any task or subtask the template keeps, or
+// earliest is the first date on any task or subtask the template keeps (an
+// epic's tasks and theirs too), or
 // nil when none has one. A cancelled subtask's date would start the plan on a
 // day nothing in it has.
 func earliest(tasks []*dgraphStruct.DgraphTask) *time.Time {
@@ -126,15 +150,17 @@ func earliest(tasks []*dgraphStruct.DgraphTask) *time.Time {
 			first = d
 		}
 	}
-	for _, task := range tasks {
-		see(task.StartDate)
-		see(task.DueDate)
-		for _, sub := range task.SubTasks {
-			if kept(sub) {
-				see(sub.DueDate)
+	var walk func(tasks []*dgraphStruct.DgraphTask)
+	walk = func(tasks []*dgraphStruct.DgraphTask) {
+		for _, task := range tasks {
+			if kept(task) {
+				see(task.StartDate)
+				see(task.DueDate)
+				walk(task.SubTasks)
 			}
 		}
 	}
+	walk(tasks)
 	return first
 }
 
@@ -170,10 +196,17 @@ func Snapshot(ctx context.Context, projectID uuid.UUID, name, description string
 	if err != nil {
 		return Template{}, err
 	}
-	t := FromProject(name, description, statuses.Custom, p.Tasks, loc)
-	for _, f := range fields {
-		t.Fields = append(t.Fields, taskFieldBusiness.InputOf(f))
+	ids, err := taskDomain.EpicsIn(ctx, projectID.String())
+	if err != nil {
+		return Template{}, err
 	}
+	epics := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		epics[id] = true
+	}
+	t := FromProject(name, description, statuses.Custom, p.Tasks, epics, loc)
+	// Each formula by its fields' names, so it reads the same in a new project.
+	t.Fields = append(t.Fields, taskFieldBusiness.InputsOf(fields)...)
 	n := t.Size()
 	if len(p.Tasks) > MaxTasks {
 		n = max(n, int(p.TaskCount)) // only the first ones were read

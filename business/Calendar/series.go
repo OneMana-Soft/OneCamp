@@ -753,9 +753,9 @@ func (s *service) updateThis(ctx context.Context, who *model.UserInfo, inst inst
 // split is "this and following" from inst, as one batch: the series ends
 // before the instance, and fresh, a new series made from next, starts there,
 // repeating by rule (nil: as the series would have from there on; "": not at
-// all) with guests, taking the later overrides along. A fresh event that
-// doesn't repeat takes the instance's own override, if it has one, as its
-// row.
+// all) with guests and the series' live files, taking the later overrides
+// along. A fresh event that doesn't repeat takes the instance's own override,
+// if it has one, as its row.
 func (s *service) split(ctx context.Context, who *model.UserInfo, inst instance, next *models.Event, rule *string, guests []models.Attendee, edit *seriesEdit, expect *int) (batch, *models.Event, error) {
 	series := inst.series
 	start, loc, _ := seriesTime(series)
@@ -839,6 +839,9 @@ func (s *service) split(ctx context.Context, who *model.UserInfo, inst instance,
 		return batch{}, nil, err
 	}
 	b.guests = append(b.guests, copied...)
+	if b.files, err = s.carriedFiles(ctx, series.ID, fresh.ID); err != nil {
+		return batch{}, nil, err
+	}
 	return b, fresh, nil
 }
 
@@ -942,7 +945,7 @@ func (s *service) deleteFollowing(ctx context.Context, who *model.UserInfo, inst
 
 // restoreThis brings a deleted instance back from the trash: as the instance
 // it was, or, when its series no longer has it, as an event on its own with
-// the series' guests.
+// the series' guests and live files.
 func (s *service) restoreThis(ctx context.Context, who *model.UserInfo, series *models.Event, guests []models.Attendee, rid time.Time) (*models.Event, error) {
 	if series.CreatedBy != personOf(who) {
 		return nil, ErrEventNotFound
@@ -968,6 +971,9 @@ func (s *service) restoreThis(ctx context.Context, who *model.UserInfo, series *
 			return nil, err
 		}
 		b.guests = copied
+		if b.files, err = s.carriedFiles(ctx, series.ID, back.ID); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.applySeries(ctx, who, series.ID, b); err != nil {
 		return nil, err

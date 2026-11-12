@@ -7,6 +7,7 @@ package Domain
 // against the safe set, the search sanitised, dates parsed and re-formatted.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -38,13 +39,38 @@ type TaskListFilter struct {
 	// DueBy keeps open tasks with a due date up to it: overdue and due
 	// today, for Home (PR1, the BE audit's due_by).
 	DueBy *time.Time
-	Now   time.Time
+	// Open keeps the tasks still to do, dated or not, in a project's own
+	// statuses too: the calendar's Tasks list (CAL51-TB, open=1).
+	Open bool
+	Now  time.Time
 	// Status turns statuses (built-in and the project's own) into a
 	// condition: business/TaskStatus.FilterClause.
 	Status func(values []string) string
 	// Side answers the filters whose values live in Postgres beside the
-	// tasks (cycles, custom fields), or false.
-	Side func(id string, values []string) (string, bool)
+	// tasks (cycles, custom fields), or false; an error is a filter the
+	// list can't take, in words for the person (a formula field's).
+	Side func(id string, values []string) (string, bool, error)
+}
+
+// NoTask is a condition no task meets: a side filter that matches nothing.
+const NoTask = `eq(task_uuid, "00000000-0000-0000-0000-000000000000")`
+
+// TasksClause is a side filter's condition from the tasks its rows in
+// Postgres name (a cycle's, a release's, a type's): those tasks, or, with
+// but, every task except them. Naming none, it is NoTask, or with but ""
+// (it narrows nothing). The one shape for every such filter. Pure.
+func TasksClause(tasks []string, but bool) string {
+	switch {
+	case len(tasks) == 0 && but:
+		return ""
+	case len(tasks) == 0:
+		return NoTask
+	}
+	list, _ := json.Marshal(tasks)
+	if but {
+		return fmt.Sprintf(`NOT eq(task_uuid, %s)`, list)
+	}
+	return fmt.Sprintf(`eq(task_uuid, %s)`, list)
 }
 
 func nameMatches(term string) string {
@@ -69,6 +95,9 @@ func (f TaskListFilter) Clause() (string, error) {
 	}
 	if f.DueBy != nil {
 		parts = append(parts, dgraphStruct.TASK_OPEN_FILTER+fmt.Sprintf(` AND le(task_due_date, "%s") AND %s`, f.DueBy.Format(time.RFC3339Nano), dgraphquery.Deleted("task_due_date")))
+	}
+	if f.Open {
+		parts = append(parts, dgraphStruct.TASK_OPEN_FILTER)
 	}
 	now := f.Now.Format(time.RFC3339Nano)
 	for _, p := range f.Params {
@@ -108,7 +137,11 @@ func (f TaskListFilter) Clause() (string, error) {
 				clause = fmt.Sprintf(`uid_in(task_project, [%s])`, strings.Join(values, ", "))
 			}
 			if f.Side != nil {
-				if side, ok := f.Side(p.ID, values); ok {
+				side, ok, err := f.Side(p.ID, values)
+				if err != nil {
+					return "", err
+				}
+				if ok {
 					clause = side
 				}
 			}

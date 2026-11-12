@@ -1711,6 +1711,16 @@ func JoinAsStagedMember(
 	return joinAsMember(ctx, emailID, userName, passwordHash, signupMethod, isSSOManaged, false)
 }
 
+// seatRefused hears of someone whose own way in met the free plan's limit,
+// so the admins are told (business/Seats, which sets it: the Inbox it writes
+// to reaches this package, so this one can't import it), and answers whether
+// they were. It is not called for an admin's own Activate or invitation,
+// which meet the limit in place.
+var seatRefused = func(ctx context.Context, email, method string) bool { return false }
+
+// OnSeatRefused sets who hears of a join the seat limit refused.
+func OnSeatRefused(f func(ctx context.Context, email, method string) bool) { seatRefused = f }
+
 // joinAsMember is JoinAsMember, welcoming the new member or not.
 func joinAsMember(
 	ctx context.Context,
@@ -1727,13 +1737,13 @@ func joinAsMember(
 	}
 	userID, adopted, err := domain.AdoptExternalUser(ctx, emailID, passwordHash, signupMethod, isSSOManaged)
 	if err != nil {
-		return Joined{}, err
+		return Joined{}, tellIfSeatRefused(ctx, err, emailID, signupMethod)
 	}
 	var handle string
 	if adopted {
 		handle = ensureHandle(ctx, userID, userName, emailID)
 	} else if userID, handle, err = CreateUserWithMethod(ctx, emailID, userName, passwordHash, signupMethod, isSSOManaged); err != nil {
-		return Joined{}, err
+		return Joined{}, tellIfSeatRefused(ctx, err, emailID, signupMethod)
 	}
 	// Whatever the way in, an invitation to this address is now used: the
 	// admin's list says Joined, and its link no longer admits anyone.
@@ -1748,6 +1758,16 @@ func joinAsMember(
 		joined.Landing = WelcomeNewMember(ctx, userID)
 	}
 	return joined, nil
+}
+
+// tellIfSeatRefused passes a join the seat limit refused to seatRefused, and
+// answers the error the joiner sees: once the admins are told, it says so.
+func tellIfSeatRefused(ctx context.Context, err error, email, method string) error {
+	var seat *helpers.SeatLimitError
+	if errors.As(err, &seat) && seatRefused(ctx, email, method) {
+		return &helpers.SeatLimitError{Limit: seat.Limit, Told: true}
+	}
+	return err
 }
 
 // CreateUserWithMethod is the canonical user-creator. It returns the new

@@ -51,6 +51,20 @@ func InsertTasks(ctx context.Context, ids []uuid.UUID, projectID, createdBy uuid
 	return out, nil
 }
 
+// SetEpics makes the tasks epics (the built-in type, migration 582), as a
+// batch makes them (business/Task CreateTasks): in the rows' transaction
+// when ctx carries one.
+func SetEpics(ctx context.Context, ids []uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if !connected() {
+		return ErrNoDatabase
+	}
+	_, err := pgexec.Exec(ctx, `UPDATE tasks SET task_type_id = (SELECT id FROM task_types WHERE builtin = 'epic') WHERE id = ANY($1)`, pq.Array(ids))
+	return err
+}
+
 // InsertTaskNumbered is InsertTask keeping a number the task had in another
 // tool (an import: ENG-123 stays 123): the number when the project has no task
 // with it yet, and the project's next number when one does. The project's

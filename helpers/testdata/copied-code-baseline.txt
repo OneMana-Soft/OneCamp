@@ -28,8 +28,6 @@ business/Import/providers/notion/provider.go 216
 business/Import/providers/todoist/provider.go 335
 business/Import/providers/trello/provider.go 109
 business/Import/user_resolver.go 107
-business/Poll/conversation.go 153
-business/Poll/pollBusiness.go 153
 business/Post/postBusiness.go 104
 business/Post/postReactions.go 101
 business/SavedItem/savedItem.go 244
@@ -49,7 +47,7 @@ controllers/Import/importController.go 419
 controllers/Post/postController.go 246
 controllers/Project/projectController.go 450
 controllers/SlackImport/slackImportController.go 419
-controllers/Task/taskController.go 1368
+controllers/Task/taskController.go 425
 controllers/Task/taskRecurrenceController.go 236
 controllers/User/userController.go 450
 controllers/Webhook/webhookController.go 222

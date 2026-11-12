@@ -359,6 +359,22 @@ func historyPurge(ctx context.Context, days int, now time.Time) error {
 	return err
 }
 
+// cellsChanged is the fields whose cells cs changed in row, as a change
+// set's live message names them (rowsByEvent), or none when cs moved the row
+// or has none: a reader then reads the row whole.
+func cellsChanged(cs *model.ChangeSet, row uuid.UUID) []string {
+	if cs == nil {
+		return nil
+	}
+	for _, c := range cs.Changes {
+		if c.Row == row && c.Field == model.FieldPosition {
+			return nil
+		}
+	}
+	_, _, _, _, fields := rowsByEvent(cs)
+	return fields[row]
+}
+
 // changedIn is the fields whose cells a change set changed: what a row's AI
 // columns that read them refill for.
 func changedIn(cs *model.ChangeSet, row uuid.UUID) map[string]bool {

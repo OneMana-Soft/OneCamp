@@ -72,6 +72,11 @@ type Task struct {
 	StartDay    *int      `json:"start_day,omitempty"`
 	DueDay      *int      `json:"due_day,omitempty"`
 	Subtasks    []Subtask `json:"subtasks,omitempty"`
+	// Epic is whether it is an epic (the built-in type, at the top: domain/Task
+	// hierarchy.go), and Tasks the tasks in it, each with its sub-tasks. Only
+	// an epic holds tasks.
+	Epic  bool   `json:"epic,omitempty"`
+	Tasks []Task `json:"tasks,omitempty"`
 }
 
 // Subtask is a step inside a task.
@@ -80,11 +85,21 @@ type Subtask struct {
 	DueDay *int   `json:"due_day,omitempty"`
 }
 
-// Size is how many tasks a template makes, subtasks included.
+// Size is how many tasks a template makes, subtasks and an epic's tasks
+// included.
 func (t Template) Size() int {
-	n := len(t.Tasks)
+	n := 0
 	for _, task := range t.Tasks {
-		n += len(task.Subtasks)
+		n += task.size()
+	}
+	return n
+}
+
+// size is the task, its subtasks and, for an epic, its tasks with theirs.
+func (t Task) size() int {
+	n := 1 + len(t.Subtasks)
+	for _, in := range t.Tasks {
+		n += in.size()
 	}
 	return n
 }
@@ -99,6 +114,54 @@ func (t Template) Preview() []string {
 		out = append(out, task.Name)
 	}
 	return out
+}
+
+// checkTask checks one task and its subtasks as Check does, label naming it
+// when it has no name; own is the template's statuses by lower-case name,
+// and descriptions the length of the descriptions checked so far.
+func checkTask(task *Task, label string, own map[string]string, descriptions *int) error {
+	var err error
+	if task.Name, err = line(task.Name, MaxTaskName, label); err != nil {
+		return err
+	}
+	if len(task.Description) > MaxTaskDescription {
+		return fix("%q has a description longer than %d characters.", task.Name, MaxTaskDescription)
+	}
+	if *descriptions += len(task.Description); *descriptions > MaxDescriptions {
+		return fix("The task descriptions add up to more than %d MB; a template keeps up to that. Shorten the longest ones.", MaxDescriptions>>20)
+	}
+	switch {
+	case task.Status == "":
+		task.Status = dgraphStruct.TASK_STATUS_TODO
+	case taskStatusBusiness.IsBuiltIn(task.Status):
+	case own[strings.ToLower(task.Status)] != "":
+		task.Status = own[strings.ToLower(task.Status)]
+	default:
+		return fix("%q is in a status the template doesn't have: %q.", task.Name, task.Status)
+	}
+	if !taskPriority.IsOrNone(task.Priority) {
+		return fix("%q has a priority OneCamp doesn't know: %q. Use urgent, high, medium or low.", task.Name, task.Priority)
+	}
+	task.Tags = helpers.NormaliseTags(task.Tags)
+	if err := day(task.StartDay, task.Name); err != nil {
+		return err
+	}
+	if err := day(task.DueDay, task.Name); err != nil {
+		return err
+	}
+	if task.StartDay != nil && task.DueDay != nil && *task.StartDay > *task.DueDay {
+		return fix("%q starts after it's due.", task.Name)
+	}
+	for j := range task.Subtasks {
+		sub := &task.Subtasks[j]
+		if sub.Name, err = line(sub.Name, MaxTaskName, fmt.Sprintf("subtask %d of %q", j+1, task.Name)); err != nil {
+			return err
+		}
+		if err := day(sub.DueDay, sub.Name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // TemplateError is a template that can't be used as it is; its text is
@@ -191,43 +254,21 @@ func Check(t Template) (Template, error) {
 	descriptions := 0
 	for i := range t.Tasks {
 		task := &t.Tasks[i]
-		if task.Name, err = line(task.Name, MaxTaskName, fmt.Sprintf("task %d", i+1)); err != nil {
+		if err := checkTask(task, fmt.Sprintf("task %d", i+1), own, &descriptions); err != nil {
 			return t, err
-		}
-		if len(task.Description) > MaxTaskDescription {
-			return t, fix("%q has a description longer than %d characters.", task.Name, MaxTaskDescription)
-		}
-		if descriptions += len(task.Description); descriptions > MaxDescriptions {
-			return t, fix("The task descriptions add up to more than %d MB; a template keeps up to that. Shorten the longest ones.", MaxDescriptions>>20)
 		}
 		switch {
-		case task.Status == "":
-			task.Status = dgraphStruct.TASK_STATUS_TODO
-		case taskStatusBusiness.IsBuiltIn(task.Status):
-		case own[strings.ToLower(task.Status)] != "":
-			task.Status = own[strings.ToLower(task.Status)]
-		default:
-			return t, fix("%q is in a status the template doesn't have: %q.", task.Name, task.Status)
+		case !task.Epic && len(task.Tasks) > 0:
+			return t, fix("%q holds tasks, which only an epic does: make its tasks its subtasks.", task.Name)
+		case task.Epic && len(task.Subtasks) > 0:
+			return t, fix("%q is an epic: what sits under it are its tasks, not subtasks.", task.Name)
 		}
-		if !taskPriority.IsOrNone(task.Priority) {
-			return t, fix("%q has a priority OneCamp doesn't know: %q. Use urgent, high, medium or low.", task.Name, task.Priority)
-		}
-		task.Tags = helpers.NormaliseTags(task.Tags)
-		if err := day(task.StartDay, task.Name); err != nil {
-			return t, err
-		}
-		if err := day(task.DueDay, task.Name); err != nil {
-			return t, err
-		}
-		if task.StartDay != nil && task.DueDay != nil && *task.StartDay > *task.DueDay {
-			return t, fix("%q starts after it's due.", task.Name)
-		}
-		for j := range task.Subtasks {
-			sub := &task.Subtasks[j]
-			if sub.Name, err = line(sub.Name, MaxTaskName, fmt.Sprintf("subtask %d of %q", j+1, task.Name)); err != nil {
-				return t, err
+		for j := range task.Tasks {
+			in := &task.Tasks[j]
+			if in.Epic || len(in.Tasks) > 0 {
+				return t, fix("%q is in the epic %q, so it can't be an epic or hold tasks; its steps are its subtasks.", in.Name, task.Name)
 			}
-			if err := day(sub.DueDay, sub.Name); err != nil {
+			if err := checkTask(in, fmt.Sprintf("task %d of %q", j+1, task.Name), own, &descriptions); err != nil {
 				return t, err
 			}
 		}

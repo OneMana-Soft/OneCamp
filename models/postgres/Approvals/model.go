@@ -356,13 +356,32 @@ func DecideAs(ctx context.Context, id uuid.UUID, by Decider, verdict, comment st
 	return Get(ctx, id)
 }
 
+// waitingOn is when a request (a) waits on the person $1: it is open, it
+// names them as an approver, and they haven't answered it.
+const waitingOn = `a.state = 'pending' AND $1 = ANY(a.approvers)
+		  AND NOT EXISTS (SELECT 1 FROM approval_decisions d WHERE d.approval_id = a.id AND d.user_id = $1)`
+
 // Waiting is the open requests that name user as an approver and that they
 // haven't answered, newest first, at most limit; the reader checks each item.
 func Waiting(ctx context.Context, user uuid.UUID, limit int) ([]*Approval, error) {
 	return pgexec.Query(ctx, `SELECT `+approvalColumns+` FROM approvals a
-		WHERE a.state = 'pending' AND $1 = ANY(a.approvers)
-		  AND NOT EXISTS (SELECT 1 FROM approval_decisions d WHERE d.approval_id = a.id AND d.user_id = $1)
+		WHERE `+waitingOn+`
 		ORDER BY a.created_at DESC LIMIT $2`, scanApproval, user, limit)
+}
+
+// WaitingAmong is which of the requests ids still wait on user, by Waiting's
+// rule, in one read: the Inbox asks it of the requests its page tells them of.
+func WaitingAmong(ctx context.Context, user uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	waiting := make(map[uuid.UUID]bool, len(ids))
+	if len(ids) == 0 {
+		return waiting, nil
+	}
+	got, err := pgexec.Query(ctx, `SELECT a.id FROM approvals a WHERE a.id = ANY($2::uuid[]) AND `+waitingOn,
+		func(r pgexec.Row) (id uuid.UUID, err error) { err = r.Scan(&id); return }, user, pq.Array(ids))
+	for _, id := range got {
+		waiting[id] = true
+	}
+	return waiting, err
 }
 
 // ForLink is a project's open task requests that name a client link and that

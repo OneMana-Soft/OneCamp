@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/akashc777/OneCamp/controllers/httpx"
+	"io"
 	"net/http"
 
 	business "github.com/akashc777/OneCamp/business/Calendar"
+	callRoomBusiness "github.com/akashc777/OneCamp/business/CallRoom"
 	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	"github.com/akashc777/OneCamp/helpers"
@@ -42,6 +44,77 @@ func RemoveCalendarEventCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "The call was taken off this event."})
+}
+
+// GetCalendarEventRoom answers where a member joins an event's call room
+// (gcal-15 head B): its title and the app's page, for whoever may read the
+// event's details by the calendar's own rule; nothing is made, and nobody
+// else is told there is such an event. GET /calendar/events/{eventId}/room
+func GetCalendarEventRoom(w http.ResponseWriter, r *http.Request) {
+	who, ok := member(w, r)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "eventId")
+	j, err := business.Events.JoinRoom(r.Context(), who, id, false)
+	if err != nil {
+		writeEventCallError(w, r, "GetCalendarEventRoom", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": eventRoomView{Title: j.Title, Join: business.RoomJoinPath + id}})
+}
+
+// eventRoomView is an event's room before joining it: no token.
+type eventRoomView struct {
+	Title string `json:"title"`
+	Join  string `json:"join"`
+}
+
+// joinBodyLimit bounds a join's body: the caller's language at most.
+const joinBodyLimit = 4 << 10
+
+// JoinCalendarEventRoom lets a member into an event's call room (gcal-15
+// head B), made ready on its first join, with guest access off or on: their
+// own call token, the room and its title. For whoever may read the event's
+// details by the calendar's own rule; anyone else is told there is no such
+// event, an event without a room (a copy a sync brought) is not found, and a
+// lock or a host's removal keeps them out in their own words.
+// POST /calendar/events/{eventId}/room/join {"language"?}
+func JoinCalendarEventRoom(w http.ResponseWriter, r *http.Request) {
+	who, ok := member(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Language string `json:"language"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, joinBodyLimit)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
+		return
+	}
+	j, err := business.Events.JoinRoom(r.Context(), who, chi.URLParam(r, "eventId"), true)
+	if err != nil {
+		writeEventCallError(w, r, "JoinCalendarEventRoom", err)
+		return
+	}
+	token, err := enterEventRoom(r.Context(), j.Room, &who.UserDgraphInfo, body.Language)
+	if err != nil {
+		if !helpers.WriteCallRefusal(w, err) {
+			writeEventCallError(w, r, "JoinCalendarEventRoom", err)
+		}
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": eventRoomEntry{Token: token, Room: j.Room, Title: j.Title}})
+}
+
+// enterEventRoom mints a member's token for an event's room (a seam for tests).
+var enterEventRoom = callRoomBusiness.EnterEventRoom
+
+// eventRoomEntry is a member's way into an event's room.
+type eventRoomEntry struct {
+	Token string `json:"token"`
+	Room  string `json:"room"`
+	Title string `json:"title"`
 }
 
 // GetCalendarEventCallArtefacts lists what an event's call made (meet-02):

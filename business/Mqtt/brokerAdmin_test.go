@@ -29,6 +29,7 @@ type fakeBroker struct {
 	tokens   int               // tokens handed out
 	expired  map[string]bool   // tokens it no longer takes
 	clients  map[string]string // client id -> username
+	gone     map[string]bool   // client ids holding a session to resume, not connected now
 	subs     map[string][]string
 	logins   int
 	kicked   []string
@@ -70,8 +71,11 @@ func (f *fakeBroker) serve(w http.ResponseWriter, r *http.Request) {
 		var data []map[string]any
 		ids := q["clientid"]
 		for id, user := range f.clients {
+			if q.Get("conn_state") == "connected" && f.gone[id] {
+				continue
+			}
 			if (len(q["username"]) > 0 && slices.Contains(q["username"], user)) || slices.Contains(ids, id) {
-				data = append(data, map[string]any{"clientid": id, "username": user, "connected": true})
+				data = append(data, map[string]any{"clientid": id, "username": user, "connected": !f.gone[id]})
 			}
 		}
 		slices.SortFunc(data, func(a, b map[string]any) int { return strings.Compare(a["clientid"].(string), b["clientid"].(string)) })
@@ -215,6 +219,28 @@ func TestSomeoneTakenOffATeamLosesItsProjectsTopicsInOneGo(t *testing.T) {
 	want := []string{helpers.GetMqttTopicForProjectMessage(launch.String()), helpers.GetMqttTopicForProjectMessage(budget.String())}
 	if got := f.unsubscribes(); len(got) != 1 || !slices.Equal(got[0], want) {
 		t.Fatalf("the broker was asked to drop %v; want one request for the team's projects' topics, %v", got, want)
+	}
+}
+
+// "Send me a test" (business/Notify Test) says how many of the person's apps
+// are open now, to show a desktop notice: their connected clients alone,
+// never a session waiting to resume, never anyone else's.
+func TestAppsOpenCountsThePersonsConnectedClientsAlone(t *testing.T) {
+	f, srv := newFakeBroker(t)
+	a := newBrokerAdmin(srv.URL, "console", f.password)
+	maya := "6f1c3b0e-0d6f-4c56-9a59-3a3f4e1c2b01"
+	f.connect("c_desk", "user_"+maya)
+	f.connect("c_tab", "user_"+maya)
+	f.connect("c_phone", "user_"+maya)
+	f.gone = map[string]bool{"c_phone": true}
+	f.connect("c_other", "user_someone-else")
+	n, err := a.appsOpen(context.Background(), maya)
+	if err != nil || n != 2 {
+		t.Fatalf("appsOpen = %d, %v; want Maya's two connected apps", n, err)
+	}
+	t.Setenv("EMQX_DASHBOARD_DEFAULT_USERNAME", "")
+	if n, known := AppsOpen(context.Background(), maya); known || n != 0 {
+		t.Errorf("with no admin login AppsOpen = %d, %v; want unknown", n, known)
 	}
 }
 

@@ -232,7 +232,8 @@ func TestRollupSettingsAreChecked(t *testing.T) {
 		`{"percent":true,"bar":true}`:     true,
 		`{"duration":"h:mm"}`:             true,
 		`{"date":"relative"}`:             true,
-		`{"currency":"EUR"}`:              false,
+		`{"currency":"EUR","decimals":2}`: true,
+		`{"currency":"EU"}`:               false,
 		`{"decimals":9}`:                  false,
 		`{"colour":"red"}`:                false,
 	}
@@ -242,6 +243,28 @@ func TestRollupSettingsAreChecked(t *testing.T) {
 		if _, err := resultFormat(m); (err == nil) != ok {
 			t.Errorf("format %s: %v", raw, err)
 		}
+	}
+}
+
+// A result's currency is any ISO 4217 code, kept in capitals however it was
+// sent; INR and USD are kept as they always were, and anything that isn't a
+// code is refused in the same plain words.
+func TestAResultsCurrencyIsAnyCode(t *testing.T) {
+	for in, want := range map[string]string{"EUR": "EUR", "GBP": "GBP", "AUD": "AUD", "CHF": "CHF", "eur": "EUR", " jpy ": "JPY", "INR": "INR", "USD": "USD"} {
+		got, err := resultFormat(map[string]interface{}{"currency": in, "decimals": 2})
+		if err != nil || got["currency"] != want || got["decimals"] != float64(2) {
+			t.Errorf("a result in %q: %v %v, want its currency kept as %s", in, got, err, want)
+		}
+	}
+	for _, in := range []interface{}{"EU", "eur1", "EURO", "XYZ", "XXX", "€", "", 5, nil, true} {
+		_, err := resultFormat(map[string]interface{}{"currency": in})
+		if err == nil || err.Error() != "A result's currency is a three-letter code, like EUR" {
+			t.Errorf("a result in %v: %v, want it refused as not a code", in, err)
+		}
+	}
+	// No currency is still no currency.
+	if got, err := resultFormat(map[string]interface{}{"decimals": 1}); err != nil || len(got) != 1 {
+		t.Errorf("a result with no currency: %v %v", got, err)
 	}
 }
 

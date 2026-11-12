@@ -6,6 +6,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 )
@@ -31,7 +33,9 @@ var (
 )
 
 // claimFor bounds a send's hold on its key: past it, the key of a send that
-// died without letting go (a crash) is free for the retry.
+// died without letting go (a crash) is free for the retry. A send holds it by
+// a token of its own and lets go only while the key holds that token, so a
+// send that outlives claimFor never frees the hold of the send after it.
 const claimFor = 10 * time.Minute
 
 // itemsKept is a batch's record: what makes two sends the same batch (its
@@ -43,19 +47,20 @@ type itemsKept struct {
 
 // itemsStore is where records live: Redis, or a test's own (the seam).
 type itemsStore interface {
-	claim(ctx context.Context, args []string) (bool, error)
+	claim(ctx context.Context, args []string, token string) (bool, error)
 	read(ctx context.Context, args []string) (string, bool, error)
 	write(ctx context.Context, args []string, value string) error
-	release(ctx context.Context, args []string)
+	release(ctx context.Context, args []string, token string)
+	forget(ctx context.Context, args []string) error
 }
 
 type redisItems struct{}
 
-func (redisItems) claim(ctx context.Context, args []string) (bool, error) {
+func (redisItems) claim(ctx context.Context, args []string, token string) (bool, error) {
 	if !redisStore.IsAvailable() {
 		return false, ErrItemsUnavailable
 	}
-	return redisStore.SetStringIfAbsent(ctx, registry.ApiBatchClaim, args, "1", claimFor)
+	return redisStore.SetStringIfAbsent(ctx, registry.ApiBatchClaim, args, token, claimFor)
 }
 
 func (redisItems) read(ctx context.Context, args []string) (string, bool, error) {
@@ -66,8 +71,12 @@ func (redisItems) write(ctx context.Context, args []string, value string) error 
 	return redisStore.SetStringWithTTL(ctx, registry.ApiBatchItems, args, value, keptFor)
 }
 
-func (redisItems) release(ctx context.Context, args []string) {
-	_ = redisStore.Delete(ctx, registry.ApiBatchClaim, args)
+func (redisItems) release(ctx context.Context, args []string, token string) {
+	_, _ = redisStore.DeleteIfHeld(ctx, registry.ApiBatchClaim, args, token)
+}
+
+func (redisItems) forget(ctx context.Context, args []string) error {
+	return redisStore.Delete(ctx, registry.ApiBatchItems, args)
 }
 
 var records itemsStore = redisItems{}
@@ -75,23 +84,33 @@ var records itemsStore = redisItems{}
 // Items is one send's hold on a batch's key, and what the batch has done
 // under it.
 type Items struct {
-	args []string
-	kept itemsKept
+	args  []string
+	token string
+	kept  itemsKept
+	// again: a send of this batch came before this one.
+	again bool
 }
 
+// Again is whether a send of this batch, under its key, came before this one.
+func (it *Items) Again() bool { return it.again }
+
 // OpenItems claims key for caller's batch on route, whose arguments hash to
-// hash (Fingerprint), and reads what the batch did under it before. The
-// caller lets the key go with Release when the send ends.
+// hash (Fingerprint), and reads what the batch did under it before. A batch
+// first sent is recorded at once, before any item runs, so the next send of
+// it knows one came before (Again) even when this one stops before its first
+// item is recorded. The caller lets the key go with Release when the send
+// ends.
 func OpenItems(ctx context.Context, caller, route, key, hash string) (*Items, error) {
 	args := []string{caller, route, key}
-	claimed, err := records.claim(ctx, args)
+	token := uuid.NewString()
+	claimed, err := records.claim(ctx, args, token)
 	if err != nil {
 		return nil, ErrItemsUnavailable
 	}
 	if !claimed {
 		return nil, ErrItemsInProgress
 	}
-	it := &Items{args: args, kept: itemsKept{BodyHash: hash, Done: map[int]json.RawMessage{}}}
+	it := &Items{args: args, token: token, kept: itemsKept{BodyHash: hash, Done: map[int]json.RawMessage{}}}
 	raw, found, err := records.read(ctx, args)
 	var before itemsKept
 	switch {
@@ -103,7 +122,13 @@ func OpenItems(ctx context.Context, caller, route, key, hash string) (*Items, er
 		return nil, ErrItemsReused
 	case found && before.Done != nil:
 		it.kept.Done = before.Done
+	case !found:
+		if err := it.keep(ctx); err != nil {
+			it.Release(ctx)
+			return nil, ErrItemsUnavailable
+		}
 	}
+	it.again = found
 	return it, nil
 }
 
@@ -117,6 +142,11 @@ func (it *Items) Done(i int) (json.RawMessage, bool) {
 // error is a record that didn't take it: the batch stops there.
 func (it *Items) Mark(ctx context.Context, i int, answer json.RawMessage) error {
 	it.kept.Done[i] = answer
+	return it.keep(ctx)
+}
+
+// keep writes the batch's record as it stands.
+func (it *Items) keep(ctx context.Context) error {
 	b, err := json.Marshal(it.kept)
 	if err != nil {
 		return err
@@ -124,9 +154,21 @@ func (it *Items) Mark(ctx context.Context, i int, answer json.RawMessage) error 
 	return records.write(context.WithoutCancel(ctx), it.args, string(b))
 }
 
+// Forget drops the record a first send kept at its claim, when the batch
+// stopped before any item began (refused at its checks, or never built): it
+// applied nothing, so the key isn't used up, and the batch corrected under
+// it runs as a first send. A send that came after another, or that recorded
+// an item, keeps its record: an item may have been applied under it.
+func (it *Items) Forget(ctx context.Context) {
+	if it.again || len(it.kept.Done) > 0 {
+		return
+	}
+	_ = records.forget(context.WithoutCancel(ctx), it.args)
+}
+
 // Release lets the key go for the next send; the record keeps its 24 hours.
 func (it *Items) Release(ctx context.Context) {
-	records.release(context.WithoutCancel(ctx), it.args)
+	records.release(context.WithoutCancel(ctx), it.args, it.token)
 }
 
 // Fingerprint is what makes two sends of a batch the same: the hash of its

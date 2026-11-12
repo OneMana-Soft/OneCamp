@@ -615,6 +615,6 @@ func (s *service) retakeSubscribed(ctx context.Context, e *models.Event, main IC
 		if err != nil || series == nil || series.RRule == "" {
 			return
 		}
-		s.takeRemoteInstance(ctx, series, inst, now)
+		s.takeRemoteInstance(ctx, series, inst, now, false)
 	}
 }

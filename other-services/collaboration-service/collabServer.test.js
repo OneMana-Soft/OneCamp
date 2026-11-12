@@ -285,7 +285,7 @@ test("a call's guest draws on the board on its stage only when the API says so",
     const reader = new TestClient({ url: collab.url, name: `board:${ID}`, token })
     assert.equal(await reader.connect(), 'synced')
     assert.equal(reader.scope, 'readonly')
-    reader.doc.getMap('elements').set('e-1', { id: 'e-1', version: 1 })
+    reader.doc.getMap('elements').set('e-1', { id: 'e-1', type: 'rectangle', version: 1 })
     await until(() => reader.statuses.includes(false), 2000, 'the refusal')
     assert.equal(collab.server.hocuspocus.documents.get(`board:${ID}`).getMap('elements').has('e-1'), false)
     await reader.close()
@@ -296,7 +296,7 @@ test("a call's guest draws on the board on its stage only when the API says so",
     const drawer = new TestClient({ url: collab.url, name: `board:${ID}`, token })
     assert.equal(await drawer.connect(), 'synced')
     assert.equal(drawer.scope, 'read-write')
-    drawer.doc.getMap('elements').set('e-2', { id: 'e-2', version: 1 })
+    drawer.doc.getMap('elements').set('e-2', { id: 'e-2', type: 'rectangle', version: 1 })
     await until(() => collab.server.hocuspocus.documents.get(`board:${ID}`).getMap('elements').has('e-2'), 2000, 'the stroke')
     await drawer.close()
     drawer.destroy()
@@ -321,20 +321,20 @@ test("a board member who may only read cannot draw, move or delete: canEdit fals
         assert.equal(reader.scope, 'readonly', who)
         // The editor draws two shapes; the reader sees both.
         const [kept, gone] = [`kept-${who}`, `gone-${who}`]
-        editor.doc.getMap('elements').set(kept, { id: kept, version: 1, x: 0 })
-        editor.doc.getMap('elements').set(gone, { id: gone, version: 1, x: 0 })
+        editor.doc.getMap('elements').set(kept, { id: kept, type: 'rectangle', version: 1, x: 0 })
+        editor.doc.getMap('elements').set(gone, { id: gone, type: 'rectangle', version: 1, x: 0 })
         await until(() => reader.doc.getMap('elements').has(gone), 2000, `the ${who} sees the shapes`)
 
         // The reader draws one, moves one and deletes one: none of it reaches the board or the editor.
         const drawn = `drawn-${who}`
-        reader.doc.getMap('elements').set(drawn, { id: drawn, version: 1, x: 0 })
-        reader.doc.getMap('elements').set(kept, { id: kept, version: 2, x: 99 })
+        reader.doc.getMap('elements').set(drawn, { id: drawn, type: 'rectangle', version: 1, x: 0 })
+        reader.doc.getMap('elements').set(kept, { id: kept, type: 'rectangle', version: 2, x: 99 })
         reader.doc.getMap('elements').delete(gone)
         await until(() => reader.statuses.includes(false), 2000, `the ${who}'s refusal`)
         await sleep(100)
         for (const [copy, elements] of [['the board', board()], ["the editor's tab", editor.doc.getMap('elements')]]) {
             assert.equal(elements.has(drawn), false, `${who}: ${copy} has no drawn shape`)
-            assert.deepEqual(elements.get(kept), { id: kept, version: 1, x: 0 }, `${who}: ${copy} kept the shape in place`)
+            assert.deepEqual(elements.get(kept), { id: kept, type: 'rectangle', version: 1, x: 0 }, `${who}: ${copy} kept the shape in place`)
             assert.equal(elements.has(gone), true, `${who}: ${copy} kept the deleted shape`)
         }
         await reader.close()

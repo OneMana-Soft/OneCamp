@@ -1,12 +1,7 @@
 package business
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -59,52 +54,30 @@ var (
 // session's.
 const cardPurpose = "onecamp.cards.v1"
 
-var b64 = base64.RawURLEncoding
-
 // Seal makes the token a card is shown with: the web sends it back with an
-// action, and Act trusts nothing else about the card.
+// action, and Act trusts nothing else about the card. Sealed with the
+// server's one seal (helpers.Seal) under the cards key.
 func Seal(ref CardRef, owner Owner, card Card, actors []string, ttl time.Duration) (string, error) {
-	key, err := helpers.PurposeKey(cardPurpose)
-	if err != nil {
-		return "", ErrNoSecret
-	}
 	s := sealed{Ref: ref, Owner: owner, Actors: actors, Exp: now().Add(ttl).Unix()}
 	for _, a := range card.Actions() {
 		if a.ActionID != "" {
 			s.Actions = append(s.Actions, a.ActionID)
 		}
 	}
-	body, err := json.Marshal(s)
-	if err != nil {
-		return "", err
+	token, err := helpers.Seal(cardPurpose, s)
+	if errors.Is(err, helpers.ErrNoSealKey) {
+		return "", ErrNoSecret
 	}
-	m := hmac.New(sha256.New, key)
-	m.Write(body)
-	return b64.EncodeToString(body) + "." + b64.EncodeToString(m.Sum(nil)), nil
+	return token, err
 }
 
 // open reads a token Seal made, refusing a forged or expired one.
 func open(token string) (sealed, error) {
-	key, err := helpers.PurposeKey(cardPurpose)
-	if err != nil {
-		return sealed{}, ErrNoSecret
-	}
-	body64, sig64, ok := strings.Cut(token, ".")
-	if !ok {
-		return sealed{}, ErrBadToken
-	}
-	body, err1 := b64.DecodeString(body64)
-	sig, err2 := b64.DecodeString(sig64)
-	if err1 != nil || err2 != nil {
-		return sealed{}, ErrBadToken
-	}
-	m := hmac.New(sha256.New, key)
-	m.Write(body)
-	if !hmac.Equal(sig, m.Sum(nil)) {
-		return sealed{}, ErrBadToken
-	}
 	var s sealed
-	if json.Unmarshal(body, &s) != nil {
+	switch err := helpers.Unseal(cardPurpose, token, &s); {
+	case errors.Is(err, helpers.ErrNoSealKey):
+		return sealed{}, ErrNoSecret
+	case err != nil:
 		return sealed{}, ErrBadToken
 	}
 	if now().Unix() > s.Exp {

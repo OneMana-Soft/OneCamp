@@ -38,6 +38,9 @@ type ReminderPayload struct {
 	// Email is a reminder that comes by email rather than as a pop-up
 	// (migration 573), as planned.
 	Email bool `json:"email,omitempty"`
+	// Default is a reminder the person's default reminders gave (they set
+	// none on the event), so its email says to change the default to stop it.
+	Default bool `json:"default,omitempty"`
 	// Replan is a wake-up with nothing to say: plan this person's next
 	// reminder for the event again.
 	Replan bool `json:"replan,omitempty"`

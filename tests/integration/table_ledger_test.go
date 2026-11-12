@@ -366,7 +366,7 @@ func TestTableLedger(t *testing.T) {
 		}
 
 		// Deleted with its link, and back with it.
-		if err := dataTableBusiness.DeleteRow(w.ctx, budget.Id, booth, amara); err != nil {
+		if _, err := dataTableBusiness.DeleteRow(w.ctx, budget.Id, booth, amara); err != nil {
 			t.Fatal(err)
 		}
 		if has, _ := dataTableModel.RowHasLinks(w.ctx, acme.Id); has {
@@ -447,14 +447,14 @@ func TestTableLedger(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := dataTableBusiness.DeleteRow(w.ctx, budget.Id, b.Id, bo); err != nil {
+		if _, err := dataTableBusiness.DeleteRow(w.ctx, budget.Id, b.Id, bo); err != nil {
 			t.Fatal(err)
 		}
 		trash, err := dataTableBusiness.TableTrash(w.ctx, budget.Id, nil, amara)
 		if err != nil || len(trash.Rows) != 1 || trash.Rows[0].ID != b.Id || trash.Rows[0].DeletedByName != "bo" {
 			t.Fatalf("the trash holds %+v (%v), want the booth, deleted by bo", trash, err)
 		}
-		if err := dataTableBusiness.DeleteRow(w.ctx, vendors.Id, hooli, amara); err != nil {
+		if _, err := dataTableBusiness.DeleteRow(w.ctx, vendors.Id, hooli, amara); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := dataTableBusiness.RestoreFromTrash(w.ctx, budget.Id, dataTableBusiness.RestoreInput{Rows: []uuid.UUID{b.Id}}, bo); err != nil {

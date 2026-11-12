@@ -13,6 +13,7 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	business "github.com/akashc777/OneCamp/business/DataTable"
+	tableController "github.com/akashc777/OneCamp/controllers/DataTable"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
@@ -43,7 +44,9 @@ func beforeParam(r *http.Request) *uuid.UUID {
 
 // writeErr answers a refused write or read: a batch's rows' errors (400,
 // with each), a row changed since it was read (409, with the row as it is),
-// nothing to undo or redo (409), no access (403), not there (404), or why.
+// nothing to undo or redo (409); the rest as every table route answers them
+// (tableController.WriteErr: no access 403, not there 404, the store's
+// failure 503 to try again, or why), so a status changes there once (V-617).
 func writeErr(w http.ResponseWriter, err error) {
 	var rows business.BatchErrors
 	var conflict *business.RowConflict
@@ -54,18 +57,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": conflict.Error(), "row": conflict.Row})
 	case business.IsConflict(err):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": err.Error()})
-	case business.IsReadOnly(err):
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": business.ReadOnlyWords, "read_only": true})
-	case business.IsForbidden(err):
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "you don't have access to this table"})
-	case business.IsNotFound(err):
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "table not found"})
-	case business.IsRowNotFound(err):
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "row not found"})
-	case business.IsUnavailable(err):
-		helpers.WriteRetryLater(w, "Couldn't load the rows.")
 	default:
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		tableController.WriteErr(w, err)
 	}
 }
 

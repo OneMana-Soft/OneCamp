@@ -82,7 +82,10 @@ type Event struct {
 	// method (CANCELLED for a Cancel).
 	Status      string
 	Transparent bool
-	Organizer   Address
+	// Class is who may see it (RFC 5545 CLASS): PUBLIC, PRIVATE or
+	// CONFIDENTIAL; empty, it isn't said.
+	Class     string
+	Organizer Address
 	// Attendees are its guests. A booking's invite names its one guest, who
 	// booked it, as Attendee instead: accepted, with no answer asked.
 	Attendees []Attendee
@@ -228,6 +231,9 @@ func writeEvent(line func(string), method string, ev Event) {
 		line("TRANSP:TRANSPARENT")
 	} else {
 		line("TRANSP:OPAQUE")
+	}
+	if ev.Class != "" {
+		line("CLASS:" + value(ev.Class))
 	}
 	for _, a := range ev.Alarms {
 		action := "DISPLAY"

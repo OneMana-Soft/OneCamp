@@ -98,7 +98,8 @@ func (ledgerWriter) patch(ctx context.Context, by rowLedger.By, table uuid.UUID,
 
 func (ledgerWriter) Delete(ctx context.Context, by rowLedger.By, table uuid.UUID, rows []uuid.UUID) error {
 	if len(rows) == 1 {
-		return DeleteRow(ctx, table, rows[0], actorBy(by))
+		_, err := DeleteRow(ctx, table, rows[0], actorBy(by))
+		return err
 	}
 	_, err := Batch(ctx, table, BatchInput{Delete: rows}, actorBy(by))
 	return err

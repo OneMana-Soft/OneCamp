@@ -87,9 +87,11 @@ var systemReads = map[string]bool{
 	"domain/Task/taskDomain.go:GetDgraphTasksWithoutStatusSince":                         true, // a backfill
 	"domain/Project/projectDomain.go:GetDgraphProjectInfoAndTeamAdminFlagAndAttachments": true, // files that go with a project
 	"domain/Project/projectDomain.go:GetDgraphProjectTasksForTemplate":                   true, // copied as nobody's (Nobody)
+	"domain/Task/readAccess.go:GetHistoryTasksFor":                                       true, // a task history's named tasks, read whole only to be judged as the reader (business/Task keepHistorySeen, JudgeTasks); nothing it reads is shown
 	"domain/Team/teamDomain.go:GetDgraphTeamInfoByUUIDForArchivingAndUnarchivingTeam":    true, // a team's archive
 	"business/Comment/commentBusiness.go:sendNewTaskCommentNotification":                 true, // whom a comment is told to, kept to its readers
 	"business/Import/commentSearchRepair.go:RepairTaskCommentSearch":                     true, // a repair: task comments' search entries, which search reads with each reader's rule
+	"business/Task/commentOwnerRepair.go:repairCommentOwners":                            true, // a repair: old task comments re-owned to whom they are addressed (NOTIF-H2)
 	"business/Cycle/scheduler.go:runSchedule":                                            true, // the Cycle Scheduler completes a cycle, restricted tasks and all
 	"business/Import/orchestrator.go:importContext":                                      true, // an import reads the tasks it makes, restricted ones too, to write the rest (a sub-task's parent, a comment's task), and its rollback takes them all away
 	"business/Import/recheck.go:recheckContext":                                          true, // an old import's re-check narrows the tasks it brought for everyone else, restricted ones too, and an admin's undo or containment of it

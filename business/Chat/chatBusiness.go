@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
-	"slices"
 	"strings"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	LiveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifyBusiness "github.com/akashc777/OneCamp/business/Notify"
 	outboxBusiness "github.com/akashc777/OneCamp/business/Outbox"
 	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	threadIndex "github.com/akashc777/OneCamp/business/ThreadIndex"
@@ -644,72 +644,41 @@ func chatMentionNodeIDs(mentions []*dgraphStruct.DgraphUser) []string {
 	return out
 }
 
-// notifyNewChat is a DM or group message's notices: the Activity item for
-// each eligible person it mentions (or whose message it quotes), the push and
-// desktop notice to every eligible person, and the email fan-out. tell, when
-// set, lets through only those not told yet (the outbox's sink: a retry tells
-// nobody twice); nil tells everyone, as today's writers do.
+// notifyNewChat is a DM or group message's notices, through the one door
+// (business/Notify Tell: Plan, then Deliver, which records each delivery
+// once): who hears of it is the router's (its people by their setting, the
+// mentioned, the replied-to author), and of those newly told, the live
+// Activity item goes to those it mentions or replies to, and the email to
+// each Plan emails. tell, when set, lets through only those not told yet (the
+// outbox's sink); nil tells everyone, as today's writers do.
 func notifyNewChat(ctx context.Context, title string, body string, userId string, grpId string, mentions []*dgraphStruct.DgraphUser, chatUUID string, username string, profileKey *string, replyToAuthorUUID string, tell outboxBusiness.Told) {
-
-	var mentionUUDs []string
-
-	for _, m := range mentions {
-		mentionUUDs = append(mentionUUDs, m.Uuid)
-	}
-
-	// A Discord-style inline reply implicitly pings the parent's author: treat
-	// them as a mention recipient (activity broadcast + email priority).
-	// Suppress self-replies and de-dup with an explicit @mention.
 	replyPing := replyToAuthorUUID != "" && replyToAuthorUUID != userId
-	if replyPing {
-		alreadyMentioned := false
-		for _, u := range mentionUUDs {
-			if u == replyToAuthorUUID {
-				alreadyMentioned = true
-				break
-			}
-		}
-		if !alreadyMentioned {
-			mentionUUDs = append(mentionUUDs, replyToAuthorUUID)
-		}
-	}
-
-	// 1. Get eligible users for notifications (based on preferences and grouping)
-	eligibleUserIDs, err := chatNotificationBusiness.GetEligibleUsersForChatActivity(ctx, grpId, userId, mentionUUDs, false)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/notifyNewChat Failed to get eligible users err: %+v",
-			err)
+	told := notifyBusiness.Tell(ctx, notifyBusiness.Event{
+		ID:        "chat:" + grpId + ":" + chatUUID,
+		Cause:     notifyBusiness.CauseMessage,
+		Actor:     userId,
+		Place:     notifyBusiness.Place{Kind: notifyBusiness.PlaceDM, ID: grpId},
+		MessageID: chatUUID,
+		Mentions:  dgraphStruct.UUIDsOf(mentions),
+		Author:    replyToAuthorUUID,
+		Push: map[string]string{
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE:      firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT,
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:   grpId,
+			firebaseInit.FIREBASE_PUSH_DATA_TITLE:     title,
+			firebaseInit.FIREBASE_PUSH_DATA_BODY:      body,
+			firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID: chatUUID,
+			firebaseInit.FIREBASE_PUSH_DATA_USERNAME:  username,
+			firebaseInit.FIREBASE_PUSH_DATA_ICON:      userBusiness.GetSignedProfileURL(ctx, profileKey),
+		},
+	})
+	if len(told) == 0 {
 		return
 	}
 
-	if len(eligibleUserIDs) == 0 {
-		return
-	}
-
-	// 2. Publish MQTT Activity Events
-	mentionsMap := make(map[string]bool)
-	for _, m := range mentions {
-		mentionsMap[m.Uuid] = true
-	}
-	// Include the replied-to author so they receive the mention-style activity
-	// broadcast for the reply.
-	if replyPing {
-		mentionsMap[replyToAuthorUUID] = true
-	}
-
-	var mentioned []string
-	for _, recipientID := range eligibleUserIDs {
-		// Only send the activity broadcast if the user was explicitly mentioned
-		if mentionsMap[recipientID] {
-			mentioned = append(mentioned, recipientID)
-		}
-	}
-	for _, recipientID := range tell.Only("activity", mentioned) {
-
-		// Create a simplified activity item for MQTT
+	// The live Activity item, to those it mentions or replies to.
+	for _, recipientID := range tell.Only("activity", notifyBusiness.Of(told, notifyBusiness.CauseMention, notifyBusiness.CauseReplyToYou)) {
 		activityItem := &dgraphModels.UnifiedActivityItem{
-			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION, // In chats, it's either a mention or a new message (which we'll treat as a notification)
+			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Mention: &dgraphStruct.DgraphMentions{
 				ChatUuid: chatUUID,
@@ -730,25 +699,8 @@ func notifyNewChat(ctx context.Context, title string, body string, userId string
 		activityBusiness.PublishActivityToUser(recipientID, activityItem)
 	}
 
-	// 3. The push, and the desktop app's notice, to those of them the push
-	// gate lets through (business/Notification Deliver).
-	pushData := make(map[string]string)
-
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = grpId
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = chatUUID
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = username
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, profileKey)
-
-	if pushTo := tell.Only("push", eligibleUserIDs); len(pushTo) > 0 {
-		notificationBusiness.DeliverFrom(ctx, userId, pushTo, pushData, "chat:"+grpId+":"+chatUUID)
-	}
-
-	// 4. Email fan-out (no-op when RESEND_API_KEY is unset). Same eligibility
-	//    set as FCM; the dispatcher applies its own per-recipient gates
-	//    (online check, prefs, suppressions, quiet hours).
+	// Email stays the site's (no-op when RESEND_API_KEY is unset): to those
+	// Plan emails; the dispatcher applies its own per-recipient gates.
 	notificationBusiness.DispatchChatDM(
 		userId,
 		username,
@@ -756,13 +708,15 @@ func notifyNewChat(ctx context.Context, title string, body string, userId string
 		grpId,
 		chatUUID,
 		body,
-		tell.Only("email", eligibleUserIDs),
+		tell.Only("email", notifyBusiness.By(told, notifyBusiness.ToEmail)),
 		len(mentions) > 0 || replyPing,
 	)
-
 }
 
 func UpdateChat(ctx context.Context, chatInfo *adapter.ChatInfo, chatUUID uuid.UUID, grpId string, chatCreatedBy string, mentions []*dgraphStruct.DgraphUser) (err error) {
+
+	// Who the message named before this save: only whom it adds is told.
+	saved, tellMentions := notificationBusiness.SaveOfMentions(ctx, "chat", chatUUID.String(), mentions)
 
 	err = domain.UpdateChatByUUID(ctx, chatUUID)
 	if err != nil {
@@ -812,6 +766,9 @@ func UpdateChat(ctx context.Context, chatInfo *adapter.ChatInfo, chatUUID uuid.U
 
 	}
 	refsBusiness.Saved(ctx, refsBusiness.Chat, chatUUID.String(), chatInfo.TextHtml, false)
+	if tellMentions {
+		tellChatMentionsAdded(ctx, notificationBusiness.ActorOf(ctx, chatCreatedBy), grpId, chatUUID.String(), "", chatInfo.TextHtml, saved)
+	}
 
 	mqttChat := mqttStruct.MqttChat{
 		Type:           mqttStruct.TYPE_UPDATE,
@@ -896,6 +853,9 @@ func DeleteChat(ctx context.Context, chatInfo *adapter.ChatInfo, chatUUID uuid.U
 		return
 
 	}
+	// Its notices are taken back (business/Notify Retract): those sent are
+	// marked retracted, those still held never go. It never fails the delete.
+	notifyBusiness.Notices.Retract(ctx, chatUUID.String())
 
 	mqttChat := mqttStruct.MqttChat{
 		Type:           mqttStruct.TYPE_DELETE,
@@ -1512,33 +1472,28 @@ func EditChatCommentAsBot(ctx context.Context, botInfo *userModels.UserInfo, cha
 // Who a reply in a DM or group thread is told to, the ways it is told, and
 // the thread's index (business/ThreadIndex, chat P2): seams for its test.
 var (
-	threadLevels      = chatNotificationBusiness.GetLevelsInConversation
 	threadRepliers    = commentBusiness.ChatThreadRepliers
-	threadFollows     = threadIndex.Following
 	recordThreadReply = threadIndex.Replied
-	deliverTo         = notificationBusiness.Deliver
+	tellThread        = notifyBusiness.Tell
 	publishActivityTo = activityBusiness.PublishActivityToUser
 	emailChatComment  = notificationBusiness.DispatchChatComment
 )
 
-// chatThreadAudience is who hears of a reply by writer in the thread of the
-// message chat: its author, those who replied before, those following it and
-// those mentioned, by their setting for the conversation, never one who
-// turned the thread off and isn't mentioned (notificationBusiness.ThreadAudience,
-// the rule a channel thread's reply uses). In a conversation of two the other
-// person is in every thread of it: a DM is addressed to them.
-func chatThreadAudience(ctx context.Context, grpId, writer string, chat *dgraphStruct.DgraphChat, mentioned []string) (notificationBusiness.Audience, error) {
+// chatThreadEvent is a reply by writer in the thread of the message chat, as
+// the router plans it (business/Notify: the thread's rule,
+// notificationBusiness.ThreadAudience, by each one's setting for the
+// conversation): its author, those who replied before, those following it
+// and those mentioned, never one who turned the thread off and isn't
+// mentioned. In a conversation of two the other person is in every thread of
+// it: a DM is addressed to them.
+func chatThreadEvent(ctx context.Context, grpId, writer string, chat *dgraphStruct.DgraphChat, mentioned []string) (notifyBusiness.Event, error) {
 	author := ""
 	if chat.From != nil {
 		author = chat.From.Uuid
 	}
 	repliers, err := threadRepliers(ctx, chat.Uuid)
 	if err != nil {
-		return notificationBusiness.Audience{}, err
-	}
-	on, off, err := threadFollows(ctx, chat.Uuid)
-	if err != nil {
-		return notificationBusiness.Audience{}, err
+		return notifyBusiness.Event{}, err
 	}
 	if chat.DM != nil && len(chat.DM.Participants) == 2 {
 		for _, p := range chat.DM.Participants {
@@ -1547,20 +1502,8 @@ func chatThreadAudience(ctx context.Context, grpId, writer string, chat *dgraphS
 			}
 		}
 	}
-	// Each person is asked about once, and only by a well-formed id: one
-	// malformed id would fail the whole read, and tell nobody.
-	var ask []string
-	for _, id := range slices.Concat([]string{author}, repliers, on, mentioned) {
-		if _, err := uuid.Parse(id); err == nil && !slices.Contains(ask, id) {
-			ask = append(ask, id)
-		}
-	}
-	levels, err := threadLevels(ctx, grpId, ask)
-	if err != nil {
-		return notificationBusiness.Audience{}, err
-	}
-	return notificationBusiness.ThreadAudience(levels, writer, author, repliers, mentioned,
-		notificationBusiness.Follows{On: on, Off: off}), nil
+	return notifyBusiness.Event{Cause: notifyBusiness.CauseMessage, Actor: writer, Author: author, Repliers: repliers, Mentions: mentioned,
+		Place: notifyBusiness.Place{Kind: notifyBusiness.PlaceDM, ID: grpId, ThreadRootID: chat.Uuid}}, nil
 }
 
 // notifyChatThreadReply records a reply in a DM or group thread in the
@@ -1580,23 +1523,21 @@ func notifyChatThreadReply(currentTime time.Time, commentUUID string, commentBod
 	// The thread's index first, so the Threads view has the reply and the
 	// audience counts who follows the thread now.
 	recordThreadReply(ctx, chatReplyRecord(grpId, chatDgraph, userDgraph.Uuid, mentioned, currentTime, outsider))
-	aud, err := chatThreadAudience(ctx, grpId, userDgraph.Uuid, chatDgraph, mentioned)
+	ev, err := chatThreadEvent(ctx, grpId, userDgraph.Uuid, chatDgraph, mentioned)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"business/notifyChatThreadReply Failed to work out who hears of the reply, telling nobody err: %+v",
+			"business/notifyChatThreadReply Failed to read the thread's repliers, telling nobody err: %+v",
 			err)
-		return
-	}
-	if len(aud.Told) == 0 {
 		return
 	}
 	plain := helpers.HTMLToPlainText(commentBody)
 	icon := userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
-	// The push, and the desktop app's notice, to those of them the push gate
-	// lets through (business/Notification Deliver). type_id is the
-	// conversation's grouping id, as for every chat notification.
-	deliverTo(ctx, aud.Told, map[string]string{
+	// Through the one door (business/Notify Tell): the push and the desktop
+	// notice, each delivery recorded once. type_id is the conversation's
+	// grouping id, as for every chat notification.
+	ev.ID, ev.MessageID = "chat_comment:"+chatDgraph.Uuid+":"+commentUUID, commentUUID
+	ev.Push = map[string]string{
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE:      firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_COMMENT,
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:   grpId,
 		firebaseInit.FIREBASE_PUSH_DATA_TITLE:     "Comment - " + userDgraph.DisplayName(),
@@ -1604,7 +1545,11 @@ func notifyChatThreadReply(currentTime time.Time, commentUUID string, commentBod
 		firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID: chatDgraph.Uuid,
 		firebaseInit.FIREBASE_PUSH_DATA_USERNAME:  userDgraph.DisplayName(),
 		firebaseInit.FIREBASE_PUSH_DATA_ICON:      icon,
-	}, "chat_comment:"+chatDgraph.Uuid+":"+commentUUID)
+	}
+	told := tellThread(ctx, ev)
+	if len(told) == 0 {
+		return
+	}
 
 	// The live Activity items.
 	comment := func() *dgraphStruct.DgraphComment {
@@ -1617,15 +1562,15 @@ func notifyChatThreadReply(currentTime time.Time, commentUUID string, commentBod
 			CreatedAt: &at,
 		}
 	}
-	for _, id := range aud.Mentioned {
+	for _, id := range notifyBusiness.Of(told, notifyBusiness.CauseMention) {
 		publishActivityTo(id, &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Comment:      comment(),
 		})
 	}
-	if aud.Author != "" {
-		publishActivityTo(aud.Author, &dgraphModels.UnifiedActivityItem{
+	for _, id := range notifyBusiness.Of(told, notifyBusiness.CauseReplyToYou) {
+		publishActivityTo(id, &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Comment:      comment(),
@@ -1633,7 +1578,7 @@ func notifyChatThreadReply(currentTime time.Time, commentUUID string, commentBod
 	}
 
 	// Email, by each one's own email settings (business/Notification).
-	emailChatComment(userDgraph.Uuid, userDgraph.DisplayName(), icon, grpId, chatDgraph.Uuid, plain, commentUUID, aud.Told)
+	emailChatComment(userDgraph.Uuid, userDgraph.DisplayName(), icon, grpId, chatDgraph.Uuid, plain, commentUUID, notifyBusiness.Told(told))
 }
 
 func UpdateChatComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *adapter.InputCreateOrUpdateCommentToChat, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, rawDgraphChat *dgraphStruct.DgraphChat, rawDgraphComment *dgraphStruct.DgraphComment) (err error) {
@@ -1666,6 +1611,9 @@ func UpdateChatComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *
 		UpdatedAt: &currentTime,
 	}
 
+	// Who the reply named before this save: only whom it adds is told.
+	mentions, tellMentions := notificationBusiness.SaveOfMentions(ctx, "comment", commentUUID.String(), mentionsDgraphUsersList)
+
 	err = commentBusiness.UpdateComment(ctx, &dgraphComment, commentUUID, currentTime)
 
 	if err != nil {
@@ -1673,6 +1621,9 @@ func UpdateChatComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *
 			"business/UpdateChatComment Failed to update comment on chat err: %+v",
 			err)
 		return
+	}
+	if tellMentions && rawDgraphChat.DM != nil {
+		tellChatMentionsAdded(ctx, notificationBusiness.ActorOf(ctx, rawDgraphComment.CommentBy.Uuid), rawDgraphChat.DM.GroupingId, rawDgraphChat.Uuid, commentUUID.String(), commentInfo.HTMLText, mentions)
 	}
 
 	mqttChatComment := mqttStruct.MqttChatComment{
@@ -1713,6 +1664,8 @@ func DeleteCommentOnChat(ctx context.Context, commentUUID uuid.UUID, userUUID st
 
 		return
 	}
+	// The reply's notices are taken back (business/Notify Retract).
+	notifyBusiness.Notices.Retract(ctx, commentUUID.String())
 
 	mqttChatComment := mqttStruct.MqttChatComment{
 		Type:        mqttStruct.TYPE_DELETE,
@@ -1773,48 +1726,32 @@ func PublishStopChatCall(grpId string) {
 
 }
 
+// sendChatCallNotification tells a conversation's people a call started,
+// through the one door (business/Notify Tell: those who hear everything there,
+// by push and desktop notice, each recorded once; each call rings anew, so
+// its notice is named by when it started), and emails those it told.
 func sendChatCallNotification(title string, body string, userId string, grpId string, username string, profileKey *string) {
-
 	ctx := context.Background()
-
-	var mentionUUDs []string
-
-	// 1. Get eligible users for notifications (based on preferences and grouping)
-	eligibleUserIDs, err := chatNotificationBusiness.GetEligibleUsersForChatActivity(ctx, grpId, userId, mentionUUDs, false)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendChatCallNotification Failed to get eligible users err: %+v",
-			err)
+	icon := userBusiness.GetSignedProfileURL(ctx, profileKey)
+	told := notifyBusiness.Tell(ctx, notifyBusiness.Event{
+		ID:    fmt.Sprintf("chat_call:%s:%d", grpId, time.Now().UnixMilli()),
+		Cause: notifyBusiness.CauseCall,
+		Actor: userId,
+		Place: notifyBusiness.Place{Kind: notifyBusiness.PlaceDM, ID: grpId},
+		Push: map[string]string{
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE:     firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT,
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:  grpId,
+			firebaseInit.FIREBASE_PUSH_DATA_TITLE:    title,
+			firebaseInit.FIREBASE_PUSH_DATA_BODY:     body,
+			firebaseInit.FIREBASE_PUSH_DATA_USERNAME: username,
+			firebaseInit.FIREBASE_PUSH_DATA_ICON:     icon,
+		},
+	})
+	if len(told) == 0 {
 		return
 	}
-
-	if len(eligibleUserIDs) == 0 {
-		return
-	}
-
-	// 2. The push, and the desktop app's notice, to those of them the push
-	// gate lets through (business/Notification Deliver). Each call rings
-	// anew, so its notice is named by when it started.
-	pushData := make(map[string]string)
-
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = grpId
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = username
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, profileKey)
-
-	notificationBusiness.Deliver(ctx, eligibleUserIDs, pushData, fmt.Sprintf("chat_call:%s:%d", grpId, time.Now().UnixMilli()))
-
-	// Email fan-out for incoming chat call.
-	notificationBusiness.DispatchChatCall(
-		userId,
-		username,
-		userBusiness.GetSignedProfileURL(ctx, profileKey),
-		grpId,
-		eligibleUserIDs,
-	)
-
+	// Email stays the site's.
+	notificationBusiness.DispatchChatCall(userId, username, icon, grpId, notifyBusiness.Told(told))
 }
 
 // StandingsOf reads where a forward's groups and people stand, in one trip

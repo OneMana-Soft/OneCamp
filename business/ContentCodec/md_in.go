@@ -667,9 +667,9 @@ func (r *mdReader) inlineInto(out *[]*Node, parent gast.Node, marks []*Mark) {
 		case *extast.Strikethrough:
 			r.inlineInto(out, n, withMark(cur(), &Mark{Type: "strike"}))
 		case *gast.Link:
-			href := unescapeMarkdown(n.Destination)
-			if safeHref(href) {
-				r.inlineInto(out, n, withMark(cur(), &Mark{Type: "link", Attrs: map[string]any{"href": href}}))
+			link := &Mark{Type: "link", Attrs: map[string]any{"href": unescapeMarkdown(n.Destination)}}
+			if admitMark(link, false) {
+				r.inlineInto(out, n, withMark(cur(), link))
 			} else {
 				r.inlineInto(out, n, cur())
 			}
@@ -679,15 +679,15 @@ func (r *mdReader) inlineInto(out *[]*Node, parent gast.Node, marks []*Mark) {
 			if n.AutoLinkType == gast.AutoLinkEmail && !strings.HasPrefix(strings.ToLower(url), "mailto:") {
 				url = "mailto:" + url
 			}
-			if safeHref(url) {
-				*out = append(*out, &Node{Type: "text", Text: label, Marks: withMark(cur(), &Mark{Type: "link", Attrs: map[string]any{"href": url}})})
+			link := &Mark{Type: "link", Attrs: map[string]any{"href": url}}
+			if admitMark(link, false) {
+				*out = append(*out, &Node{Type: "text", Text: label, Marks: withMark(cur(), link)})
 			} else {
 				*out = append(*out, &Node{Type: "text", Text: label, Marks: cur()})
 			}
 		case *gast.Image:
 			img := newNode("image")
-			src := unescapeMarkdown(n.Destination)
-			img.setAttr("src", src)
+			img.setAttr("src", unescapeMarkdown(n.Destination))
 			alt := PlainText(&Node{Type: "paragraph", Content: r.inlineFlat(n, nil)})
 			if alt != "" {
 				img.setAttr("alt", alt)
@@ -695,7 +695,7 @@ func (r *mdReader) inlineInto(out *[]*Node, parent gast.Node, marks []*Mark) {
 			if len(n.Title) > 0 {
 				img.setAttr("title", unescapeMarkdown(n.Title))
 			}
-			if safeImageSrc(src, true) {
+			if admitNode(img, false, false) {
 				*out = append(*out, img)
 			} else if alt != "" {
 				*out = append(*out, &Node{Type: "text", Text: alt, Marks: cur()})
@@ -753,11 +753,10 @@ func (r *mdReader) inlineHTML(raw string, marks []*Mark, open map[string][]*Mark
 	case mark != "":
 		m := &Mark{Type: mark}
 		if mark == "link" {
-			href := htmlAttr(t, "href")
-			if !safeHref(href) {
+			m.Attrs = map[string]any{"href": htmlAttr(t, "href")}
+			if !admitMark(m, false) {
 				return nil
 			}
-			m.Attrs = map[string]any{"href": href}
 		}
 		open[mark] = append(open[mark], m)
 	}

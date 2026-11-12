@@ -31,6 +31,11 @@ type FakeEgress struct {
 	// API reports to the caller as an internal error.
 	livekit.Egress
 
+	// Starting, when set, sees each start's request before the start is
+	// made, as LiveKit's recorder does: it opens the address at once. An
+	// error refuses the start, as an egress service that can't take it does.
+	Starting func(*livekit.RoomCompositeEgressRequest) error
+
 	mu  sync.Mutex
 	all []*livekit.EgressInfo
 }
@@ -53,6 +58,11 @@ func (env *LiveKitEnv) UseFakeEgress(t *testing.T) *FakeEgress {
 // StartRoomCompositeEgress starts recording a room that is there now, tagged
 // with that room's sid as LiveKit's egress tags it.
 func (f *FakeEgress) StartRoomCompositeEgress(ctx context.Context, req *livekit.RoomCompositeEgressRequest) (*livekit.EgressInfo, error) {
+	if f.Starting != nil {
+		if err := f.Starting(req); err != nil {
+			return nil, err
+		}
+	}
 	room, err := livekitInit.LiveKitService.GetRoom(ctx, req.RoomName)
 	if err != nil {
 		return nil, fmt.Errorf("room %s: %w", req.RoomName, err)

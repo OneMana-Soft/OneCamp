@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -40,6 +41,32 @@ func TestOnlyTheSharedDemoVisitorIsRefused(t *testing.T) {
 			if refused := w.Code == http.StatusForbidden && !reached; refused != c.refused {
 				t.Errorf("%s, %s: refused=%v, want %v", guard.name, c.name, refused, c.refused)
 			}
+		}
+	}
+}
+
+// On the demo, a route that writes to GitHub is refused for everyone, the
+// demo's own team too: the connection it would write with is shared.
+func TestTheDemoRefusesEveryoneAGitHubWrite(t *testing.T) {
+	t.Setenv("DEMO_USER_EMAIL", "visitor@demo.example")
+	for _, c := range []struct {
+		name, demoMode, email string
+		refused               bool
+	}{
+		{"the shared visitor on the demo", "true", "visitor@demo.example", true},
+		{"the demo's own team on the demo", "TRUE", "owner@company.example", true},
+		{"anyone on a normal install", "", "visitor@demo.example", false},
+	} {
+		t.Setenv("DEMO_MODE", c.demoMode)
+		reached := false
+		h := NoGitHubWritesInDemo(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, requestAs(c.email))
+		var out struct{ Code, Msg string }
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		refused := w.Code == http.StatusForbidden && !reached && out.Code == "demo" && out.Msg == helpers.DemoGitHubMsg
+		if refused != c.refused || reached == c.refused {
+			t.Errorf("%s: %d %s (handler reached %v), want refused=%v", c.name, w.Code, w.Body.String(), reached, c.refused)
 		}
 	}
 }

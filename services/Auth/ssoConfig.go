@@ -101,26 +101,27 @@ func ResolveSAMLConfig(_ context.Context) SAMLConfig {
 	}
 }
 
+// FrontendOrigin is the web's origin, with scheme, from its host:
+// FRONTEND_DOMAIN, else FE_HOST_DOMAIN; "" when neither is set. Whoever needs
+// the web's real address (the recorder's layout page) asks this; a redirect,
+// which can fall back to the dev web, asks FrontendBaseURL.
+func FrontendOrigin() string {
+	host := strings.TrimSpace(os.Getenv("FRONTEND_DOMAIN"))
+	if host == "" {
+		host = strings.TrimSpace(os.Getenv("FE_HOST_DOMAIN"))
+	}
+	return withScheme(host)
+}
+
 // FrontendBaseURL returns the canonical frontend origin for redirects, with
-// scheme. Resolution order matches the Google Calendar controller pattern:
-//
-//	FRONTEND_DOMAIN → FE_HOST_DOMAIN → "localhost:3001" fallback.
-//
-// The scheme is http only when the host is localhost/127.0.0.1 or
-// COOKIE_SECURE=false (dev). Otherwise https.
+// scheme: FrontendOrigin, else the dev web on localhost:3001. The scheme is
+// http only when the host is localhost/127.0.0.1 or COOKIE_SECURE=false (dev).
+// Otherwise https.
 func FrontendBaseURL() string {
-	frontendDomain := strings.TrimSpace(os.Getenv("FRONTEND_DOMAIN"))
-	if frontendDomain == "" {
-		frontendDomain = strings.TrimSpace(os.Getenv("FE_HOST_DOMAIN"))
+	if origin := FrontendOrigin(); origin != "" {
+		return origin
 	}
-	if frontendDomain == "" {
-		frontendDomain = "localhost:3001"
-	}
-	// Already a full URL? (FE_HOST_DOMAIN historically permitted this.)
-	if strings.HasPrefix(frontendDomain, "http://") || strings.HasPrefix(frontendDomain, "https://") {
-		return strings.TrimRight(frontendDomain, "/")
-	}
-	return scheme(frontendDomain) + "://" + strings.TrimRight(frontendDomain, "/")
+	return withScheme("localhost:3001")
 }
 
 // BackendBaseURL returns this server's public origin, with scheme, from
@@ -128,14 +129,25 @@ func FrontendBaseURL() string {
 // server names itself to someone outside: email links, and the OAuth issuer
 // and resource an MCP client checks against the URL it was given.
 func BackendBaseURL() string {
-	backend := strings.TrimRight(strings.TrimSpace(os.Getenv("BACKEND_DOMAIN")), "/")
+	backend := strings.TrimSpace(os.Getenv("BACKEND_DOMAIN"))
 	if backend == "" {
 		backend = "localhost:3000"
 	}
-	if strings.HasPrefix(backend, "http://") || strings.HasPrefix(backend, "https://") {
-		return backend
+	return withScheme(backend)
+}
+
+// withScheme is a host as an origin, without a trailing slash: as given when
+// it is a full URL (FE_HOST_DOMAIN historically permitted one), else with the
+// scheme rule's scheme. "" for no host.
+func withScheme(host string) string {
+	host = strings.TrimRight(strings.TrimSpace(host), "/")
+	if host == "" {
+		return ""
 	}
-	return scheme(backend) + "://" + backend
+	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
+		return host
+	}
+	return scheme(host) + "://" + host
 }
 
 // MCPResourceMetadataURL is where an MCP client that was refused learns how to
@@ -208,13 +220,17 @@ func SignInErrorURL(code, message string) string {
 }
 
 func scheme(host string) string {
-	host = strings.ToLower(host)
-	if strings.Contains(host, "localhost") ||
-		strings.Contains(host, "127.0.0.1") ||
-		strings.EqualFold(os.Getenv("COOKIE_SECURE"), "false") {
+	if LocalHost(host) || strings.EqualFold(os.Getenv("COOKIE_SECURE"), "false") {
 		return "http"
 	}
 	return "https"
+}
+
+// LocalHost reports whether a host, or an origin, is this machine's own:
+// localhost or 127.0.0.1.
+func LocalHost(host string) bool {
+	host = strings.ToLower(host)
+	return strings.Contains(host, "localhost") || strings.Contains(host, "127.0.0.1")
 }
 
 func splitCSV(s string) []string {

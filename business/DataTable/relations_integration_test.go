@@ -212,7 +212,7 @@ func TestRelationsBetweenTables(t *testing.T) {
 		t.Fatalf("unlink: %v", err)
 	}
 	// A deleted row drops out of the links and the totals.
-	if err := DeleteRow(ctx, budget.Id, film, w.me); err != nil {
+	if _, err := DeleteRow(ctx, budget.Id, film, w.me); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	check("Film deleted", map[uuid.UUID][4]interface{}{
@@ -790,7 +790,7 @@ func TestRelationWrites(t *testing.T) {
 	}
 	// A row deleted since is passed over.
 	gone := w.row(vendors, map[string]interface{}{vName.Id.String(): "Gone"})
-	if err := DeleteRow(ctx, vendors.Id, gone, w.me); err != nil {
+	if _, err := DeleteRow(ctx, vendors.Id, gone, w.me); err != nil {
 		t.Fatal(err)
 	}
 	film := w.row(budget, map[string]interface{}{bName.Id.String(): "Film", vendor.Id.String(): []interface{}{gone.String(), acme.String()}})
@@ -855,7 +855,7 @@ func TestRelationDeletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range all {
-		if err := DeleteRow(ctx, tags.Id, id, w.me); err != nil {
+		if _, err := DeleteRow(ctx, tags.Id, id, w.me); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -867,7 +867,7 @@ func TestRelationDeletes(t *testing.T) {
 		t.Errorf("a post whose tags were deleted can't link a new one: %v", err)
 	}
 	// From the other end: a deleted post leaves Fresh with no links back.
-	if err := DeleteRow(ctx, posts.Id, post, w.me); err != nil {
+	if _, err := DeleteRow(ctx, posts.Id, post, w.me); err != nil {
 		t.Fatal(err)
 	}
 	if has, _ := model.RowHasLinks(ctx, fresh); has {
@@ -898,7 +898,7 @@ func TestRelationDeletes(t *testing.T) {
 			defer wg.Done()
 			_, _, _ = ChangeLinks(ctx, posts.Id, post, tag.Id, []uuid.UUID{victim}, nil, w.me)
 		}()
-		go func() { defer wg.Done(); _ = DeleteRow(ctx, tags.Id, victim, w.me) }()
+		go func() { defer wg.Done(); _, _ = DeleteRow(ctx, tags.Id, victim, w.me) }()
 		wg.Wait()
 		if has, _ := model.RowHasLinks(ctx, victim); has {
 			t.Fatalf("round %d: a link to a deleted row", round)

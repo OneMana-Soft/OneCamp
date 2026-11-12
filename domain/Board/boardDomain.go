@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/akashc777/OneCamp/models/dgexec"
 	"strconv"
+	"strings"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Board"
@@ -85,6 +86,7 @@ func GetBasicDgraphBoardByUUID(ctx context.Context, boardUUID string, userUID st
 					board_private
 					board_title
 					board_deleted_at
+					board_scratch
 					board_created_by {
 						uid
 						user_uuid
@@ -249,38 +251,101 @@ func GetBoardPermissions(ctx context.Context, boardUUID string) (dgraphBoard *dg
 	return
 }
 
+// Whose boards a board list keeps (BoardListFilter.Owner).
+const (
+	// BoardsMine is the boards the viewer made.
+	BoardsMine = "mine"
+	// BoardsShared is the boards shared with the viewer, less their own.
+	BoardsShared = "shared"
+)
+
+// BoardListFilter narrows a board list (miro-46); the zero filter is every
+// board the viewer may read. A filter only ever narrows that list: it never
+// adds a board the viewer may not read. ProjectUUID and TeamUUID are one or
+// the other, and the caller has checked the viewer may read the project or
+// team (controllers/Board's GetBoardList).
+type BoardListFilter struct {
+	// Editable keeps the boards the viewer may change (CanEdit: owned, or
+	// shared to edit), as a call's board picker lists.
+	Editable bool
+	// Owner is "" (any), BoardsMine or BoardsShared.
+	Owner string
+	// ProjectUUID keeps the boards linked from the project's home
+	// (EntityLink's linked_boards), archived or not: project_deleted_at is
+	// the archive mark, and its members still open the project.
+	ProjectUUID string
+	// TeamUUID keeps the boards linked from any of the team's live projects
+	// (team_projects, then linked_boards), as the team page lists them.
+	TeamUUID string
+}
+
 // GetDgraphBoardList returns the boards a user can access (owned or shared via
-// edit/read/comment), newest-edited first, with an optional title search and
-// pagination. With editable, only those CanEdit lets them change (owned or
-// shared to edit), as a call's board picker lists. Relies on the @reverse
+// edit/read/comment), newest-edited first, with an optional title search,
+// narrowed by filter, and pagination. The narrowing is inside the query, so a
+// page is full and the count is the narrowed list's; a deleted board or team,
+// a team's archived project and a removed link never count. Relies on the @reverse
 // indexes on board_created_by and the board_*_users predicates.
-func GetDgraphBoardList(ctx context.Context, userUID string, search string, first int, offset int, editable bool) (list *dgraphStruct.DgraphBoardList, err error) {
+func GetDgraphBoardList(ctx context.Context, userUID string, search string, first int, offset int, filter BoardListFilter) (list *dgraphStruct.DgraphBoardList, err error) {
 	variables := make(map[string]string)
 	variables["$userId"] = userUID
 	variables["$first"] = strconv.Itoa(first)
 	variables["$offset"] = strconv.Itoa(offset)
+	params := "$userId: string, $first: int, $offset: int"
 
-	notDeleted := `not gt(board_deleted_at, "1970-01-01T00:00:00Z")`
-	filter := notDeleted
+	conds := []string{dgraphquery.Live("board_deleted_at")}
 	if search != "" {
-		filter = fmt.Sprintf(`%s AND regexp(board_title, /%s/i)`, notDeleted, search)
+		conds = append(conds, fmt.Sprintf(`regexp(board_title, /%s/i)`, search))
 	}
 
-	// Dgraph refuses a query that defines a variable it never uses, so the
-	// editable list doesn't define the read and comment shares at all.
-	shares, boards := `owned as ~board_created_by
-					edits as ~board_editing_users`, "owned, edits"
-	if !editable {
+	// Dgraph refuses a query that defines a variable it never uses, so each
+	// list defines only the shares it reads: the editable list no read or
+	// comment shares, the viewer's own list no shares at all.
+	shared := []string{"edits"}
+	shares := `edits as ~board_editing_users`
+	if !filter.Editable {
+		shared = append(shared, "reads", "comments")
 		shares += `
 					reads as ~board_reading_users
 					comments as ~board_commenting_users`
-		boards += ", reads, comments"
+	}
+	owned := `owned as ~board_created_by`
+	vars, boards := owned+"\n\t\t\t\t\t"+shares, "owned, "+strings.Join(shared, ", ")
+	switch filter.Owner {
+	case BoardsMine:
+		vars, boards = owned, "owned"
+	case BoardsShared:
+		boards = strings.Join(shared, ", ")
+		conds = append(conds, "not uid(owned)")
 	}
 
-	query := fmt.Sprintf(`query BoardList($userId: string, $first: int, $offset: int){
+	// The boards linked from the project, archived or not, or from the live
+	// team's live projects, through the links there are now.
+	linked := ""
+	switch {
+	case filter.ProjectUUID != "":
+		variables["$scope"] = filter.ProjectUUID
+		params += ", $scope: string"
+		linked = `var(func: eq(project_uuid, $scope)) {
+					linked as linked_boards
+				}`
+		conds = append(conds, "uid(linked)")
+	case filter.TeamUUID != "":
+		variables["$scope"] = filter.TeamUUID
+		params += ", $scope: string"
+		linked = fmt.Sprintf(`var(func: eq(team_uuid, $scope)) @filter(%s) {
+					team_projects @filter(%s) {
+						linked as linked_boards
+					}
+				}`, dgraphquery.Live("team_deleted_at"), dgraphquery.Live("project_deleted_at"))
+		conds = append(conds, "uid(linked)")
+	}
+	where := strings.Join(conds, " AND ")
+
+	query := fmt.Sprintf(`query BoardList(%s){
 				var(func: uid($userId)) {
 					%s
 				}
+				%s
 
 				board_count(func: uid(%s)) @filter(%s) {
 					count(uid)
@@ -300,7 +365,7 @@ func GetDgraphBoardList(ctx context.Context, userUID string, search string, firs
 						user_profile_object_key
 					}
 				}
-			}`, shares, boards, filter, boards, filter)
+			}`, params, vars, linked, boards, where, boards, where)
 
 	list, err = dgraphModels.GetDgraphBoardsWithCount(ctx, query, variables)
 	if err != nil {

@@ -355,6 +355,7 @@ func (s *service) planAfter(ctx context.Context, id uuid.UUID, only []uuid.UUID,
 		case ok:
 			payload := reminderPayload(id, next)
 			payload.Email = slices.Contains(emailed, next.minutes)
+			payload.Default = !set
 			err = s.rem.planReminder(ctx, p, payload, next.at)
 		case e.RRule != "" && (e.UntilAt == nil || e.UntilAt.After(w.To)):
 			// Nothing in reach of a series that goes on: planned again at the edge.
@@ -509,7 +510,7 @@ func (s *service) sendReminder(ctx context.Context, person uuid.UUID, e *models.
 	// One set to come by email is emailed; when it can't be, it comes as a
 	// pop-up that says why.
 	if p.Email {
-		why := sendByEmail(ctx, person, title, body, eventPath(inst.ref), dedup)
+		why := sendByEmail(ctx, person, title, body, eventPath(inst.ref), dedup, p.Default)
 		if why == "" {
 			return nil
 		}

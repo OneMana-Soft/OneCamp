@@ -41,10 +41,17 @@ const (
 	// one (business/TableComments).
 	EventTableMention EventType = "table.mention"
 	EventTableComment EventType = "table.comment"
+	// A mention in a task's words (TaskMentioned).
+	EventTaskMention EventType = "task.mention"
 )
 
 // ActivityNotice is the activity feed's type for a notice.
 const ActivityNotice = "NOTICE"
+
+// NoticeWords is the Data key of words a notice carries from the thing itself
+// (an agent's reply where it was asked): shown only to a reader who may open
+// the thing now (NoticeItem).
+const NoticeWords = "text"
 
 // Notice is what to tell people, and how it reads.
 type Notice struct {
@@ -106,6 +113,9 @@ type NoticeRecipient struct {
 	// the thing already (a comment on what they made, a mention of them). A
 	// hidden row still keeps them from being told twice.
 	Listed bool
+	// NoEmail is told in the inbox and by push, never by email: someone a
+	// broadcast or a team reached (an @channel), whom a send doesn't email.
+	NoEmail bool
 	// NoPush is told in the inbox and by email, never by push, desktop
 	// notice or sound: an organiser hearing of a guest's answer, who asked to
 	// be emailed answers (calendar D-CAL-17).
@@ -210,7 +220,7 @@ func Tell(ctx context.Context, n Notice, recipients []NoticeRecipient) []string 
 		helpers.LogErrorWithContext(ctx, "notification/Tell %s: the notices couldn't be written, telling nobody: %+v", n.Kind, err)
 		return nil
 	}
-	var told, reach, pushed, through []string
+	var told, reach, emailed, pushed, through []string
 	for _, t := range tells {
 		if !written[t.row.UserUUID] {
 			continue
@@ -223,6 +233,9 @@ func Tell(ctx context.Context, n Notice, recipients []NoticeRecipient) []string 
 		}
 		if !t.r.InboxOnly {
 			reach = append(reach, id)
+			if !t.r.NoEmail {
+				emailed = append(emailed, id)
+			}
 			switch {
 			case t.r.NoPush:
 			case t.r.ThroughHolds:
@@ -241,7 +254,9 @@ func Tell(ctx context.Context, n Notice, recipients []NoticeRecipient) []string 
 	if len(through) > 0 {
 		pushNotice(ctx, n, through, noticeDeliverThrough)
 	}
-	emailNotice(ctx, n, reach)
+	if len(emailed) > 0 {
+		emailNotice(ctx, n, emailed)
+	}
 	return told
 }
 
@@ -249,10 +264,12 @@ func Tell(ctx context.Context, n Notice, recipients []NoticeRecipient) []string 
 // back (business/Follow's feed), one shape for both: the people shown as an
 // inbox shows them (DgraphUser.Public, never an email), the actor's kind as the feed
 // has always said it (activity.ActorKind: an agent, or an app for a bridge),
-// and what it is about titled and openable only when the reader may open it
-// (canOpen). The live item was built apart from the feed's and said "person"
+// and what it is about titled and openable, and its own words (NoticeWords)
+// shown, only when the reader may open it (canOpen). The live item was built apart from the feed's and said "person"
 // for any actor without an agent, so a bot's notice moved between the people
-// and agents filters when the inbox was read again.
+// and agents filters when the inbox was read again. It is scored as the feed
+// scores (activity.ScorePriority): a request asking for the reader's answer
+// is high.
 func NoticeItem(row *followModels.Notice, actor, agent *dgraphStruct.DgraphUser, title string, canOpen bool) dgraphModels.UnifiedActivityItem {
 	at := row.CreatedAt.UTC().Format(time.RFC3339Nano)
 	kind := activityBusiness.ActorPerson
@@ -274,16 +291,25 @@ func NoticeItem(row *followModels.Notice, actor, agent *dgraphStruct.DgraphUser,
 		Data:         row.Data,
 		CreatedAt:    at,
 	}
+	if _, worded := row.Data[NoticeWords]; worded && !canOpen {
+		item.Data = make(map[string]string, len(row.Data))
+		for k, v := range row.Data {
+			if k != NoticeWords {
+				item.Data[k] = v
+			}
+		}
+	}
 	if canOpen {
 		item.Title, item.CanOpen = title, true
 	}
-	return dgraphModels.UnifiedActivityItem{
+	out := dgraphModels.UnifiedActivityItem{
 		ActivityType: ActivityNotice,
 		Time:         at,
-		Priority:     "normal",
 		ActorKind:    kind,
 		Notice:       item,
 	}
+	out.Priority = activityBusiness.ScorePriority(out)
+	return out
 }
 
 // openTitle is the title a live item shows: none on a closed notice.
@@ -303,6 +329,20 @@ func openTitle(n Notice) string {
 // app heard of no notice at all. The desktop notice's id is the telling's key,
 // as the email's dedup part is, so the app raises it once.
 func pushNotice(ctx context.Context, n Notice, recipients []string, deliver func(ctx context.Context, recipients []string, pushData map[string]string, noticeID string)) {
+	// An actor's notice is their words: their VIPs hear through the gate; the
+	// rest as this notice is told (deliver: as usual, or through holds).
+	sender := ""
+	if n.Actor != nil {
+		sender = n.Actor.Uuid
+	}
+	deliverFrom(ctx, sender, recipients, PushData(n), n.DedupKey, deliver)
+}
+
+// PushData is n's push as each device is sent it: its type and what it
+// opens, its title and line, who it is from, and its tag and thread when it
+// has them. One shape for a notice's push and for one business/Notify
+// delivers (an edit's mention, V-843). Pure.
+func PushData(n Notice) map[string]string {
 	name := ""
 	if n.Actor != nil {
 		name = n.Actor.DisplayName()
@@ -327,13 +367,7 @@ func pushNotice(ctx context.Context, n Notice, recipients []string, deliver func
 	if n.Push != nil && n.Push.Thread != "" {
 		data[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = n.Push.Thread
 	}
-	// An actor's notice is their words: their VIPs hear through the gate; the
-	// rest as this notice is told (deliver: as usual, or through holds).
-	sender := ""
-	if n.Actor != nil {
-		sender = n.Actor.Uuid
-	}
-	deliverFrom(ctx, sender, recipients, data, n.DedupKey, deliver)
+	return data
 }
 
 // emailNotice emails the recipients, by every rule an email follows.

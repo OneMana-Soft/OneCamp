@@ -55,17 +55,39 @@ func (acrossRefusal) Is(target error) bool { return target == ErrNotAllowed }
 // the other task but not change tasks where it is.
 var ErrAcrossProjects error = acrossRefusal{}
 
+// MayUnlink is nil when the person may take a link off the task of verdict v
+// (a dependency, a typed link, its parent): change the task, in a project
+// that isn't archived (an archived project's tasks are read-only). Otherwise
+// a Refusal. Pure.
+func MayUnlink(v Verdict) error {
+	if err := v.Standing.CheckTask(NeedEditTask, v.Facts); err != nil {
+		return err
+	}
+	return notArchived(v.Standing)
+}
+
+// notArchived is a Refusal, in words, for a task of an archived project.
+func notArchived(s Standing) error {
+	if s.Archived {
+		return &Refusal{Need: NeedEditTask, Standing: s}
+	}
+	return nil
+}
+
 // MayLink is nil when the person may make, or change, the dependency of
 // waiting on blocker; sameProject says whether both are in one project.
 // Otherwise: a Refusal for the waiting task, ErrHiddenEnd for a blocker they
-// can't see, ErrAcrossProjects for one in another project they can't change.
-// Pure.
+// can't see, a Refusal for one in an archived project, ErrAcrossProjects for
+// one in another project they can't change. Pure.
 func MayLink(waiting, blocker Verdict, sameProject bool) error {
-	if err := waiting.Standing.CheckTask(NeedEditTask, waiting.Facts); err != nil {
+	if err := MayUnlink(waiting); err != nil {
 		return err
 	}
 	if !blocker.See {
 		return ErrHiddenEnd
+	}
+	if err := notArchived(blocker.Standing); err != nil {
+		return err
 	}
 	if !sameProject && !blocker.Move {
 		return ErrAcrossProjects
@@ -132,7 +154,7 @@ func KeepSeenEnds(ctx context.Context, userUUID, userUID string, task *dgraphStr
 			switch {
 			case e == nil:
 			case e.Hidden:
-				if id, err := uuid.Parse(e.Uuid); err == nil {
+				if id, err := uuid.Parse(e.StubOf); err == nil {
 					stubs = append(stubs, id)
 				}
 			case e.Project == nil || !strings.EqualFold(e.Project.Uuid, own):
@@ -170,7 +192,7 @@ func KeepSeenEnds(ctx context.Context, userUUID, userUID string, task *dgraphStr
 			case e == nil:
 				continue
 			case e.Hidden:
-				if !keepStub[strings.ToLower(e.Uuid)] {
+				if !keepStub[strings.ToLower(e.StubOf)] {
 					continue
 				}
 			case e.Project == nil:

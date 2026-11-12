@@ -363,6 +363,10 @@ type UnifiedActivityItem struct {
 	// Notice is a "NOTICE" item: one with no graph record of its own
 	// (business/Follow), sent only to an app that asks for notices.
 	Notice *NoticeItem `json:"notice,omitempty"`
+	// Unread is whether the Inbox badge counts it (business/Activity
+	// unreadInInbox), set as the feed is read: the Inbox draws its dot from
+	// it, so the dots are the items the badge counted.
+	Unread bool `json:"unread"`
 }
 
 // NoticeItem is an inbox item from business/Follow's notices: what happened to

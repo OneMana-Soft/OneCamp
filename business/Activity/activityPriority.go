@@ -46,14 +46,23 @@ var actionCues = []string{
 	"by today", "by eod", "by tomorrow", "deadline", "help",
 }
 
-// scoreActivityPriority assigns a coarse priority to one activity item. It is
-// pure and side-effect free. Heuristics, in order of strength:
+// approvalAsked is the notice an approver gets when a request asks for their
+// answer (business/Approvals tellApprovers).
+const approvalAsked = "work.approval.requested"
+
+// ScorePriority assigns a coarse priority to one activity item, the feed's
+// and a live notice's alike. It is pure and side-effect free. Heuristics, in
+// order of strength:
 //   - MENTION of the user that asks a question or carries an action cue → high
 //   - MENTION (plain) → normal
 //   - COMMENT on the user's content that asks a question / action cue → high
 //   - COMMENT (plain) → normal
+//   - NOTICE of an approval request asking for the user's answer → high
+//   - NOTICE (any other) → normal
 //   - REACTION → low (nice-to-know, rarely actionable)
-func scoreActivityPriority(item dgraphModels.UnifiedActivityItem) string {
+//
+// What the user has since answered drops to low: demoteAnswered.
+func ScorePriority(item dgraphModels.UnifiedActivityItem) string {
 	switch item.ActivityType {
 	case "MENTION":
 		if item.Mention == nil {
@@ -75,6 +84,12 @@ func scoreActivityPriority(item dgraphModels.UnifiedActivityItem) string {
 
 	case "REACTION":
 		return PriorityLow
+
+	case "NOTICE":
+		if approvalOf(&item) != "" {
+			return PriorityHigh
+		}
+		return PriorityNormal
 
 	default:
 		return PriorityNormal
@@ -116,62 +131,6 @@ func isActionable(text string) bool {
 		}
 	}
 	return false
-}
-
-// hasDemotableActivity reports whether any item could be demoted by
-// read-state (i.e. is currently high or normal). When false — e.g. a feed
-// of only reactions, which are already low — the caller can skip the
-// last-seen reads entirely and pay zero extra queries.
-func hasDemotableActivity(items []dgraphModels.UnifiedActivityItem) bool {
-	for i := range items {
-		if items[i].Priority == PriorityHigh || items[i].Priority == PriorityNormal {
-			return true
-		}
-	}
-	return false
-}
-
-// demoteSeenActivities downgrades the priority of items the user has ALREADY
-// ENGAGED WITH, so the Priority tab reflects "what still needs me" rather
-// than "what ever needed me". The signal is read-state: if the user's
-// last-seen for an item's scope (channel / DM-or-group) is at or after the
-// item's timestamp, they've opened that conversation since — which is the
-// primary acknowledgment signal in a chat product. Such items are demoted
-// to PriorityLow (they drop out of the high-priority Priority view) but are
-// NEVER hidden from the full feed.
-//
-// Cheap by construction: the two last-seen maps are each a single batched
-// query; this pass is O(items) with map lookups, no per-item round-trips.
-// Items whose scope can't be resolved (e.g. task/doc mentions) are left
-// as-is — we only demote when we have positive evidence of engagement.
-func demoteSeenActivities(items []dgraphModels.UnifiedActivityItem, lastSeenChannels, lastSeenChats map[string]time.Time) {
-	for i := range items {
-		// Reactions are already low; nothing to demote.
-		if items[i].Priority == "" || items[i].Priority == PriorityLow {
-			continue
-		}
-		scopeKind, scopeID := activityScope(&items[i])
-		if scopeKind == "" || scopeID == "" {
-			continue
-		}
-		itemTime := parseActivityTime(items[i].Time)
-		if itemTime.IsZero() {
-			continue
-		}
-		var seen time.Time
-		var ok bool
-		switch scopeKind {
-		case "channel":
-			seen, ok = lastSeenChannels[scopeID]
-		case "chat":
-			seen, ok = lastSeenChats[scopeID]
-		}
-		// Seen AT OR AFTER the item → the user has opened this conversation
-		// since the mention/comment; treat as acknowledged.
-		if ok && !seen.Before(itemTime) {
-			items[i].Priority = PriorityLow
-		}
-	}
 }
 
 // activityScope returns the (kind, id) the item lives in: ("channel", chUUID)
@@ -217,4 +176,82 @@ func parseActivityTime(s string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+// demoteAnswered drops what asked the person something to low once they have
+// answered it, so the Priority view is "what still needs me", not "what ever
+// needed me": an approval request once it no longer waits on them (decided,
+// withdrawn, or their part answered), a mention or a comment once they wrote
+// in its conversation or replied in its thread after it. Opening the
+// conversation isn't an answer: the Inbox's dots and badge go by that
+// (looks.engaged), Priority doesn't. Only positive evidence demotes; nothing
+// is hidden, the full feed lists every item still.
+func demoteAnswered(items []dgraphModels.UnifiedActivityItem, a answers) {
+	for i := range items {
+		if items[i].Priority == PriorityHigh && a.answered(&items[i]) {
+			items[i].Priority = PriorityLow
+		}
+	}
+}
+
+// answered reports whether the person has answered item, by a.
+func (a answers) answered(item *dgraphModels.UnifiedActivityItem) bool {
+	if id := approvalOf(item); id != "" {
+		return a.settled[id]
+	}
+	at := parseActivityTime(item.Time)
+	if at.IsZero() {
+		return false
+	}
+	since := func(wrote map[string]time.Time, key string) bool {
+		t, ok := wrote[key]
+		return key != "" && ok && t.After(at)
+	}
+	kind, id := activityScope(item)
+	if (kind == "channel" && since(a.channels, id)) || (kind == "chat" && since(a.chats, id)) {
+		return true
+	}
+	_, thread := activityThread(item)
+	return since(a.threads, thread)
+}
+
+// approvalOf is the request an approval-request notice asks the person to
+// answer, by its id; "" for any other item, and for a request on something
+// they may no longer open (they can't answer it there).
+func approvalOf(item *dgraphModels.UnifiedActivityItem) string {
+	if item.Notice == nil || item.Notice.Kind != approvalAsked || !item.Notice.CanOpen {
+		return ""
+	}
+	return item.Notice.Data["approval_id"]
+}
+
+// activityThread is the thread a mention or a comment lives in, by the
+// message it hangs off: ("post", uuid) for a channel message's, ("chat",
+// uuid) for a DM or group message's. A mention in a message is in that
+// message's thread, one in a reply in its parent's; empty when the loaded
+// item says neither (task and doc mentions).
+func activityThread(item *dgraphModels.UnifiedActivityItem) (kind, id string) {
+	var c *dgraphStruct.DgraphComment
+	switch {
+	case item.ActivityType == "MENTION" && item.Mention != nil:
+		if item.Mention.Post != nil && item.Mention.Post.Uuid != "" {
+			return "post", item.Mention.Post.Uuid
+		}
+		if item.Mention.Chat != nil && item.Mention.Chat.Uuid != "" {
+			return "chat", item.Mention.Chat.Uuid
+		}
+		c = item.Mention.Comment
+	case item.ActivityType == "COMMENT":
+		c = item.Comment
+	}
+	if c == nil {
+		return "", ""
+	}
+	if c.Post != nil && c.Post.Uuid != "" {
+		return "post", c.Post.Uuid
+	}
+	if c.Chat != nil && c.Chat.Uuid != "" {
+		return "chat", c.Chat.Uuid
+	}
+	return "", ""
 }

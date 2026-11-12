@@ -48,14 +48,18 @@ type batchItem struct {
 // batchStep is an item ready to run: the app's own check of it against the
 // table as it is, its audit row's action, and its write, which answers what
 // it stored (itemDone). A create also says whether a send before made it
-// (made, by the id it takes).
+// (made, by the id it takes), as does a delete in a batch sent again (made:
+// its target is in the trash).
 type batchStep struct {
 	item batchItem
 	// action is its audit row's ("table.field.created").
 	action string
 	check  func(ctx context.Context) error
 	made   func(ctx context.Context) (bool, error)
-	apply  func(ctx context.Context) (itemDone, error)
+	// madeAnswer answers the item when made finds it done before: a
+	// create's apiMadeBefore when none is set.
+	madeAnswer any
+	apply      func(ctx context.Context) (itemDone, error)
 }
 
 // itemDone is an item's write as the store took it: its answer, and its
@@ -76,6 +80,11 @@ type batchRecord interface {
 	Done(i int) (json.RawMessage, bool)
 	Mark(ctx context.Context, i int, answer json.RawMessage) error
 	Release(ctx context.Context)
+	// Again: a send of the batch came before this one.
+	Again() bool
+	// Forget drops a first send's record when it stopped before any item
+	// began, so its key isn't used up (a no-op once an item may have run).
+	Forget(ctx context.Context)
 }
 
 // openItems opens a batch's record under its key; swapped by tests.
@@ -157,8 +166,13 @@ func applyItem(ctx context.Context, s batchStep, audit itemAudit) (any, error) {
 }
 
 // batchKeys are what a batch's creates take their ids from: the caller, the
-// op, the key and the batch's arguments (the same batch, the same ids).
-type batchKeys struct{ caller, route, key, hash string }
+// op, the key and the batch's arguments (the same batch, the same ids); and
+// whether a send of the batch came before this one (again), whose deletes
+// may be done already.
+type batchKeys struct {
+	caller, route, key, hash string
+	again                    bool
+}
 
 // batchSpace is the namespace a batch's creates take their ids in.
 var batchSpace = uuid.MustParse("971539f6-9e71-4573-a3a2-5ee1b8694a3f")
@@ -212,8 +226,10 @@ func serveBatch(ctx context.Context, call v1api.Call, route string, build batchB
 		return nil, batchKeyErr(err)
 	}
 	defer rec.Release(ctx)
+	keys.again = rec.Again()
 	steps, err := build(ctx, actor, table, keys, creates, updates, deletes)
 	if err != nil {
+		rec.Forget(ctx) // nothing began
 		return nil, schemaErr(ctx, table, actor, err)
 	}
 	audit := func(ctx context.Context, s batchStep, done itemDone, action string) error {
@@ -225,8 +241,15 @@ func serveBatch(ctx context.Context, call v1api.Call, route string, build batchB
 // runSteps checks a batch whole, then applies it item by item: an item the
 // record has done is answered as before, unchecked, and a create a send
 // before made is answered by its id. Each item applied is written with its
-// audit row in one transaction (applyItem) and recorded done at once.
-func runSteps(ctx context.Context, rec batchRecord, steps []batchStep, audit itemAudit, says func(error) error) (any, error) {
+// audit row in one transaction (applyItem) and recorded done at once. A batch
+// stopped at its checks applied nothing: its record is forgotten (Forget).
+func runSteps(ctx context.Context, rec batchRecord, steps []batchStep, audit itemAudit, says func(error) error) (res any, err error) {
+	checked := false
+	defer func() {
+		if err != nil && !checked {
+			rec.Forget(ctx)
+		}
+	}()
 	answers := make([]json.RawMessage, len(steps))
 	before := make([]bool, len(steps))
 	var refused []batchItem
@@ -260,13 +283,17 @@ func runSteps(ctx context.Context, rec batchRecord, steps []batchStep, audit ite
 		e.Details = refused
 		return nil, e
 	}
+	checked = true
 	for i, s := range steps {
 		if answers[i] != nil {
 			continue
 		}
 		var answer any
 		if before[i] {
-			answer = apiMadeBefore{ID: s.item.ID, MadeBefore: true}
+			answer = s.madeAnswer
+			if answer == nil {
+				answer = apiMadeBefore{ID: s.item.ID, MadeBefore: true}
+			}
 		} else {
 			v, err := applyItem(ctx, s, audit)
 			if err != nil {
@@ -314,7 +341,7 @@ type apiMadeBefore struct {
 
 // serversOwn is whether err is the server's failure, not the item's refusal.
 func serversOwn(err error) bool {
-	return errors.As(err, new(storeFailed)) || errors.Is(err, errViewsUnavailable) || IsUnavailable(err)
+	return IsStoreFailed(err) || errors.Is(err, errViewsUnavailable) || IsUnavailable(err)
 }
 
 // refusalWords are an item's refusal as the API says it.

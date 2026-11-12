@@ -247,7 +247,7 @@ func TestTableFieldTypes(t *testing.T) {
 		if err != nil || len(page) == 0 {
 			t.Fatalf("the table reads %d rows (%v)", len(page), err)
 		}
-		if err := dataTableBusiness.DeleteRow(w.ctx, tb.Id, page[0].Id, w.people["bo"]); err != nil {
+		if _, err := dataTableBusiness.DeleteRow(w.ctx, tb.Id, page[0].Id, w.people["bo"]); err != nil {
 			t.Fatal(err)
 		}
 		r, err := dataTableBusiness.CreateRow(w.ctx, tb.Id, dataTableBusiness.RowInput{}, w.people["bo"])

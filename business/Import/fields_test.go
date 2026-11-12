@@ -20,7 +20,7 @@ func TestImportedFieldMatching(t *testing.T) {
 	money := func(cur string) importProvider.SourceField {
 		return importProvider.SourceField{Type: importProvider.FieldMoney, Currency: cur}
 	}
-	if !sameField(have[0], "budget", money("usd")) || !sameField(have[0], "Budget", money("")) {
+	if !sameField(have[0], "budget", money("usd")) || !sameField(have[0], "Budget", money(" usd ")) || !sameField(have[0], "Budget", money("")) {
 		t.Error("a field of the same name and kind is the same field, whatever the case")
 	}
 	if sameField(have[0], "Budget", money("EUR")) {

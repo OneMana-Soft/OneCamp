@@ -1,8 +1,8 @@
 package business
 
-// Boards in the admin audit log (miro-44): who a board was shared with, and
-// every export of it, one row each under "boards", in the hash chain an admin
-// reads on every plan. Taking a place on a board away, or lowering it, is
+// Boards in the admin audit log (miro-44): who a board was shared with, every
+// export of it, and every restore from the trash, one row each under
+// "boards", in the hash chain an admin reads on every plan. Taking a place on a board away, or lowering it, is
 // recorded before it happens (UpdateBoardPermissions, RecordedTaking), and an
 // external link's making and turning off by the guest-link routes.
 //
@@ -35,6 +35,7 @@ const KindBoard = "board"
 var boardAuditedKinds = map[resourceEventBusiness.Kind]string{
 	resourceEventBusiness.BoardShared:   "Shared %s",
 	resourceEventBusiness.BoardExported: "Exported %s",
+	resourceEventBusiness.BoardRestored: "Restored %s from Deleted boards",
 }
 
 // boardsAudit is the boards' events in the admin audit log.

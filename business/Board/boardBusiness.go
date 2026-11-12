@@ -254,12 +254,27 @@ func UpdateBoardFromCollab(ctx context.Context, input *adapter.InputBoardCollabU
 
 // DeleteBoard soft-deletes a board (sets board_deleted_at).
 func DeleteBoard(ctx context.Context, boardUUID string) (err error) {
+	return deleteBoard(ctx, boardUUID, false)
+}
+
+// DiscardBoard deletes a board the app made and takes away again, one that
+// was never anyone's to keep (an import's board it couldn't record, a demo
+// seed's spare): deleted as DeleteBoard deletes a board, softly, and marked
+// scratch, so Deleted boards never lists it and no restore brings it back.
+func DiscardBoard(ctx context.Context, boardUUID string) error {
+	return deleteBoard(ctx, boardUUID, true)
+}
+
+func deleteBoard(ctx context.Context, boardUUID string, scratch bool) (err error) {
 	currentTime := time.Now()
 	dgraphBoard := &dgraphStruct.DgraphBoard{
 		DType:     []string{"Board"},
 		Uid:       "uid(board)",
 		Uuid:      boardUUID,
 		DeletedAt: &currentTime,
+	}
+	if scratch {
+		dgraphBoard.Scratch = &scratch
 	}
 
 	_, err = domain.CreateOrUpdateDgraphBoard(ctx, dgraphBoard)
@@ -399,17 +414,28 @@ func SearchUsersForBoard(ctx context.Context, userDgraphUUID string, viewerEmail
 	return userDomain.DemoVisibleUsers(viewerEmail, dgraphUsers), nil
 }
 
+// BoardListFilter narrows a board list: domain/Board's, for its callers.
+type BoardListFilter = domain.BoardListFilter
+
+// Whose boards a board list keeps (BoardListFilter.Owner).
+const (
+	BoardsMine   = domain.BoardsMine
+	BoardsShared = domain.BoardsShared
+)
+
 // GetBoardList returns the boards the user can access (owned or shared), with
-// optional title search and pagination; with editable, only the boards they
-// may edit (CanEdit).
-func GetBoardList(ctx context.Context, userUID string, search string, first int, offset int, editable bool) (list *dgraphStruct.DgraphBoardList, err error) {
+// optional title search and pagination, narrowed by filter: with Editable,
+// only the boards they may edit (CanEdit); by owner, project or team as
+// BoardListFilter says. The caller has checked the viewer is in a project or
+// team it filters by.
+func GetBoardList(ctx context.Context, userUID string, search string, first int, offset int, filter BoardListFilter) (list *dgraphStruct.DgraphBoardList, err error) {
 	if first <= 0 {
 		first = 30
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	list, err = domain.GetDgraphBoardList(ctx, userUID, search, first, offset, editable)
+	list, err = domain.GetDgraphBoardList(ctx, userUID, search, first, offset, filter)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetBoardList Failed to get board list err: %+v", err)
 		return

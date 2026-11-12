@@ -1,8 +1,10 @@
 // Package business (WorkTaxonomy) is the Work Taxonomy
 // (design/projects-vs-asana-jira/PROGRAM.md §4.2 #95, D-PJ-9; projects A8K):
-// what kind of work a task is. Six types are built in (Task, Bug, Feature,
-// Milestone, Approval and Request) and a project's admins add their own, each
-// a name and an icon. A task with no type is a Task.
+// what kind of work a task is. Seven types are built in (Task, Bug, Feature,
+// Milestone, Approval, Request and Epic) and a project's admins add their
+// own, each a name and an icon. A task with no type is a Task. An epic holds
+// tasks through the one parent/sub-task relation (domain/Task hierarchy.go):
+// epic -> task -> sub-task.
 //
 // A type shows as a glyph beside the task's key and as the panel's Type row,
 // and milestones draw as diamonds on the timeline. Labels with groups and
@@ -11,9 +13,9 @@ package business
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -33,11 +35,13 @@ var (
 	TypeMilestone = uuid.MustParse("fd0c7ea2-3255-4a4e-9d50-97c30dea1b61")
 	TypeApproval  = uuid.MustParse("38e9401a-79ea-481d-9af1-b5411003aecd")
 	TypeRequest   = uuid.MustParse("65e4944a-7ee3-436f-aceb-5f90dfc1c60d")
+	// TypeEpic is the seventh, from task_type_epic (582).
+	TypeEpic = uuid.MustParse("0c06e5fa-fd1a-41d1-bb38-7cdb1fe8097e")
 )
 
 // Icons is the glyphs a project's own type may take; the app draws each.
 var Icons = []string{
-	"task", "bug", "feature", "milestone", "approval", "request",
+	"task", "bug", "feature", "milestone", "approval", "request", "epic",
 	"flag", "book", "wrench", "shield", "palette", "megaphone",
 	"flask", "layers", "target", "rocket", "file", "chart",
 }
@@ -47,6 +51,9 @@ const (
 	MaxNameLen = 40
 	// MaxTypes is how many types of its own a project may have at once.
 	MaxTypes = 20
+	// MaxEpics is how many epics a project holds: the top-level reads name
+	// them (domain/Task TopLevel), so the number is bounded.
+	MaxEpics = taskDomain.MaxEpics
 )
 
 // ErrBadType is a name or icon a type can't have; its message says why in
@@ -57,6 +64,9 @@ var ErrBadType = errors.New("that type can't be saved")
 var (
 	ErrTypeNameTaken = model.ErrTypeNameTaken
 	ErrNoType        = model.ErrNoType
+	// ErrHierarchy is a type change the work hierarchy refuses (an epic sits
+	// at the top), in words.
+	ErrHierarchy = taskDomain.ErrHierarchy
 )
 
 // Seams for tests.
@@ -68,6 +78,9 @@ var (
 	setTaskType = model.SetTaskType
 	typedTasks  = model.TypedTasks
 	writeLine   = taskDomain.UpdateDgraphTaskClearing
+	factsFor    = model.FactsFor
+	placeOf     = taskDomain.PlaceOf
+	epicsIn     = model.Epics
 )
 
 func bad(format string, args ...any) error {
@@ -182,9 +195,6 @@ func Archive(ctx context.Context, projectID, typeID uuid.UUID) error {
 // values are type ids, and Task's stands for every plain task.
 const FilterID = "task_work_type"
 
-// matchesNothing is a clause no task meets.
-const matchesNothing = `eq(task_uuid, "00000000-0000-0000-0000-000000000000")`
-
 // FilterClause narrows a project's task list to the tasks of the given types.
 // The clause names typed tasks only, never the plain ones, so its size is
 // bounded by the project's typed work: with Task chosen it leaves out the
@@ -204,31 +214,25 @@ func FilterClause(ctx context.Context, projectID uuid.UUID, ids []string) (strin
 		}
 	}
 	if !plain && len(chosen) == 0 {
-		return matchesNothing, nil
+		return taskDomain.NoTask, nil
 	}
 	tasks, err := typedTasks(ctx, projectID, chosen, plain)
 	if err != nil {
 		return "", err
 	}
-	list, _ := json.Marshal(tasks)
-	switch {
-	case plain && len(tasks) == 0:
-		return "", nil
-	case plain:
-		return fmt.Sprintf(`NOT eq(task_uuid, %s)`, list), nil
-	case len(tasks) == 0:
-		return matchesNothing, nil
-	}
-	return fmt.Sprintf(`eq(task_uuid, %s)`, list), nil
+	return taskDomain.TasksClause(tasks, plain), nil
 }
 
-// Builtin says whether id is one of the six built-in types.
+// Builtins is the built-in types' ids in their position order, the one list
+// of them: task_keys_and_types (471) made the first six, task_type_epic (582)
+// Epic. A new built-in type is added here and nowhere else in Go.
+func Builtins() []uuid.UUID {
+	return []uuid.UUID{TypeTask, TypeBug, TypeFeature, TypeMilestone, TypeApproval, TypeRequest, TypeEpic}
+}
+
+// Builtin says whether id is one of the built-in types.
 func Builtin(id uuid.UUID) bool {
-	switch id {
-	case TypeTask, TypeBug, TypeFeature, TypeMilestone, TypeApproval, TypeRequest:
-		return true
-	}
-	return false
+	return slices.Contains(Builtins(), id)
 }
 
 // SetTaskType gives a task a type (nil: a Task), as by, and writes the change
@@ -242,6 +246,9 @@ func SetTaskType(ctx context.Context, task *dgraphStruct.DgraphTask, typeID *uui
 	}
 	if typeID != nil && *typeID == TypeTask {
 		typeID = nil
+	}
+	if err := mayRetype(ctx, taskID, typeID != nil && *typeID == TypeEpic); err != nil {
+		return nil, err
 	}
 	before, after, err := setTaskType(ctx, taskID, typeID)
 	if err != nil {
@@ -266,6 +273,47 @@ func SetTaskType(ctx context.Context, task *dgraphStruct.DgraphTask, typeID *uui
 		helpers.LogErrorWithContext(ctx, "business/WorkTaxonomy SetTaskType history err: %+v", err)
 	}
 	return after, nil
+}
+
+// mayRetype is nil when the task may become an epic (epic) or stop being
+// one, by the hierarchy's rule (domain/Task MayType): an epic sits at the
+// top, and stays one while its tasks hold sub-tasks or take dependencies. A
+// project holds at most MaxEpics. A change that keeps it an epic, or keeps it
+// not one, reads nothing more.
+func mayRetype(ctx context.Context, taskID uuid.UUID, epic bool) error {
+	facts, err := factsFor(ctx, []uuid.UUID{taskID})
+	if err != nil {
+		return err
+	}
+	f := facts[taskID]
+	if (f.Type != nil && f.Type.ID == TypeEpic) == epic {
+		return nil
+	}
+	place, err := placeOf(ctx, taskID.String())
+	if errors.Is(err, taskDomain.ErrHierarchyMissing) {
+		return model.ErrNoTask
+	}
+	if err != nil {
+		return err
+	}
+	if err := taskDomain.MayType(place, epic); err != nil {
+		return err
+	}
+	if !epic {
+		return nil
+	}
+	project, err := uuid.Parse(place.Project)
+	if err != nil {
+		return model.ErrNoTask
+	}
+	epics, err := epicsIn(ctx, []uuid.UUID{project})
+	if err != nil {
+		return err
+	}
+	if len(epics) >= MaxEpics {
+		return bad("A project holds at most %d epics.", MaxEpics)
+	}
+	return nil
 }
 
 func sameType(a, b *model.Type) bool {

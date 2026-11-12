@@ -29,7 +29,8 @@ var revokeSettles = []struct {
 	// A board unshared, made private, deleted.
 	{"business/Board/boardBusiness.go", "UpdateBoardPermissions", "SettleBoardSearch"},
 	{"business/Board/boardBusiness.go", "UpdateBoard", "SettleBoardSearch"},
-	{"business/Board/boardBusiness.go", "DeleteBoard", "settleBoardDelete"},
+	// DeleteBoard and DiscardBoard (a scratch board, CR-247 F2) both delete through deleteBoard.
+	{"business/Board/boardBusiness.go", "deleteBoard", "settleBoardDelete"},
 }
 
 func TestEveryRevocationSettlesSearchBeforeItReturns(t *testing.T) {

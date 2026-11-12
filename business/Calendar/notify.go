@@ -18,8 +18,9 @@ package Calendar
 //   - What only its organiser sees (its colour, show as, who may change it)
 //     tells nobody, and a bulk write (the demo's seeding) tells nobody at all.
 //
-// At chat A4's wiring this file is the calendar's one swap: business/Notify's
-// Plan takes these audiences, and its Deliver replaces Tell's push and email.
+// A notice's people go through business/Notify's Plan (A4 H1: a site's
+// audience, as before); at chat A4's wiring its Deliver replaces Tell's push
+// and email.
 
 import (
 	"context"
@@ -240,6 +241,11 @@ func (s *service) notice(ctx context.Context, actor *model.UserInfo, kind, ref s
 	if len(people) == 0 {
 		return
 	}
+	people, inboxOnly, err := planned(ctx, kind, me, people, inbox)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Calendar: a notice couldn't be planned: %v", err)
+		return
+	}
 	zones, err := s.zonesOf(ctx, people)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Calendar: zones for a notice couldn't be read, so UTC: %v", err)
@@ -279,7 +285,7 @@ func (s *service) notice(ctx context.Context, actor *model.UserInfo, kind, ref s
 		}
 		recipients := make([]notificationBusiness.NoticeRecipient, 0, len(ids))
 		for _, id := range ids {
-			recipients = append(recipients, notificationBusiness.NoticeRecipient{UserUUID: id.String(), Reason: "guest", InboxOnly: inbox})
+			recipients = append(recipients, notificationBusiness.NoticeRecipient{UserUUID: id.String(), Reason: "guest", InboxOnly: inboxOnly[id]})
 		}
 		title, body := noticeWords(kind, name, ev, was, t, loc)
 		actorUser := actor.UserDgraphInfo
@@ -290,6 +296,32 @@ func (s *service) notice(ctx context.Context, actor *model.UserInfo, kind, ref s
 			Push: &notificationBusiness.Push{Type: firebaseInit.FIREBASE_PUSH_DATA_TYPE_CALENDAR, ID: ref, Tag: "calendar:" + ref},
 		}, recipients)
 	}
+}
+
+// planned is people as business/Notify's router plans a notice of kind for
+// them (a site's audience: each once, never the actor), and who of them it
+// tells in the inbox alone: everyone when the organiser said not to send.
+// The router decides; Tell still sends, by each person's own rules.
+func planned(ctx context.Context, kind string, me uuid.UUID, people []uuid.UUID, inbox bool) ([]uuid.UUID, map[uuid.UUID]bool, error) {
+	audience := make([]string, len(people))
+	for i, id := range people {
+		audience[i] = id.String()
+	}
+	ds, err := notifyBusiness.Notices.Plan(ctx, notifyBusiness.Event{Cause: notifyBusiness.Cause(kind), Actor: me.String(), Audience: audience, Quiet: inbox})
+	if err != nil {
+		return nil, nil, err
+	}
+	out := make([]uuid.UUID, 0, len(ds))
+	inboxOnly := make(map[uuid.UUID]bool, len(ds))
+	for _, d := range ds {
+		id, err := uuid.Parse(d.UserID)
+		if err != nil {
+			continue
+		}
+		out = append(out, id)
+		inboxOnly[id] = !slices.Contains(d.To, notifyBusiness.ToPush)
+	}
+	return out, inboxOnly, nil
 }
 
 // uninvite tells people taken off an event that they were, never naming it:

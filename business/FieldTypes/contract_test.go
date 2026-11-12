@@ -16,14 +16,15 @@ func TestTodaysKindsAreRegistered(t *testing.T) {
 		got = append(got, k.ID)
 	}
 	want := []string{"text", "number", "select", "multi_select", "date", "checkbox", "person", "url", "email", "relation", "formula", "rollup",
-		"status", "people", "long_text", "phone", "duration", "rating", "autonumber", "created_time", "created_by", "modified_time", "modified_by", "attachment"}
+		"status", "people", "long_text", "phone", "duration", "rating", "autonumber", "created_time", "created_by", "modified_time", "modified_by", "attachment", "money"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("kinds %v, want %v", got, want)
 	}
 	fromRow := map[string]bool{"autonumber": true, "created_time": true, "created_by": true, "modified_time": true, "modified_by": true}
 	for _, id := range want {
 		k, ok := Kinds.Lookup(id)
-		if !ok || !Kinds.Valid(id) {
+		// Money is a task field's only (business/TaskField): no table's.
+		if !ok || Kinds.Valid(id) == (id == "money") {
 			t.Errorf("%s: registered %v, valid %v", id, ok, Kinds.Valid(id))
 		}
 		if stored := id != "formula" && id != "rollup" && !fromRow[id]; k.Stored != stored {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,7 +56,7 @@ func TestInsights(t *testing.T) {
 	}
 	spread := func(v ...float64) helpers.Spread { return helpers.SpreadOf(v) }
 
-	in := buildInsights(projects, nil, first, now, nil)
+	in := buildInsights(projects, insightIn{first: first, now: now})
 	if !reflect.DeepEqual(in.Cycle, spread(72, 216, 24)) || !reflect.DeepEqual(in.Lead, spread(240, 72, 360, 24)) {
 		t.Errorf("cycle %+v lead %+v", in.Cycle, in.Lead)
 	}
@@ -100,7 +101,11 @@ func TestInsights(t *testing.T) {
 		"type:t-bug":    {By: "type", Key: "t-bug", Name: "Bug", Cycle: spread(72, 216), Lead: spread(240, 360), Age: spread()},
 		"type:":         {By: "type", Cycle: spread(24), Lead: spread(72, 24), Age: spread(240, 24)},
 	} {
-		if !reflect.DeepEqual(slices[key], w) {
+		// The spreads as before; the counts and effort beside them are
+		// TestInsightsByEveryDim's.
+		got := slices[key]
+		got.Open, got.Overdue, got.Done, got.Effort = 0, 0, 0, InsightEffort{}
+		if !reflect.DeepEqual(got, w) {
 			t.Errorf("slice %s = %+v, want %+v", key, slices[key], w)
 		}
 	}
@@ -109,7 +114,7 @@ func TestInsights(t *testing.T) {
 	}
 
 	// Only the projects kept.
-	if only := buildInsights(projects, nil, first, now, map[string]bool{"p1": true}); only.Lead.N != 3 || len(only.Points) != 3 {
+	if only := buildInsights(projects, insightIn{first: first, now: now, only: map[string]bool{"p1": true}}); only.Lead.N != 3 || len(only.Points) != 3 {
 		t.Errorf("only p1: lead %+v, %d points", only.Lead, len(only.Points))
 	}
 }
@@ -126,7 +131,7 @@ func TestInsightPointsAreCapped(t *testing.T) {
 		closed = append(closed, &dgraphStruct.DgraphTask{Uuid: end.Format("02"), Name: end.Format("02"), CreatedAt: &made, Status: dgraphStruct.TASK_STATUS_DONE,
 			Activity: []*dgraphStruct.DgraphTaskActivity{{Type: dgraphStruct.ACTIVITY_TYPE_STATUS, LogTime: &end, PrevState: dgraphStruct.TASK_STATUS_TODO, NextState: dgraphStruct.TASK_STATUS_DONE}}})
 	}
-	in := buildInsights([]domain.ReportProject{{UUID: "p", Closed: closed}}, nil, time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC), nil)
+	in := buildInsights([]domain.ReportProject{{UUID: "p", Closed: closed}}, insightIn{first: time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC), now: time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)})
 	if in.Lead.N != 4 || len(in.Points) != 2 || in.Points[0].Name != "13" || in.Points[1].Name != "12" || !in.PointsCapped {
 		t.Errorf("lead %+v points %+v capped %v", in.Lead, in.Points, in.PointsCapped)
 	}
@@ -136,8 +141,8 @@ func TestInsightPointsAreCapped(t *testing.T) {
 // each task by its option or person, several for a multi-select, "" for none;
 // another project's tasks are in none of its slices; an option taken away
 // since makes no slice; a person not found is a former member; a done task's
-// point carries its keys; text fields slice nothing; and the fields stop at
-// the cap.
+// point carries its keys; a text field slices by its values (each kind is
+// TestInsightsByEveryFieldKind's); and the fields stop at the cap.
 func TestInsightsByCustomFields(t *testing.T) {
 	day := func(d int) *time.Time { x := time.Date(2026, 9, d, 12, 0, 0, 0, time.UTC); return &x }
 	p1, p2 := uuid.New(), uuid.New()
@@ -173,11 +178,11 @@ func TestInsightsByCustomFields(t *testing.T) {
 			Closed: []*dgraphStruct.DgraphTask{task("D", values(tf, `"ops"`, af, `["site","docs"]`), true)}},
 		{UUID: p2.String(), Name: "Other", Open: []*dgraphStruct.DgraphTask{task("E", values(tf, `"web"`), false)}},
 	}
-	dims, capped := fieldDims([]*taskFieldModel.Field{team, notes, areas, who}, map[string]string{"maya": "Maya"})
-	if len(dims) != 3 || capped {
-		t.Fatalf("%d dims (capped %v), want Team, Areas and Reviewer", len(dims), capped)
+	dims, capped := fieldDims(fieldAsk{fields: []*taskFieldModel.Field{team, notes, areas, who}, names: map[string]string{"maya": "Maya"}}, projects)
+	if len(dims) != 4 || capped {
+		t.Fatalf("%d dims (capped %v), want Team, Notes, Areas and Reviewer", len(dims), capped)
 	}
-	in := buildInsights(projects, nil, *day(7), *day(25), nil, dims...)
+	in := buildInsights(projects, insightIn{first: *day(7), now: *day(25), fields: dims})
 	got := map[string]string{}
 	for _, s := range in.Slices {
 		if len(s.By) > 6 && s.By[:6] == "field:" {
@@ -188,23 +193,34 @@ func TestInsightsByCustomFields(t *testing.T) {
 		tf + "/web": "Web age 1 done 0", tf + "/": " age 2 done 0", tf + "/ops": "Ops age 0 done 1",
 		af + "/docs": "Docs age 2 done 1", af + "/site": "Site age 1 done 1", af + "/": " age 1 done 0",
 		wf + "/maya": "Maya age 1 done 0", wf + "/left": "Former member age 1 done 0", wf + "/": " age 1 done 1",
+		notes.ID.String() + "/hi": "hi age 1 done 0", notes.ID.String() + "/": " age 2 done 1",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("field slices\n got %v\nwant %v", got, want)
 	}
 	wantFields := []InsightField{
 		{By: "field:" + tf, Name: "Team", Type: "select", Project: p1.String()},
+		{By: "field:" + notes.ID.String(), Name: "Notes", Type: "text", Project: p1.String()},
 		{By: "field:" + af, Name: "Areas", Type: "multi_select", Project: p1.String()},
 		{By: "field:" + wf, Name: "Reviewer", Type: "person", Project: p1.String()},
 	}
 	if !reflect.DeepEqual(in.Fields, wantFields) {
 		t.Errorf("fields %+v", in.Fields)
 	}
-	if len(in.Points) != 1 || !reflect.DeepEqual(in.Points[0].In, map[string][]string{"field:" + tf: {"ops"}, "field:" + af: {"site", "docs"}, "field:" + wf: {""}}) {
+	onlyFields := func(in map[string][]string) map[string][]string {
+		out := map[string][]string{}
+		for by, keys := range in {
+			if strings.HasPrefix(by, "field:") {
+				out[by] = keys
+			}
+		}
+		return out
+	}
+	if len(in.Points) != 1 || !reflect.DeepEqual(onlyFields(in.Points[0].In), map[string][]string{"field:" + tf: {"ops"}, "field:" + af: {"site", "docs"}, "field:" + wf: {""}, "field:" + notes.ID.String(): {""}}) {
 		t.Errorf("D's point: %+v", in.Points)
 	}
 	// Without fields, none: the report as before.
-	if plain := buildInsights(projects, nil, *day(7), *day(25), nil); len(plain.Fields) != 0 || plain.Fields == nil || plain.Points[0].In != nil {
+	if plain := buildInsights(projects, insightIn{first: *day(7), now: *day(25)}); len(plain.Fields) != 0 || plain.Fields == nil || len(onlyFields(plain.Points[0].In)) != 0 {
 		t.Errorf("no fields: %+v, point %+v", plain.Fields, plain.Points[0])
 	}
 	// The cap.
@@ -212,7 +228,7 @@ func TestInsightsByCustomFields(t *testing.T) {
 	for i := range many {
 		many[i] = &taskFieldModel.Field{ID: uuid.New(), ProjectID: p1, Type: taskFieldModel.TypeSelect}
 	}
-	if dims, capped := fieldDims(many, nil); len(dims) != insightFieldsCap || !capped {
+	if dims, capped := fieldDims(fieldAsk{fields: many}, nil); len(dims) != insightFieldsCap || !capped {
 		t.Errorf("%d fields: %d dims, capped %v", len(many), len(dims), capped)
 	}
 }

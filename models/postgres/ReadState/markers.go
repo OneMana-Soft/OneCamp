@@ -19,6 +19,7 @@ import (
 
 	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // Table is one kind's marker table and the rows it reads.
@@ -44,6 +45,19 @@ func (t Table) Unread() string {
 			AND m.created_at > lsc.user_last_seen
 			AND m.deleted_at IS NULL
 			AND m.created_by <> lsc.user_id`
+}
+
+// LastWrote is when who last wrote in each of conversations, by its key: the
+// time of their latest live row there, in one read. A conversation they
+// haven't written in has no entry.
+func LastWrote(ctx context.Context, t Table, who uuid.UUID, conversations []string) (map[string]time.Time, error) {
+	if len(conversations) == 0 {
+		return map[string]time.Time{}, nil
+	}
+	return pgexec.Pairs[string, time.Time](ctx, `SELECT m.`+t.RowKey+`::text, MAX(m.created_at)
+		FROM `+t.Rows+` m
+		WHERE m.created_by = $1::uuid AND m.deleted_at IS NULL AND m.`+t.RowKey+` = ANY($2::`+t.KeyOf+`[])
+		GROUP BY m.`+t.RowKey, who, pq.Array(conversations))
 }
 
 // ErrNoMessage is MarkUnreadFrom's answer for a message that isn't a live one

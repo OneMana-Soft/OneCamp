@@ -14,11 +14,12 @@ import (
 	"time"
 
 	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
-	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	postBusiness "github.com/akashc777/OneCamp/business/Post"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	pollModel "github.com/akashc777/OneCamp/models/postgres/Poll"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -135,10 +136,7 @@ func Create(ctx context.Context, user *userModels.UserInfo, in NewPoll) (*View, 
 	}
 	p := &pollModel.Poll{
 		ID: uuid.New(), ChannelID: channelID, Question: in.Question, Multiple: in.Multiple,
-		CreatedBy: user.UserPostgresInfo.Id,
-	}
-	for i, o := range in.Options {
-		p.Options = append(p.Options, pollModel.Option{ID: strconv.Itoa(i + 1), Text: o})
+		Options: optionsOf(in.Options), CreatedBy: user.UserPostgresInfo.Id,
 	}
 	if in.OpenHours > 0 {
 		t := time.Now().Add(time.Duration(in.OpenHours) * time.Hour)
@@ -164,6 +162,15 @@ func Create(ctx context.Context, user *userModels.UserInfo, in NewPoll) (*View, 
 	return view(p, &pollModel.Tally{Counts: map[string]int{}}, user.UserPostgresInfo.Id, true), nil
 }
 
+// optionsOf numbers a poll's options from 1, as a vote names them. Pure.
+func optionsOf(texts []string) []pollModel.Option {
+	out := make([]pollModel.Option, 0, len(texts))
+	for i, o := range texts {
+		out = append(out, pollModel.Option{ID: strconv.Itoa(i + 1), Text: o})
+	}
+	return out
+}
+
 // View is a poll as one reader sees it.
 type View struct {
 	ID        string       `json:"id"`
@@ -182,6 +189,9 @@ type View struct {
 	// its counts held back for whoever runs the call until shared.
 	Anonymous     bool `json:"anonymous,omitempty"`
 	ResultsHidden bool `json:"results_hidden,omitempty"`
+	// A board's poll's (board.go): the board and the frame it is on.
+	Board string `json:"board_uuid,omitempty"`
+	Frame string `json:"frame_id,omitempty"`
 }
 
 // OptionView is one option with its count.
@@ -211,6 +221,9 @@ func view(p *pollModel.Poll, t *pollModel.Tally, reader uuid.UUID, canClose bool
 	if p.PostID != nil {
 		v.PostID = p.PostID.String()
 	}
+	if p.BoardID != nil {
+		v.Board, v.Frame = p.BoardID.String(), p.FrameID
+	}
 	for _, o := range p.Options {
 		v.Options = append(v.Options, OptionView{ID: o.ID, Text: o.Text, Votes: t.Counts[o.ID]})
 	}
@@ -218,10 +231,13 @@ func view(p *pollModel.Poll, t *pollModel.Tally, reader uuid.UUID, canClose bool
 }
 
 // where is the place a poll lives in, as its reader may see it: a channel,
-// or a DM or group chat (conversation.go).
+// a DM or group chat (conversation.go), or a board (board.go), with whether
+// the reader may edit it.
 type where struct {
 	channel      *dgraphStruct.DgraphChannel
 	conversation string
+	board        string
+	editsBoard   bool
 }
 
 // topic is the id whose message topic tells open views the poll changed: a
@@ -246,6 +262,13 @@ func load(ctx context.Context, user *userModels.UserInfo, pollID string) (*pollM
 	if err != nil {
 		return nil, where{}, err
 	}
+	if p.BoardID != nil {
+		board, err := boardFor(ctx, p.BoardID.String(), user)
+		if err != nil {
+			return nil, where{}, err
+		}
+		return p, where{board: board.Uuid, editsBoard: boardBusiness.CanEdit(board, user.UserDgraphInfo.Uuid)}, nil
+	}
 	if inConversation(p) {
 		grp, err := conversationOf(ctx, p, user)
 		if err != nil {
@@ -260,8 +283,12 @@ func load(ctx context.Context, user *userModels.UserInfo, pollID string) (*pollM
 	return p, where{channel: ch}, nil
 }
 
-// canClose: the poll's author, or in a channel one of its admins.
+// canClose: on a board, who may edit it; elsewhere the poll's author, or in
+// a channel one of its admins.
 func canClose(p *pollModel.Poll, w where, user *userModels.UserInfo) bool {
+	if w.board != "" {
+		return w.editsBoard
+	}
 	return p.CreatedBy == user.UserPostgresInfo.Id || (w.channel != nil && w.channel.IsAdmin > 0)
 }
 
@@ -317,7 +344,7 @@ func Vote(ctx context.Context, user *userModels.UserInfo, pollID string, optionI
 	if err := pollModel.ReplaceVotes(ctx, p.ID, user.UserPostgresInfo.Id, choice); err != nil {
 		return nil, err
 	}
-	go mqttBusiness.PublishPollUpdate(w.topic(p), p.ID.String())
+	helpers.GoSafeNamed("business/Poll Vote tell", func() { w.tell(p, mqttStruct.TYPE_UPDATE) })
 	t, err := pollModel.Count(ctx, p.ID, user.UserPostgresInfo.Id)
 	if err != nil {
 		return nil, err
@@ -331,13 +358,16 @@ func Close(ctx context.Context, user *userModels.UserInfo, pollID string) (*View
 	if err != nil {
 		return nil, err
 	}
+	if !canClose(p, w, user) && w.board != "" {
+		return nil, ErrNotBoardEditor
+	}
 	if !canClose(p, w, user) {
 		return nil, InputError("only the person who made this poll, or a channel admin, can close it")
 	}
 	if err := pollModel.Close(ctx, p.ID); err != nil {
 		return nil, err
 	}
-	helpers.GoSafeNamed("mqttBusiness.PublishPollUpdate", func() { mqttBusiness.PublishPollUpdate(w.topic(p), p.ID.String()) })
+	helpers.GoSafeNamed("business/Poll Close tell", func() { w.tell(p, mqttStruct.TYPE_UPDATE) })
 	return Get(ctx, user, pollID)
 }
 

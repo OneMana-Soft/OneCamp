@@ -95,7 +95,8 @@ func TestEveryAssignAndAddPathAsksTheOneRule(t *testing.T) {
 // let in by whoever gave it, past its project or a restriction an admin set.
 // The paths through these functions ask (business/Task Unseeing,
 // UnseeingNew); the data moves below bring their people with them and are
-// named, each marked DataMove where it assigns, so a new path still has to ask.
+// named, each marked DataMove where it assigns (or QuietMove, a data move that
+// also tells nobody), so a new path still has to ask.
 func TestEveryAssignPathAsksWhoSeesTheTask(t *testing.T) {
 	for _, path := range []struct{ file, fn, why string }{
 		{"../../business/Task/taskBusiness.go", "CreateTask", "a new task could be given to someone outside its project (the app, a token, an agent, a rule)"},
@@ -114,9 +115,13 @@ func TestEveryAssignPathAsksWhoSeesTheTask(t *testing.T) {
 		{"../../business/Import/recheck.go", "", "an import's re-check puts back an assignee its source lets in"},
 		{"../../business/ProjectTemplate/apply.go", "", "a template's apply makes its tasks as the template has them"},
 	} {
-		if !callsAny(t, move.file, move.fn, "DataMove") {
-			t.Errorf("%s is a data move that keeps its assignees (%s) but no longer says so (DataMove)", move.file, move.why)
+		if !callsAny(t, move.file, move.fn, "DataMove", "QuietMove") {
+			t.Errorf("%s is a data move that keeps its assignees (%s) but no longer says so (DataMove or QuietMove)", move.file, move.why)
 		}
+	}
+	// QuietMove counts above only while it is a data move itself (V-748).
+	if !callsAny(t, "../../business/Task/statusGate.go", "QuietMove", "DataMove") {
+		t.Errorf("QuietMove no longer marks a data move (DataMove), so the moves that use it would hand tasks on unasked")
 	}
 }
 

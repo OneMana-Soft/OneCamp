@@ -14,8 +14,11 @@ package business
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
+	githubWebhookDeliveryDomain "github.com/akashc777/OneCamp/domain/GitHubWebhookDelivery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
 )
@@ -44,7 +47,30 @@ type Provider interface {
 	// issue's older comments (as the refresh route does unless asked), as by:
 	// what it changes it changes as them.
 	Refresh(ctx context.Context, taskID uuid.UUID, by *dgraphStruct.DgraphUser) error
+	// Verify lets a delivery to the provider's webhook in, once: its
+	// signature checks in constant time against the secrets the provider
+	// keeps (ErrUnsigned, before anything is recorded), it carries an id
+	// (ErrNoDelivery), and that id is claimed, so a replay of it is
+	// ErrReplayed and moves nothing twice.
+	Verify(ctx context.Context, header http.Header, body []byte) (Hook, error)
+	// Handle runs a delivery Verify let in and records how it went, done or
+	// failed (a panic included), so a failed one may be delivered again.
+	Handle(ctx context.Context, hook Hook) error
 }
+
+// Hook is a delivery Verify let in: its event, its id and its body.
+type Hook struct {
+	Event    string
+	Delivery string
+	Body     []byte
+}
+
+// What Verify refuses.
+var (
+	ErrUnsigned   = errors.New("git: the delivery isn't signed with a linked repository's secret")
+	ErrNoDelivery = errors.New("git: the delivery has no id")
+	ErrReplayed   = errors.New("git: that delivery was let in already")
+)
 
 // ErrNotBuilt is something a provider doesn't do yet.
 var ErrNotBuilt = errors.New("git: that isn't built yet")
@@ -60,6 +86,12 @@ var (
 	linkedRepos = githubBusiness.GetLinkedRepos
 	openPR      = githubBusiness.CreatePullRequestForTask
 	refresh     = githubBusiness.RefreshFromGitHub
+
+	verifySignature = githubBusiness.VerifyGitHubWebhookSignature
+	claimDelivery   = githubWebhookDeliveryDomain.ClaimGitHubWebhookDelivery
+	handleEvent     = githubBusiness.HandleGitHubWebhookEvent
+	deliveryDone    = githubWebhookDeliveryDomain.MarkGitHubWebhookDeliveryCompleted
+	deliveryFailed  = githubWebhookDeliveryDomain.MarkGitHubWebhookDeliveryFailed
 )
 
 type github struct{}
@@ -90,4 +122,45 @@ func (github) MakeBranch(context.Context, uuid.UUID, string) error { return ErrN
 
 func (github) Refresh(ctx context.Context, taskID uuid.UUID, by *dgraphStruct.DgraphUser) error {
 	return refresh(ctx, taskID, false, by)
+}
+
+// Verify checks GitHub's HMAC SHA-256 signature (X-Hub-Signature-256, with
+// hmac.Equal) against any linked repository's secret, then claims the
+// delivery's id (X-GitHub-Delivery).
+func (github) Verify(ctx context.Context, header http.Header, body []byte) (Hook, error) {
+	hook := Hook{Event: header.Get("X-GitHub-Event"), Delivery: header.Get("X-GitHub-Delivery"), Body: body}
+	sig := header.Get("X-Hub-Signature-256")
+	if sig == "" {
+		return Hook{}, ErrUnsigned
+	}
+	if ok, _ := verifySignature(ctx, body, sig, hook.Event); !ok {
+		return Hook{}, ErrUnsigned
+	}
+	if hook.Delivery == "" {
+		return Hook{}, ErrNoDelivery
+	}
+	fresh, err := claimDelivery(ctx, hook.Delivery, hook.Event)
+	if err != nil {
+		return Hook{}, fmt.Errorf("git: couldn't claim delivery %s: %w", hook.Delivery, err)
+	}
+	if !fresh {
+		return Hook{}, ErrReplayed
+	}
+	return hook, nil
+}
+
+func (github) Handle(ctx context.Context, hook Hook) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic: %v", rec)
+		}
+		// Recorded apart from ctx, so a run that ran out of time still is.
+		record := context.WithoutCancel(ctx)
+		if err != nil {
+			_ = deliveryFailed(record, hook.Delivery, err.Error())
+			return
+		}
+		_ = deliveryDone(record, hook.Delivery)
+	}()
+	return handleEvent(ctx, hook.Event, hook.Body)
 }

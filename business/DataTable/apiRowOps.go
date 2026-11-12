@@ -187,6 +187,8 @@ func serveRowsBatch(ctx context.Context, call v1api.Call) (any, error) {
 type apiDeleted struct {
 	ID      uuid.UUID `json:"id"`
 	Deleted bool      `json:"deleted"`
+	// DeletedBefore: a send of the same batch before this one deleted it.
+	DeletedBefore bool `json:"deleted_before,omitempty"`
 }
 
 func serveRowDelete(ctx context.Context, call v1api.Call) (any, error) {

@@ -39,6 +39,7 @@ func TestClassifyBotAndBotNameFollowTheEdition(t *testing.T) {
 			SlackBridgeBotEmail:             BotKindBridge,
 			CheckInBotEmail:                 BotKindCheckIn,
 			UpgradeRepairBotEmail:           BotKindRepair,
+			IntegrationBotEmail("github"):   BotKindIntegration,
 			"someone@example.com":           "",
 			"":                              "",
 			"unrecognised" + BotEmailDomain: BotKindUnknown,
@@ -79,5 +80,8 @@ func TestBotEmailConstructorsMatchTheClassifier(t *testing.T) {
 	id := uuid.New()
 	if want := AgentBotUsername(id) + BotEmailDomain; AgentBotEmail(id) != want {
 		t.Errorf("AgentBotEmail = %q, want %q", AgentBotEmail(id), want)
+	}
+	if want := IntegrationBotUsername("github") + BotEmailDomain; IntegrationBotEmail("github") != want {
+		t.Errorf("IntegrationBotEmail = %q, want %q", IntegrationBotEmail("github"), want)
 	}
 }

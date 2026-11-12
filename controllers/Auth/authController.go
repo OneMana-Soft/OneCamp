@@ -1328,7 +1328,8 @@ func HasPassword(w http.ResponseWriter, r *http.Request) {
 //	                "oidc": false, "saml": false, "ldap": false, "demo": false},
 //	  "email_configured": true,
 //	  "email_sender": "OneCamp <hello@example.com>",
-//	  "workspace_name": "Kestrel Studio"
+//	  "workspace_name": "Kestrel Studio",
+//	  "hosting": "self"
 //	}
 //
 // We expose only enable/disable, not credentials. Issuer URLs, tenant IDs,
@@ -1341,6 +1342,9 @@ func HasPassword(w http.ResponseWriter, r *http.Request) {
 // which have no session, as well as the app's own (design review PG1-01). A
 // self-hosted workspace renamed on its server reads its new name without a
 // rebuild of the web app.
+//
+// hosting is where the workspace runs (business/Settings Hosting: demo, cloud
+// or self), so the sign-in page's trust line is true of it (SHELL-05).
 func GetEnabledProviders(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status":           "success",
@@ -1348,6 +1352,7 @@ func GetEnabledProviders(w http.ResponseWriter, r *http.Request) {
 		"email_configured": emailService.IsEmailEnabled(),
 		"email_sender":     emailService.SenderAddress(),
 		"workspace_name":   settingsBusiness.WorkspaceName(),
+		"hosting":          settingsBusiness.Hosting(),
 	})
 }
 
@@ -1368,6 +1373,9 @@ func UpdateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		GoogleClientSecret *string `json:"google_client_secret,omitempty"`
 		GithubClientID     *string `json:"github_client_id,omitempty"`
 		GithubClientSecret *string `json:"github_client_secret,omitempty"`
+		// The Microsoft app for Outlook calendar sync (calendar B7).
+		MicrosoftClientID     *string `json:"microsoft_client_id,omitempty"`
+		MicrosoftClientSecret *string `json:"microsoft_client_secret,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		helpers.WriteBadRequest(w, "Failed to parse body")
@@ -1391,6 +1399,15 @@ func UpdateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		auditBusiness.Record(r, "auth.github_oauth", auditBusiness.CategoryAuth,
 			auditBusiness.SecretChangeSummary("GitHub sign-in credentials", body.GithubClientSecret), nil)
+	}
+	if body.MicrosoftClientID != nil || body.MicrosoftClientSecret != nil {
+		if err := oauth.SaveMicrosoftOAuthConfig(body.MicrosoftClientID, body.MicrosoftClientSecret); err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/UpdateOAuthConfig microsoft err: %+v", err)
+			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to save Microsoft credentials"})
+			return
+		}
+		auditBusiness.Record(r, "auth.microsoft_oauth", auditBusiness.CategoryAuth,
+			auditBusiness.SecretChangeSummary("Microsoft OAuth credentials", body.MicrosoftClientSecret), nil)
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": oauth.GetOAuthConfigStatus()})

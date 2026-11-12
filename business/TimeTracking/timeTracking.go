@@ -187,6 +187,22 @@ func (n Names) person(id uuid.UUID) string {
 	return "Former member"
 }
 
+// HiddenTask is how a report names the time on tasks the reader may not see.
+const HiddenTask = "A task you can't see"
+
+// Hide puts the time on each task hides says the reader may not see on one
+// line that names none of them (uuid.Nil, HiddenTask: no title, key or id,
+// nor how many there are), and leaves out the notes typed about them, in
+// place. A task's time is never on uuid.Nil otherwise. Pure.
+func (n Names) Hide(entries []timeModel.Entry, hides func(uuid.UUID) bool) {
+	for i := range entries {
+		if hides(entries[i].TaskUUID) {
+			entries[i].TaskUUID, entries[i].Note = uuid.Nil, ""
+			n.Tasks[uuid.Nil] = HiddenTask
+		}
+	}
+}
+
 func (n Names) task(id uuid.UUID) string {
 	if s := n.Tasks[id]; s != "" {
 		return s

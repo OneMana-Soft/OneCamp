@@ -58,7 +58,7 @@ func SetupOwnBroker(t *testing.T) *BrokerEnv {
 	}
 	mqttPort, apiPort := freeLoopbackPort(t), freeLoopbackPort(t)
 
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	c, err := StartContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "emqx/emqx:6.0.0",
 			ExposedPorts: []string{"1883/tcp", "18083/tcp"},

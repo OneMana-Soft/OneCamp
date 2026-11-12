@@ -83,9 +83,9 @@ func TouchTasks(ctx context.Context, ids []uuid.UUID, at time.Time) error {
 }
 
 // SetDgraphTasks writes tasks already in the graph (each by its uid), in one
-// mutation.
-func SetDgraphTasks(ctx context.Context, tasks []*dgraphStruct.DgraphTask) error {
-	if err := dgraphModels.SetDgraphTasks(ctx, tasks); err != nil {
+// request, taking each predicate in clear off them first.
+func SetDgraphTasks(ctx context.Context, tasks []*dgraphStruct.DgraphTask, clear ...string) error {
+	if err := dgraphModels.SetDgraphTasks(ctx, tasks, clear...); err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/SetDgraphTasks couldn't write %d tasks err: %+v", len(tasks), err)
 		return err
 	}

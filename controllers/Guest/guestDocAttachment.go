@@ -8,6 +8,7 @@ import (
 
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
+	pollBusiness "github.com/akashc777/OneCamp/business/Poll"
 	fileBusiness "github.com/akashc777/OneCamp/business/User"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	attachmentModels "github.com/akashc777/OneCamp/models/postgres/Attachment"
@@ -84,6 +85,26 @@ func guestAttachment(kind, srcKey, name string) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "private, no-store")
 		http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 	}
+}
+
+// GuestBoardPolls GET /guest/board-polls/{token}: a board's polls (miro-28
+// polls on a slide) as its link's guest reads them, or a call's guest the
+// board on the call's stage: each question and its tally, never whose a vote
+// is. Read only: a guest never votes. The page reads it again every few
+// seconds, as a guest page does; members hear the board's topic.
+func GuestBoardPolls(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	board, _, err := guestScope(ctx, chi.URLParam(r, "token"), guestModel.ResourceBoard)
+	if err != nil {
+		guestReadFailed(w, r, "GuestBoardPolls", err, "")
+		return
+	}
+	polls, err := pollBusiness.GuestBoardViews(ctx, board)
+	if err != nil {
+		guestReadFailed(w, r, "GuestBoardPolls", err, "")
+		return
+	}
+	writeGuestRead(w, map[string]any{"polls": polls})
 }
 
 // guestScope is the resource a guest's token opens now, and whether it is

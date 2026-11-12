@@ -44,3 +44,25 @@ var DemoSignInStays = notForDemoVisitor(helpers.DemoSignInMsg)
 // admin added carries their credential, so one visitor repointing it would
 // send that credential anywhere.
 var NoOutsideConnectionsInDemo = notForDemoVisitor(helpers.DemoOutsideMsg)
+
+// NoGitHubWritesInDemo refuses, on the public demo, a route that writes to
+// GitHub with the workspace's connection: creating a task's branch, opening
+// its pull request, sending its changes again. The demo holds a real GitHub
+// connection, an admin's token, and everyone who opens it shares it, so the
+// route is refused whoever asks, the demo's own team included. The connection
+// itself refuses any write that gets past (business/GitHub workspaceWrites);
+// this says so first, in plain words. On any other server it does nothing.
+func NoGitHubWritesInDemo(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if helpers.DemoMode() {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "demo", "msg": helpers.DemoGitHubMsg})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// NoDeviceTestsInDemo refuses the shared visitor "Send me a test": every
+// visitor's browser that turned push on is the visitor's device, so one
+// visitor's test would buzz the others'.
+var NoDeviceTestsInDemo = notForDemoVisitor(helpers.DemoDeviceTestMsg)

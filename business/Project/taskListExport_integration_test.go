@@ -217,8 +217,10 @@ func TestATaskListsCSV(t *testing.T) {
 		if !got.bom || got.total != 3 || got.rows != 3 || len(got.records) != 4 {
 			t.Fatalf("bom %v, total %d, rows %d, records %d", got.bom, got.total, got.rows, len(got.records))
 		}
+		// Budget is a money field: only the project's admins see it, so Maya, a
+		// member, gets no Budget column.
 		wantHeader := []string{"Key", "Title", "Type", "Status", "Priority", "Assignee", "Start date", "Due date", "Estimate (hours)", "Tags", "Parent", "Created", "Created by",
-			"Notes", "Score", "Budget (EUR)", "Launch", "Channel", "Areas", "Reviewer", "Signed off", "Site", "status (field)", "Description", "Link"}
+			"Notes", "Score", "Launch", "Channel", "Areas", "Reviewer", "Signed off", "Site", "status (field)", "Description", "Link"}
 		if !slices.Equal(got.records[0], wantHeader) {
 			t.Fatalf("header %q", got.records[0])
 		}
@@ -227,7 +229,7 @@ func TestATaskListsCSV(t *testing.T) {
 		}
 		row := got.records[3]
 		want := []string{"SF-1", "Write the launch post", "Milestone", "In progress", "High", "Maya Chen", "2026-11-02", "", "1.50", "launch, web", "", "2026-10-20 14:45", "Lee Park",
-			"'=1+1", "-3.5", "-2.50", "2026-11-20", "Email", "Web, App", "Maya Chen", "Yes", "https://fair.example/launch", "'=1+1", "Draft it\n\n- copy\n- ads"}
+			"'=1+1", "-3.5", "2026-11-20", "Email", "Web, App", "Maya Chen", "Yes", "https://fair.example/launch", "'=1+1", "Draft it\n\n- copy\n- ads"}
 		if !slices.Equal(row[:len(want)], want) {
 			t.Errorf("the launch post\n got %q\nwant %q", row[:len(want)], want)
 		}

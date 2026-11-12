@@ -14,6 +14,7 @@ import (
 	milestoneController "github.com/akashc777/OneCamp/controllers/Milestone"
 	projectLinkController "github.com/akashc777/OneCamp/controllers/ProjectLink"
 	projectPlanController "github.com/akashc777/OneCamp/controllers/ProjectPlan"
+	releaseController "github.com/akashc777/OneCamp/controllers/Release"
 	taskFieldController "github.com/akashc777/OneCamp/controllers/TaskField"
 	taskStatusController "github.com/akashc777/OneCamp/controllers/TaskStatus"
 	timeEntryController "github.com/akashc777/OneCamp/controllers/TimeEntry"
@@ -38,6 +39,7 @@ var kinds = map[softDelete.Kind]kind{
 	softDelete.Link:          projectLinkController.RestoreLink,
 	softDelete.ProjectStatus: projectPlanController.RestoreStatus,
 	softDelete.ProjectLabel:  projectPlanController.RestoreLabel,
+	softDelete.Release:       releaseController.RestoreRelease,
 }
 
 // Restore is POST /restore/{kind}/{id}.

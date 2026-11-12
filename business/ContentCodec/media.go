@@ -227,57 +227,34 @@ func readMediaBlock(dataType string, el *html.Node, foreign, assets bool) *Node 
 			n.setAttr(a[0], v)
 		}
 	}
-	if typ == "fileBlock" {
-		if s := n.attrString("src"); s != "" && !fileHref(s) && !(assets && importPath(s)) {
-			delete(n.Attrs, "src")
-		}
-		if foreign && n.attrString("src") == "" {
-			return nil
-		}
-	} else {
-		key := "src"
-		if typ == "bookmark" {
-			key = "href"
-		}
-		if !webHref(n.attrString(key)) {
-			return nil
-		}
-	}
-	for _, a := range []string{"icon", "image"} {
-		if _, has := n.Attrs[a]; has && (foreign || !fileHref(n.attrString(a))) {
-			delete(n.Attrs, a)
-		}
+	if !admitNode(n, foreign, assets) {
+		return nil
 	}
 	return n
 }
 
 // readLinkMention reads a link mention, or nil to read the element as a link.
 func readLinkMention(el *html.Node, foreign bool) *Node {
-	href := attrVal(el, "href")
-	if !webHref(href) {
-		return nil
-	}
 	n := newNode("linkMention")
-	n.setAttr("href", href)
+	n.setAttr("href", attrVal(el, "href"))
 	for _, a := range mentionAttrs {
-		if v := attrVal(el, a[1]); v != "" && !(a[0] == "icon" && (foreign || !fileHref(v))) {
+		if v := attrVal(el, a[1]); v != "" {
 			n.setAttr(a[0], v)
 		}
+	}
+	if !admitNode(n, foreign, false) {
+		return nil
 	}
 	return n
 }
 
-// readImageMedia reads an image's alignment, crop and link from its element,
-// when they are sound.
+// readImageMedia reads an image's alignment, crop and link from its element;
+// admitNode keeps those that are sound.
 func readImageMedia(el *html.Node, img *Node) {
-	if v := attrVal(el, "data-align"); v != "" && imageAligns[v] {
-		img.setAttr("align", v)
-	}
-	if v := attrVal(el, "data-crop"); v != "" && cropPattern.MatchString(v) {
-		img.setAttr("crop", v)
-	}
-	if v := attrVal(el, "data-href"); v != "" && webHref(v) {
-		img.setAttr("href", v)
+	for _, a := range imageMediaAttrs {
+		if v := attrVal(el, a[1]); v != "" {
+			img.setAttr(a[0], v)
+		}
 	}
 }
 

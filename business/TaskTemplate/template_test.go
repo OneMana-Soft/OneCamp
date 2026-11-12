@@ -263,3 +263,32 @@ func fieldsOf(m map[uuid.UUID]json.RawMessage) string {
 	b, _ := json.Marshal(m)
 	return string(b)
 }
+
+// A money value is set by the project's admins only (V-698): what anyone
+// else types in a money field is left off and named, and the template's own
+// value, an admin's, stands; an admin's typed value wins as any other.
+func TestOnlyAProjectAdminTypesAMoneyValue(t *testing.T) {
+	facts, size, _ := fitFacts()
+	budget := &taskFieldModel.Field{ID: uuid.New(), Name: "Budget", Type: taskFieldModel.TypeMoney}
+	cost := &taskFieldModel.Field{ID: uuid.New(), Name: "Cost", Type: taskFieldModel.TypeMoney}
+	facts.Fields = append(facts.Fields, budget, cost)
+	tpl := kept(t, Template{Name: "Spend", Shape: Shape{Task: projectTemplate.Task{Name: "Spend"},
+		Fields: map[string]json.RawMessage{budget.ID.String(): json.RawMessage(`5000`)}}})
+	typed := Typed{Fields: map[string]json.RawMessage{
+		budget.ID.String(): json.RawMessage(`99`), cost.ID.String(): json.RawMessage(`42`), size.ID.String(): json.RawMessage(`"M"`)}}
+	start := projectTemplate.Start{Day: time.Now().UTC(), Loc: time.UTC}
+
+	made := Fit(tpl, typed, facts, start)
+	if string(made.Task.Fields[budget.ID]) != `5000` || made.Task.Fields[cost.ID] != nil || string(made.Task.Fields[size.ID]) != `"M"` {
+		t.Errorf("a member's typed money: %s", fieldsOf(made.Task.Fields))
+	}
+	if len(made.LeftOff) != 2 || !strings.Contains(made.LeftOff[0], "Budget: only project admins can set money fields") || !strings.Contains(made.LeftOff[1], "Cost") {
+		t.Errorf("left off: %v", made.LeftOff)
+	}
+
+	facts.Money = true
+	made = Fit(tpl, typed, facts, start)
+	if string(made.Task.Fields[budget.ID]) != `99` || string(made.Task.Fields[cost.ID]) != `42` || len(made.LeftOff) != 0 {
+		t.Errorf("an admin's typed money: %s, left off %v", fieldsOf(made.Task.Fields), made.LeftOff)
+	}
+}

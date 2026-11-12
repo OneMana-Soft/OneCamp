@@ -478,6 +478,7 @@ func GetUnifiedActivity(ctx context.Context, userDgraphId string, beforeTime tim
 						board_uuid
 						board_title
 					}
+					comment_uuid
 					comment_text
 					comment_by {
 						user_uuid
@@ -493,6 +494,7 @@ func GetUnifiedActivity(ctx context.Context, userDgraphId string, beforeTime tim
 
 		commentInfo(func: uid($user_id)) {
 			comments: ~comment_on_content_added_by @filter(lt(comment_created_at, $time) AND not gt(comment_deleted_at, "1970-01-01T00:00:00Z") AND (has(comment_doc) OR has(comment_post) OR has(comment_chat) OR has(comment_task) OR has(comment_board)) AND NOT uid_in(comment_by, $user_id)) (orderdesc: comment_created_at, first: $limit){
+				comment_uuid
 				comment_text
 				comment_by {
 					user_uuid

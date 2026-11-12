@@ -180,3 +180,36 @@ func TestDeliveryTimeKeepsTheSchedule(t *testing.T) {
 		t.Errorf("inside the schedule: got %v %v, want now", got, deferred)
 	}
 }
+
+// A focus-time event set far in the future can't stall an email: the
+// schedule's next range after it is found at once. Its end is the person's
+// own (nothing caps it), and on 31 December 2040 Go's ZoneBounds gave the
+// year's end as the instant itself, where NextOpen never moved again. Past
+// 2037 every zone file leaves the years to the rule, so on any host's data.
+func TestDeliveryTimeAfterAFarFocusEnd(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	focusUntil := time.Date(2040, 12, 30, 18, 0, 0, 0, time.UTC) // Sunday, 20:00 in Kyiv
+	weekdays := []weekHours.Span{{Start: "09:00", End: "17:00"}}
+	p := &prefModels.UserNotificationPreference{
+		FocusUntil: &focusUntil,
+		Schedule:   &prefModels.Schedule{TZ: "Europe/Kyiv", Week: map[string][]weekHours.Span{"1": weekdays, "2": weekdays, "3": weekdays, "4": weekdays, "5": weekdays}},
+	}
+	type answer struct {
+		at       time.Time
+		deferred bool
+	}
+	done := make(chan answer, 1)
+	go func() {
+		at, deferred := deliveryTime(now, p)
+		done <- answer{at, deferred}
+	}()
+	select {
+	case a := <-done:
+		// Monday 31 December 2040, nine in Kyiv (UTC+2).
+		if want := time.Date(2040, 12, 31, 7, 0, 0, 0, time.UTC); !a.deferred || !a.at.Equal(want) {
+			t.Errorf("got %v %v, want %v", a.at, a.deferred, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("deliveryTime hasn't answered in 5 s")
+	}
+}

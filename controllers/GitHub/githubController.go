@@ -12,6 +12,7 @@ import (
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	business "github.com/akashc777/OneCamp/business/GitHub"
+	gitProviders "github.com/akashc777/OneCamp/business/GitProviders"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	githubWebhookDeliveryDomain "github.com/akashc777/OneCamp/domain/GitHubWebhookDelivery"
@@ -432,85 +433,53 @@ func HandleUpdateBranchFormat(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Branch format updated"})
 }
 
-// HandleGitHubWebhook processes incoming GitHub webhook events (public, signature-verified).
+// HandleGitHubWebhook processes incoming GitHub webhook events (public,
+// signature-verified, each delivery once).
 func HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	serveHook(w, r, gitProviders.GitHub)
+}
 
-	// Read body
+// serveHook lets a delivery to a provider's webhook in through the provider's
+// one verifier (its signature, then its id, claimed once) and handles it in
+// the background: 401 for a bad signature, 400 without an id, 200 for a
+// replay (handled already, or being handled), 500 when the claim can't be
+// recorded, so the provider delivers it again.
+func serveHook(w http.ResponseWriter, r *http.Request, name string) {
+	ctx := r.Context()
+	provider := gitProviders.Providers[name]
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20)) // 10MB limit
-	if err != nil {
+	if err != nil || provider == nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-
-	eventType := r.Header.Get("X-GitHub-Event")
-	deliveryId := r.Header.Get("X-GitHub-Delivery")
-
-	// Verify GitHub signature using per-link secrets with global fallback
-	signature := r.Header.Get("X-Hub-Signature-256")
-	if signature == "" {
-		helpers.LogErrorWithContext(ctx, "controllers/HandleGitHubWebhook Missing signature")
+	hook, err := provider.Verify(ctx, r.Header, body)
+	switch {
+	case errors.Is(err, gitProviders.ErrUnsigned):
+		helpers.LogErrorWithContext(ctx, "controllers/serveHook %s: a delivery without a valid signature", name)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
-	}
-
-	verified, _ := business.VerifyGitHubWebhookSignature(ctx, body, signature, eventType)
-	if !verified {
-		helpers.LogErrorWithContext(ctx, "controllers/HandleGitHubWebhook Invalid signature")
-		w.WriteHeader(http.StatusUnauthorized)
+	case errors.Is(err, gitProviders.ErrNoDelivery):
+		w.WriteHeader(http.StatusBadRequest)
 		return
-	}
-
-	helpers.MessageLogs.InfoLog.Printf("GitHub webhook: event=%s delivery=%s", eventType, deliveryId)
-
-	// Dedup + claim. Returns shouldProcess=true for new deliveries AND
-	// for previously-failed/still-processing rows that GitHub is
-	// retrying. Only 'completed' rows short-circuit, so transient
-	// failures get a real second chance instead of being silently
-	// swallowed by the dedup check.
-	shouldProcess, claimErr := githubWebhookDeliveryDomain.ClaimGitHubWebhookDelivery(ctx, deliveryId, eventType)
-	if claimErr != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/HandleGitHubWebhook Failed to claim delivery: %v", claimErr)
-		// Return 5xx so GitHub retries — the dedup row failure means
-		// we don't even know if we'll handle it. Better to ask GitHub
-		// to send it again.
+	case errors.Is(err, gitProviders.ErrReplayed):
+		helpers.MessageLogs.InfoLog.Printf("%s webhook: delivery let in already, skipped", name)
+		w.WriteHeader(http.StatusOK)
+		return
+	case err != nil:
+		helpers.LogErrorWithContext(ctx, "controllers/serveHook %s: %v", name, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if !shouldProcess {
-		helpers.MessageLogs.InfoLog.Printf("Skipping already-completed GitHub webhook delivery=%s", deliveryId)
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	// Process async with detached background context and panic recovery.
-	// We've already 200'd to GitHub so retries fire only on terminal
-	// failure (the goroutine will mark the row 'failed' and the next
-	// GitHub retry will re-claim it).
-	go func() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				helpers.LogErrorWithContext(ctx, "controllers/HandleGitHubWebhook Panic recovered in webhook goroutine: %v", rec)
-				_ = githubWebhookDeliveryDomain.MarkGitHubWebhookDeliveryFailed(
-					context.Background(), deliveryId, fmt.Sprintf("panic: %v", rec))
-			}
-		}()
-
+	helpers.MessageLogs.InfoLog.Printf("%s webhook: event=%s delivery=%s", name, hook.Event, hook.Delivery)
+	// Handled apart from the request, which is answered now; Handle records
+	// the outcome, so a failed delivery may be delivered again.
+	helpers.GoSafeNamed("serveHook."+name, func() {
 		procCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-
-		if err := business.HandleGitHubWebhookEvent(procCtx, eventType, body); err != nil {
-			helpers.LogErrorWithContext(procCtx, "controllers/HandleGitHubWebhook Failed to process event=%s err: %+v", eventType, err)
-			_ = githubWebhookDeliveryDomain.MarkGitHubWebhookDeliveryFailed(
-				context.Background(), deliveryId, err.Error())
-			return
+		if err := provider.Handle(procCtx, hook); err != nil {
+			helpers.LogErrorWithContext(procCtx, "controllers/serveHook %s: event=%s failed: %+v", name, hook.Event, err)
 		}
-		// Use a fresh background context for the success update so a
-		// cancelled procCtx doesn't leave the row in 'processing'.
-		_ = githubWebhookDeliveryDomain.MarkGitHubWebhookDeliveryCompleted(
-			context.Background(), deliveryId)
-	}()
-
+	})
 	w.WriteHeader(http.StatusOK)
 }
 

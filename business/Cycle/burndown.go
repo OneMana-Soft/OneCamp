@@ -42,7 +42,8 @@ type TaskProgress struct {
 	Points *float64
 }
 
-func progressOf(t *dgraphStruct.DgraphTask) TaskProgress {
+// ProgressOf is what burndown and velocity need of task t. Pure.
+func ProgressOf(t *dgraphStruct.DgraphTask) TaskProgress {
 	p := TaskProgress{Status: t.Status, Since: t.StatusSince, Points: t.EstimatePoints}
 	if t.EstimateMinutes != nil && *t.EstimateMinutes > 0 {
 		p.Hours, p.HasEstimate = float64(*t.EstimateMinutes)/60, true
@@ -50,11 +51,12 @@ func progressOf(t *dgraphStruct.DgraphTask) TaskProgress {
 	return p
 }
 
-// Burndown is a cycle's work by day, in the reader's zone. Scope and
-// Remaining run only up to today, or to the day the cycle was completed;
+// Burndown is a cycle's (or a release's) work by day, in the reader's zone.
+// Scope and Remaining run only up to today, or to the day it was completed;
 // Ideal is an even pace from the first day's scope to nothing by the end of
-// the last day. The hour series are null unless some task has an estimate,
-// and the point series unless the project estimates in points.
+// its last day (null when it has none: a release with no target day). The
+// hour series are null unless some task has an estimate, and the point
+// series unless the project estimates in points.
 type Burndown struct {
 	Days            []string  `json:"days"`
 	Scope           []int     `json:"scope"`
@@ -78,41 +80,99 @@ type Burndown struct {
 	Points    float64 `json:"points"`
 }
 
-func closedStatus(s string) bool { return !isOpen(s) }
+func closedStatus(s string) bool { return !IsOpen(s) }
 
 func round1(v float64) float64 { return math.Round(v*10) / 10 }
 
-// BuildBurndown counts a cycle's work by day. A task counts from the day it
-// joined (from the first day if it joined before the cycle began) and stops
-// being remaining the day it was finished or cancelled. A task the cycle left
-// unfinished when it was completed stays remaining to the end, whatever it
-// became later. Tasks not in tasks (archived) aren't counted. With a scale
-// (nil: the project estimates in hours) it counts points too. Pure.
+// Span is what a burndown counts over: the reader's days from StartsAt to
+// EndsAt, and what had happened by CompletedAt (when a cycle was completed or
+// a release went out), nil while it runs. With no EndsAt (a release with no
+// target day) the days run to today, or to the day it was completed, and
+// there is no ideal line. RunsOver lets the days run on past EndsAt to today,
+// or to the day it was completed (a release later than its target day), the
+// ideal line reaching nothing on EndsAt's day. MostDays bounds the days,
+// keeping the latest: a cycle's eight weeks when it is 0.
+type Span struct {
+	StartsAt    time.Time
+	EndsAt      *time.Time
+	CompletedAt *time.Time
+	RunsOver    bool
+	MostDays    int
+}
+
+// SpanMember is a task a span counts and when it joined. LeftUnfinished is
+// one the span left still to do when it was completed (a cycle's unfinished
+// task, carried on; a release's task moved on when it went out): it stays
+// remaining to the end, whatever it became later.
+type SpanMember struct {
+	TaskUUID       string
+	JoinedAt       time.Time
+	LeftUnfinished bool
+}
+
+// BuildBurndown counts a cycle's work by day: BurndownOf over the cycle's
+// span, a task it left unfinished when it was completed staying remaining to
+// the end. Pure.
 func BuildBurndown(c cycleModel.Cycle, members []cycleModel.Member, tasks map[string]TaskProgress, now time.Time, loc *time.Location, scale *estimateScale.Scale) Burndown {
-	b := Burndown{Days: []string{}, Scope: []int{}, Remaining: []int{}, Ideal: []float64{}}
-	// The reader's days the cycle touches, from the one it starts on to the
+	in := make([]SpanMember, len(members))
+	for i, m := range members {
+		in[i] = SpanMember{TaskUUID: m.TaskUUID, JoinedAt: m.AddedAt, LeftUnfinished: m.Unfinished}
+	}
+	ends := c.EndsAt
+	return BurndownOf(Span{StartsAt: c.StartsAt, EndsAt: &ends, CompletedAt: c.CompletedAt}, in, tasks, now, loc, scale)
+}
+
+// BurndownOf counts a span's work by day. A task counts from the day it
+// joined (from the first day if it joined before the span began) and stops
+// being remaining the day it was finished or cancelled. A task the span left
+// unfinished when it was completed stays remaining to the end, whatever it
+// became later. Tasks not in tasks (archived, or kept from the reader) aren't
+// counted. With a scale (nil: the project estimates in hours) it counts
+// points too. Pure.
+func BurndownOf(s Span, members []SpanMember, tasks map[string]TaskProgress, now time.Time, loc *time.Location, scale *estimateScale.Scale) Burndown {
+	b := Burndown{Days: []string{}, Scope: []int{}, Remaining: []int{}}
+	// What has happened so far: up to now, or to when it was completed.
+	until := now
+	if s.CompletedAt != nil && s.CompletedAt.Before(until) {
+		until = *s.CompletedAt
+	}
+	// The reader's days the span touches, from the one it starts on to the
 	// one it ends in: a reader zones away from whoever made it can see one
-	// more. Its end is its start plus whole days of 24 hours, which a clock
-	// change can move an hour into the next day; the hour taken off keeps that
-	// out. Days are counted on the calendar at noon, so a zone whose clocks
-	// change at midnight still names each day once.
-	y, m, d := c.StartsAt.In(loc).Date()
-	ly, lm, ld := c.EndsAt.Add(-time.Hour - time.Nanosecond).In(loc).Date()
-	last := time.Date(ly, lm, ld, 12, 0, 0, 0, loc)
+	// more. A cycle's end is its start plus whole days of 24 hours, which a
+	// clock change can move an hour into the next day; the hour taken off
+	// keeps that out. Days are counted on the calendar at noon, so a zone
+	// whose clocks change at midnight still names each day once.
+	y, m, d := s.StartsAt.In(loc).Date()
+	uy, um, ud := until.In(loc).Date()
+	last := time.Date(uy, um, ud, 12, 0, 0, 0, loc)
+	var end time.Time // the ideal line's last day
+	if s.EndsAt != nil {
+		ly, lm, ld := s.EndsAt.Add(-time.Hour - time.Nanosecond).In(loc).Date()
+		end = time.Date(ly, lm, ld, 12, 0, 0, 0, loc)
+		if !s.RunsOver || end.After(last) {
+			last = end
+		}
+	}
+	most := s.MostDays
+	if most < 1 {
+		most = maxDays
+	}
+	// Past most days, the latest: noons are whole days apart, give or take
+	// the hour a clock change moves.
+	skip := max(0, int(math.Round(last.Sub(time.Date(y, m, d, 12, 0, 0, 0, loc)).Hours()/24))+1-most)
 	var starts, ends []time.Time
-	for i := 0; i < maxDays; i++ {
+	idealDays := 0
+	for i := skip; i < skip+most; i++ {
 		noon := time.Date(y, m, d+i, 12, 0, 0, 0, loc)
-		if i > 0 && noon.After(last) {
+		if i > skip && noon.After(last) {
 			break
 		}
 		b.Days = append(b.Days, noon.Format(time.DateOnly))
 		starts = append(starts, helpers.DayStart(noon, loc))
 		ends = append(ends, helpers.DayStart(time.Date(y, m, d+i+1, 12, 0, 0, 0, loc), loc))
-	}
-	// What has happened so far: up to now, or to when the cycle was completed.
-	until := now
-	if c.CompletedAt != nil && c.CompletedAt.Before(until) {
-		until = *c.CompletedAt
+		if s.EndsAt != nil && !noon.After(end) {
+			idealDays++
+		}
 	}
 	known := 0
 	for i := range starts {
@@ -130,10 +190,10 @@ func BuildBurndown(c cycleModel.Cycle, members []cycleModel.Member, tasks map[st
 			continue
 		}
 		var closedAt *time.Time
-		if !m.Unfinished && closedStatus(t.Status) {
+		if !m.LeftUnfinished && closedStatus(t.Status) {
 			closedAt = t.Since
 			if closedAt == nil { // closed with no record of when: since it joined
-				closedAt = &m.AddedAt
+				closedAt = &m.JoinedAt
 			}
 		}
 		b.Tasks++
@@ -155,7 +215,7 @@ func BuildBurndown(c cycleModel.Cycle, members []cycleModel.Member, tasks map[st
 			b.Done++
 		}
 		for i := 0; i < known; i++ {
-			if !m.AddedAt.Before(ends[i]) {
+			if !m.JoinedAt.Before(ends[i]) {
 				continue
 			}
 			scope[i]++
@@ -170,19 +230,26 @@ func BuildBurndown(c cycleModel.Cycle, members []cycleModel.Member, tasks map[st
 	}
 	b.Scope, b.Remaining = scope, remaining
 	// The ideal paces what was in by the end of the first day (or, before the
-	// cycle starts, everything in it now) evenly down to nothing.
+	// span starts, everything in it now) evenly down to nothing by the end of
+	// its last day, and stays at nothing on any day after; none with no end.
 	from, fromH, fromP := float64(b.Tasks), totalH, totalP
 	if known > 0 {
 		from, fromH, fromP = float64(scope[0]), scopeH[0], scopeP[0]
 	}
-	b.Ideal = idealLine(from, len(b.Days))
+	ideal := func(start float64) []float64 {
+		if s.EndsAt == nil {
+			return nil
+		}
+		return append(idealLine(start, idealDays), make([]float64, len(b.Days)-idealDays)...)
+	}
+	b.Ideal = ideal(from)
 	b.Hours = round1(totalH)
 	if b.Estimated > 0 {
 		b.ScopeHours, b.RemainingHours = make([]float64, known), make([]float64, known)
 		for i := 0; i < known; i++ {
 			b.ScopeHours[i], b.RemainingHours[i] = round1(scopeH[i]), round1(remainingH[i])
 		}
-		b.IdealHours = idealLine(fromH, len(b.Days))
+		b.IdealHours = ideal(fromH)
 	}
 	if scale != nil {
 		b.Points = round1(totalP)
@@ -190,7 +257,7 @@ func BuildBurndown(c cycleModel.Cycle, members []cycleModel.Member, tasks map[st
 		for i := 0; i < known; i++ {
 			b.ScopePoints[i], b.RemainingPoints[i] = round1(scopeP[i]), round1(remainingP[i])
 		}
-		b.IdealPoints = idealLine(fromP, len(b.Days))
+		b.IdealPoints = ideal(fromP)
 	}
 	return b
 }
@@ -344,7 +411,7 @@ func GetBurndown(ctx context.Context, c *cycleModel.Cycle, now time.Time, loc *t
 	}
 	tasks := make(map[string]TaskProgress, len(found))
 	for _, t := range found {
-		tasks[t.Uuid] = progressOf(t)
+		tasks[t.Uuid] = ProgressOf(t)
 	}
 	// The cycle's progress, counted as the cycles list counts it.
 	var statuses []string

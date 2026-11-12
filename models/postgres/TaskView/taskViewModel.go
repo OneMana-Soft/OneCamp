@@ -134,3 +134,22 @@ func OwnersOf(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]Owner, error)
 	}
 	return out, nil
 }
+
+// LiveByID is each live view of ids, by its id, whoever's it is: callers read
+// only the views the access rules let them (business/Dashboard reads a
+// widget's view as its reader). A deleted view, and one that isn't there,
+// is left out.
+func LiveByID(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]TaskView, error) {
+	out := make(map[uuid.UUID]TaskView, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := pgexec.Query(ctx, `SELECT `+viewColumns+` FROM task_views WHERE id = ANY($1) AND `+softDelete.Live(""), scanView, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range rows {
+		out[v.Id] = v
+	}
+	return out, nil
+}

@@ -8,6 +8,7 @@ package business
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
@@ -48,6 +49,7 @@ var (
 	assigneeFor                                                                                 = assignee
 	makeTask                                                                                    = taskWriter.MakeTask
 	makeSubTasks                                                                                = taskWriter.MakeSubTasks
+	maySet                                                                                      = taskFieldBusiness.MaySet
 )
 
 // Make makes a task from t in a project as who, typed over, its days counted
@@ -59,6 +61,11 @@ func Make(ctx context.Context, who *userModels.UserInfo, project uuid.UUID, t Te
 	var err error
 	if facts.Fields, err = projectFields(ctx, project); err != nil {
 		return Result{}, err
+	}
+	// Whether the maker may set money: asked once, of the first money field
+	// (all of them are this project's).
+	if i := slices.IndexFunc(facts.Fields, func(f *taskFieldModel.Field) bool { return f.Type == taskFieldModel.TypeMoney }); i >= 0 && who != nil {
+		facts.Money = maySet(ctx, taskFieldBusiness.Reader{UUID: who.UserPostgresInfo.Id.String(), UID: who.UserDgraphInfo.Uid}, facts.Fields[i]) == nil
 	}
 	types, err := typesOf(ctx, project)
 	if err != nil {

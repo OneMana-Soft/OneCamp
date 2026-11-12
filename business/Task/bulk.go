@@ -77,8 +77,8 @@ var bulkSeams = struct {
 	read       func(ctx context.Context, ids []string, userUID string) ([]*dgraphStruct.DgraphTask, error)
 	check      func(ctx context.Context, who *model.UserInfo, ts []*dgraphStruct.DgraphTask, need workAccess.Need) map[string]error
 	touch      func(ctx context.Context, ids []uuid.UUID, at time.Time) error
-	write      func(ctx context.Context, ts []*dgraphStruct.DgraphTask) error
-	index      func(ts []*dgraphStruct.DgraphTask)
+	write      func(ctx context.Context, ts []*dgraphStruct.DgraphTask, clear ...string) error
+	index      func(ts []*dgraphStruct.DgraphTask, clear ...string)
 	githubSync func(ctx context.Context, taskID uuid.UUID, syncType string, payload map[string]interface{})
 	one        func(ctx context.Context, t *dgraphStruct.DgraphTask, change BulkChange, who *dgraphStruct.DgraphUser) error
 	visible    func(t *dgraphStruct.DgraphTask, userUID string) bool
@@ -127,7 +127,7 @@ func checkTasks(ctx context.Context, who *model.UserInfo, ts []*dgraphStruct.Dgr
 	return out
 }
 
-func indexTasks(ts []*dgraphStruct.DgraphTask) {
+func indexTasks(ts []*dgraphStruct.DgraphTask, clear ...string) {
 	docs := make([]*openSearchStruct.OpenSearchTask, 0, len(ts))
 	for _, t := range ts {
 		os := &openSearchStruct.OpenSearchTask{Uuid: t.Uuid, TaskPriority: t.Priority, TaskLabel: t.Label}
@@ -136,7 +136,7 @@ func indexTasks(ts []*dgraphStruct.DgraphTask) {
 		}
 		docs = append(docs, os)
 	}
-	domain.UpdateTasksInOpenSearch(docs)
+	domain.UpdateTasksInOpenSearch(docs, clear...)
 }
 
 // valid checks a change can be made at all, and words what can't.
@@ -340,10 +340,15 @@ func bulkFields(ctx context.Context, tasks []*dgraphStruct.DgraphTask, change Bu
 	if len(writes) == 0 {
 		return nil
 	}
+	// No priority takes each one's off (noPriority).
+	var clear []string
+	if change.Op == BulkPriority {
+		clear = noPriority(change.Value)
+	}
 	if err := bulkSeams.touch(ctx, ids, now); err != nil {
 		return err
 	}
-	if err := bulkSeams.write(ctx, writes); err != nil {
+	if err := bulkSeams.write(ctx, writes, clear...); err != nil {
 		return err
 	}
 	for _, w := range writes {
@@ -354,7 +359,7 @@ func bulkFields(ctx context.Context, tasks []*dgraphStruct.DgraphTask, change Bu
 	logChange(ctx, by, logged...)
 	// Search and GitHub follow, as for a single change, off the request.
 	index, githubSync := bulkSeams.index, bulkSeams.githubSync
-	helpers.GoSafeNamed("Task.Bulk:index", func() { index(writes) })
+	helpers.GoSafeNamed("Task.Bulk:index", func() { index(writes, clear...) })
 	for _, s := range tags {
 		helpers.GoSafeNamed("Task.Bulk:githubSync", func() {
 			githubSync(ctx, s.id, "label", map[string]interface{}{"label": s.to, "old_label": s.from})

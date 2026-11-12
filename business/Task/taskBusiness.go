@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -82,8 +83,10 @@ func CreateTaskComment(ctx context.Context, taskUUID uuid.UUID, rawTaskDgraph *d
 				Task: &dgraphStruct.DgraphTask{
 					Uid: "uid(ta)",
 				},
+				// Whom the comment is addressed to, as the live item and the
+				// push have it: the feed and the badge list it for them.
 				ContentAddedBy: &dgraphStruct.DgraphUser{
-					Uid: createdByUser.UserDgraphInfo.Uid,
+					Uid: addressedTo(rawTaskDgraph, createdByUser.UserDgraphInfo.Uid),
 				},
 				Attachments: createTaskCommentInfoInput.Attachments,
 				CreatedAt:   &currentTime,
@@ -130,7 +133,9 @@ func CreateTaskComment(ctx context.Context, taskUUID uuid.UUID, rawTaskDgraph *d
 		CommentCreatedAt: currentTime,
 	}
 
-	go publishTaskCommentActivity(createTaskCommentInfoInput.CommentBody, &currentTime, mentionsDgraphUsersList, commentUUID.String(), rawTaskDgraph, &createdByUser.UserDgraphInfo)
+	if !helpers.Quiet(ctx) { // a move of data tells nobody (QuietMove)
+		go publishTaskCommentActivity(createTaskCommentInfoInput.CommentBody, &currentTime, mentionsDgraphUsersList, commentUUID.String(), rawTaskDgraph, &createdByUser.UserDgraphInfo)
+	}
 
 	// Notify listeners (an AI teammate working this task can resume/continue on
 	// a human reply). Loop-safe: a worker posting an agent's own status comment
@@ -235,17 +240,23 @@ func publishTaskCommentActivity(commentBody string, currentTime *time.Time, ment
 // nobody. Pure.
 func commentRecipient(task *dgraphStruct.DgraphTask, commenterUUID string) string {
 	recipient := ""
-	switch {
-	case task == nil:
-	case task.Assignee != nil && task.Assignee.Uuid != "":
-		recipient = task.Assignee.Uuid
-	case task.CreatedBy != nil:
-		recipient = task.CreatedBy.Uuid
+	if to := businessComment.Addressee(task); to != nil {
+		recipient = to.Uuid
 	}
 	if recipient == commenterUUID {
 		return ""
 	}
 	return recipient
+}
+
+// addressedTo is the graph uid a new comment on task is owned by: its
+// Addressee's (business/Comment), or the writer's (writerUID) when the task read names no uid
+// for them. Pure.
+func addressedTo(task *dgraphStruct.DgraphTask, writerUID string) string {
+	if to := businessComment.Addressee(task); to != nil && to.Uid != "" {
+		return to.Uid
+	}
+	return writerUID
 }
 
 func UpdateTaskCommentBody(ctx context.Context, commentUUID uuid.UUID, createTaskCommentInfoInput *adapter.CreateOrUpdateTaskCommentInput, rawDgraphCommentInfo *dgraphStruct.DgraphComment, mentionsDgraphUsersList []*dgraphStruct.DgraphUser) (err error) {
@@ -278,11 +289,17 @@ func UpdateTaskCommentBody(ctx context.Context, commentUUID uuid.UUID, createTas
 		UpdatedAt: &currentTime,
 	}
 
+	// Who the comment named before this save: only whom it adds is told.
+	mentions, tellMentions := notificationBusiness.SaveOfMentions(ctx, "comment", commentUUID.String(), mentionsDgraphUsersList)
+
 	err = businessComment.UpdateComment(ctx, &dgraphComment, commentUUID, currentTime)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/UpdateTaskCommentBody Failed to update comment in dgraph err: %+v", err)
 		return
+	}
+	if tellMentions {
+		tellTaskMentionsAdded(ctx, notificationBusiness.ActorOf(ctx, rawDgraphCommentInfo.CommentBy.Uuid), rawDgraphCommentInfo.Task, commentUUID.String(), createTaskCommentInfoInput.CommentBody, mentions)
 	}
 
 	taskCommentMqttStruct := &mqttStruct.MqttTaskComment{
@@ -355,6 +372,13 @@ func ArchiveCommentByCommentUUID(ctx context.Context, commentUUID uuid.UUID, raw
 }
 
 func CreateSubTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.UserInfo, projectDgraphInfo *dgraphStruct.DgraphProject, assigneeDgraphInfo *dgraphStruct.DgraphUser, taskInfo adapter.CreateOrUpdateTaskInput) (dgraphTask *dgraphStruct.DgraphTask, err error) {
+	// Under an epic, or a task at the top or in one: never under a sub-task
+	// (the work hierarchy, domain/Task MayParent).
+	if len(projectDgraphInfo.Tasks) > 0 && projectDgraphInfo.Tasks[0] != nil {
+		if err = mayHoldNew(ctx, projectUUID.String(), projectDgraphInfo.Tasks[0].Uuid); err != nil {
+			return
+		}
+	}
 	// As a task (CreateTask): given only to someone who can be given work and
 	// who sees it (whoever sees its parent), with dates that are dates, before
 	// anything is written.
@@ -432,7 +456,7 @@ func CreateSubTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.U
 		CreatedBy: &dgraphStruct.DgraphUser{
 			Uid: userInfo.UserDgraphInfo.Uid,
 		},
-		Priority:  dgraphStruct.TASK_PRIORITY_MEDIUM,
+		Priority:  taskInfo.Priority,
 		Status:    dgraphStruct.TASK_STATUS_TODO,
 		CreatedAt: &currentTime,
 		UpdatedAt: &currentTime,
@@ -802,7 +826,9 @@ func CreateTaskAsked(ctx context.Context, projectUUID uuid.UUID, userInfo *model
 
 	/* AI call omitted in v1 */
 
-	go sendNewTaskNotification(taskInfo.TaskDescription, projectDgraphInfo.Uuid, taskInfo.TaskName, mentionsUsers, taskUUID.String(), userInfo.UserDgraphInfo, assigneeDgraphInfo)
+	if !helpers.Quiet(ctx) { // a move of data tells nobody (QuietMove)
+		go sendNewTaskNotification(taskInfo.TaskDescription, projectDgraphInfo.Uuid, taskInfo.TaskName, mentionsUsers, taskUUID.String(), userInfo.UserDgraphInfo, assigneeDgraphInfo)
+	}
 
 	if assigneeDgraphInfo != nil {
 		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), assigneeDgraphInfo.Uuid)
@@ -880,38 +906,22 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 	// read it now (newTaskHearers).
 	eligibleUserIDs := newTaskHearers(ctx, projectId, taskUUID, userDgraph.Uuid, mentionsUUIDList)
 
-	// 2. Publish MQTT Activity Events
-	// Filter eligibleUserIDs to find those who are also in mentionsUUIDList
+	// 2. Whom it mentions who hear of it: told in the inbox, by push and by
+	// email, once (task.mentioned). The graph's feed lists no mention in a
+	// task, so the live item alone left nothing after a reload (NOTIF-H3).
 	eligibleMentionsUserIDs := []string{}
-
 	for _, uid := range eligibleUserIDs {
 		if mentionsMap[uid] {
 			eligibleMentionsUserIDs = append(eligibleMentionsUserIDs, uid)
 		}
 	}
-
-	for _, recipientID := range eligibleMentionsUserIDs {
-
-		if recipientID == userDgraph.Uuid {
-			continue
-		}
-		activityItem := &dgraphModels.UnifiedActivityItem{
-			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION, // In channels, new posts are notifications for members
-			Time:         time.Now().UTC().Format(time.RFC3339Nano),
-			Mention: &dgraphStruct.DgraphMentions{
-				TaskUuid: taskUUID,
-				Task: &dgraphStruct.DgraphTask{
-					Uuid: taskUUID,
-					Name: taskName,
-					Project: &dgraphStruct.DgraphProject{
-						Uuid: projectId,
-					},
-				},
-
-				CreatedAt: helpers.TimePointer(time.Now()),
-			},
-		}
-		activityBusiness.PublishActivityToUser(recipientID, activityItem)
+	task := &dgraphStruct.DgraphTask{Uuid: taskUUID, Name: taskName, Project: &dgraphStruct.DgraphProject{Uuid: projectId}}
+	told := map[string]bool{}
+	for _, id := range notificationBusiness.TellMentionsAdded(ctx, taskMentionNotice(&userDgraph, task, "", body), notificationBusiness.MentionSave{
+		Kind: "task", ID: taskUUID, After: mentionsUUIDList,
+		Hear: func(context.Context, []string) ([]string, error) { return eligibleMentionsUserIDs, nil },
+	}) {
+		told[id] = true
 	}
 
 	// 3. The push, and the desktop app's notice, to those of them the push
@@ -919,9 +929,11 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 	// was given to, unless that is the person who made it: them too when
 	// nobody's setting tells anyone else of it, which used to tell nobody at
 	// all, nor email them.
+	// Nobody told of their mention is pushed of it twice.
 	if assigneeDrgraph != nil && assigneeDrgraph.Uuid != "" && assigneeDrgraph.Uuid != userDgraph.Uuid {
 		eligibleUserIDs = append(eligibleUserIDs, assigneeDrgraph.Uuid)
 	}
+	eligibleUserIDs = slices.DeleteFunc(eligibleUserIDs, func(id string) bool { return told[id] })
 
 	if len(eligibleUserIDs) > 0 {
 		pushData := make(map[string]string)
@@ -961,20 +973,26 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 // were pushed to people taken off its team. With no answer of either, nobody
 // hears of it by setting.
 func newTaskHearers(ctx context.Context, projectID, taskUUID, makerUUID string, mentioned []string) []string {
-	eligible, err := newTaskEligible(ctx, projectID, makerUUID, mentioned, false)
+	hearers, err := taskHearers(ctx, projectID, taskUUID, makerUUID, mentioned, false)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendNewTaskNotification Failed to get eligible users err: %+v",
-			err)
+		helpers.LogErrorWithContext(ctx, "business/sendNewTaskNotification could not read who hears of task %s, telling only whom it's given to: %+v", taskUUID, err)
 		return nil
 	}
-	if len(eligible) == 0 {
-		return nil
+	return hearers
+}
+
+// taskHearers is who of a project's people hears of something in its task by
+// their setting for the project, never the actor, of those who may read the
+// task now; with onlyMentioned, of the mentioned alone (a mention a save
+// adds, tellTaskMentionsAdded).
+func taskHearers(ctx context.Context, projectID, taskUUID, actorUUID string, mentioned []string, onlyMentioned bool) ([]string, error) {
+	eligible, err := newTaskEligible(ctx, projectID, actorUUID, mentioned, onlyMentioned)
+	if err != nil || len(eligible) == 0 {
+		return nil, err
 	}
 	readers, err := newTaskReaders(ctx, taskUUID, eligible)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/sendNewTaskNotification could not check who may read task %s, telling only whom it's given to: %+v", taskUUID, err)
-		return nil
+		return nil, err
 	}
 	hearers := make([]string, 0, len(eligible))
 	for _, id := range eligible {
@@ -982,7 +1000,7 @@ func newTaskHearers(ctx context.Context, projectID, taskUUID, makerUUID string, 
 			hearers = append(hearers, id)
 		}
 	}
-	return hearers
+	return hearers, nil
 }
 
 // Seams for tests: who hears of a new task by their setting, and who may read it.
@@ -1018,6 +1036,9 @@ func UpdateTaskDesByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskDesc s
 	currentTime := time.Now()
 	zeroUnixTime := time.Time{}
 	activityUUID := uuid.New()
+
+	// Who the description named before this save: only whom it adds is told.
+	mentions, tellMentions := notificationBusiness.SaveOfMentions(ctx, "task", taskUUID.String(), mentionUsers)
 
 	err = domain.UpdateTaskByTaskUUID(ctx, taskUUID, currentTime)
 
@@ -1063,6 +1084,9 @@ func UpdateTaskDesByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskDesc s
 		return
 	}
 	refsBusiness.Saved(ctx, refsBusiness.Task, taskUUID.String(), taskDesc, false)
+	if tellMentions {
+		tellTaskMentionsAdded(ctx, userInfo, dgraphTaskInfo, "", taskDesc, mentions)
+	}
 
 	taskOpenSearch := &openSearchStruct.OpenSearchTask{
 		Uuid:            dgraphTask.Uuid,
@@ -1158,6 +1182,12 @@ func UpdateTaskNameByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskName 
 	return
 }
 
+// UpdateTaskAssigneeByTaskUUID gives the task to newAssigneeDgraphInfo (nil
+// takes its assignee off), as userInfo. An issue given on GitHub is its
+// sender's act: one with no account here is provisioned as an external person
+// and named by their login. userInfo is nil only when no one can be named
+// (that provisioning failed): whom it's given to is told by no name
+// ("Someone") and the change is no one's.
 func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAssigneeDgraphInfo *dgraphStruct.DgraphUser, dgraphOldUserUID string, dgraphTaskUID string, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
 	// A deleted task stays deleted: these writes set its deletion time to the
 	// zero (live) value, so a late edit from an open tab, an agent or a sync
@@ -1215,19 +1245,24 @@ func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAs
 	}
 
 	// Email the new assignee, but only if it's an actual change (not a
-	// re-assign to the same person, and not the actor assigning to themselves).
-	if newAssigneeDgraphInfo != nil &&
+	// re-assign to the same person, and not the actor assigning to themselves),
+	// and never of a move of data (QuietMove).
+	if !helpers.Quiet(ctx) && newAssigneeDgraphInfo != nil &&
 		newAssigneeDgraphInfo.Uuid != "" &&
-		newAssigneeDgraphInfo.Uuid != userInfo.Uuid &&
+		newAssigneeDgraphInfo.Uuid != userUUIDOf(userInfo) &&
 		(dgraphTaskInfo.Assignee == nil || dgraphTaskInfo.Assignee.Uuid != newAssigneeDgraphInfo.Uuid) {
 		taskName := ""
 		if dgraphTaskInfo.Name != "" {
 			taskName = dgraphTaskInfo.Name
 		}
+		avatar := ""
+		if userInfo != nil {
+			avatar = userBusiness.GetSignedProfileURL(ctx, userInfo.ProfileKey)
+		}
 		notificationBusiness.DispatchTaskAssignment(
-			userInfo.Uuid,
+			userUUIDOf(userInfo),
 			userInfo.DisplayName(),
-			userBusiness.GetSignedProfileURL(ctx, userInfo.ProfileKey),
+			avatar,
 			taskUUID.String(),
 			taskName,
 			"",
@@ -1440,7 +1475,6 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 
 	currentTime := time.Now()
 	zeroUnixTime := time.Time{}
-	activityUUID := uuid.New()
 
 	err = domain.UpdateTaskByTaskUUID(ctx, taskUUID, currentTime)
 
@@ -1457,23 +1491,15 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 		}
 		return r.Category
 	}
+	change := StatusChange(userInfo.Uid, currentTime, activityState(prev), activityState(next))
 	dgraphTask := &dgraphStruct.DgraphTask{
 		Uid:         "uid(task)",
 		Uuid:        taskUUID.String(),
 		Status:      next.Category,
 		StatusSince: &currentTime,
-		Activity: []*dgraphStruct.DgraphTaskActivity{{
-			Uuid: activityUUID.String(),
-			Type: dgraphStruct.ACTIVITY_TYPE_STATUS,
-			CreatedBy: &dgraphStruct.DgraphUser{
-				Uid: userInfo.Uid,
-			},
-			LogTime:   &currentTime,
-			PrevState: activityState(prev),
-			NextState: activityState(next),
-		}},
-		UpdatedAt: &currentTime,
-		DeletedAt: &zeroUnixTime,
+		Activity:    []*dgraphStruct.DgraphTaskActivity{change},
+		UpdatedAt:   &currentTime,
+		DeletedAt:   &zeroUnixTime,
 	}
 	var clear []string
 	if next.CustomID != "" {
@@ -1521,10 +1547,12 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 	if dgraphTaskInfo.Project != nil {
 		projectName = dgraphTaskInfo.Project.Name
 	}
-	notificationBusiness.DispatchTaskStatusChange(userInfo.Uuid, userInfo.DisplayName(),
-		userBusiness.GetSignedProfileURL(ctx, userInfo.ProfileKey),
-		taskUUID.String(), dgraphTaskInfo.Name, projectName, prev.Display(), next.Display(),
-		activityUUID.String(), people)
+	if !helpers.Quiet(ctx) { // a move of data tells nobody (QuietMove)
+		notificationBusiness.DispatchTaskStatusChange(userInfo.Uuid, userInfo.DisplayName(),
+			userBusiness.GetSignedProfileURL(ctx, userInfo.ProfileKey),
+			taskUUID.String(), dgraphTaskInfo.Name, projectName, prev.Display(), next.Display(),
+			change.Uuid, people)
+	}
 
 	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "task.status_changed", map[string]interface{}{
 		"task_id":         taskUUID.String(),
@@ -1549,6 +1577,15 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 	}
 
 	return
+}
+
+// noPriority is what setting priority p takes off a task: its priority, for
+// none. The graph's predicate and search's field share the name.
+func noPriority(p string) []string {
+	if p == "" {
+		return []string{"task_priority"}
+	}
+	return nil
 }
 
 func UpdateTaskPriorityByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskPriority string, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
@@ -1588,7 +1625,10 @@ func UpdateTaskPriorityByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskP
 		DeletedAt: &zeroUnixTime,
 	}
 
-	_, err = domain.CreateOrUpdateDgraphTask(ctx, dgraphTask)
+	// No priority takes the value off, in the graph and in search: "" written
+	// over it would be left out of the write and keep the old one.
+	clear := noPriority(taskPriority)
+	err = domain.UpdateDgraphTaskClearing(ctx, dgraphTask, clear)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/UpdateTaskPriorityByTaskUUID failed to update task in dgraph err: %+v", err)
@@ -1601,7 +1641,9 @@ func UpdateTaskPriorityByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskP
 		TaskUpdatedAt: currentTime.Unix(),
 	}
 
-	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
+	helpers.GoSafeNamed("domain.UpdateTasksInOpenSearch", func() {
+		domain.UpdateTasksInOpenSearch([]*openSearchStruct.OpenSearchTask{taskOpenSearch}, clear...)
+	})
 	dispatchTaskChanged(ctx, dgraphTaskInfo, FieldPriority, dgraphTaskInfo.Priority, taskPriority, userInfo)
 	if dgraphTaskInfo.Priority != taskPriority {
 		logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectOf(dgraphTaskInfo),
@@ -1964,6 +2006,10 @@ func GetDgraphTaskInfo(ctx context.Context, teamUUID string, userDgraphUID strin
 	if err := workAccess.KeepSeenEnds(ctx, taskread.ReaderOf(ctx), userDgraphUID, dgraphTask); err != nil {
 		return nil, err
 	}
+	// Nor is any task they may not see named, by its history or by a stub.
+	if err := keepHistorySeen(ctx, userDgraphUID, dgraphTask); err != nil {
+		return nil, err
+	}
 	// Its key and type, and its sub-tasks', parent's and dependencies'.
 	taskKeys.Lay(ctx, dgraphTask)
 	return dgraphTask, nil
@@ -2074,7 +2120,9 @@ func GetDgraphTaskActivityList(ctx context.Context, taskUUID string, userDgraphU
 		helpers.LogErrorWithContext(ctx, "business/GetDgraphTaskActivityList failed to get task info from dgraph err: %+v", err)
 		return
 	}
-
+	if err = keepHistorySeen(ctx, userDgraphUID, dgraphTask); err != nil {
+		return nil, err
+	}
 	return
 }
 
@@ -2084,6 +2132,8 @@ func GetDgraphTaskActivityInfo(ctx context.Context, teamUUID string, activityUUI
 		helpers.LogErrorWithContext(ctx, "business/GetDgraphTaskActivityInfo failed to get task info from dgraph err: %+v", err)
 		return
 	}
-
+	if err = keepHistorySeen(ctx, userDgraphUID, dgraphTask); err != nil {
+		return nil, err
+	}
 	return
 }

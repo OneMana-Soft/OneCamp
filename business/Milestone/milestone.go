@@ -50,7 +50,6 @@ const (
 	// nameMost and descriptionMost are migration 935's column sizes.
 	nameMost        = 80
 	descriptionMost = 2000
-	dayLayout       = "2006-01-02"
 )
 
 // Input is a milestone's words and target day as a person sets them.
@@ -77,14 +76,11 @@ func (in Input) Clean() (Input, error) {
 	if strings.ContainsRune(out.Name+out.Description, 0) {
 		return out, &MilestoneError{"That text has a character a milestone can't keep."}
 	}
-	if in.TargetDate != nil && strings.TrimSpace(*in.TargetDate) != "" {
-		d, err := time.Parse(dayLayout, strings.TrimSpace(*in.TargetDate))
-		if err != nil || d.Year() < 1970 {
-			return out, &MilestoneError{"That target date couldn't be read."}
-		}
-		day := d.Format(dayLayout)
-		out.TargetDate = &day
+	day, ok := helpers.TargetDay(in.TargetDate)
+	if !ok {
+		return out, &MilestoneError{"That target date couldn't be read."}
 	}
+	out.TargetDate = day
 	return out, nil
 }
 

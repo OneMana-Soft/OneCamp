@@ -198,11 +198,11 @@ func SetGitHubBranchOnTaskByTaskID(ctx context.Context, query string, branchName
 	return exec(ctx, "SetGitHubBranchOnTaskByTaskID", query, branchName, taskUUID)
 }
 
-// FindTaskUUIDByGitHubBranch finds a task UUID by its linked GitHub branch in
-// a project linking the repository owner/name: query takes owner, name and
-// branch, in that order ("" for none).
-func FindTaskUUIDByGitHubBranch(ctx context.Context, query string, owner, name, branch string) (string, error) {
-	return scalarOrZero[string](ctx, query, owner, name, branch)
+// FindTaskUUIDsByGitHubBranch is the tasks carrying a GitHub branch in a
+// project linking the repository owner/name, as query orders them: query
+// takes owner, name and branch, in that order, and returns ids as text.
+func FindTaskUUIDsByGitHubBranch(ctx context.Context, query string, owner, name, branch string) ([]string, error) {
+	return pgexec.Query(ctx, query, pgexec.Text, owner, name, branch)
 }
 
 // UpdateTaskPRState updates the GitHub PR state fields on a task.

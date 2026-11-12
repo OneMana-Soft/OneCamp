@@ -20,12 +20,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	contentIOBusiness "github.com/akashc777/OneCamp/business/ContentIO"
 	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	formula "github.com/akashc777/OneCamp/business/Formula"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/currency"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -395,8 +397,8 @@ type columnGuess struct {
 	// the days written with a time.
 	formulas, failed, timed int
 	failure                 string
-	// currency counts a number's currency: "USD", "INR", "" for none, or
-	// "other" for a sign a column doesn't show.
+	// currency counts a number's currency: its ISO 4217 code, "" for none,
+	// or "other" for a sign that names no one currency.
 	currency map[string]int
 	values   []string
 	counts   map[string]int
@@ -731,16 +733,16 @@ func (c *columnGuess) notes(f ImportField) []ImportNote {
 }
 
 // numberFormat is a number column's format: a percent when every cell is
-// one, a currency the grid shows (rupees or dollars) when every cell has it,
-// else none.
+// one, a currency when every cell is in that one currency, else none.
 func (c *columnGuess) numberFormat() map[string]any {
-	switch {
-	case c.percents == c.filled:
+	if c.percents == c.filled {
 		return map[string]any{"format": map[string]any{"percent": true}}
-	case c.currency["USD"] == c.filled:
-		return map[string]any{"format": map[string]any{"currency": "USD"}}
-	case c.currency["INR"] == c.filled:
-		return map[string]any{"format": map[string]any{"currency": "INR"}}
+	}
+	// At most one currency is in every cell.
+	for code, n := range c.currency {
+		if n == c.filled && code != "" && code != "other" {
+			return map[string]any{"format": map[string]any{"currency": code}}
+		}
 	}
 	return nil
 }
@@ -768,8 +770,9 @@ func listParts(s string) []string {
 
 // readNumber reads s as a number written with signs: in full ("1,200.50"),
 // with a currency sign ("$12", "12 €"), or as a percent ("12.5%", which is
-// 12.5, as a percent column holds it). cur is "USD" for a dollar sign, "INR"
-// for a rupee sign, "" for none, "other" for any other. Pure.
+// 12.5, as a percent column holds it). cur is the currency its sign names
+// ("USD" for a dollar sign, "EUR" for a euro's), "" with no sign, "other"
+// for a sign that names no one currency. Pure.
 func readNumber(s string, signs formula.NumberSigns) (n float64, cur string, pct bool, ok bool) {
 	if t, found := strings.CutSuffix(s, "%"); found {
 		s, pct = strings.TrimSpace(t), true
@@ -777,20 +780,18 @@ func readNumber(s string, signs formula.NumberSigns) (n float64, cur string, pct
 	if n, ok = formula.ParseNumber(s, signs); !ok {
 		return 0, "", false, false
 	}
-	switch {
-	case strings.Contains(s, "$"):
-		cur = "USD"
-	case strings.Contains(s, "₹"):
-		cur = "INR"
-	case strings.IndexFunc(s, isCurrencySign) >= 0:
-		cur = "other"
+	if i := strings.IndexFunc(s, isCurrencySign); i >= 0 {
+		sign, _ := utf8.DecodeRuneInString(s[i:])
+		if cur = currency.OfSign(string(sign)); cur == "" {
+			cur = "other"
+		}
 	}
 	return n, cur, pct, true
 }
 
-func isCurrencySign(r rune) bool {
-	return r > 0x7f && strings.ContainsRune("€£¥₩₽₺₫₦₱₪₴₸฿", r)
-}
+// isCurrencySign reports whether r is a currency's sign, as a number may
+// be written with one (formula.ParseNumber).
+func isCurrencySign(r rune) bool { return unicode.Is(unicode.Sc, r) }
 
 // checkboxText reads a checkbox written as words or marks, as a checkbox
 // field takes it (fieldTypes.Truth), but for 1 and 0, which a column of

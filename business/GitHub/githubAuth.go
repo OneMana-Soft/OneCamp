@@ -232,6 +232,8 @@ func GitHubHTTPClient(ctx context.Context) (*http.Client, error) {
 	// is unsafe for a public-facing IDP API.
 	client := oauth2.NewClient(ctx, src)
 	client.Timeout = httpRequestTimeout
+	// The workspace's connection writes nothing on the demo.
+	client.Transport = workspaceWrites{base: client.Transport}
 	return client, nil
 }
 

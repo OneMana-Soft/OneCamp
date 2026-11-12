@@ -150,23 +150,28 @@ type Event struct {
 	SeriesID     string `json:"series_id,omitempty"`
 	RecurrenceID *When  `json:"recurrence_id,omitempty"`
 	// Recurrence is a series' rule, for the series and each instance.
-	Recurrence         *Recurrence `json:"recurrence,omitempty"`
-	Kind               EventKind   `json:"kind"`
-	Title              string      `json:"title"`
-	Notes              string      `json:"notes"`
-	NotesFormat        string      `json:"notes_format"`
-	Location           string      `json:"location"`
-	CallRoom           string      `json:"call_room,omitempty"`
-	Start              When        `json:"start"`
-	End                When        `json:"end"`
-	AllDay             bool        `json:"all_day"`
-	Transparency       string      `json:"transparency"`
-	Visibility         string      `json:"visibility"`
-	Hue                string      `json:"hue,omitempty"`
-	Status             string      `json:"status"`
-	GuestsCanModify    bool        `json:"guests_can_modify"`
-	GuestsCanInvite    bool        `json:"guests_can_invite"`
-	GuestsCanSeeGuests bool        `json:"guests_can_see_guests"`
+	Recurrence  *Recurrence `json:"recurrence,omitempty"`
+	Kind        EventKind   `json:"kind"`
+	Title       string      `json:"title"`
+	Notes       string      `json:"notes"`
+	NotesFormat string      `json:"notes_format"`
+	// Files are the OneCamp docs, boards and tasks it carries, by reference
+	// (eventFiles.go): read where its notes are, each only by a reader who
+	// may open it (nothing of the rest), and never with a title, which each
+	// reader's own chip read gives.
+	Files              []FileRef `json:"files"`
+	Location           string    `json:"location"`
+	CallRoom           string    `json:"call_room,omitempty"`
+	Start              When      `json:"start"`
+	End                When      `json:"end"`
+	AllDay             bool      `json:"all_day"`
+	Transparency       string    `json:"transparency"`
+	Visibility         string    `json:"visibility"`
+	Hue                string    `json:"hue,omitempty"`
+	Status             string    `json:"status"`
+	GuestsCanModify    bool      `json:"guests_can_modify"`
+	GuestsCanInvite    bool      `json:"guests_can_invite"`
+	GuestsCanSeeGuests bool      `json:"guests_can_see_guests"`
 	// EmailOnAnswers is the organiser's "Email me when guests answer",
 	// said to the organiser alone.
 	EmailOnAnswers bool                       `json:"email_on_answers,omitempty"`
@@ -178,10 +183,15 @@ type Event struct {
 	Booking        *dgraphStruct.EventBooking `json:"booking,omitempty"`
 	// Task is a task block's task: its uuid, and its name, where it stands
 	// and its project when the reader may read it.
-	Task      *dgraphStruct.EventTask `json:"task,omitempty"`
+	Task *dgraphStruct.EventTask `json:"task,omitempty"`
+	// Room is its call room (gcal-15 head B, eventRoom.go): where a member
+	// joins it; absent for an event without one and for a Busy block.
+	Room      *dgraphStruct.EventRoom `json:"room,omitempty"`
 	CreatedAt time.Time               `json:"created_at"`
 	UpdatedAt time.Time               `json:"updated_at"`
 	DeletedAt *time.Time              `json:"deleted_at,omitempty"`
+	// DeletedBy is who put it in the trash, when its row says so.
+	DeletedBy *Person `json:"deleted_by,omitempty"`
 	// OutOfOffice is an out-of-office event's decline rule, read by its
 	// owner alone (head 5b).
 	OutOfOffice *OOOView `json:"out_of_office,omitempty"`
@@ -237,6 +247,10 @@ type EventInput struct {
 	TaskUUID string `json:"task_uuid"`
 	// OutOfOffice is an out-of-office event's decline rule (head 5b).
 	OutOfOffice *OOOInput `json:"out_of_office"`
+	// Files are the OneCamp docs, boards and tasks it carries from the start
+	// (a duplicate's, or those the form picked before it was saved): each
+	// one the writer may open, at most maxEventFiles (eventFiles.go).
+	Files []FileRef `json:"files"`
 }
 
 // EventPatch is a change to an event (CAL2): a field left out stays as it
@@ -300,6 +314,9 @@ func (in AnswerInput) noteTooLong() bool {
 
 // inputError is an EventInputError, said in words.
 func inputError(msg string) error { return &EventInputError{msg} }
+
+// refusal is an EventRefusal, said in words.
+func refusal(msg string) error { return &EventRefusal{msg} }
 
 // checkText checks an event's words.
 func checkText(title, notes, location string) error {
@@ -457,9 +474,11 @@ func checkKindRules(e *models.Event) error {
 	default:
 		return inputError("An event's visibility is default, public or private.")
 	}
-	// One of the six camp hues (DESIGN_V3 §3.5), or none for its calendar's.
-	if e.Hue != "" && !helpers.IsCampHue(e.Hue) {
-		return inputError("That isn't one of the event colours.")
+	// One of the six camp hues (DESIGN_V3 §3.5), a colour of its own as
+	// "#rrggbb" in lower case (More colours; the web works out the text on
+	// it), or none for its calendar's.
+	if e.Hue != "" && !helpers.IsCampHue(e.Hue) && !helpers.IsHexColour(e.Hue) {
+		return inputError("An event's colour is one of the event colours, or a colour of its own like #1a73e8.")
 	}
 	return nil
 }

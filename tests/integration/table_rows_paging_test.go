@@ -92,7 +92,7 @@ func TestTableRowsPastOnePage(t *testing.T) {
 		}
 		before, _ := dataTableBusiness.GetBundle(w.ctx, tb.Id, me)
 		for _, r := range page {
-			if err := dataTableBusiness.DeleteRow(w.ctx, tb.Id, r.Id, me); err != nil {
+			if _, err := dataTableBusiness.DeleteRow(w.ctx, tb.Id, r.Id, me); err != nil {
 				t.Fatal(err)
 			}
 		}

@@ -109,7 +109,8 @@ func Apply(ctx context.Context, t Template, project *dgraphStruct.DgraphProject,
 		out.Statuses++
 	}
 	// A field that couldn't be made is left out; the tasks don't need it.
-	for _, f := range t.Fields {
+	// Each formula is made after the fields it reads (CreationOrder).
+	for _, f := range taskFieldBusiness.CreationOrder(t.Fields) {
 		if _, err := taskFieldBusiness.Create(ctx, projectID, f, userID, ""); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/ProjectTemplate/Apply field %q err: %+v", f.Name, err)
 			continue
@@ -121,35 +122,7 @@ func Apply(ctx context.Context, t Template, project *dgraphStruct.DgraphProject,
 	// each task, then its sub-tasks under it (the BE audit's #30: one
 	// statement, one graph write, one search write, not a whole CreateTask
 	// each).
-	var batch []taskBusiness.NewTask
-	for _, task := range t.Tasks {
-		in := taskAdapter.CreateOrUpdateTaskInput{
-			TaskName:        task.Name,
-			TaskDescription: task.Description,
-			ProjectUuid:     project.Uuid,
-			Status:          task.Status,
-			Priority:        task.Priority,
-			Label:           task.Tags,
-		}
-		if c := fallback[strings.ToLower(task.Status)]; c != "" {
-			in.Status = c
-		}
-		if task.StartDay != nil {
-			in.StartDate = start.At(*task.StartDay, startHour)
-		}
-		if task.DueDay != nil {
-			in.DueDate = start.At(*task.DueDay, dueHour)
-		}
-		parent := len(batch)
-		batch = append(batch, taskBusiness.NewTask{Input: in, Parent: -1})
-		for _, sub := range task.Subtasks {
-			sin := taskAdapter.CreateOrUpdateTaskInput{TaskName: sub.Name, ProjectUuid: project.Uuid}
-			if sub.DueDay != nil {
-				sin.DueDate = start.At(*sub.DueDay, dueHour)
-			}
-			batch = append(batch, taskBusiness.NewTask{Input: sin, Parent: parent})
-		}
-	}
+	batch := batchOf(t, project.Uuid, fallback, start)
 	var made []string
 	// An apply is a data move: the template's tasks start in its statuses (DataMove).
 	ids, err := taskBusiness.CreateTasks(taskBusiness.DataMove(ctx), projectID, user, project, batch)
@@ -168,6 +141,50 @@ func Apply(ctx context.Context, t Template, project *dgraphStruct.DgraphProject,
 		helpers.LogErrorWithContext(ctx, "business/ProjectTemplate/Apply order err: %+v", err)
 	}
 	return out
+}
+
+// batchOf is the template's tasks as one batch for business/Task CreateTasks,
+// in the order the template reads: each task, then its sub-tasks under it,
+// then, for an epic, each of its tasks with theirs;
+// fallback is the built-in status of a status that couldn't be made. Pure.
+func batchOf(t Template, projectUUID string, fallback map[string]string, start Start) []taskBusiness.NewTask {
+	var batch []taskBusiness.NewTask
+	var add func(task Task, parent int)
+	add = func(task Task, parent int) {
+		in := taskAdapter.CreateOrUpdateTaskInput{
+			TaskName:        task.Name,
+			TaskDescription: task.Description,
+			ProjectUuid:     projectUUID,
+			Status:          task.Status,
+			Priority:        task.Priority,
+			Label:           task.Tags,
+		}
+		if c := fallback[strings.ToLower(task.Status)]; c != "" {
+			in.Status = c
+		}
+		if task.StartDay != nil {
+			in.StartDate = start.At(*task.StartDay, startHour)
+		}
+		if task.DueDay != nil {
+			in.DueDate = start.At(*task.DueDay, dueHour)
+		}
+		at := len(batch)
+		batch = append(batch, taskBusiness.NewTask{Input: in, Parent: parent, Epic: task.Epic})
+		for _, sub := range task.Subtasks {
+			sin := taskAdapter.CreateOrUpdateTaskInput{TaskName: sub.Name, ProjectUuid: projectUUID}
+			if sub.DueDay != nil {
+				sin.DueDate = start.At(*sub.DueDay, dueHour)
+			}
+			batch = append(batch, taskBusiness.NewTask{Input: sin, Parent: at})
+		}
+		for _, inEpic := range task.Tasks {
+			add(inEpic, at)
+		}
+	}
+	for _, task := range t.Tasks {
+		add(task, -1)
+	}
+	return batch
 }
 
 // readingOrder dates tasks a millisecond apart, the first newest, so a

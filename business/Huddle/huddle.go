@@ -72,6 +72,13 @@ type Facts struct {
 	Came   []Face `json:"came,omitempty"`
 	People int    `json:"people,omitempty"`
 	Missed bool   `json:"missed,omitempty"`
+	// Declined is who said no to the call ringing them (slack-06 H2's
+	// decline), first declined first, at most FactsFaces, each named as they
+	// are when the call ends: the card reads "Declined by Maya".
+	Declined []Face `json:"declined,omitempty"`
+	// By is who started the call (slack-06 H2): its missed card offers the
+	// people it rang "Call back" and its starter "Call again".
+	By string `json:"by,omitempty"`
 }
 
 // Face is a member who came to a call, for its card.
@@ -94,6 +101,7 @@ var seams = struct {
 	publish      func(context.Context, string)
 	setPostFacts func(context.Context, string, string) error
 	setChatFacts func(context.Context, string, string) error
+	declined     func(context.Context, string) ([]Face, error)
 	postless     func(context.Context, time.Time, int, int) ([]string, error)
 	noteTry      func(context.Context, string, bool) error
 	now          func() time.Time
@@ -107,6 +115,7 @@ var seams = struct {
 	publish:      callStateBusiness.Publish,
 	setPostFacts: postDgraphModels.SetCallFactsByUUID,
 	setChatFacts: chatDgraphModels.SetCallFactsByUUID,
+	declined:     declinedFaces,
 	postless:     postlessHuddles,
 	noteTry:      notePostTry,
 	now:          time.Now,
@@ -189,7 +198,11 @@ func finish(ctx context.Context, s *callStateBusiness.Session) {
 	if s.PostUUID == "" || s.EndedAt == nil {
 		return
 	}
-	facts, _ := json.Marshal(endFacts(s))
+	declined, derr := seams.declined(ctx, s.ID)
+	if derr != nil {
+		helpers.LogErrorWithContext(ctx, "business/Huddle: call %s's declines (its card goes without them): %+v", s.ID, derr)
+	}
+	facts, _ := json.Marshal(endFacts(s, declined))
 	var err error
 	switch s.Resource.Kind {
 	case "channel":
@@ -204,10 +217,14 @@ func finish(ctx context.Context, s *callStateBusiness.Session) {
 
 // endFacts is an ended call's facts for its post: how long it ran, the
 // faces of the members who came (first joined first, at most FactsFaces),
-// how many came, guests too, and whether nobody but its starter was ever in
-// it. Pure.
-func endFacts(s *callStateBusiness.Session) Facts {
-	f := Facts{Session: s.ID, Started: s.StartedAt, Ended: s.EndedAt, Seconds: int(s.EndedAt.Sub(s.StartedAt).Seconds()), People: len(s.People)}
+// how many came, guests too, whether nobody but its starter was ever in it,
+// who declined it (at most FactsFaces of them), and who started it. Pure.
+func endFacts(s *callStateBusiness.Session, declined []Face) Facts {
+	f := Facts{Session: s.ID, Started: s.StartedAt, Ended: s.EndedAt, Seconds: int(s.EndedAt.Sub(s.StartedAt).Seconds()), People: len(s.People), By: s.StartedBy}
+	if len(declined) > FactsFaces {
+		declined = declined[:FactsFaces]
+	}
+	f.Declined = declined
 	others := 0
 	for _, p := range s.People {
 		if p.UserUUID != "" && len(f.Came) < FactsFaces {
@@ -219,6 +236,36 @@ func endFacts(s *callStateBusiness.Session) Facts {
 	}
 	f.Missed = len(s.People) > 0 && others == 0
 	return f
+}
+
+// declinedFaces is who declined a call (business/CallState Decline), first
+// declined first, at most FactsFaces, each named as people see them now:
+// one read of the declines and one of their names. Someone since deactivated
+// is left off.
+func declinedFaces(ctx context.Context, session string) ([]Face, error) {
+	id, err := uuid.Parse(session)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := callStateModel.Declines(ctx, id, FactsFaces)
+	if err != nil || len(ids) == 0 {
+		return nil, err
+	}
+	who := make([]string, len(ids))
+	for i, d := range ids {
+		who[i] = d.String()
+	}
+	names, err := userDomain.ResolveUserDisplays(ctx, who)
+	if err != nil {
+		return nil, err
+	}
+	faces := make([]Face, 0, len(who))
+	for _, d := range who {
+		if n, ok := names[d]; ok {
+			faces = append(faces, Face{UUID: d, Name: n.Display})
+		}
+	}
+	return faces, nil
 }
 
 // errNoStarter is a call whose starter can't be read as a person: it can't

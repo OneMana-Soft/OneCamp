@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -137,6 +138,16 @@ type Registry interface {
 	Register(a Adapter)
 	// For is the provider's adapter, if one is registered.
 	For(provider string) (Adapter, bool)
+	// TwoWay names the providers whose calendars sync both ways, in order:
+	// every adapter but a feed's that is only read (ReadsOnly), which is
+	// read by a sweep of its own.
+	TwoWay() []string
+}
+
+// ReadsOnly is an adapter of calendars that are only read, never written:
+// a published feed (calendar B8).
+type ReadsOnly interface {
+	ReadsOnly() bool
 }
 
 // Adapters is the registry everything asks.
@@ -164,4 +175,18 @@ func (r *registry) For(provider string) (Adapter, bool) {
 	defer r.mu.RUnlock()
 	a, ok := r.byProvider[provider]
 	return a, ok
+}
+
+func (r *registry) TwoWay() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []string
+	for name, a := range r.byProvider {
+		if ro, ok := a.(ReadsOnly); ok && ro.ReadsOnly() {
+			continue
+		}
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out
 }

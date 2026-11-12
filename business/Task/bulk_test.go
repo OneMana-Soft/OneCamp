@@ -53,12 +53,12 @@ func TestABulkChangeReadsChecksAndWritesOnceForTheLot(t *testing.T) {
 		}
 		return nil
 	}
-	bulkSeams.write = func(_ context.Context, ts []*dgraphStruct.DgraphTask) error {
+	bulkSeams.write = func(_ context.Context, ts []*dgraphStruct.DgraphTask, _ ...string) error {
 		graphWrites++
 		wrote = ts
 		return nil
 	}
-	bulkSeams.index = func([]*dgraphStruct.DgraphTask) {}
+	bulkSeams.index = func([]*dgraphStruct.DgraphTask, ...string) {}
 	bulkSeams.visible = func(t *dgraphStruct.DgraphTask, _ string) bool { return t.Uuid != outside.String() }
 	who := &model.UserInfo{UserDgraphInfo: dgraphStruct.DgraphUser{Uid: "0x9", Uuid: uuid.NewString()}}
 	res, err := Bulk(context.Background(), who, ids, BulkChange{Op: BulkPriority, Value: "high"})
@@ -89,6 +89,51 @@ func TestABulkChangeReadsChecksAndWritesOnceForTheLot(t *testing.T) {
 	res, _ = Bulk(context.Background(), who, ids[:1], BulkChange{Op: BulkPriority, Value: "high"})
 	if pgWrites != 0 || graphWrites != 0 || len(res.Unchanged) != 1 {
 		t.Fatalf("already urgent: %d %d %+v", pgWrites, graphWrites, res)
+	}
+}
+
+// UX-PROJECTS-H1-BE (PROJECTS-14): No priority for a selection takes each
+// task's priority off, in the graph and in search, in the batch's one write:
+// "" written over a priority is left out of the write and kept it.
+func TestBulkNoPriorityTakesEachPriorityOff(t *testing.T) {
+	live := time.Time{}
+	ids := []uuid.UUID{uuid.New(), uuid.New()}
+	old := bulkSeams
+	t.Cleanup(func() { bulkSeams = old })
+	bulkSeams.read = func(context.Context, []string, string) ([]*dgraphStruct.DgraphTask, error) {
+		return []*dgraphStruct.DgraphTask{{Uid: "0x1", Uuid: ids[0].String(), Priority: "high", DeletedAt: &live}, {Uid: "0x2", Uuid: ids[1].String(), DeletedAt: &live}}, nil
+	}
+	bulkSeams.check = func(context.Context, *model.UserInfo, []*dgraphStruct.DgraphTask, workAccess.Need) map[string]error {
+		return nil
+	}
+	bulkSeams.touch = func(context.Context, []uuid.UUID, time.Time) error { return nil }
+	bulkSeams.visible = func(*dgraphStruct.DgraphTask, string) bool { return true }
+	var wrote []*dgraphStruct.DgraphTask
+	var cleared, unindexed []string
+	bulkSeams.write = func(_ context.Context, ts []*dgraphStruct.DgraphTask, clear ...string) error {
+		wrote, cleared = ts, clear
+		return nil
+	}
+	indexed := make(chan struct{})
+	bulkSeams.index = func(_ []*dgraphStruct.DgraphTask, clear ...string) {
+		unindexed = clear
+		close(indexed)
+	}
+	who := &model.UserInfo{UserDgraphInfo: dgraphStruct.DgraphUser{Uid: "0x9"}}
+	res, err := Bulk(context.Background(), who, ids, BulkChange{Op: BulkPriority, Value: ""})
+	if err != nil || len(res.Changed) != 1 || len(res.Unchanged) != 1 {
+		t.Fatalf("%+v %v: the one with a priority changes, the one with none doesn't", res, err)
+	}
+	<-indexed
+	if len(wrote) != 1 || wrote[0].Uid != "0x1" || wrote[0].Activity[0].NextState != "" ||
+		len(cleared) != 1 || cleared[0] != "task_priority" || len(unindexed) != 1 || unindexed[0] != "task_priority" {
+		t.Fatalf("wrote %+v clearing %v, search clearing %v", wrote, cleared, unindexed)
+	}
+
+	// A priority set clears nothing.
+	bulkSeams.index = func([]*dgraphStruct.DgraphTask, ...string) {}
+	if _, err := Bulk(context.Background(), who, ids[1:], BulkChange{Op: BulkPriority, Value: "low"}); err != nil || len(cleared) != 0 {
+		t.Fatalf("low: clearing %v %v", cleared, err)
 	}
 }
 
@@ -125,8 +170,8 @@ func TestABulkTagChangeKeepsEachTasksOwnTags(t *testing.T) {
 	}
 	bulkSeams.touch = func(context.Context, []uuid.UUID, time.Time) error { return nil }
 	var wrote []*dgraphStruct.DgraphTask
-	bulkSeams.write = func(_ context.Context, ts []*dgraphStruct.DgraphTask) error { wrote = ts; return nil }
-	bulkSeams.index = func([]*dgraphStruct.DgraphTask) {}
+	bulkSeams.write = func(_ context.Context, ts []*dgraphStruct.DgraphTask, _ ...string) error { wrote = ts; return nil }
+	bulkSeams.index = func([]*dgraphStruct.DgraphTask, ...string) {}
 	bulkSeams.githubSync = func(context.Context, uuid.UUID, string, map[string]interface{}) {}
 	bulkSeams.visible = func(*dgraphStruct.DgraphTask, string) bool { return true }
 	who := &model.UserInfo{UserDgraphInfo: dgraphStruct.DgraphUser{Uid: "0x9"}}
@@ -186,8 +231,8 @@ func TestABulkPriorityOrLabelChangeIsLoggedOnceForTheBatch(t *testing.T) {
 		return nil
 	}
 	bulkSeams.touch = func(context.Context, []uuid.UUID, time.Time) error { return nil }
-	bulkSeams.write = func(context.Context, []*dgraphStruct.DgraphTask) error { return nil }
-	bulkSeams.index = func([]*dgraphStruct.DgraphTask) {}
+	bulkSeams.write = func(context.Context, []*dgraphStruct.DgraphTask, ...string) error { return nil }
+	bulkSeams.index = func([]*dgraphStruct.DgraphTask, ...string) {}
 	bulkSeams.githubSync = func(context.Context, uuid.UUID, string, map[string]interface{}) {}
 	bulkSeams.visible = func(*dgraphStruct.DgraphTask, string) bool { return true }
 	var logged [][]workFeed.TaskChange

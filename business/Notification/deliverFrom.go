@@ -23,15 +23,11 @@ var (
 	deliverThrough = DeliverThroughPause
 )
 
-// DeliverFrom is Deliver for words sender (a user id) wrote: those of
+// deliverFrom is Deliver for words sender (a user id) wrote: those of
 // recipients who have sender as a VIP are told through their pause, focus
-// time and quiet hours; the rest as Deliver tells them. If who has whom as a
-// VIP can't be read, everyone is told as Deliver tells them.
-func DeliverFrom(ctx context.Context, sender string, recipients []string, pushData map[string]string, noticeID string) {
-	deliverFrom(ctx, sender, recipients, pushData, noticeID, deliverNow)
-}
-
-// deliverFrom is DeliverFrom telling the rest by now.
+// time and quiet hours; the rest by now (Deliver). If who has whom as a VIP
+// can't be read, everyone is told by now. The chat sites' DeliverFrom went
+// with A4 H2: the router (business/Notify) holds or passes a VIP's words.
 func deliverFrom(ctx context.Context, sender string, recipients []string, pushData map[string]string, noticeID string,
 	now func(context.Context, []string, map[string]string, string)) {
 	if sender == "" {

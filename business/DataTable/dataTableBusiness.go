@@ -12,7 +12,6 @@
 package business
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1356,7 +1355,7 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	written := changedCells("{}", created.Values)
 	stored := *created // as written: what its AI columns read
 	withComputed(ctx, fields, []*model.Row{created})
-	broadcastRow(t.Id.String(), "created", created)
+	broadcastRow(t.Id.String(), "created", created, nil)
 	tellTables(ctx, linkedTables...)
 	announce(ctx, t, cs, hooksOnly)
 	// Continuous AI autofill: fill the new row's auto AI columns it wasn't
@@ -1462,7 +1461,8 @@ func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]i
 }
 
 // singleRowErr is what a write of one row says when it's refused: the row is
-// gone, too large, or why not.
+// gone or too large, or else the store didn't take it (storeFailed, the
+// server's to try again: a write Postgres refused for space, V-583).
 func singleRowErr(err error, otherwise string) error {
 	var re model.RowErrors
 	if errors.As(err, &re) && len(re) == 1 {
@@ -1474,7 +1474,7 @@ func singleRowErr(err error, otherwise string) error {
 	case errors.Is(err, sql.ErrNoRows):
 		return errRowNotFound
 	}
-	return fmt.Errorf("%s", otherwise)
+	return storeFailed(otherwise)
 }
 
 // rowUpdated is what follows a change to a row's cells (cs, its change set):
@@ -1488,7 +1488,7 @@ func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, 
 	// The row as written, before its cells are worked out for this reader.
 	stored := *r
 	withComputed(ctx, fields, []*model.Row{r})
-	broadcastRow(t.Id.String(), "updated", r)
+	broadcastRow(t.Id.String(), "updated", r, cs)
 	helpers.GoSafeNamed("AutofillRowOnWrite", func() { AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, changed, actor) })
 	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() {
 		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "table.row.updated", map[string]interface{}{
@@ -1502,23 +1502,25 @@ func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, 
 
 // DeleteRow soft-deletes a row (view/edit access) and broadcasts it: it goes
 // to the table's trash, with its cells and place, and its links kept in its
-// change set for a restore. A row that's gone is errRowNotFound.
-func DeleteRow(ctx context.Context, tableId, rowId uuid.UUID, actor Actor) error {
+// change set for a restore. It answers that change set, which an undo names
+// to take back this delete and no other (V-360), as every row write answers
+// its own (Written). A row that's gone is errRowNotFound.
+func DeleteRow(ctx context.Context, tableId, rowId uuid.UUID, actor Actor) (*uuid.UUID, error) {
 	t, err := loadEditable(ctx, tableId, actor)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeDelete)
 	done, err := model.ApplyBatch(ctx, tableId, actor.UserID, model.Batch{Delete: []uuid.UUID{rowId}}, nil, maxValuesBytes, maxLinks, keys, cs, observe)
 	if err != nil {
-		return singleRowErr(err, "failed to delete row")
+		return nil, singleRowErr(err, "failed to delete row")
 	}
 	mqttBusiness.PublishTableRow(t.Id.String(), map[string]interface{}{"action": "deleted", "row_id": rowId.String()})
 	announce(ctx, t, cs, hooksOnly)
 	if done.Linked {
 		helpers.GoSafeNamed("tellLinkedTables", func() { tellLinkedTables(context.WithoutCancel(ctx), tableId, rowId, true) })
 	}
-	return nil
+	return storedSet(cs), nil
 }
 
 // ListRows returns a page of rows for a table the actor may view.
@@ -1587,11 +1589,25 @@ func validateValues(values map[string]interface{}) (string, error) {
 // broadcastRow tells a table's live topic a row was created or updated, by
 // id: readers fetch it again, each as they may see it. The row itself isn't
 // sent, as its links to other tables were worked out for its writer.
-func broadcastRow(tableID, action string, r *model.Row) {
+func broadcastRow(tableID, action string, r *model.Row, cs *model.ChangeSet) {
 	if r == nil {
 		return
 	}
-	mqttBusiness.PublishTableRow(tableID, map[string]interface{}{"action": action, "row_id": r.Id.String()})
+	publishRow(tableID, rowMessage(action, r, cs))
+}
+
+// publishRow sends a row's live message: a seam, so a test hears it.
+var publishRow = mqttBusiness.PublishTableRow
+
+// rowMessage is broadcastRow's message for r, written in cs: an update
+// names the cells cs changed in it (cellsChanged), so an open view reads
+// those cells alone (tables L1). Ids only, never values. Pure.
+func rowMessage(action string, r *model.Row, cs *model.ChangeSet) map[string]interface{} {
+	msg := map[string]interface{}{"action": action, "row_id": r.Id.String()}
+	if f := cellsChanged(cs, r.Id); action == "updated" && len(f) > 0 {
+		msg["fields"] = f
+	}
+	return msg
 }
 
 // ───────────────────────── views ─────────────────────────
@@ -1752,34 +1768,3 @@ func AutofillRowOnWrite(ctx context.Context, t *model.DataTable, row *model.Row,
 // aiColumns is the ids of a table's AI columns, whose cells a person's write
 // marks as theirs: this edition has none.
 func aiColumns(fields []*model.Field) []string { return nil }
-
-// changedCells is the cells that differ between two rows' values (was, is):
-// added, changed or gone.
-func changedCells(was, is string) map[string]bool {
-	var before, after map[string]json.RawMessage
-	_ = json.Unmarshal([]byte(was), &before)
-	_ = json.Unmarshal([]byte(is), &after)
-	changed := map[string]bool{}
-	for id, v := range after {
-		if !bytes.Equal(compactJSON(before[id]), compactJSON(v)) {
-			changed[id] = true
-		}
-	}
-	for id := range before {
-		if _, kept := after[id]; !kept {
-			changed[id] = true
-		}
-	}
-	delete(changed, model.AIKeptKey)
-	return changed
-}
-
-// compactJSON is a JSON value without its insignificant spaces, so two
-// spellings of one value compare equal.
-func compactJSON(v json.RawMessage) []byte {
-	var b bytes.Buffer
-	if json.Compact(&b, v) != nil {
-		return v
-	}
-	return b.Bytes()
-}

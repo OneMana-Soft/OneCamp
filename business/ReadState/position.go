@@ -88,12 +88,15 @@ func (m markers) MarkUnread(ctx context.Context, who *userModels.UserInfo, ref c
 }
 
 // MovedEvent is the read.moved event's body: where the mover now is in one
-// conversation.
+// conversation, or (kind "inbox", with Seen) that they opened their Inbox.
 type MovedEvent struct {
 	Kind        string `json:"kind"`
-	ID          string `json:"id"`
+	ID          string `json:"id,omitempty"`
 	Unread      int    `json:"unread"`
 	FirstUnread string `json:"first_unread,omitempty"`
+	// Seen is when they opened their Inbox (kind "inbox"): its badge counts
+	// from then, and every tab and device reads it again.
+	Seen string `json:"seen,omitempty"`
 }
 
 // Moved tells who's own activity topic where they now are in ref: called

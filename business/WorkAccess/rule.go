@@ -39,6 +39,11 @@ func (s Standing) Can(n Need) bool {
 	return admin
 }
 
+// AddsTasks is whether someone with standing s may add tasks to the project
+// now: whoever may make a task there (NeedCreateTask), and never in an
+// archived one. New task's list and a template's use ask it. Pure.
+func (s Standing) AddsTasks() bool { return !s.Archived && s.Can(NeedCreateTask) }
+
 // CanOnTask is whether someone with standing s in a task's project, and facts f
 // about the task, may do n on it. Pure.
 //

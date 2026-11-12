@@ -8,9 +8,6 @@ import (
 	lastSeenActivityBusiness "github.com/akashc777/OneCamp/business/LastSeenActivity"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	domain "github.com/akashc777/OneCamp/domain/Activity"
-	lastSeenActivityDomain "github.com/akashc777/OneCamp/domain/LastSeenActivity"
-	lastSeenChannelDomain "github.com/akashc777/OneCamp/domain/LastSeenChannel"
-	lastSeenChatDomain "github.com/akashc777/OneCamp/domain/LastSeenChat"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -104,46 +101,58 @@ func GetReactionsByUserId(ctx context.Context, userDgraphId string, userUUID str
 	return
 }
 
-// GetUnifiedActivity is a page of the person's feed before beforeTime, newest
-// first, scored for triage. Reading it marks nothing seen: Home reads it too,
-// and opening the app cleared the Inbox badge, unseen replies and reactions
-// included. The Inbox marks the feed seen by asking (MarkActivitySeen).
-func GetUnifiedActivity(ctx context.Context, userUUID uuid.UUID, userDgraphId string, beforeTime time.Time, limit int) (dgraphActivities dgraphModels.UnifiedActivityPagination, err error) {
+// FeedQuery is a read of a page of the person's feed.
+type FeedQuery struct {
+	User     uuid.UUID
+	DgraphID string
+	// Before is the page's cursor: the time of the last item of the page
+	// before it, or now.
+	Before time.Time
+	Limit  int
+	// Notices: the app draws notices ("NOTICE" items), as the Inbox does.
+	Notices bool
+}
 
-	dgraphActivities, err = feedPage(ctx, userUUID, userDgraphId, beforeTime, limit)
+// GetUnifiedActivity is a page of the person's feed before q.Before, newest
+// first, with their notices when the app draws them, scored for triage, each
+// item marked Unread as the Inbox badge counts it (unreadInInbox), so the Inbox
+// draws its dots on exactly what the badge counted. Reading it marks nothing
+// seen: Home reads it too, and opening the app cleared the Inbox badge, unseen
+// replies and reactions included. The Inbox marks the feed seen by asking
+// (MarkActivitySeen).
+func GetUnifiedActivity(ctx context.Context, q FeedQuery) (page dgraphModels.UnifiedActivityPagination, err error) {
+	page, err = pageOf(ctx, q.User, q.DgraphID, q.Before, q.Limit)
 	if err != nil {
 		return
 	}
-
-	// Demote items the user has ALREADY engaged with (opened the
-	// conversation since the mention/comment) so the Priority view reflects
-	// "what still needs me", not "what ever needed me". Read-state is the
-	// signal; two batched last-seen reads keep this cheap. Best-effort: a
-	// read failure simply leaves priorities as content-scored.
-	//
-	// Skip the two reads entirely when there's nothing demotable (e.g. a
-	// reaction-only page) so a quiet feed costs zero extra queries.
-	if hasDemotableActivity(dgraphActivities.Activities) {
-		if chSeen, csErr := lastSeenChannelDomain.GetAllLastSeenChannelsForUser(ctx, userUUID); csErr == nil {
-			grpSeen, _ := lastSeenChatDomain.GetAllLastSeenChatsForUser(ctx, userUUID)
-			demoteSeenActivities(dgraphActivities.Activities, chSeen, grpSeen)
-		} else {
-			helpers.LogErrorWithContext(ctx, "GetUnifiedActivity: last-seen read for triage failed: %v", csErr)
-		}
+	if q.Notices {
+		page = WithNotices(ctx, page, q.User.String(), q.Before, q.Limit)
+	}
+	if page.Activities == nil {
+		page.Activities = []dgraphModels.UnifiedActivityItem{}
 	}
 
-	// Safety check: if slice is nil, return empty slice
-	if dgraphActivities.Activities == nil {
-		dgraphActivities.Activities = []dgraphModels.UnifiedActivityItem{}
+	// Priority is "what still needs me": what asked the person something and
+	// they have since answered drops to low (demoteAnswered), by what they
+	// wrote and decided, read once for the page. Best-effort: a read failure
+	// leaves priorities as scored. The dots go by what they have read.
+	demoteAnswered(page.Activities, readAnswers(ctx, q.User, q.DgraphID, page.Activities))
+	l, lerr := readLooks(ctx, q.User, page.Activities)
+	if lerr != nil {
+		// No dots rather than a guess: the badge, which reads the same last
+		// look, isn't counted either.
+		helpers.LogErrorWithContext(ctx, "business/GetUnifiedActivity: %s's last look couldn't be read, so nothing is marked unread: %+v", q.User, lerr)
+		return
 	}
-
+	markUnread(page.Activities, l)
 	return
 }
 
 // feedPage is a page of the person's feed before beforeTime, newest first:
 // the feed's query and its model's filters, cut to limit, then kept to what
-// they may read now (readable.go). The feed and the Inbox badge both count
-// from it, so the badge never counts what the feed won't show.
+// they may read now (readable.go), less the mentions told by a notice
+// (dropToldMentions). The feed and the Inbox badge both count from it, so the
+// badge never counts what the feed won't show.
 func feedPage(ctx context.Context, userUUID uuid.UUID, userDgraphId string, beforeTime time.Time, limit int) (page dgraphModels.UnifiedActivityPagination, err error) {
 	mentions, comments, reactions, err := domain.GetUnifiedActivity(ctx, userDgraphId, beforeTime, limit)
 	if err != nil {
@@ -167,6 +176,7 @@ func feedPage(ctx context.Context, userUUID uuid.UUID, userDgraphId string, befo
 	// leaving an item out makes a page short, never the last. The person's
 	// graph uuid is their account id.
 	page.Activities = keepReadable(ctx, userUUID.String(), page.Activities, itemAbout)
+	page.Activities = dropToldMentions(ctx, userUUID.String(), page.Activities)
 	return
 }
 
@@ -174,38 +184,73 @@ func feedPage(ctx context.Context, userUUID uuid.UUID, userDgraphId string, befo
 // "99+".
 const unreadActivityCap = 100
 
-// UnreadActivityCount is the Inbox badge: how many items of the person's feed
-// are newer than when they last marked it seen, up to unreadActivityCap. It
-// counts the feed itself (feedPage), so whatever the feed leaves out (deleted
-// messages, channels and conversations they aren't in, docs and boards they
-// can't read, their own doings) the badge leaves out too. It counted the
-// stored mentions, comments and reactions with none of those filters, so a
-// mention in a private channel they weren't in, or in a message since
-// deleted, raised a badge over an Inbox with nothing new in it.
+// UnreadActivityCount is the Inbox badge: how many items of the Inbox's
+// default view (the feed with its notices) are unread by unreadInInbox, the
+// rule the feed marks its items by, up to unreadActivityCap. It counts the
+// feed itself (feedPage), so whatever the feed leaves out (deleted messages,
+// channels and conversations they aren't in, docs and boards they can't read,
+// their own doings) the badge leaves out too. It counted the stored mentions,
+// comments and reactions with none of those filters, so a mention in a
+// private channel they weren't in, or in a message since deleted, raised a
+// badge over an Inbox with nothing new in it; and then the feed without its
+// notices, which the Inbox lists (C4), and by the last look alone, so a
+// mention read in its channel still counted (C7).
+//
+// The person's urgent OneCamp AI nudges count by the same rule (UrgentNudges):
+// one raised since the last look is unread, and opening the Inbox clears it
+// like anything else, though it stays listed until it is resolved or
+// dismissed. The web added them to this count on its own, outside the rule,
+// so a months-old nudge kept the badge up after every look, and only the
+// Priority tab listed it (V-577).
+//
+// Cheap, as every sidebar asks for it: the stored count bounds the feed's
+// part (three graph counts and one indexed notices count since the last
+// look), and nothing stored since is nothing of it to read, which is most
+// reads. Otherwise one page of the feed and one of bare notices, each at most
+// the bound and the cap long, and the conversations' markers when an item is
+// in one. The nudges aren't in the stored count: they are one indexed read of
+// the person's own open urgent ones, and the last look only when there are
+// any.
 func UnreadActivityCount(ctx context.Context, userUUID uuid.UUID, userDgraphId string) (uint64, error) {
-	// The stored count is an upper bound for three counts' cost: nothing
-	// stored since they looked is nothing in the feed, which is most reads.
-	upper, err := lastSeenActivityBusiness.GetTotalUnreadActivityCount(ctx, userDgraphId, userUUID)
-	if err != nil || upper == 0 {
-		return 0, err
-	}
-	lastSeen, err := lastSeenActivityDomain.GetLastSeenActivityByUserId(ctx, userUUID)
+	upper, err := storedUnread(ctx, userDgraphId, userUUID)
 	if err != nil {
 		return 0, err
 	}
-	// Each kind of item newer than the last look is among that kind's newest
-	// `upper`, so a page that long holds every one the feed would show.
-	page, err := feedPage(ctx, userUUID, userDgraphId, time.Now().Add(time.Minute), int(min(upper, unreadActivityCap)))
-	if err != nil {
-		return 0, err
-	}
-	var n uint64
-	for _, it := range page.Activities {
-		if at, perr := time.Parse(activityTimeLayout, it.Time); perr == nil && at.After(lastSeen) {
-			n++
+	var items []dgraphModels.UnifiedActivityItem
+	if upper > 0 {
+		// Each source's items newer than the last look are among its newest
+		// `upper`, so a page that long of each holds every one the Inbox
+		// would mark.
+		limit := int(min(upper, unreadActivityCap))
+		before := time.Now().Add(time.Minute)
+		page, err := pageOf(ctx, userUUID, userDgraphId, before, limit)
+		if err != nil {
+			return 0, err
+		}
+		items = page.Activities
+		if NoticeTimes != nil {
+			notices, err := NoticeTimes(ctx, userUUID.String(), before, limit)
+			if err != nil {
+				return 0, err
+			}
+			items = append(items, notices...)
 		}
 	}
-	return n, nil
+	if UrgentNudges != nil {
+		nudges, err := UrgentNudges(ctx, userUUID, unreadActivityCap)
+		if err != nil {
+			return 0, err
+		}
+		items = append(items, nudges...)
+	}
+	if len(items) == 0 {
+		return 0, nil
+	}
+	l, err := readLooks(ctx, userUUID, items)
+	if err != nil {
+		return 0, err
+	}
+	return min(uint64(markUnread(items, l)), unreadActivityCap), nil
 }
 
 // MarkActivitySeen is the Inbox opened: everything in the feed until now is
@@ -242,7 +287,7 @@ func mergeActivities(mentions []*dgraphStruct.DgraphMentions, comments []*dgraph
 	all := make([]timed, 0, len(mentions)+len(comments)+len(reactions))
 	add := func(item dgraphModels.UnifiedActivityItem, at *time.Time) {
 		item.Time = activityTime(at)
-		item.Priority = scoreActivityPriority(item)
+		item.Priority = ScorePriority(item)
 		item.ActorKind = ActorKind(actorOf(&item))
 		t := time.Time{}
 		if at != nil {
@@ -330,7 +375,7 @@ func PublishActivityToUser(recipientUserUUID string, activityItem *dgraphModels.
 	// Score priority on the realtime path too so live notifications carry
 	// the same triage signal as the fetched feed.
 	if activityItem != nil && activityItem.Priority == "" {
-		activityItem.Priority = scoreActivityPriority(*activityItem)
+		activityItem.Priority = ScorePriority(*activityItem)
 	}
 	mqttActivity := &mqttStruct.MqttActivity{
 		UserUuid: recipientUserUUID,

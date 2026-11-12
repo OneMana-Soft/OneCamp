@@ -21,8 +21,8 @@ const (
 )
 
 // ClaimDelivery atomically inserts a brand-new delivery row in
-// 'processing' state, or — if the row already exists and is NOT yet
-// completed — bumps its attempts counter and re-claims it. This is the
+// 'processing' state, or — if the row already exists and failed (or its
+// run stopped long ago) — bumps its attempts counter and re-claims it. This is the
 // dedup primitive used by the webhook controller.
 //
 // Returns:
@@ -33,10 +33,12 @@ const (
 //
 // The two outcomes look like this:
 //  1. Brand-new delivery_id      → INSERT … 'processing'  → process
-//  2. Existing & 'completed'     → conflict, no UPDATE     → skip
-//  3. Existing & not completed   → UPDATE → 'processing'   → process
-//     (this is the retry path: GitHub re-delivers, we re-attempt
-//     because the previous attempt didn't finish)
+//  2. Existing & 'completed', or 'processing' for under 5 minutes
+//     (a replay while the first run goes) → no UPDATE → skip
+//  3. Existing & 'failed', or 'processing' for over 5 minutes
+//     → UPDATE → 'processing' → process (the retry path: GitHub
+//     re-delivers, we re-attempt because the previous attempt failed
+//     or its server stopped)
 func ClaimDelivery(ctx context.Context, deliveryID, eventType string) (shouldProcess bool, err error) {
 	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -49,11 +51,15 @@ func ClaimDelivery(ctx context.Context, deliveryID, eventType string) (shouldPro
 		    SET status      = 'processing',
 		        attempts    = github_webhook_deliveries.attempts + 1,
 		        updated_at  = NOW()
-		    -- Crucial: only re-claim non-completed rows. The DO UPDATE
-		    -- without a WHERE always rewrites; the WHERE here makes
-		    -- "row exists and is completed" a no-op so RETURNING can
-		    -- distinguish that case.
-		    WHERE github_webhook_deliveries.status <> 'completed'
+		    -- Crucial: only re-claim a row that failed, or one still
+		    -- 'processing' long after its run's 2-minute limit (a server
+		    -- that stopped mid-run). A replay while the first run is
+		    -- going was claimed too and ran twice. The DO UPDATE without
+		    -- a WHERE always rewrites; the WHERE makes every other case a
+		    -- no-op so RETURNING can tell it.
+		    WHERE github_webhook_deliveries.status = 'failed'
+		       OR (github_webhook_deliveries.status = 'processing'
+		           AND github_webhook_deliveries.updated_at < NOW() - INTERVAL '5 minutes')
 		RETURNING status
 	`
 	var status string

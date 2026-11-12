@@ -11,7 +11,7 @@ import (
 	lastseenChannelBusiness "github.com/akashc777/OneCamp/business/LastSeenChannel"
 	lastseenBusiness "github.com/akashc777/OneCamp/business/LastSeenChat"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
-	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifyBusiness "github.com/akashc777/OneCamp/business/Notify"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	chatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
 	domain "github.com/akashc777/OneCamp/domain/BulkPostAndChat"
@@ -364,19 +364,16 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 
 }
 
-// Who hears of a forward into a conversation, and how they are told: seams
-// for its test.
-var (
-	eligibleForForward = chatNotificationBusiness.GetEligibleUsersForChatActivity
-	deliverForward     = notificationBusiness.Deliver
-)
+// The router's one door (business/Notify Tell): a seam for its test.
+var tellForward = notifyBusiness.Tell
 
 // sendFwdMessageNotifications tells of each message forwarded into a DM or a
 // group as a new message there is told of (chatBusiness notifyNewChat):
-// to everyone in the conversation on "all", never the sender, through
-// notificationBusiness.Deliver, so the push gate applies by person and the
-// desktop app gets its notice. It had its own token loop, which told the
-// desktop app nothing (TN-BUG-12).
+// through the one door, so the router decides who hears (those in the
+// conversation who hear everything there, never the sender), the push gate
+// applies by person, the desktop app gets its notice and each delivery is
+// recorded once. It had its own token loop, which told the desktop app
+// nothing (TN-BUG-12), and then its own list of who hears (A4 H2).
 func sendFwdMessageNotifications(ctx context.Context, userInfo *dgraphStruct.DgraphUser, htmlText string, dms []*dgraphStruct.DgraphDm) {
 	plainText := helpers.HTMLToPlainText(htmlText)
 	if len(plainText) == 0 {
@@ -389,19 +386,22 @@ func sendFwdMessageNotifications(ctx context.Context, userInfo *dgraphStruct.Dgr
 			continue
 		}
 		grpId, chatUUID := dm.GroupingId, dm.Chats[0].Uuid
-		eligibleUserIDs, err := eligibleForForward(ctx, grpId, userInfo.Uuid, nil, false)
-		if err != nil || len(eligibleUserIDs) == 0 {
-			continue
-		}
-		deliverForward(ctx, eligibleUserIDs, map[string]string{
-			firebaseInit.FIREBASE_PUSH_DATA_TYPE:      firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT,
-			firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:   grpId,
-			firebaseInit.FIREBASE_PUSH_DATA_TITLE:     userInfo.DisplayName(),
-			firebaseInit.FIREBASE_PUSH_DATA_BODY:      plainText,
-			firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID: chatUUID,
-			firebaseInit.FIREBASE_PUSH_DATA_USERNAME:  userInfo.DisplayName(),
-			firebaseInit.FIREBASE_PUSH_DATA_ICON:      icon,
-		}, "chat:"+grpId+":"+chatUUID)
+		tellForward(ctx, notifyBusiness.Event{
+			ID:        "chat:" + grpId + ":" + chatUUID,
+			MessageID: chatUUID,
+			Cause:     notifyBusiness.CauseMessage,
+			Actor:     userInfo.Uuid,
+			Place:     notifyBusiness.Place{Kind: notifyBusiness.PlaceDM, ID: grpId},
+			Push: map[string]string{
+				firebaseInit.FIREBASE_PUSH_DATA_TYPE:      firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT,
+				firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:   grpId,
+				firebaseInit.FIREBASE_PUSH_DATA_TITLE:     userInfo.DisplayName(),
+				firebaseInit.FIREBASE_PUSH_DATA_BODY:      plainText,
+				firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID: chatUUID,
+				firebaseInit.FIREBASE_PUSH_DATA_USERNAME:  userInfo.DisplayName(),
+				firebaseInit.FIREBASE_PUSH_DATA_ICON:      icon,
+			},
+		})
 	}
 }
 

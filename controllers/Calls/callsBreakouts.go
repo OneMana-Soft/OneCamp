@@ -50,15 +50,41 @@ func GuestCallBreakoutToken(w http.ResponseWriter, r *http.Request) {
 	writeRoomToken(w, r, token, err)
 }
 
-// writeRoomToken answers a room's token, or why not.
+// CallCompanionToken POST /calls/{session_id}/companion-token: a token for
+// another device of the signed-in member in the call (meet-04), companion mode
+// or presenting without joining. Only a language tag is read: who the token
+// is for is the session's, and its identity the server's.
+func CallCompanionToken(w http.ResponseWriter, r *http.Request) {
+	userInfo, ok := signedIn(w, r)
+	if !ok {
+		return
+	}
+	var ask struct {
+		Language string `json:"language"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&ask); err != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That request couldn't be read."})
+			return
+		}
+	}
+	token, err := callControlBusiness.CompanionToken(r.Context(), &userInfo.UserDgraphInfo, chi.URLParam(r, "session_id"), ask.Language)
+	writeRoomToken(w, r, token, err)
+}
+
+// writeRoomToken answers a call room's token, or why not: Call Control's
+// refusals and a call's own (put out, locked) in their words.
 func writeRoomToken(w http.ResponseWriter, r *http.Request, token callControlBusiness.RoomToken, err error) {
 	var refused *callControlBusiness.Refusal
 	if errors.As(err, &refused) {
 		helpers.WriteJSON(w, refused.Status, helpers.Envolope{"code": refused.Code, "msg": refused.Msg})
 		return
 	}
+	if helpers.WriteCallRefusal(w, err) {
+		return
+	}
 	if err != nil {
-		helpers.LogErrorWithContext(r.Context(), "controllers/Calls a breakout room's token failed: %+v", err)
+		helpers.LogErrorWithContext(r.Context(), "controllers/Calls a call room's token failed: %+v", err)
 		helpers.WriteRetryLater(w, "The call server couldn't open that room just now. Try again.")
 		return
 	}

@@ -60,8 +60,11 @@ const (
 )
 
 // syncBrokenWhy is what a person reads of a link Google stopped answering
-// for.
-const syncBrokenWhy = "Google stopped answering for this account. Connect it again."
+// for; syncBrokenWhyMicrosoft of one Microsoft did.
+const (
+	syncBrokenWhy          = "Google stopped answering for this account. Connect it again."
+	syncBrokenWhyMicrosoft = "The Microsoft account isn't linked any more: connect it again from Calendars."
+)
 
 func init() {
 	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "calendar.sync.google", Every: syncEvery, Run: func(ctx context.Context) error {
@@ -72,25 +75,30 @@ func init() {
 	}})
 }
 
-// syncAll keeps every finished move's link in step with Google.
+// syncAll keeps every finished move's link in step with its provider: each
+// provider that syncs both ways (Google, Outlook), through its adapter.
 func (s *service) syncAll(ctx context.Context) error {
 	if err := s.ready(ctx); err != nil {
 		return nil // the store isn't in use yet: nothing to keep in step
 	}
-	google, ok := syncProvider("google")
-	if !ok {
-		return nil
-	}
-	links, err := s.ledger.syncedLinks(ctx, "google", syncLinksPerSweep)
-	if err != nil {
-		return err
-	}
-	for _, l := range links {
-		if err := s.syncLink(ctx, l, google); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync for link %s: %v", l.ID, err)
+	var errs []error
+	for _, name := range calendarSyncBusiness.Adapters.TwoWay() {
+		provider, ok := syncProvider(name)
+		if !ok {
+			continue
+		}
+		links, err := s.ledger.syncedLinks(ctx, name, syncLinksPerSweep)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, l := range links {
+			if err := s.syncLink(ctx, l, provider); err != nil {
+				helpers.LogErrorWithContext(ctx, "business/Calendar: %s sync for link %s: %v", name, l.ID, err)
+			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // syncLink brings Google's changes in, then sends OneCamp's out. When Google
@@ -111,21 +119,32 @@ func (s *service) syncLink(ctx context.Context, link *models.SyncLink, provider 
 		byExternal[r.RemoteID+"\x00"+r.ExternalID] = r
 	}
 	// Google's first, so a change made on both sides is seen before
-	// OneCamp's is sent.
+	// OneCamp's is sent. A calendar without a cursor is read whole (after a
+	// move, only once migration 577 asked for it): until that read has
+	// worked and its privacy has landed here, nothing is sent to it (held),
+	// so what OneCamp has of an event it hasn't read again never overwrites
+	// the provider's, and it keeps no cursor, so the next sweep reads it
+	// whole again.
+	held := map[string]bool{}
 	for _, c := range cals {
 		remote := remoteOf(l, c)
+		whole := c.Cursor == ""
 		changes, cursor, err := provider.Pull(ctx, remote, c.Cursor)
 		if errors.Is(err, calendarSyncBusiness.ErrFullPull) {
 			changes, cursor, err = provider.Pull(ctx, remote, "")
 		}
 		if errors.Is(err, calendarSyncBusiness.ErrRevoked) {
-			return s.breakLink(ctx, link.ID, err)
+			return s.breakLink(ctx, link, err)
 		}
 		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't read %q: %v", c.RemoteID, err)
+			held[c.RemoteID] = whole
+			helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't read %q: %v", c.RemoteID, err)
 			continue
 		}
-		s.applyPulled(ctx, who, link.ID, c, changes, byExternal)
+		if !s.applyPulled(ctx, who, link.ID, c, changes, byExternal, whole) {
+			held[c.RemoteID] = true
+			continue
+		}
 		if cursor != "" && cursor != c.Cursor {
 			c.Cursor = cursor
 			_ = s.ledger.keepCalendar(ctx, c)
@@ -135,7 +154,7 @@ func (s *service) syncLink(ctx context.Context, link *models.SyncLink, provider 
 	remotes := map[uuid.UUID]calendarSyncBusiness.Remote{}
 	var calendars []uuid.UUID
 	for _, c := range cals {
-		if c.CalendarID != nil {
+		if c.CalendarID != nil && !held[c.RemoteID] {
 			remotes[*c.CalendarID] = remoteOf(l, c)
 			calendars = append(calendars, *c.CalendarID)
 		}
@@ -144,7 +163,7 @@ func (s *service) syncLink(ctx context.Context, link *models.SyncLink, provider 
 	if personal, err := s.store.personalCalendar(ctx, link.PersonID, s.zoneOf(ctx, link.PersonID)); err == nil {
 		if _, ok := remotes[personal]; !ok {
 			for _, c := range cals {
-				if c.Primary {
+				if c.Primary && !held[c.RemoteID] {
 					remotes[personal] = remoteOf(l, c)
 					calendars = append(calendars, personal)
 				}
@@ -171,7 +190,7 @@ func (s *service) syncLink(ctx context.Context, link *models.SyncLink, provider 
 		for i, e := range changed {
 			ref, has := refs[e.ID]
 			if err := s.pushOne(ctx, provider, remotes[e.CalendarID], link.ID, e, evs[i], ref, has, refused[e.ID].Tries); err != nil {
-				return s.breakLink(ctx, link.ID, err)
+				return s.breakLink(ctx, link, err)
 			}
 		}
 	}
@@ -186,9 +205,9 @@ func remoteOf(l calendarSyncBusiness.Link, c models.SyncCalendar) calendarSyncBu
 // breakLink records that Google stopped answering for a link (why is what
 // it answered): the link isn't synced until the person connects Google
 // again (models.ReconnectSyncLinks).
-func (s *service) breakLink(ctx context.Context, link uuid.UUID, why error) error {
-	helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync stops for link %s until Google is connected again: %v", link, why)
-	return s.ledger.breakLink(ctx, link, syncBrokenWhy)
+func (s *service) breakLink(ctx context.Context, link *models.SyncLink, why error) error {
+	helpers.LogErrorWithContext(ctx, "business/Calendar: %s sync stops for link %s until it is connected again: %v", link.Provider, link.ID, why)
+	return s.ledger.breakLink(ctx, link.ID, syncWithOf(link.Provider).brokenWhy)
 }
 
 // pushOne sends one event (a series with its changed instances) to Google,
@@ -209,7 +228,7 @@ func (s *service) pushOne(ctx context.Context, provider calendarSyncBusiness.Ada
 		if errors.Is(err, calendarSyncBusiness.ErrRevoked) {
 			return err
 		}
-		helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't %s %s: %v", what, e.ID, err)
+		helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't %s %s: %v", what, e.ID, err)
 		if errors.Is(err, calendarSyncBusiness.ErrReadOnly) {
 			_ = s.ledger.markReadOnly(ctx, link, remote.ID)
 		}
@@ -249,7 +268,7 @@ func (s *service) pushOne(ctx context.Context, provider calendarSyncBusiness.Ada
 		}
 	}
 	if err := s.ledger.keepRefs(ctx, []models.SyncRef{{LinkID: link, RemoteID: remote.ID, ExternalID: external, EventID: e.ID, ETag: got.ETag}}); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't keep where %s is: %v", e.ID, err)
+		helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't keep where %s is: %v", e.ID, err)
 	}
 	if instanceErr != nil {
 		return failed("send an instance of", instanceErr)
@@ -270,14 +289,20 @@ func (s *service) refuse(ctx context.Context, link, event uuid.UUID, tries int, 
 		r.RetryAt = &at
 	}
 	if err := s.ledger.keepRefusal(ctx, r, now); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't keep that %s wasn't taken: %v", event, err)
+		helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't keep that %s wasn't taken: %v", event, err)
 	}
 }
 
 // applyPulled writes Google's changes to one calendar here: a new event
 // through the import path, a changed one onto its row, an instance changed
 // or cancelled on its own onto its series, and a deleted one into the trash.
-func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uuid.UUID, c models.SyncCalendar, changes []calendarSyncBusiness.Change, byExternal map[string]models.SyncRef) {
+// Read whole, every event is taken again, whatever its version, and one
+// private on either side is made private on both: before calendar B7
+// neither side told the other, so a version unchanged since says nothing of
+// it. It says whether a whole read's privacy landed here (a read from a
+// cursor always does): when not, nothing is sent to the calendar and it is
+// read whole again (syncLink).
+func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uuid.UUID, c models.SyncCalendar, changes []calendarSyncBusiness.Change, byExternal map[string]models.SyncRef, whole bool) bool {
 	me := personOf(who)
 	now := s.now()
 	// Where the page's events are at Google is kept, and the deleted ones'
@@ -293,6 +318,14 @@ func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uui
 		kept[k] = ref
 	}
 	var drop []uuid.UUID
+	// madePrivate are the events a whole read makes private here, written in
+	// one batch after the page; inStepOnce, the refs of those Google has
+	// private already, in step once that batch lands. send are the refs of
+	// series with an instance to send, kept for none of the page's changes.
+	var madePrivate []rowUpdate
+	var inStepOnce []models.SyncRef
+	send := map[string]bool{}
+	landed := true
 	var fresh []calendarSyncBusiness.Change
 	freshUIDs := map[string]bool{}
 	// touched is the events written here, for the work graph: Google's
@@ -311,7 +344,7 @@ func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uui
 			}
 			continue
 		}
-		if ref.ETag != "" && ref.ETag == ch.ETag {
+		if !whole && ref.ETag != "" && ref.ETag == ch.ETag {
 			continue // what OneCamp sent, back
 		}
 		e, err := s.store.get(ctx, ref.EventID)
@@ -321,7 +354,7 @@ func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uui
 		if ch.Deleted || cancelled(ch.Event) {
 			if e.DeletedAt == nil {
 				if _, err := s.store.setDeleted(ctx, e.ID, &now, &me, now, nil); err != nil {
-					helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't trash %s: %v", e.ID, err)
+					helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't trash %s: %v", e.ID, err)
 					continue
 				}
 			}
@@ -329,17 +362,54 @@ func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uui
 			touched = append(touched, e.ID.String())
 			continue
 		}
-		// Both sides changed it: the later change wins.
-		if e.UpdatedAt.After(ref.UpdatedAt) && !ch.Event.Stamp.IsZero() && ch.Event.Stamp.Before(e.UpdatedAt) {
+		ev := ch.Event
+		privateThere := visibilityOfClass(ev.Class) == visibilityPrivate
+		private := whole && (privateThere || e.Visibility == visibilityPrivate)
+		if private {
+			ev.Class = classOf(visibilityPrivate)
+		}
+		// Both sides changed it: the later change wins, and is sent private
+		// when either side had it so.
+		if e.UpdatedAt.After(ref.UpdatedAt) && !ev.Stamp.IsZero() && ev.Stamp.Before(e.UpdatedAt) {
+			if private && e.Visibility != visibilityPrivate {
+				madePrivate = append(madePrivate, privateNow(e, now))
+				touched = append(touched, e.ID.String())
+			}
 			continue
 		}
-		changed := s.takeRemote(ctx, e, ch.Event)
+		changed := s.takeRemote(ctx, e, ev)
 		if changed {
 			touched = append(touched, e.ID.String())
+		}
+		// Private here only: it is sent so, so it isn't in step yet.
+		if private && !privateThere {
+			if !changed {
+				madePrivate = append(madePrivate, privateNow(e, now))
+			}
+			continue
+		}
+		// Private at Google, and Google's version not taken (refused, or its
+		// write failed): private here all the same.
+		if private && !changed && e.Visibility != visibilityPrivate {
+			madePrivate = append(madePrivate, privateNow(e, now))
+			touched = append(touched, e.ID.String())
+			ref.ETag = ch.ETag
+			inStepOnce = append(inStepOnce, ref)
+			continue
 		}
 		if changed || ref.ETag != ch.ETag {
 			ref.ETag = ch.ETag
 			keepRef(ref)
+		}
+	}
+	if len(madePrivate) > 0 {
+		if err := s.store.apply(ctx, batch{updates: madePrivate, now: now}); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't make %q's events private: %v", c.RemoteID, err)
+			landed = false
+		} else {
+			for _, ref := range inStepOnce {
+				keepRef(ref)
+			}
 		}
 	}
 	// New events come in as an import does, with their instances.
@@ -360,7 +430,7 @@ func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uui
 		}
 		made, err := s.importCalendars(ctx, who, []ICS.Calendar{cal}, func(int, int) {})
 		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't bring in new events: %v", err)
+			helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't bring in new events: %v", err)
 		} else {
 			s.keepRefsOf(ctx, link, c.RemoteID, made.Created, external)
 		}
@@ -378,33 +448,51 @@ func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uui
 		if err != nil || series == nil || series.RRule == "" || series.DeletedAt != nil {
 			continue
 		}
-		if s.takeRemoteInstance(ctx, series, ch.Event, now) {
+		switch s.takeRemoteInstance(ctx, series, ch.Event, now, whole) {
+		case instanceInStep:
 			// In step with Google now: nothing of this to send back.
 			if newer, ok := kept[ref.RemoteID+"\x00"+ref.ExternalID]; ok {
 				ref = newer
 			}
 			keepRef(ref)
+		case instanceToSend:
+			send[ref.RemoteID+"\x00"+ref.ExternalID] = true
+		case instanceFailed:
+			landed = false
 		}
 	}
+	keep = slices.DeleteFunc(keep, func(k string) bool { return send[k] })
 	if len(keep) > 0 {
 		refs := make([]models.SyncRef, len(keep))
 		for i, k := range keep {
 			refs[i] = kept[k]
 		}
 		if err := s.ledger.keepRefs(ctx, refs); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't keep where %q's events are: %v", c.RemoteID, err)
+			helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't keep where %q's events are: %v", c.RemoteID, err)
 		}
 	}
 	if len(drop) > 0 {
 		if err := s.ledger.dropRefs(ctx, link, drop); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't forget %q's deleted events: %v", c.RemoteID, err)
+			helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't forget %q's deleted events: %v", c.RemoteID, err)
 		}
 	}
 	nodesChanged(ctx, workGraph.KindEvent, touched)
 	SearchEntriesChanged(ctx, touched)
+	return landed
 }
 
 func cancelled(ev ICS.Event) bool { return ev.Status == "CANCELLED" }
+
+// privateNow is an event made private, changed at now so it is sent: what a
+// whole read does with one private on one side only (applyPulled). It is
+// written only while the row is as read, so an edit made since fails the
+// batch (and the calendar is read whole again) rather than being lost. Pure.
+func privateNow(e *models.Event, now time.Time) rowUpdate {
+	next := cloneEvent(e)
+	next.Visibility, next.UpdatedAt = visibilityPrivate, now
+	read := e.Sequence
+	return rowUpdate{e: next, expect: &read}
+}
 
 // takeRemote writes Google's version of an event onto its row, and says
 // whether anything changed: an event already as Google has it is left
@@ -415,7 +503,7 @@ func (s *service) takeRemote(ctx context.Context, e *models.Event, ev ICS.Event)
 		return false
 	}
 	next := cloneEvent(e)
-	next.Title, next.Notes, next.Location, next.Transparency = row.Title, row.Notes, row.Location, row.Transparency
+	next.Title, next.Notes, next.Location, next.Transparency, next.Visibility = row.Title, row.Notes, row.Location, row.Transparency, row.Visibility
 	if e.Source == sourceSubscribed {
 		next.Transparency = transparencyTransparent // never busy (calendar B8)
 	}
@@ -435,73 +523,95 @@ func (s *service) takeRemote(ctx context.Context, e *models.Event, ev ICS.Event)
 		return false
 	}
 	if _, err := s.store.update(ctx, next, nil, guestWrites{}); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't write %s: %v", e.ID, err)
+		helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't write %s: %v", e.ID, err)
 		return false
 	}
 	return true
 }
 
+// instanceTake is what takeRemoteInstance did with Google's version of an
+// instance.
+type instanceTake int
+
+const (
+	// instanceAsIs: nothing written (as Google has it already, or not taken).
+	instanceAsIs instanceTake = iota
+	// instanceInStep: written as Google has it.
+	instanceInStep
+	// instanceToSend: read whole, private here only, so written to be sent
+	// private.
+	instanceToSend
+	// instanceFailed: read whole, a private instance's write didn't land.
+	instanceFailed
+)
+
 // takeRemoteInstance writes Google's version of one instance of a series:
 // cancelled, it is skipped; changed, its own row says how. One already as
-// Google has it is left alone. It says whether it wrote.
-func (s *service) takeRemoteInstance(ctx context.Context, series *models.Event, ev ICS.Event, now time.Time) bool {
+// Google has it is left alone, and read whole, one private here stays so
+// and is sent so when Google's isn't: private wins both ways, as for a
+// whole event (applyPulled). One with no override here yet comes in as an
+// import's does (overrideFromRemote): private when it or its series is.
+func (s *service) takeRemoteInstance(ctx context.Context, series *models.Event, ev ICS.Event, now time.Time, whole bool) instanceTake {
 	rid := ev.RecurrenceID.UTC()
 	if series.AllDay() {
 		rid = time.Date(rid.Year(), rid.Month(), rid.Day(), 0, 0, 0, 0, time.UTC)
 	}
 	if !isInstance(series, rid) && !slices.ContainsFunc(series.Exdates, rid.Equal) {
-		return false
+		return instanceAsIs
 	}
 	have, err := s.store.overrideAt(ctx, series.ID, rid)
 	if err != nil {
-		return false
+		return instanceAsIs
 	}
 	if cancelled(ev) {
 		if slices.ContainsFunc(series.Exdates, rid.Equal) {
-			return false
+			return instanceAsIs
 		}
 		next := cloneEvent(series)
 		next.Exdates = append(next.Exdates, rid)
 		next.UpdatedAt = now
 		if _, err := s.store.update(ctx, next, nil, guestWrites{}); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't skip an instance of %s: %v", series.ID, err)
-			return false
+			helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't skip an instance of %s: %v", series.ID, err)
+			return instanceAsIs
 		}
-		return true
+		return instanceInStep
 	}
 	row, why := importedRow(ev, series.TZ)
 	if why != "" || row.AllDay() != series.AllDay() {
-		return false
+		return instanceAsIs
 	}
 	inst := madeInstance(series, rid)
 	if have != nil {
+		sendPrivate := false
+		if whole && have.Visibility == visibilityPrivate {
+			sendPrivate = row.Visibility != visibilityPrivate
+			row.Visibility = visibilityPrivate
+		}
 		next := cloneEvent(have)
 		takeChanges(next, row, changesOf(have, row))
-		if len(changesOf(have, next)) == 0 {
-			return false
+		if len(changesOf(have, next)) == 0 && !sendPrivate {
+			return instanceAsIs
 		}
 		next.Changed = changesOf(inst.Event, next)
 		next.UpdatedAt = now
 		if _, err := s.store.update(ctx, next, nil, guestWrites{}); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't change an instance of %s: %v", series.ID, err)
-			return false
+			helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't change an instance of %s: %v", series.ID, err)
+			if whole && row.Visibility == visibilityPrivate {
+				return instanceFailed
+			}
+			return instanceAsIs
 		}
-		return true
+		if sendPrivate {
+			return instanceToSend
+		}
+		return instanceInStep
 	}
-	row.Kind, row.Visibility, row.Hue = series.Kind, series.Visibility, series.Hue
-	row.GuestsCanModify, row.GuestsCanInvite, row.GuestsCanSeeGuests = series.GuestsCanModify, series.GuestsCanInvite, series.GuestsCanSeeGuests
-	s.newOverride(row, inst, now)
-	row.Source, row.Sequence, row.UpdatedAt = sourceICS, 0, now
-	if series.Source == sourceSubscribed {
-		row.Source, row.Transparency = sourceSubscribed, transparencyTransparent
-	}
-	row.Changed = changesOf(inst.Event, row)
-	if len(row.Changed) == 0 {
-		return false
+	if !s.overrideFromRemote(row, series, rid, now) {
+		return instanceAsIs
 	}
 	if err := s.store.apply(ctx, batch{inserts: []*models.Event{row}, now: now, by: &series.CreatedBy}); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Calendar: Google sync couldn't add an instance of %s: %v", series.ID, err)
-		return false
+		helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't add an instance of %s: %v", series.ID, err)
+		return instanceAsIs
 	}
-	return true
+	return instanceInStep
 }

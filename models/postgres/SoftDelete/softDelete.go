@@ -44,6 +44,7 @@ const (
 	Link          Kind = "link"           // a project's link to a tool elsewhere (project_links)
 	ProjectStatus Kind = "project_status" // one of the workspace's own project statuses (project_statuses)
 	ProjectLabel  Kind = "project_label"  // one of the workspace's project labels (project_labels)
+	Release       Kind = "release"        // a project's release, with its tasks and stages (releases)
 )
 
 // table is a kind's table: its name, whether its rows carry updated_at,
@@ -69,6 +70,7 @@ var tables = map[Kind]table{
 	Link:          {name: "project_links", capped: true, project: "project_uuid"},
 	ProjectStatus: {name: "project_statuses", stamped: true, capped: true},
 	ProjectLabel:  {name: "project_labels", stamped: true, capped: true},
+	Release:       {name: "releases", stamped: true, project: "project_uuid"},
 }
 
 var (

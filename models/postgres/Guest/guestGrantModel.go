@@ -236,17 +236,40 @@ func Revoke(ctx context.Context, id uuid.UUID) error {
 
 // RevokeLiveForResource turns off every live grant to one resource (revoked
 // as Revoke does; expired ones are left as they are) and answers how many.
-// Inside pgexec.InTx it is part of that transaction: a personal room's links
-// end with its meeting (business/CallRoom Close).
+// Inside pgexec.InTx it is part of that transaction.
 func RevokeLiveForResource(ctx context.Context, resourceType, resourceID string) (int64, error) {
-	q := `UPDATE guest_grants SET revoked_at=NOW()
+	return revokeLiveForResource(ctx, resourceType, resourceID, nil)
+}
+
+// RevokeLiveForResourceAt is RevokeLiveForResource with the grants revoked at
+// at: a room's links end at the moment its meeting closes (business/CallRoom),
+// so ReviveRevokedAt can bring back those links alone.
+func RevokeLiveForResourceAt(ctx context.Context, resourceType, resourceID string, at time.Time) (int64, error) {
+	return revokeLiveForResource(ctx, resourceType, resourceID, &at)
+}
+
+// revokeLiveForResource revokes at at, or at the database's now for nil.
+func revokeLiveForResource(ctx context.Context, resourceType, resourceID string, at *time.Time) (int64, error) {
+	q := `UPDATE guest_grants SET revoked_at = COALESCE($4::timestamptz, NOW())
 		WHERE resource_type = $1 AND resource_id = $2 AND ` + liveSQL(3)
-	n, err := pgexec.Exec(ctx, q, resourceType, resourceID, LinkCapDays(ctx))
+	n, err := pgexec.Exec(ctx, q, resourceType, resourceID, LinkCapDays(ctx), at)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Guest/RevokeLiveForResource err: %+v", err)
 		return 0, err
 	}
 	return n, nil
+}
+
+// ReviveRevokedAt turns back on the grants to one resource revoked at at
+// (RevokeLiveForResourceAt's), at the addresses they had, and answers how
+// many: an event call's links as its event comes back from the trash
+// (business/CallRoom ReopenEventCall). A link revoked at any other moment (an
+// admin's turn-off) stays off. An address another live grant took meanwhile
+// is refused by the index of live addresses, as a unique violation. Inside
+// pgexec.InTx it is part of that transaction.
+func ReviveRevokedAt(ctx context.Context, resourceType, resourceID string, at time.Time) (int64, error) {
+	return pgexec.Exec(ctx, `UPDATE guest_grants SET revoked_at = NULL
+		WHERE resource_type = $1 AND resource_id = $2 AND revoked_at = $3`, resourceType, resourceID, at)
 }
 
 // ResourceExists reports whether ANY guest grant (active or not) exists for a

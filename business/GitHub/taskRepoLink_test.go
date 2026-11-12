@@ -1,6 +1,8 @@
 package business
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	githubLinkModel "github.com/akashc777/OneCamp/models/postgres/GitHubLink"
@@ -107,5 +109,45 @@ func TestTheRepairUnlinksOnlyLinksOutsideTheTasksProject(t *testing.T) {
 	}
 	if outsideLinks(kept, links) != nil {
 		t.Error("a task linked inside its own project is unlinked")
+	}
+}
+
+// A task's stored branch is a ref like its key: it leads only to a task the
+// integration's bot may read (botReads, as codeTask). A restricted task
+// carrying the branch is no lead and hides no readable task carrying it too.
+func TestABranchLeadsOnlyToATaskTheBotMayRead(t *testing.T) {
+	oldTasks, oldReads := branchTasks, botReads
+	t.Cleanup(func() { branchTasks, botReads = oldTasks, oldReads })
+
+	restricted, made := uuid.New(), uuid.New()
+	carriers := map[string][]string{
+		"cache-sessions": {restricted.String(), made.String()},
+		"private":        {restricted.String()},
+		"garbled":        {"not-a-task", made.String()},
+	}
+	read := 0
+	branchTasks = func(_ context.Context, owner, name, branch string) ([]string, error) {
+		read++
+		if branch == "gone" {
+			return nil, errors.New("the read failed")
+		}
+		return carriers[branch], nil
+	}
+	botReads = func(_ context.Context, task uuid.UUID) bool { return task != restricted }
+
+	for branch, want := range map[string]string{
+		"cache-sessions": made.String(),
+		"private":        "",
+		"garbled":        made.String(),
+		"gone":           "",
+		"unknown":        "",
+	} {
+		if got := onBranch(context.Background(), "acme", "web", branch)(); got != want {
+			t.Errorf("branch %q leads to %q, want %q", branch, got, want)
+		}
+	}
+	read = 0
+	if got := onBranch(context.Background(), "acme", "web", "")(); got != "" || read != 0 {
+		t.Errorf("no branch leads to %q after %d reads, want none after none", got, read)
 	}
 }

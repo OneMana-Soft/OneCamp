@@ -289,6 +289,10 @@ func (p *htmlParser) add(n *html.Node) {
 		pushed++
 	}
 	clearBold := false
+	// A mark the collaboration service kept as a marker (preserved.go).
+	if m := p.keptMark(n); m != nil {
+		pushMark(m)
+	}
 	switch tag {
 	case "strong":
 		pushMark(&Mark{Type: "bold"})
@@ -312,19 +316,16 @@ func (p *htmlParser) add(n *html.Node) {
 		// A highlight by colour name, yellow when it names none of ours (B2).
 		pushMark(&Mark{Type: "highlight", Attrs: map[string]any{"color": highlightColour(attrVal(n, "data-color"))}})
 	case "a":
-		if href, ok := attrOf(n, "href"); ok && safeHref(href) {
+		if href, ok := attrOf(n, "href"); ok {
 			m := &Mark{Type: "link", Attrs: map[string]any{"href": href}}
-			if !p.foreign {
-				for _, a := range []string{"target", "rel"} {
-					if v, ok := attrOf(n, a); ok {
-						m.Attrs[a] = v
-					}
-				}
-				if c := contentClasses(attrVal(n, "class")); c != "" {
-					m.Attrs["class"] = c
+			for _, a := range []string{"target", "rel", "class"} {
+				if v, ok := attrOf(n, a); ok {
+					m.Attrs[a] = v
 				}
 			}
-			pushMark(m)
+			if admitMark(m, p.foreign) {
+				pushMark(m)
+			}
 		}
 	}
 	if tag != "b" && tag != "strong" {
@@ -376,7 +377,7 @@ func (p *htmlParser) add(n *html.Node) {
 		p.marks = p.marks[:len(p.marks)-pushed]
 	}()
 
-	if p.addNode(n, tag) {
+	if p.keptNode(n) || p.addNode(n, tag) {
 		return
 	}
 	// No node for this element: its content, with a block boundary around it
@@ -770,33 +771,25 @@ func (p *htmlParser) atom(node *Node) {
 }
 
 func (p *htmlParser) image(n *html.Node, caption string) {
-	src := trimSpace(attrVal(n, "src"))
-	if !safeImageSrc(src, true) {
-		// An image with nowhere to load from: its alt text, if it has any.
-		if alt := trimSpace(attrVal(n, "alt")); alt != "" {
-			p.addTextValue(alt)
-		}
-		return
-	}
 	img := newNode("image")
-	img.setAttr("src", src)
+	img.setAttr("src", attrVal(n, "src"))
 	for _, a := range []string{"alt", "title"} {
 		if v, ok := attrOf(n, a); ok {
 			img.setAttr(a, v)
 		}
 	}
-	for _, a := range []string{"width", "height"} {
-		if v, ok := attrOf(n, a); ok && v != "" {
-			img.setAttr(a, v)
+	for _, a := range [][2]string{{"width", "width"}, {"height", "height"}, {"id", "id"}, {"caption", "caption"}, {"fileName", "filename"}} {
+		if v, ok := attrOf(n, a[1]); ok && v != "" {
+			img.setAttr(a[0], v)
 		}
 	}
-	if !p.foreign {
-		for _, a := range [][2]string{{"id", "id"}, {"caption", "caption"}, {"fileName", "filename"}} {
-			if v, ok := attrOf(n, a[1]); ok && v != "" {
-				img.setAttr(a[0], v)
-			}
+	readImageMedia(n, img)
+	if !admitNode(img, p.foreign, p.assets) {
+		// An image with nowhere to load from: its alt text, if it has any.
+		if alt := refusedText(img); alt != "" {
+			p.addTextValue(alt)
 		}
-		readImageMedia(n, img)
+		return
 	}
 	if caption != "" {
 		img.setAttr("caption", caption)

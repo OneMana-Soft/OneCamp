@@ -6,15 +6,15 @@ import (
 	"testing"
 )
 
-// Day 0 plans today's notices: the site's audience, each by push and desktop
-// notice, never the actor, and delivers them through business/Notification
+// A site's event plans today's notices: the site's audience, each by inbox,
+// push and desktop notice, never the actor, and delivers them through business/Notification
 // Deliver with the event's push and its id, untouched.
 func TestTodaysNoticesGoThroughDeliver(t *testing.T) {
 	ev := Event{ID: "chat:g:m", Cause: CauseMessage, Actor: "me", Push: map[string]string{"title": "Maya"}, Audience: []string{"ann", "me", "bea", ""}}
 	ds, err := Notices.Plan(context.Background(), ev)
 	want := []Decision{
-		{UserID: "ann", Cause: CauseMessage, To: []Delivery{ToPush, ToDesktop}},
-		{UserID: "bea", Cause: CauseMessage, To: []Delivery{ToPush, ToDesktop}},
+		{UserID: "ann", Cause: CauseMessage, To: []Delivery{ToInbox, ToPush, ToDesktop}},
+		{UserID: "bea", Cause: CauseMessage, To: []Delivery{ToInbox, ToPush, ToDesktop}},
 	}
 	if err != nil || !reflect.DeepEqual(ds, want) {
 		t.Fatalf("plan: %+v (%v)", ds, err)

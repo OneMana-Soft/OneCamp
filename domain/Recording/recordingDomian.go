@@ -109,7 +109,7 @@ func GetDeletedDmRecordingInfo(ctx context.Context, egressId string, userDgraphU
 // recording here has (its webhook was for another server's call).
 func EndRecording(ctx context.Context, egressID string, fields map[string]interface{}) error {
 	query := `query Recording($id: string) {
-		recording as var(func: eq(recording_egress_id, $id)) @filter(has(recording_stared_at) AND has(recording_obj_key))
+		recording as var(func: eq(recording_egress_id, $id)) @filter(` + egressRecording + `)
 	}`
 	return dgraphModels.SetFoundRecordingsFields(ctx, query, map[string]string{"$id": egressID}, "recording", fields)
 }
@@ -406,4 +406,43 @@ func GetRecentlyArchivedRecordings(ctx context.Context, cutoffRFC3339 string, fi
 		return nil, 0, err
 	}
 	return list.Recordings, int64(list.Count), nil
+}
+
+// egressRecording is a recording an egress makes: it started, and has a file
+// (a call session's transcript node has neither).
+const egressRecording = `has(recording_stared_at) AND has(recording_obj_key)`
+
+// runningRecording is egressRecording's recordings that have not ended: a
+// running one's end is the zero time (fileRecording), never after the epoch.
+var runningRecording = egressRecording + ` AND ` + dgraphquery.Live("recording_ended_at")
+
+// RunningRecordingStart answers when the running recording with this egress
+// id started, and whether there is one here: another server's egress, or one
+// whose end was stamped, is none.
+func RunningRecordingStart(ctx context.Context, egressID string) (time.Time, bool, error) {
+	recs, err := dgraphModels.GetDgraphRecordingsList(ctx, `query Recording($id: string) {
+		recordingInfo(func: eq(recording_egress_id, $id)) @filter(`+runningRecording+`) {
+			recording_stared_at
+		}
+	}`, map[string]string{"$id": egressID})
+	if err != nil || len(recs) == 0 {
+		return time.Time{}, false, err
+	}
+	if recs[0].StartedAt == nil {
+		return time.Time{}, true, nil
+	}
+	return *recs[0].StartedAt, true, nil
+}
+
+// MoveRecording moves the running recording with egress id from onto the
+// egress to, which records the call on in its place and writes its file at
+// objectKey. It stays the same recording: its home, who started it, when, and
+// its transcript lines. Nothing moves for an egress id no running recording
+// here has.
+func MoveRecording(ctx context.Context, from, to, objectKey string) error {
+	query := `query Recording($id: string) {
+		recording as var(func: eq(recording_egress_id, $id)) @filter(` + runningRecording + `)
+	}`
+	return dgraphModels.SetFoundRecordingsFields(ctx, query, map[string]string{"$id": from}, "recording",
+		map[string]interface{}{"recording_egress_id": to, "recording_obj_key": objectKey})
 }

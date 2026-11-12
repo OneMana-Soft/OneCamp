@@ -17,6 +17,7 @@ import (
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	OpenSearchBulkModels "github.com/akashc777/OneCamp/models/openSearch/Bulk"
 	OpenSearchModels "github.com/akashc777/OneCamp/models/openSearch/Task"
+	githubLinkModel "github.com/akashc777/OneCamp/models/postgres/GitHubLink"
 	models "github.com/akashc777/OneCamp/models/postgres/Task"
 	taskKeyModel "github.com/akashc777/OneCamp/models/postgres/TaskKey"
 	"github.com/akashc777/OneCamp/models/taskread"
@@ -1145,23 +1146,28 @@ func GetTaskGitHubURLs(ctx context.Context, taskUUID uuid.UUID) (issueURL, prURL
 	return issueURL, prURL, nil
 }
 
-// FindTaskUUIDByGitHubBranch finds the task on branch of a project that links
-// the repository owner/name, matched in any case as GitHub matches names. A
-// branch's name is whoever pushes it's to choose ("main", "patch-1"), so a
-// task of a project that doesn't link the repository is never the one a
-// branch there means.
-func FindTaskUUIDByGitHubBranch(ctx context.Context, owner, name, branch string) (string, error) {
-	query := `SELECT t.id FROM tasks t
+// FindTaskUUIDsByGitHubBranch is the tasks on branch in projects that link
+// the repository owner/name, matched in any case as GitHub matches names,
+// the first to carry it first; an offline link (githubLinkModel.Online) is
+// no link. A branch's name is whoever pushes it's to choose ("main",
+// "patch-1"), so a task of a project that doesn't link the repository is
+// never one a branch there means. More than one task can
+// carry a branch (a pull request from a restricted task's branch makes its
+// own task, which carries it too), so the caller picks among them: the
+// first 50, a bound for a branch many pull requests made tasks of.
+func FindTaskUUIDsByGitHubBranch(ctx context.Context, owner, name, branch string) ([]string, error) {
+	query := `SELECT t.id::text FROM tasks t
 		WHERE t.github_branch = $3 AND t.deleted_at IS NULL AND t.project_id IS NOT NULL
 		AND t.project_id IN (SELECT l.project_id FROM github_links l
-			WHERE lower(l.repo_owner) = lower($1) AND lower(l.repo_name) = lower($2) AND l.deleted_at IS NULL)
-		LIMIT 1`
-	taskUUID, err := models.FindTaskUUIDByGitHubBranch(ctx, query, owner, name, branch)
+			WHERE lower(l.repo_owner) = lower($1) AND lower(l.repo_name) = lower($2) AND l.deleted_at IS NULL` + githubLinkModel.Online("l") + `)
+		ORDER BY t.created_at, t.id
+		LIMIT 50`
+	taskUUIDs, err := models.FindTaskUUIDsByGitHubBranch(ctx, query, owner, name, branch)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/FindTaskUUIDByGitHubBranch Failed err: %+v", err)
-		return "", err
+		helpers.LogErrorWithContext(ctx, "domain/FindTaskUUIDsByGitHubBranch Failed err: %+v", err)
+		return nil, err
 	}
-	return taskUUID, nil
+	return taskUUIDs, nil
 }
 
 // SetGitHubLastSyncedAt updates the last sync timestamp for a task.
@@ -1188,13 +1194,17 @@ func SetGitHubBranchOnTaskByTaskID(ctx context.Context, branchName string, taskU
 
 // UpdateTaskPRState updates the GitHub PR state fields on a task.
 // Uses CASE to preserve existing values when an empty string or nil is passed for a field.
+// Every parameter is cast: Postgres types a parameter where it first meets it,
+// and "$4 IS NULL" types nothing, so without the casts it refused the whole
+// statement at prepare (42P08) and no PR state, check or review ever landed
+// (V-705; TestEveryStatementsParametersHaveATypePostgresCanTell holds the line).
 func UpdateTaskPRState(ctx context.Context, taskUUID uuid.UUID, prState string, checkStatus string, reviewState string, isDraft *bool) error {
 	query := `
 		UPDATE tasks SET
-			github_pr_state = CASE WHEN $1 = '' THEN github_pr_state ELSE $1 END,
-			github_pr_check_status = CASE WHEN $2 = '' THEN github_pr_check_status ELSE $2 END,
-			github_pr_review_state = CASE WHEN $3 = '' THEN github_pr_review_state ELSE $3 END,
-			github_pr_is_draft = CASE WHEN $4 IS NULL THEN github_pr_is_draft ELSE $4 END,
+			github_pr_state = CASE WHEN $1::text = '' THEN github_pr_state ELSE $1::text END,
+			github_pr_check_status = CASE WHEN $2::text = '' THEN github_pr_check_status ELSE $2::text END,
+			github_pr_review_state = CASE WHEN $3::text = '' THEN github_pr_review_state ELSE $3::text END,
+			github_pr_is_draft = CASE WHEN $4::boolean IS NULL THEN github_pr_is_draft ELSE $4::boolean END,
 			updated_at = NOW()
 		WHERE id = $5
 	`
@@ -1406,6 +1416,15 @@ func SetDgraphTaskStatusSince(ctx context.Context, tasks []*dgraphStruct.DgraphT
 	return writeDgraphTasks(ctx, tasks, func(from, to *dgraphStruct.DgraphTask) { to.StatusSince = from.StatusSince })
 }
 
+// SetDgraphTaskHistory writes, for each task, the status changes it went
+// through (its Activity, added to what it has) and when it entered its
+// status, in one transaction: a data move that knows its history.
+func SetDgraphTaskHistory(ctx context.Context, tasks []*dgraphStruct.DgraphTask) error {
+	return writeDgraphTasks(ctx, tasks, func(from, to *dgraphStruct.DgraphTask) {
+		to.Activity, to.StatusSince = from.Activity, from.StatusSince
+	})
+}
+
 // writeDgraphTasks writes, for each task (found by its uuid), the fields fill
 // copies over, all in one transaction.
 func writeDgraphTasks(ctx context.Context, tasks []*dgraphStruct.DgraphTask, fill func(from, to *dgraphStruct.DgraphTask)) error {
@@ -1446,12 +1465,9 @@ func GetDgraphTasksWithoutStatusSince(ctx context.Context, n int) ([]*dgraphStru
 
 // clearJSON is a Dgraph delete for the named predicates of the nodes in var v.
 func clearJSON(v string, predicates []string) (string, error) {
-	if len(predicates) == 0 {
+	del := dgraphModels.Clearing("uid("+v+")", predicates)
+	if del == nil {
 		return "", nil
-	}
-	del := map[string]interface{}{"uid": "uid(" + v + ")"}
-	for _, p := range predicates {
-		del[p] = nil
 	}
 	b, err := json.Marshal(del)
 	return string(b), err
@@ -1550,10 +1566,11 @@ func syncTaskStatusToOpenSearch(uuids []string, category string) {
 }
 
 // UpdateTasksInOpenSearch updates many tasks' search documents in one bulk
-// request. Best effort, as every search write here.
-func UpdateTasksInOpenSearch(docs []*openSearchStruct.OpenSearchTask) {
+// request, emptying each field in clear. Best effort, as every search write
+// here.
+func UpdateTasksInOpenSearch(docs []*openSearchStruct.OpenSearchTask, clear ...string) {
 	ctx := context.Background()
-	if err := OpenSearchModels.UpdateTasksInOpenSearch(ctx, docs); err != nil {
+	if err := OpenSearchModels.UpdateTasksInOpenSearch(ctx, docs, clear...); err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/UpdateTasksInOpenSearch couldn't update %d tasks err: %+v", len(docs), err)
 	}
 }

@@ -65,7 +65,11 @@ type eventPlace struct {
 //   - call.started, call.ended: built for outside (business/CallState
 //     webhooks.go): ids, times and counts, never a name, a title or anything
 //     said. Named one by one: a call's kind added later stays private.
-var wholeAtOrg = []string{"user.joined", "user.left", "github.*", "doc.*", "call.started", "call.ended"}
+//   - event.created, updated, cancelled, deleted, restored: built for
+//     outside (business/Calendar webhooks.go), busy-shaped: ids and times,
+//     never a title, notes or who is on it. Named one by one.
+var wholeAtOrg = []string{"user.joined", "user.left", "github.*", "doc.*", "call.started", "call.ended",
+	"event.created", "event.updated", "event.cancelled", "event.deleted", "event.restored"}
 
 func sentWholeAtOrg(eventType string) bool {
 	for _, k := range wholeAtOrg {

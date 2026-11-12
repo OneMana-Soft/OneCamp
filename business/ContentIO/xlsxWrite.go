@@ -24,9 +24,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/currency"
 )
 
 const (
@@ -279,17 +281,18 @@ func (o *xlsxOut) cell(b *bufio.Writer, ref string, c Cell, col WorkbookColumn) 
 		if col.Fixed {
 			places = min(max(col.Places, 0), 6)
 		}
+		sign := o.styles.moneySign(c.Currency)
 		switch {
 		case c.Percent:
 			if places < 0 {
 				places = placesOf(c.Number)
 			}
 			o.value(b, ref, "", excelNumber(c.Number/100), o.styles.percent(places))
-		case c.Currency == "USD" || c.Currency == "INR":
+		case sign != "":
 			if places < 0 {
 				places = placesOf(c.Number)
 			}
-			o.value(b, ref, "", excelNumber(c.Number), o.styles.money(c.Currency, places))
+			o.value(b, ref, "", excelNumber(c.Number), o.styles.money(sign, places))
 		default:
 			o.value(b, ref, "", excelNumber(c.Number), o.styles.number(places))
 		}
@@ -440,10 +443,12 @@ type xlsxStyles struct {
 	// style of each.
 	formats  []int
 	byFormat map[int]int
+	// signs are the currencies' signs asked for so far (moneySign).
+	signs map[string]string
 }
 
 func newXLSXStyles() *xlsxStyles {
-	return &xlsxStyles{ids: map[string]int{}, byFormat: map[int]int{}}
+	return &xlsxStyles{ids: map[string]int{}, byFormat: map[int]int{}, signs: map[string]string{}}
 }
 
 // builtin is the style of Excel's own number format id.
@@ -486,13 +491,30 @@ func (s *xlsxStyles) percent(places int) int {
 	return s.code("0" + decimals(places) + "%")
 }
 
-// money is an amount's style, with its currency's sign: the dollar or the
-// rupee, the two a table's number shows.
-func (s *xlsxStyles) money(currency string, places int) int {
-	sign := "$"
-	if currency == "INR" {
-		sign = "₹"
+// moneySign is what an amount in code, a cell's Currency, shows before it:
+// its currency's sign ("$", "€", "A$"), with a space after one that ends in
+// a letter ("CHF 12"); "" when code is no currency. Kept for the workbook,
+// since every cell of a column asks.
+func (s *xlsxStyles) moneySign(code string) string {
+	if code == "" {
+		return ""
 	}
+	sign, ok := s.signs[code]
+	if !ok {
+		sign = currency.Sign(code)
+		if r, _ := utf8.DecodeLastRuneInString(sign); unicode.IsLetter(r) {
+			sign += " "
+		}
+		s.signs[code] = sign
+	}
+	return sign
+}
+
+// money is an amount's style, with its currency's sign (moneySign) quoted
+// before it. A quoted sign is plain text in a number format, which Excel,
+// LibreOffice and Google Sheets all show as written; Excel's own currency
+// tag ([$€-407]) names a locale as well, which a table's number hasn't.
+func (s *xlsxStyles) money(sign string, places int) int {
 	return s.code(`"` + sign + `"#,##0` + decimals(places))
 }
 

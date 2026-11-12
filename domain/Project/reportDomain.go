@@ -37,8 +37,10 @@ const reportPerson = `uid user_uuid user_name user_full_name user_profile_object
 // (23 kinds), and a nested filter needs no index. (With its uid: Dgraph leaves
 // out a node with nothing to show, which an unassigned one could be.) Its
 // uuid and name are for its type (business/TaskKeys) and its point on the
-// insights' chart.
-const reportTask = `uid task_uuid task_name task_status task_priority task_due_date task_created_at task_status_since task_assignee { ` + reportPerson + ` }
+// insights' chart; its label (tags), own status and estimates, for slicing
+// them by labels, status and estimate and adding up their effort (L32).
+const reportTask = `uid task_uuid task_name task_status task_priority task_due_date task_created_at task_status_since task_label task_custom_status
+	task_estimate_minutes task_estimate_points task_assignee { ` + reportPerson + ` }
 	task_activities @filter(eq(activity_type, "` + dgraphStruct.ACTIVITY_TYPE_STATUS + `")) { activity_type activity_time activity_prev_state activity_next_state }`
 
 // GetDgraphReport reads, for every live project the person is in, its open

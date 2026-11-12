@@ -154,3 +154,36 @@ func TestWriteCSVNeutralisesFormulas(t *testing.T) {
 		t.Errorf("the report starts with the byte order mark: %q", out[:min(len(out), 12)])
 	}
 }
+
+// Time on tasks the reader may not see is one line that names none of them:
+// not their titles, not their ids, not how many; their notes go too.
+func TestHideNamesNoTaskTheReaderCantSee(t *testing.T) {
+	seen, h1, h2, who := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now()
+	ended := now.Add(-time.Hour)
+	entry := func(task uuid.UUID, note string) timeModel.Entry {
+		return timeModel.Entry{TaskUUID: task, UserID: who, StartedAt: now.Add(-2 * time.Hour), EndedAt: &ended, Note: note}
+	}
+	entries := []timeModel.Entry{entry(seen, "kept"), entry(h1, "secret one"), entry(h2, "secret two")}
+	names := Names{People: map[uuid.UUID]string{who: "Ana"}, Tasks: map[uuid.UUID]string{seen: "Seen", h1: "Secret"}}
+	names.Hide(entries, func(id uuid.UUID) bool { return id == h1 || id == h2 })
+	r := Summarise(entries, names, now.Add(-24*time.Hour), now, now, nil)
+	if len(r.ByTask) != 2 {
+		t.Fatalf("by task: %+v, want the seen task and one hidden line", r.ByTask)
+	}
+	for _, l := range r.ByTask {
+		if l.ID == h1.String() || l.ID == h2.String() || l.Name == "Secret" {
+			t.Errorf("a line names a hidden task: %+v", l)
+		}
+		if l.ID == uuid.Nil.String() && (l.Name != HiddenTask || l.Seconds != 7200) {
+			t.Errorf("the hidden line: %+v, want both hours as %q", l, HiddenTask)
+		}
+	}
+	var csv strings.Builder
+	if err := WriteCSV(&csv, entries, names, time.UTC, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	if out := csv.String(); strings.Contains(out, "secret") || strings.Contains(out, "Secret") || !strings.Contains(out, "kept") {
+		t.Errorf("the export: %s", out)
+	}
+}

@@ -27,6 +27,7 @@ import (
 
 	"github.com/google/uuid"
 
+	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
 	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -147,6 +148,11 @@ func TestCalendarRemindersOverHTTP(t *testing.T) {
 		t.Fatalf("create: %d %v", code, body)
 	}
 	e := dataEvent(t, body)
+	// The create's reminders sink has run for everyone on it (V-730): a late
+	// run would undo the reminders Maya and Sam set below.
+	if !resourceEventBusiness.Sinks.Settle(30 * time.Second) {
+		t.Fatal("the design review's sinks didn't settle")
+	}
 
 	// Sam organises it: 10 minutes before, by default. Maya hasn't answered.
 	eventually(t, "Sam's reminder to be planned", func() bool {

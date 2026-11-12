@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+
+	formula "github.com/akashc777/OneCamp/business/Formula"
 )
 
 // IsEmpty is whether a cell holds nothing: no value, blank text, or an empty
@@ -121,4 +123,78 @@ func HasMoreRef(cell any) bool {
 func IsHiddenRef(item any) bool {
 	m, ok := item.(map[string]any)
 	return ok && m["hidden"] == true
+}
+
+// FormulaKindOf is how a field of kind fieldType reads in a formula: as its
+// kind says, text for one nothing knows.
+func FormulaKindOf(fieldType string) formula.Kind {
+	if k, ok := Kinds.Lookup(fieldType); ok {
+		return k.FormulaKind
+	}
+	return formula.KindText
+}
+
+// FormulaValue reads a cell of a field of kind fieldType for a formula, with the same helpers totals and
+// filters use: a number field as a number, a date as a date, a checkbox as
+// yes or no, and anything else as its labels ("Design, Launch" for a
+// multi-select, a person's or a linked item's name).
+func FormulaValue(fieldType string, raw interface{}) formula.Value {
+	// By what its kind reads as (business/FieldTypes): a duration, a rating
+	// and a row's number are numbers; when a row was made or changed, dates.
+	switch FormulaKindOf(fieldType) {
+	case formula.KindNumber:
+		if f, ok := CellNumber(raw); ok {
+			return formula.Number(f)
+		}
+		return formula.Blank()
+	case formula.KindBool:
+		b, _ := raw.(bool)
+		return formula.Bool(b)
+	case formula.KindDate:
+		if s, ok := raw.(string); ok {
+			if v, ok := formula.ParseDate(s); ok {
+				return v
+			}
+		}
+		return formula.Blank()
+	default:
+		// A number in a list reads as a number cell does (1e+21 from 1e21).
+		labels := LabelsWith(raw, formula.FormatNumber)
+		if _, isList := raw.([]interface{}); !isList {
+			return formula.Text(strings.Join(labels, ", "))
+		}
+		// A list (a multi-select's options, people, linked items) is its
+		// labels joined, as before, and its items for the ARRAY functions.
+		// Every label is kept, a blank one too, so the text is as it was.
+		items := make([]formula.Value, len(labels))
+		for i, l := range labels {
+			items[i] = formula.Text(l)
+		}
+		return formula.List(items)
+	}
+}
+
+// CellNumber attempts to read a numeric value from a cell (number column, or a
+// numeric string, read as formula.ParseNumber reads one in en-US's signs).
+// Returns (value, true) only on success. Text was read by dropping its
+// commas, so "1,5" summed as 15, and "NaN" as a number no answer could hold.
+// Totals and formulas read cells so; a filter reads them as the grid does
+// (rowFilters.go), where a number written as text is no number.
+func CellNumber(v interface{}) (float64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case json.Number:
+		if f, err := t.Float64(); err == nil {
+			return f, true
+		}
+	case bool:
+		if t {
+			return 1, true
+		}
+		return 0, true
+	case string:
+		return formula.ParseNumber(t, formula.PlainSigns)
+	}
+	return 0, false
 }

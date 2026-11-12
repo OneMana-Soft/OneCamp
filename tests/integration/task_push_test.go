@@ -260,8 +260,11 @@ func TestANewTaskReachesItsReadersAndWhomItIsGivenTo(t *testing.T) {
 			t.Errorf("the new task was pushed to %v, want %v: everyone hearing of everything, but Maya, who made it, "+
 				"Dex (deactivated) and Lee (off the project); Mo and Tom hear of mentions only; Olu has no device", got, want)
 		}
-		if got, want := w.noticed("task:"+task), []string{"ben", "kay", "olu", "sam"}; !slices.Equal(got, want) {
-			t.Errorf("the new task's desktop notice reached %v, want %v: Olu is given it and uses only the desktop app", got, want)
+		if got, want := w.noticed("task:"+task), []string{"ben", "kay", "olu"}; !slices.Equal(got, want) {
+			t.Errorf("the new task's desktop notice reached %v, want %v: Olu is given it and uses only the desktop app; Sam is told of his mention", got, want)
+		}
+		if got, want := w.noticed("mention|task|"+task), []string{"sam"}; !slices.Equal(got, want) {
+			t.Errorf("the new task's mention's desktop notice reached %v, want %v", got, want)
 		}
 	})
 

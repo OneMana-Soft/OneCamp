@@ -50,9 +50,9 @@ type Cell struct {
 	// Number is a number's value, a percent's as it shows (12.5 for 12.5%),
 	// or a duration's seconds.
 	Number float64
-	// Percent and Currency are how a number shows: Currency is "USD" or
-	// "INR" for the signs a table's number shows, "other" for another sign,
-	// and "" for none.
+	// Percent and Currency are how a number shows: Currency is the
+	// currency's ISO 4217 code ("USD", "EUR"), "other" for a sign that names
+	// no one currency, and "" for none.
 	Percent  bool
 	Currency string
 	// Bool is a checkbox's value.

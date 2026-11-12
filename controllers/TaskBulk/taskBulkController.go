@@ -19,7 +19,6 @@ import (
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
-	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
 )
 
@@ -114,10 +113,8 @@ func CreateTasks(w http.ResponseWriter, r *http.Request) {
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Every task needs a name."})
 			return
 		}
-		if in.Tasks[i].Priority == "" {
-			in.Tasks[i].Priority = dgraphStruct.TASK_PRIORITY_MEDIUM
-		}
-		if !taskPriority.Is(in.Tasks[i].Priority) {
+		// None given is none.
+		if !taskPriority.IsOrNone(in.Tasks[i].Priority) {
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": fmt.Sprintf("%q isn't a priority.", in.Tasks[i].Priority)})
 			return
 		}

@@ -26,8 +26,15 @@ const planFields = `uid task_uuid task_name task_status task_status_since task_e
 		project_is_admin: count(project_admins @filter(eq(user_uuid, $u)))
 	}`
 
-// planLinked is a live top-level task's filter, for every hop.
-const planLinked = dgraphStruct.TASK_LIVE_FILTER + ` AND NOT has(task_parent_task)`
+// planRoots is the filter of a plan's roots, a project's live top-level
+// tasks: top is the top-level clause (TopLevel: a task at the top or in an
+// epic). Pure.
+func planRoots(top string) string { return dgraphStruct.TASK_LIVE_FILTER + ` AND ` + top }
+
+// planHop is the filter of every dependency hop: any live task. A sub-task
+// has no dependency edge (the hierarchy refuses one: MayParent, and a
+// sub-task takes no dependency), so a hop only ever meets top-level work.
+const planHop = dgraphStruct.TASK_LIVE_FILTER
 
 // PlanRead is what a plan read keeps of one project: its tasks, and what its
 // limits left out.
@@ -65,14 +72,19 @@ func PlanTasksOf(ctx context.Context, projectUUIDs []string, readerUUID string, 
 	if len(ids) == 0 {
 		return out, nil
 	}
+	top, clause, err := TopLevelWork(ctx, ids...)
+	if err != nil {
+		return nil, err
+	}
 	params := []string{"$u: string"}
 	vars := map[string]string{"$u": readerUUID}
 	var blocks strings.Builder
+	blocks.WriteString(top)
 	for i, id := range ids {
 		n := strconv.Itoa(i)
 		params = append(params, "$p"+n+": string")
 		vars["$p"+n] = id
-		blocks.WriteString(planBlocks(n, limits))
+		blocks.WriteString(planBlocks(n, limits, clause))
 	}
 	read, err := dgexec.Read[map[string][]*dgraphStruct.DgraphTask](ctx, tr.Fill(`query q(`+strings.Join(params, ", ")+`) {`+blocks.String()+`
 	}`), vars)
@@ -100,9 +112,9 @@ func PlanTasksOf(ctx context.Context, projectUUIDs []string, readerUUID string, 
 // them, the open tasks of other projects linked to them, and its finished
 // ones, the latest finished first, limits.Finished and one more, so a cut
 // shows.
-func planBlocks(n string, limits PlanLimits) string {
+func planBlocks(n string, limits PlanLimits, top string) string {
 	fields := planFields + `
-			task_blocked_by @facets(kind, lag) @filter(` + planLinked + `) { task_uuid }`
+			task_blocked_by @facets(kind, lag) @filter(` + planHop + `) { task_uuid }`
 	own := `
 		own` + n + `(func: uid(pt` + n + `)) @filter(` + dgraphStruct.TASK_OPEN_FILTER + ` ` + taskread.Mark + `) {
 			` + fields + `
@@ -118,9 +130,9 @@ func planBlocks(n string, limits PlanLimits) string {
 		}`
 	}
 	return `
-		var(func: eq(project_uuid, $p` + n + `)) { pt` + n + ` as project_tasks @filter(` + planLinked + `) }
-		var(func: uid(pt` + n + `)) @recurse(loop: false) { up` + n + ` as task_blocked_by @filter(` + planLinked + `) }
-		var(func: uid(pt` + n + `)) @recurse(loop: false) { down` + n + ` as ~task_blocked_by @filter(` + planLinked + `) }` + own + `
+		var(func: eq(project_uuid, $p` + n + `)) { pt` + n + ` as project_tasks @filter(` + planRoots(top) + `) }
+		var(func: uid(pt` + n + `)) @recurse(loop: false) { up` + n + ` as task_blocked_by @filter(` + planHop + `) }
+		var(func: uid(pt` + n + `)) @recurse(loop: false) { down` + n + ` as ~task_blocked_by @filter(` + planHop + `) }` + own + `
 		linked` + n + `(func: uid(up` + n + `, down` + n + `)) @filter(` + dgraphStruct.TASK_OPEN_FILTER + ` AND NOT uid(pt` + n + `) ` + taskread.Mark + `) {
 			` + fields + `
 		}
@@ -206,12 +218,17 @@ func ReadPlanTotalsOf(ctx context.Context, projectUUIDs []string, bounds []time.
 		vars["$to"+s], vars["$from"+s] = bounds[i].UTC().Format(time.RFC3339), bounds[i+1].UTC().Format(time.RFC3339)
 		params = append(params, "$to"+s+": string", "$from"+s+": string")
 	}
+	top, clause, err := TopLevelWork(ctx, ids...)
+	if err != nil {
+		return nil, err
+	}
 	var blocks strings.Builder
+	blocks.WriteString(top)
 	for i, id := range ids {
 		p := "p" + strconv.Itoa(i)
 		vars["$"+p] = id
 		params = append(params, "$"+p+": string")
-		blocks.WriteString(totalsBlocks(p, spans))
+		blocks.WriteString(totalsBlocks(p, spans, clause))
 	}
 	raw, err := dgexec.Read[map[string][]map[string]any](ctx, tr.Fill(`query q(`+strings.Join(params, ", ")+`) {`+blocks.String()+`
 	}`), vars)
@@ -229,7 +246,7 @@ func ReadPlanTotalsOf(ctx context.Context, projectUUIDs []string, bounds []time.
 // project), their variables and names ending in p: its tasks, its open ones
 // and their points, what got done in each of spans spans ($from<i> to $to<i>),
 // its first done, and when it was made.
-func totalsBlocks(p string, spans int) string {
+func totalsBlocks(p string, spans int, top string) string {
 	var ranges, counts, sums strings.Builder
 	for i := 0; i < spans; i++ {
 		w, s := "w"+strconv.Itoa(i)+p, strconv.Itoa(i)
@@ -241,7 +258,7 @@ func totalsBlocks(p string, spans int) string {
 		sums.WriteString(` done` + s + `: sum(val(p` + w + `))`)
 	}
 	return `
-		var(func: eq(project_uuid, $` + p + `)) { own` + p + ` as project_tasks @filter(` + planLinked + ` ` + taskread.Mark + `) }
+		var(func: eq(project_uuid, $` + p + `)) { own` + p + ` as project_tasks @filter(` + planRoots(top) + ` ` + taskread.Mark + `) }
 		var(func: uid(own` + p + `)) @filter(` + dgraphStruct.TASK_OPEN_FILTER + `) { o` + p + ` as uid op` + p + ` as task_estimate_points }
 		var(func: uid(own` + p + `)) @filter(eq(task_status, "` + dgraphStruct.TASK_STATUS_DONE + `")) { fin` + p + ` as uid }` + ranges.String() + `
 		project` + p + `(func: eq(project_uuid, $` + p + `)) { project_created_at }

@@ -692,18 +692,21 @@ func firstSection(code string) string {
 
 // firstSign is sign, or the currency sign literal text in a number format
 // shows when sign is none yet: a currency symbol in it ("₹", "€"), or the
-// whole of it when it names dollars or rupees ("USD", "Rs."), and not text
+// whole of it when that names a currency its symbol alone doesn't ("A$",
+// Australia's dollar; "CHF" and "Rs.", which have no symbol), and not text
 // such as " km". Pure.
 func firstSign(sign, literal string) string {
 	if sign != "" {
 		return sign
 	}
+	symbol := ""
 	if i := strings.IndexFunc(literal, func(r rune) bool { return unicode.Is(unicode.Sc, r) }); i >= 0 {
 		r, _ := utf8.DecodeRuneInString(literal[i:])
-		return string(r)
+		symbol = string(r)
 	}
-	if code := strings.TrimSpace(literal); currencyOf(code) == "USD" || currencyOf(code) == "INR" {
-		return code
+	whole := strings.TrimSpace(literal)
+	if code := currencyOf(whole); code != "" && code != "other" && code != currencyOf(symbol) {
+		return whole
 	}
-	return ""
+	return symbol
 }

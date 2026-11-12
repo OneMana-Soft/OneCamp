@@ -35,6 +35,17 @@ type BotIdentity struct {
 	Kind domain.BotKind
 }
 
+// Principal is the bot as a notice shows it: its own ids, so it is never told
+// of its own words, under name: its own, or whom it wrote for (a guest).
+func (b *BotIdentity) Principal(name string) *dgraphStruct.DgraphUser {
+	u := &dgraphStruct.DgraphUser{Uid: b.DgraphUID, Uuid: b.UUID, UserName: name, IsBot: true}
+	if b.ProfileKey != "" {
+		key := b.ProfileKey
+		u.ProfileKey = &key
+	}
+	return u
+}
+
 var (
 	botMu       sync.RWMutex
 	botIdentity *BotIdentity

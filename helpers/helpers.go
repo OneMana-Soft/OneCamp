@@ -106,6 +106,22 @@ func IsBulkImport(ctx context.Context) bool {
 	return v
 }
 
+type quietKey struct{}
+
+// Quietly marks a move of data that tells nobody: what an import, a sync,
+// the demo's seed or an import's re-check writes was there already, so
+// nobody is pushed, sent the desktop app's notice, emailed or told in their
+// Inbox of it, as nobody is of a bulk import's writes (NOTIF-H6).
+func Quietly(ctx context.Context) context.Context {
+	return context.WithValue(ctx, quietKey{}, true)
+}
+
+// Quiet is whether a write tells nobody: it's a move of data (Quietly) or a
+// bulk import's (IsBulkImport). Each teller asks it first.
+func Quiet(ctx context.Context) bool {
+	return ctx != nil && (ctx.Value(quietKey{}) != nil || IsBulkImport(ctx))
+}
+
 // GetApiScopes returns the granted scopes for the API token that authenticated
 // the request, or nil for non-token (cookie/session) requests.
 func GetApiScopes(ctx context.Context) []string {

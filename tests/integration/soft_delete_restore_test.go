@@ -246,7 +246,7 @@ func TestEveryDeletedProjectPartComesBackWhole(t *testing.T) {
 			},
 			shown: func() bool {
 				fields, _ := taskFieldBusiness.List(ctx, project)
-				values, _ := fieldModel.ValuesFor(ctx, tasks)
+				values, _, _ := fieldModel.ReadValues(ctx, tasks)
 				_, valued := values[w.task][field.ID.String()]
 				for _, f := range fields {
 					if f.ID == field.ID {

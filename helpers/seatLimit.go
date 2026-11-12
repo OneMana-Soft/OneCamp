@@ -28,10 +28,19 @@ func parseSeatLimit(raw string) int {
 
 // SeatLimitError is returned when a new or returning member would take the
 // workspace past its licence. Its message is written for the person who sees
-// it: it says what happened and what an admin can do.
-type SeatLimitError struct{ Limit int }
+// it: it says what happened and what an admin can do. Told is set when the
+// admins have been told of this person (business/Seats, for someone's own
+// way in): then the joiner hears that, and nothing of licences or prices.
+type SeatLimitError struct {
+	Limit int
+	Told  bool
+}
 
 func (e *SeatLimitError) Error() string {
+	if e.Told {
+		return fmt.Sprintf("This workspace is on OneCamp's free plan, which has room for %d people, and it's full. "+
+			"Your admin has been told; try again once they've freed a place or removed the limit.", e.Limit)
+	}
 	return fmt.Sprintf("This workspace is on OneCamp's free plan, which has room for %d people, and it is full. "+
 		"An admin can deactivate someone who has left, or remove the limit with a lifetime licence at onemana.dev/pricing.", e.Limit)
 }
@@ -54,6 +63,9 @@ func WriteSeatLimit(w http.ResponseWriter, err error) bool {
 		"msg":    e.Error(),
 		"status": "failed",
 		"code":   "seat_limit",
+		// The plan's figure, so the app can say it to a member who meets
+		// it without reading the seats, which are an admin's.
+		"limit": e.Limit,
 	})
 	return true
 }

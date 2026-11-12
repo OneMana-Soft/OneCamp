@@ -100,6 +100,13 @@ func DataMove(ctx context.Context) context.Context {
 	return context.WithValue(ctx, dataMoveKey{}, true)
 }
 
+// QuietMove is a DataMove that tells nobody (helpers.Quietly): an import, a
+// sync, the demo's seed, an import's re-check. A template's apply is a
+// DataMove alone: a person's act, told in its one push.
+func QuietMove(ctx context.Context) context.Context {
+	return DataMove(helpers.Quietly(ctx))
+}
+
 // Held is a task made in its project's default status because the status it
 // was asked for wants approval, and what became of asking: the request
 // (ApprovalID, empty when none could be opened) and both in words ("Made in To

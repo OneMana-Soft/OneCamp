@@ -1,8 +1,8 @@
 // Package business (Dashboard) is dashboards (B9-b2: jira-08, asana-08,
 // linear-32): pages of widgets (metrics, charts and tables) over the report
-// and its insights (business/Project ReportFor) and over goals, each with a
-// COPY of its query taken when it was added: its projects, a saved view's
-// filters and search, its weeks and what it measures.
+// and its insights (business/Project ReportFor) and over goals, each with
+// its own query: its projects, filters and search, or a saved view it reads
+// as it is now (view.go), and its weeks and what it measures.
 //
 // WHO (the permission model; tests/integration/dashboards_http_test.go has a
 // block for each case):
@@ -21,6 +21,10 @@
 //     those who keep the dashboard read it whole, to change it; a reader gets
 //     only its shape (Shown), never the projects, filters, search or goal it
 //     reads, which may name work outside the reader's reach.
+//  6. a widget over a saved view reads the view as the reader (view.go): a
+//     view is its owner's alone, so anyone else, and everyone once it is
+//     deleted, reads the widget's own word for why, never the view's work.
+//     Its keeper puts on it only a view of their own that fits it.
 //
 // API tokens act as their member; no bot keeps dashboards.
 package business
@@ -32,6 +36,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/google/uuid"
@@ -66,19 +71,22 @@ const (
 	KindControlChart = "control_chart"  // each task done: its cycle and lead time
 	KindTimeInStatus = "time_in_status" // how long done work spent in each step
 	KindFlow         = "flow"           // where the work stood at each week's end
-	KindBreakdown    = "breakdown"      // a table of open, overdue and done By
+	KindBreakdown    = "breakdown"      // a table of open, overdue and done (or their effort) By
 	KindGoal         = "goal"           // one goal's progress and health
 )
 
 var kinds = map[string]bool{KindMetric: true, KindThroughput: true, KindControlChart: true, KindTimeInStatus: true,
 	KindFlow: true, KindBreakdown: true, KindGoal: true}
 
-// measures are what a metric widget may show: a count, or a spread of days.
+// measures are what a metric widget may show: a count, a spread of days, or
+// the effort of the open work or of the work done (L32).
 var measures = map[string]bool{"open": true, "overdue": true, "due_this_week": true, "done_total": true, "on_time": true,
-	"cycle": true, "lead": true, "triage": true, "age": true}
+	"cycle": true, "lead": true, "triage": true, "age": true, "effort_open": true, "effort_done": true}
 
-// breakdowns are what a breakdown widget's rows may be.
-var breakdowns = map[string]bool{"project": true, "person": true, "priority": true}
+// breakdownMeasures are what a breakdown widget's rows count: their tasks
+// ("" is count, as before L32), or their effort. Its rows are by any way
+// the insights slice work (projectBusiness.InsightBy).
+var breakdownMeasures = map[string]bool{"": true, "count": true, "effort": true}
 
 var (
 	// ErrNotFound: no such dashboard or widget here, or not for this reader.
@@ -108,10 +116,13 @@ type Dashboard struct {
 	MineOf uuid.UUID `json:"-"`
 }
 
-// Query is a widget's own copy of what it reads. Projects empty is all the
-// reader's (a project's dashboard: that project alone); Filters and Search
-// are a saved view's, as its list sends them.
+// Query is what a widget reads. Projects empty is all the reader's (a
+// project's dashboard: that project alone); Filters and Search are a list's,
+// as it sends them. With View, a saved view's id, the widget keeps no filters
+// or search of its own: they are the view's, read as the reader each time
+// the widget is worked out (view.go).
 type Query struct {
+	View     string                     `json:"view,omitempty"`
 	Projects []string                   `json:"projects,omitempty"`
 	Filters  []taskDomain.TaskListParam `json:"filters,omitempty"`
 	Search   string                     `json:"search,omitempty"`
@@ -237,6 +248,18 @@ func checkQuery(d Dashboard, kind string, q Query) (Query, error) {
 		projects = []string{d.ProjectID}
 	}
 	q.Projects = projects
+	if q.View = strings.TrimSpace(q.View); q.View != "" && kind != KindGoal {
+		id, err := uuid.Parse(q.View)
+		if err != nil {
+			return q, refuse("A widget names a saved view that isn't one.")
+		}
+		// The view's own query is read when the widget is worked out: a
+		// copy here would go stale, and its projects are the view's.
+		q.View, q.Filters, q.Search = id.String(), nil, ""
+		if d.Scope != ScopeProject {
+			q.Projects = nil
+		}
+	}
 	if len(q.Filters) > MaxFilters {
 		return q, refuse("A widget keeps at most %d filters.", MaxFilters)
 	}
@@ -250,14 +273,18 @@ func checkQuery(d Dashboard, kind string, q Query) (Query, error) {
 	switch kind {
 	case KindMetric:
 		if !measures[q.Measure] {
-			return q, refuse("A metric widget measures one of: open, overdue, due_this_week, done_total, on_time, cycle, lead, triage or age.")
+			return q, refuse("A metric widget measures one of: open, overdue, due_this_week, done_total, on_time, cycle, lead, triage, age, effort_open or effort_done.")
 		}
 		q.By, q.Goal = "", ""
 	case KindBreakdown:
-		if !breakdowns[q.By] {
-			return q, refuse("A breakdown widget is by project, person or priority.")
+		by, ok := projectBusiness.InsightBy(q.By)
+		if !ok {
+			return q, refuse("A breakdown widget is by project, person, priority, type, status, labels, cycle, estimate or a custom field.")
 		}
-		q.Measure, q.Goal = "", ""
+		if !breakdownMeasures[q.Measure] {
+			return q, refuse("A breakdown widget counts tasks or adds up their effort.")
+		}
+		q.By, q.Goal = by, ""
 	case KindGoal:
 		id, err := uuid.Parse(strings.TrimSpace(q.Goal))
 		if err != nil {

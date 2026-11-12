@@ -250,3 +250,20 @@ func TestGoogleTellsSyncWhyAChangeWasntTaken(t *testing.T) {
 		}
 	}
 }
+
+// Google's visibility is the codec's CLASS both ways, so a private event
+// stays private wherever it is changed.
+func TestGoogleVisibilityIsTheCodecsClass(t *testing.T) {
+	cal := calendarSyncBusiness.Remote{Zone: "UTC"}
+	for vis, class := range map[string]string{"private": "PRIVATE", "confidential": "CONFIDENTIAL", "public": "PUBLIC", "default": "", "": ""} {
+		ev := &calendar.Event{Id: "e1", Visibility: vis, Start: &calendar.EventDateTime{Date: "2026-11-10"}, End: &calendar.EventDateTime{Date: "2026-11-11"}}
+		if got := eventOf(ev, cal).Class; got != class {
+			t.Errorf("visibility %q reads as %q, want %q", vis, got, class)
+		}
+	}
+	for class, vis := range map[string]string{"PRIVATE": "private", "CONFIDENTIAL": "confidential", "PUBLIC": "public", "": "default"} {
+		if got := googleEventOf(ICS.Event{StartDate: "2026-11-10", EndDate: "2026-11-11", Class: class}).Visibility; got != vis {
+			t.Errorf("CLASS %q is sent as %q, want %q", class, got, vis)
+		}
+	}
+}

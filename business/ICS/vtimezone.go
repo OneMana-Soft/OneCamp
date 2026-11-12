@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // transition is a change of a zone's offset.
@@ -36,32 +38,20 @@ func periodAt(loc *time.Location, t time.Time) period {
 	return period{off: off, dst: in.IsDST()}
 }
 
-// transitions are loc's changes of offset between start and end, each to the
-// second. Pure.
+// transitions are loc's changes of offset between start and end, each at
+// its instant, stepping from one possible change to the next
+// (helpers.NextZoneChange, whatever the years). Pure.
 func transitions(loc *time.Location, start, end time.Time) []transition {
 	var out []transition
-	prev, was := start, periodAt(loc, start)
-	for t := start.Add(24 * time.Hour); !t.After(end); t = t.Add(24 * time.Hour) {
+	was := periodAt(loc, start)
+	for t := helpers.NextZoneChange(start.In(loc)); !t.IsZero() && !t.After(end); t = helpers.NextZoneChange(t) {
 		now := periodAt(loc, t)
 		if now == was {
-			prev = t
 			continue
 		}
-		lo, hi := prev, t // lo is in the old period, hi in the new
-		for hi.Sub(lo) > time.Second {
-			mid := lo.Add(hi.Sub(lo) / 2).Truncate(time.Second)
-			if !mid.After(lo) {
-				mid = lo.Add(time.Second)
-			}
-			if periodAt(loc, mid) == was {
-				lo = mid
-			} else {
-				hi = mid
-			}
-		}
-		name, _ := hi.In(loc).Zone()
-		out = append(out, transition{at: hi.UTC(), from: was.off, to: now.off, dst: now.dst, name: name})
-		prev, was = t, now
+		name, _ := t.Zone()
+		out = append(out, transition{at: t.UTC(), from: was.off, to: now.off, dst: now.dst, name: name})
+		was = now
 	}
 	return out
 }

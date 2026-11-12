@@ -3,12 +3,15 @@ package Calendar
 // The calendar's meetings in the work graph (DG13). A meeting's node is a
 // thin projection that business/Refs keeps (domain/WorkGraph nodes.go): who
 // organised it and who it's with, the project, channel or team calendar it's
-// on, and the docs, tasks and projects its notes link to. Postgres stays the
-// source; the node is rebuilt from it.
+// on, the docs, tasks and projects its notes link to, and the docs and tasks
+// it carries as files (eventFiles.go), so a doc's or a task's backlinks and
+// Connected panel show the meeting. Postgres stays the source; the node is
+// rebuilt from it.
 //
 // WHICH EVENTS HAVE ONE. A standalone event or a series that connects
 // something beyond its organiser: a member invited who hasn't declined, a
-// container's calendar, or a link in its notes. An instance changed on its
+// container's calendar, a link in its notes, or a doc or task it carries. An
+// instance changed on its
 // own counts as its series, and an event read from an address, someone's
 // own time (ownTimeKinds) and an event of one person alone have none.
 //
@@ -21,6 +24,7 @@ package Calendar
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
@@ -111,6 +115,10 @@ func (s *service) eventNodes(ctx context.Context, ids []string) (map[string]work
 	if err != nil {
 		return nil, err
 	}
+	files, err := s.store.filesOf(ctx, idsOf(events))
+	if err != nil {
+		return nil, err
+	}
 	on := map[uuid.UUID]workGraph.Ref{}
 	for _, c := range cals {
 		if k, ok := containerKinds[c.ContainerKind]; ok && helpers.IsCanonicalUUID(c.ContainerID) {
@@ -123,7 +131,7 @@ func (s *service) eventNodes(ctx context.Context, ids []string) (map[string]work
 		if hasContainer {
 			onCalendar = &container
 		}
-		if p, ok := meetingNode(e, guests[e.ID], onCalendar); ok {
+		if p, ok := meetingNode(e, guests[e.ID], onCalendar, files[e.ID]); ok {
 			out[e.ID.String()] = p
 		}
 	}
@@ -146,10 +154,10 @@ func mayBeMeeting(e *models.Event) bool {
 }
 
 // meetingNode is e's projection, with its member guests in the order they
-// were invited and the container whose calendar it's on (nil for none), and
-// whether it should have a node: one that connects something beyond its
-// organiser. Pure.
-func meetingNode(e *models.Event, guests []uuid.UUID, on *workGraph.Ref) (workGraph.Projection, bool) {
+// were invited, the container whose calendar it's on (nil for none) and its
+// files, and whether it should have a node: one that connects something
+// beyond its organiser. Pure.
+func meetingNode(e *models.Event, guests []uuid.UUID, on *workGraph.Ref, files []models.EventFile) (workGraph.Projection, bool) {
 	var with []workGraph.Ref
 	for _, g := range guests {
 		if len(with) == maxWith {
@@ -159,7 +167,7 @@ func meetingNode(e *models.Event, guests []uuid.UUID, on *workGraph.Ref) (workGr
 			with = append(with, workGraph.Ref{Kind: workGraph.KindPerson, UUID: g.String()})
 		}
 	}
-	links := refsBusiness.BodyLinks(workGraph.KindEvent, e.ID.String(), e.Notes)
+	links := withFileLinks(refsBusiness.BodyLinks(workGraph.KindEvent, e.ID.String(), e.Notes), files)
 	if len(with) == 0 && on == nil && len(links) == 0 {
 		return workGraph.Projection{}, false
 	}
@@ -178,6 +186,23 @@ func meetingNode(e *models.Event, guests []uuid.UUID, on *workGraph.Ref) (workGr
 		}
 	}
 	return p, true
+}
+
+// fileTargets are the work graph's kinds of the files a meeting links: a doc
+// and a task. A board is no link's target in the work graph
+// (workGraph.RefTargets), so it has none.
+var fileTargets = map[string]workGraph.Kind{fileDoc: workGraph.KindDoc, fileTask: workGraph.KindTask}
+
+// withFileLinks is links with the docs and tasks among files after them, each
+// once: one on a meeting links it as a link in its notes does. Pure.
+func withFileLinks(links []workGraph.Ref, files []models.EventFile) []workGraph.Ref {
+	for _, f := range files {
+		k, ok := fileTargets[f.Kind]
+		if r := (workGraph.Ref{Kind: k, UUID: f.Ref.String()}); ok && !slices.Contains(links, r) {
+			links = append(links, r)
+		}
+	}
+	return links
 }
 
 // eventNodesAfter is the nightly pass's page: up to n ids, after the cursor

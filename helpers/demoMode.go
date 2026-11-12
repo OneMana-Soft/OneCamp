@@ -30,6 +30,10 @@ const DemoSignInMsg = "The demo is shared by everyone who opens it, so how it si
 const DemoPersonalAccountMsg = "The demo is shared by everyone who opens it, so it never connects anyone's own " +
 	"Google, GitHub or Slack account: the next visitor would see it. Install OneCamp free to try this with yours."
 
+// DemoDeviceTestMsg is why the demo sends no test notice.
+const DemoDeviceTestMsg = "The demo is shared by everyone who opens it, so a test would reach every visitor's " +
+	"devices. Install OneCamp free to test notifications on yours."
+
 // DemoSeededMsg is why the demo keeps its own channels, projects, teams and
 // docs from the shared visitor (business/DemoGuard).
 const DemoSeededMsg = "Everyone who opens the demo shares this, so it can't be archived or deleted here. " +
@@ -40,6 +44,12 @@ const DemoSeededMsg = "Everyone who opens the demo shares this, so it can't be a
 // credentials, and everyone who opens the demo shares it.
 const DemoOutsideMsg = "The demo is shared by everyone who opens it, so its agents don't connect to outside tools " +
 	"or agents here. Install OneCamp free to connect your own."
+
+// DemoGitHubMsg is why the demo writes nothing to GitHub: no branch, pull
+// request, comment or change to an issue. It holds a real GitHub connection,
+// and everyone who opens it shares it.
+const DemoGitHubMsg = "The demo is shared by everyone who opens it, so it never changes anything on GitHub: " +
+	"no branches, pull requests, comments or issue changes. Install OneCamp free to connect your own repositories."
 
 // RefuseDemoVisitor answers 403 with code "demo" and msg when email is the
 // demo's shared visitor, and reports whether it did. The one refusal behind

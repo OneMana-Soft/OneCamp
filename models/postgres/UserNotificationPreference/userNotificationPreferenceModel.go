@@ -19,22 +19,29 @@ import (
 // All flags are sticky-on at creation time so users who never visit the
 // settings page still get the documented default (everything except digests).
 type UserNotificationPreference struct {
-	ID                   uuid.UUID `json:"id"`
-	UserID               uuid.UUID `json:"user_id"`
-	EmailEnabled         bool      `json:"email_enabled"`
-	EmailMentions        bool      `json:"email_mentions"`
-	EmailDMs             bool      `json:"email_dms"`
-	EmailTaskAssigned    bool      `json:"email_task_assigned"`
-	EmailTaskStatus      bool      `json:"email_task_status"`
-	EmailComments        bool      `json:"email_comments"`
-	EmailCalls           bool      `json:"email_calls"`
-	EmailChannelInvites  bool      `json:"email_channel_invites"`
-	EmailOnlyWhenOffline bool      `json:"email_only_when_offline"`
-	EmailDigestFrequency string    `json:"email_digest_frequency"`
-	QuietHoursEnabled    bool      `json:"quiet_hours_enabled"`
-	QuietHoursStart      *string   `json:"quiet_hours_start,omitempty"`
-	QuietHoursEnd        *string   `json:"quiet_hours_end,omitempty"`
-	QuietHoursTZ         *string   `json:"quiet_hours_tz,omitempty"`
+	ID                uuid.UUID `json:"id"`
+	UserID            uuid.UUID `json:"user_id"`
+	EmailEnabled      bool      `json:"email_enabled"`
+	EmailMentions     bool      `json:"email_mentions"`
+	EmailDMs          bool      `json:"email_dms"`
+	EmailTaskAssigned bool      `json:"email_task_assigned"`
+	EmailTaskStatus   bool      `json:"email_task_status"`
+	EmailComments     bool      `json:"email_comments"`
+	EmailCalls        bool      `json:"email_calls"`
+	// The calendar's emails by kind (migration 578), as Google lets each
+	// person choose: invitations (a booking of their time is one), changes
+	// (a cancellation is one), and replies to events they organise. A
+	// reminder by email has no switch here: the person asked for it.
+	EmailCalendarInvites bool    `json:"email_calendar_invites"`
+	EmailCalendarChanges bool    `json:"email_calendar_changes"`
+	EmailCalendarAnswers bool    `json:"email_calendar_answers"`
+	EmailChannelInvites  bool    `json:"email_channel_invites"`
+	EmailOnlyWhenOffline bool    `json:"email_only_when_offline"`
+	EmailDigestFrequency string  `json:"email_digest_frequency"`
+	QuietHoursEnabled    bool    `json:"quiet_hours_enabled"`
+	QuietHoursStart      *string `json:"quiet_hours_start,omitempty"`
+	QuietHoursEnd        *string `json:"quiet_hours_end,omitempty"`
+	QuietHoursTZ         *string `json:"quiet_hours_tz,omitempty"`
 	// NotificationsPausedUntil is a pause the person set (Slack's "pause
 	// notifications"); nil or past means not paused. See domain/UserFCMToken.
 	NotificationsPausedUntil *time.Time `json:"notifications_paused_until,omitempty"`
@@ -62,7 +69,8 @@ type UserNotificationPreference struct {
 // each call, as focus_until reads whichever calendar store is on.
 func allColumns() string {
 	return `id, user_id, email_enabled, email_mentions, email_dms, email_task_assigned,
-		email_task_status, email_comments, email_calls, email_channel_invites,
+		email_task_status, email_comments, email_calls, email_calendar_invites,
+		email_calendar_changes, email_calendar_answers, email_channel_invites,
 		email_only_when_offline, email_digest_frequency, quiet_hours_enabled,
 		quiet_hours_start, quiet_hours_end, quiet_hours_tz, unsubscribe_token,
 		created_at, updated_at, notifications_paused_until, read_receipts, record_views, ` +
@@ -167,6 +175,7 @@ func scanRow(row rowScanner) (*UserNotificationPreference, error) {
 	err := row.Scan(
 		&p.ID, &p.UserID, &p.EmailEnabled, &p.EmailMentions, &p.EmailDMs,
 		&p.EmailTaskAssigned, &p.EmailTaskStatus, &p.EmailComments, &p.EmailCalls,
+		&p.EmailCalendarInvites, &p.EmailCalendarChanges, &p.EmailCalendarAnswers,
 		&p.EmailChannelInvites, &p.EmailOnlyWhenOffline, &p.EmailDigestFrequency,
 		&p.QuietHoursEnabled, &p.QuietHoursStart, &p.QuietHoursEnd, &p.QuietHoursTZ,
 		&p.UnsubscribeToken, &p.CreatedAt, &p.UpdatedAt, &p.NotificationsPausedUntil,
@@ -248,6 +257,9 @@ type UpdatePreferenceInput struct {
 	EmailTaskStatus      *bool   `json:"email_task_status,omitempty"`
 	EmailComments        *bool   `json:"email_comments,omitempty"`
 	EmailCalls           *bool   `json:"email_calls,omitempty"`
+	EmailCalendarInvites *bool   `json:"email_calendar_invites,omitempty"`
+	EmailCalendarChanges *bool   `json:"email_calendar_changes,omitempty"`
+	EmailCalendarAnswers *bool   `json:"email_calendar_answers,omitempty"`
 	EmailChannelInvites  *bool   `json:"email_channel_invites,omitempty"`
 	EmailOnlyWhenOffline *bool   `json:"email_only_when_offline,omitempty"`
 	EmailDigestFrequency *string `json:"email_digest_frequency,omitempty"`
@@ -295,6 +307,15 @@ func Update(userID uuid.UUID, in UpdatePreferenceInput) error {
 	}
 	if in.EmailCalls != nil {
 		add("email_calls", *in.EmailCalls)
+	}
+	if in.EmailCalendarInvites != nil {
+		add("email_calendar_invites", *in.EmailCalendarInvites)
+	}
+	if in.EmailCalendarChanges != nil {
+		add("email_calendar_changes", *in.EmailCalendarChanges)
+	}
+	if in.EmailCalendarAnswers != nil {
+		add("email_calendar_answers", *in.EmailCalendarAnswers)
 	}
 	if in.EmailChannelInvites != nil {
 		add("email_channel_invites", *in.EmailChannelInvites)

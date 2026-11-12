@@ -10,6 +10,12 @@ package business
 // comments (rowAccess.go), never the table a call names, so a call's row must
 // be one that table holds: otherwise a token held to one table would reach the
 // comments of another table's rows.
+//
+// A comment mentions a member as @[<their user_uuid>] (Airtable's API writes
+// @[usrID]): it becomes the chip the app's composer writes, so the member is
+// told as anyone mentioned in the app is, and every answer writes each chip
+// back as @[uuid], with who they are in comment_mentioned
+// (contentcodec.WriteMentions, MentionsAsTokens).
 
 import (
 	"context"
@@ -23,9 +29,11 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
+	contentcodec "github.com/akashc777/OneCamp/business/ContentCodec"
 	v1api "github.com/akashc777/OneCamp/business/PublicAPI"
 	tableAccess "github.com/akashc777/OneCamp/business/TableAccess"
 	threadBusiness "github.com/akashc777/OneCamp/business/Thread"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -55,7 +63,7 @@ func commentOps() []v1api.Op {
 		// safe. It deletes nothing.
 		Behaviour: v1api.Behaviour{},
 		Input: json.RawMessage(`{"type":"object","properties":{` + tableArg + `,` + rowArg + `,
-			"text":{"type":"string","minLength":1,"maxLength":50000,"description":"The comment, as plain text: a blank line starts a paragraph, and lines that start with - or * make a list."},
+			"text":{"type":"string","minLength":1,"maxLength":50000,"description":"The comment, as plain text: a blank line starts a paragraph, and lines that start with - or * make a list. @[a member's user_uuid] mentions them: they are told, as anyone mentioned in the app is."},
 			"thread":{"type":"string","maxLength":64,"description":"The id of one of the row's threads, to reply in it; leave it out to start a thread."},
 			"field":{"type":"string","maxLength":64,"description":"A field's id, to start the thread on the row's cell in that field; leave it out for the row as a whole."}},
 			"required":["id","row","text"]}`),
@@ -85,7 +93,7 @@ func commentOps() []v1api.Op {
 		Method:  http.MethodPatch, Path: threadPath + "/comments/{comment}", Scope: apiTokenBusiness.ScopeTablesWrite,
 		Behaviour: v1api.Behaviour{Idempotent: true},
 		Input: json.RawMessage(`{"type":"object","properties":{` + tableArg + `,` + rowArg + `,` + threadArg + `,` + commentArg + `,
-			"text":{"type":"string","minLength":1,"maxLength":50000,"description":"The comment's new text, as plain text: a blank line starts a paragraph, and lines that start with - or * make a list."}},
+			"text":{"type":"string","minLength":1,"maxLength":50000,"description":"The comment's new text, as plain text: a blank line starts a paragraph, and lines that start with - or * make a list. @[a member's user_uuid] mentions them."}},
 			"required":["id","row","thread","comment","text"]}`),
 		Reach: tableReach,
 		Serve: serveRowCommentUpdate,
@@ -190,9 +198,9 @@ func serveThreadSettle(to threadBusiness.Status) func(context.Context, v1api.Cal
 
 func serveRowCommentUpdate(ctx context.Context, call v1api.Call) (any, error) {
 	text, _ := call.Args["text"].(string)
-	body := threadBusiness.Body{HTML: helpers.PlainTextToHTML(text)}
-	if body.HTML == "" {
-		return nil, v1api.Errorf(http.StatusBadRequest, "invalid_argument", "", "write the comment's text: it is blank")
+	body, err := commentBody(ctx, text)
+	if err != nil {
+		return nil, err
 	}
 	return threadChange(ctx, call, "tables.row.comment.update", "table.row.comment.edited", func(ctx context.Context, who accessBusiness.Subject, row uuid.UUID, thread string) (any, bool, error) {
 		if _, err := rowThread(ctx, who, row, thread); err != nil {
@@ -206,7 +214,7 @@ func serveRowCommentUpdate(ctx context.Context, call v1api.Call) (any, error) {
 		if err != nil {
 			return nil, false, threadErr(ctx, err)
 		}
-		return c, true, nil
+		return apiComments(ctx, c)[0], true, nil
 	})
 }
 
@@ -239,7 +247,7 @@ func serveRowCommentDelete(ctx context.Context, call v1api.Call) (any, error) {
 
 // rowComments is a row's threads as the API answers them.
 type rowComments struct {
-	Threads []threadBusiness.View `json:"threads"`
+	Threads []apiThread `json:"threads"`
 }
 
 func serveRowComments(ctx context.Context, call v1api.Call) (any, error) {
@@ -252,10 +260,7 @@ func serveRowComments(ctx context.Context, call v1api.Call) (any, error) {
 	if err != nil {
 		return nil, threadErr(ctx, err)
 	}
-	if list == nil {
-		list = []threadBusiness.View{}
-	}
-	return rowComments{Threads: list}, nil
+	return rowComments{Threads: apiThreads(ctx, list...)}, nil
 }
 
 // serveRowCommentCreate answers the comment it made, with its thread's id.
@@ -265,9 +270,9 @@ func serveRowCommentCreate(ctx context.Context, call v1api.Call) (any, error) {
 		return nil, err
 	}
 	text, _ := call.Args["text"].(string)
-	body := threadBusiness.Body{HTML: helpers.PlainTextToHTML(text)}
-	if body.HTML == "" {
-		return nil, v1api.Errorf(http.StatusBadRequest, "invalid_argument", "", "write the comment's text: it is blank")
+	body, err := commentBody(ctx, text)
+	if err != nil {
+		return nil, err
 	}
 	field, err := optionalID(call.Args, "field")
 	if err != nil {
@@ -292,7 +297,7 @@ func serveRowCommentCreate(ctx context.Context, call v1api.Call) (any, error) {
 	if len(v.Comments) == 0 {
 		return nil, errors.New("tables: a new thread came back without its first comment")
 	}
-	return v.Comments[0], nil
+	return apiComments(ctx, v.Comments[0])[0], nil
 }
 
 // commentCall is who a comments call acts for, as the threads service
@@ -330,7 +335,7 @@ func replyOnRow(ctx context.Context, who accessBusiness.Subject, row uuid.UUID, 
 	if err != nil {
 		return nil, threadErr(ctx, err)
 	}
-	return c, nil
+	return apiComments(ctx, c)[0], nil
 }
 
 // rowThread is one of the row's threads, with its comments, as who sees it:
@@ -395,4 +400,122 @@ func threadErr(ctx context.Context, err error) error {
 	e := v1api.Errorf(http.StatusServiceUnavailable, "unavailable", "send it again in a few seconds", "the comments couldn't be read or saved just now")
 	e.RetryAfter = retryRows
 	return e
+}
+
+// mentionable is each live member among ids, by uuid, as their own node (a
+// seam for tests).
+var mentionable = userDomain.LiveOwnNodesByUUIDs
+
+// commentBody is a comment's text as the HTML the threads service keeps:
+// plain text (helpers.PlainTextToHTML), each @[member uuid] in it made that
+// member's mention. Someone who isn't a live member of the workspace is
+// refused by name, and nothing is posted.
+func commentBody(ctx context.Context, text string) (threadBusiness.Body, error) {
+	h := helpers.PlainTextToHTML(text)
+	if h == "" {
+		return threadBusiness.Body{}, v1api.Errorf(http.StatusBadRequest, "invalid_argument", "", "write the comment's text: it is blank")
+	}
+	ids := contentcodec.MentionTokens(text)
+	if len(ids) == 0 {
+		return threadBusiness.Body{HTML: h}, nil
+	}
+	found, err := mentionable(ctx, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/DataTable commentBody: the people mentioned couldn't be read: %+v", err)
+		e := v1api.Errorf(http.StatusServiceUnavailable, "unavailable", "send it again in a few seconds", "the people mentioned couldn't be read just now")
+		e.RetryAfter = retryRows
+		return threadBusiness.Body{}, e
+	}
+	people := make(map[string]contentcodec.Mention, len(ids))
+	for _, id := range ids {
+		n := found[id]
+		if n == nil {
+			return threadBusiness.Body{}, v1api.Errorf(http.StatusBadRequest, "invalid_argument", "mention a member by their user_uuid, as @[user_uuid]", "%s is no member of this workspace", contentcodec.MentionToken(id))
+		}
+		people[id] = contentcodec.Mention{UUID: id, UID: n.Uid, Label: helpers.FirstNonEmpty(n.UserName, n.UserFullName)}
+	}
+	doc, err := contentcodec.FromHTML(h, contentcodec.HTMLOptions{})
+	if err != nil {
+		return threadBusiness.Body{}, err
+	}
+	return threadBusiness.Body{HTML: contentcodec.ToHTML(contentcodec.WriteMentions(doc, people))}, nil
+}
+
+// apiComment is a comment as the API answers it: each mention written back
+// as @[uuid], and who those are in comment_mentioned (their name now; the
+// name the chip kept for someone who has since left).
+type apiComment struct {
+	threadBusiness.Comment
+	Mentioned map[string]threadBusiness.Person `json:"comment_mentioned,omitempty"`
+}
+
+// apiThread is a thread as the API answers it: its comments as apiComments.
+type apiThread struct {
+	threadBusiness.View
+	Comments []apiComment `json:"comments"`
+}
+
+// apiThreads is threads as the API answers them, every mention in them named
+// in one read.
+func apiThreads(ctx context.Context, threads ...threadBusiness.View) []apiThread {
+	var all []threadBusiness.Comment
+	for _, t := range threads {
+		all = append(all, t.Comments...)
+	}
+	said := apiComments(ctx, all...)
+	out := make([]apiThread, len(threads))
+	for i, t := range threads {
+		out[i] = apiThread{View: t, Comments: said[:len(t.Comments):len(t.Comments)]}
+		said = said[len(t.Comments):]
+	}
+	return out
+}
+
+// apiComments is comments as the API answers them, the people they mention
+// named in one read. A name that can't be read just now is the one the chip
+// kept: a read never fails for a name.
+func apiComments(ctx context.Context, comments ...threadBusiness.Comment) []apiComment {
+	out := make([]apiComment, len(comments))
+	kept := make([][]contentcodec.Mention, len(comments))
+	var ids []string
+	for i, c := range comments {
+		out[i] = apiComment{Comment: c}
+		if !strings.Contains(c.Text, `data-type="mention"`) {
+			continue
+		}
+		doc, err := contentcodec.FromHTML(c.Text, contentcodec.HTMLOptions{})
+		if err != nil {
+			continue
+		}
+		if kept[i] = contentcodec.MentionsAsTokens(doc); len(kept[i]) > 0 {
+			out[i].Text = contentcodec.ToHTML(doc)
+			for _, m := range kept[i] {
+				ids = append(ids, m.UUID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return out
+	}
+	now, err := mentionable(ctx, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/DataTable apiComments: the people mentioned couldn't be named just now: %+v", err)
+		now = nil
+	}
+	for i, ms := range kept {
+		for _, m := range ms {
+			p := threadBusiness.Person{UUID: m.UUID, Name: m.Label}
+			if n := now[m.UUID]; n != nil {
+				p.Name = helpers.FirstNonEmpty(n.UserName, n.UserFullName, m.Label)
+				if n.ProfileKey != nil {
+					p.ProfileKey = *n.ProfileKey
+				}
+			}
+			if out[i].Mentioned == nil {
+				out[i].Mentioned = map[string]threadBusiness.Person{}
+			}
+			out[i].Mentioned[m.UUID] = p
+		}
+	}
+	return out
 }

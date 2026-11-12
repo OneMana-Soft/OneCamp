@@ -6,6 +6,7 @@ package models
 
 import (
 	"context"
+	"time"
 
 	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
@@ -172,4 +173,73 @@ func boardStages(ctx context.Context, who string, board uuid.UUID, whom any) ([]
 func BoardsShown(ctx context.Context, session uuid.UUID) ([]uuid.UUID, error) {
 	return pgexec.Query(ctx, `SELECT board_uuid FROM call_session_boards WHERE session_id = $1
 		ORDER BY first_shown_at, board_uuid`, scanID, session)
+}
+
+// BoardCall is a call that showed a board (call_session_boards), as the
+// board's calls read it.
+type BoardCall struct {
+	SessionID uuid.UUID
+	Room      string
+	RoomSID   string
+	StartedAt time.Time
+	EndedAt   *time.Time
+	// OnStage is whether the board is on the call's stage now.
+	OnStage bool
+	// ShownBy is the name of whoever first put the board there, as the call
+	// knew them, and ShownAt when.
+	ShownBy string
+	ShownAt time.Time
+	// People is how many came to the call.
+	People int
+}
+
+// BoardCallsAfter is where a page of a board's calls starts: right after the
+// call that showed it at ShownAt with the session Session, in CallsOfBoard's
+// order. The zero value is the top, the call that showed it latest.
+type BoardCallsAfter struct {
+	ShownAt time.Time
+	Session uuid.UUID
+}
+
+// After is the page that starts right after c.
+func (c BoardCall) After() BoardCallsAfter {
+	return BoardCallsAfter{ShownAt: c.ShownAt, Session: c.SessionID}
+}
+
+// boardCallsRead and boardCallsOrder are CallsOfBoard's read, either side of
+// where a page starts.
+const (
+	boardCallsRead = `SELECT s.id, s.room, COALESCE(s.room_sid, ''), s.started_at, s.ended_at,
+			s.ended_at IS NULL AND COALESCE(s.board_uuid = b.board_uuid, false),
+			COALESCE(a.name, ''), b.first_shown_at,
+			(SELECT count(*) FROM call_attendance p WHERE p.session_id = s.id)
+		FROM call_session_boards b
+		JOIN call_sessions s ON s.id = b.session_id
+		LEFT JOIN call_attendance a ON a.session_id = s.id AND a.identity = b.shown_by
+		WHERE b.board_uuid = $1`
+	boardCallsOrder = `
+		ORDER BY b.first_shown_at DESC, b.session_id
+		LIMIT $2`
+)
+
+// CallsOfBoard answers a page of the calls that showed a board, the one that
+// showed it latest first, at most limit, from after (the top when zero). A
+// page starts by its key, never by an offset, in the index's own order
+// (call_session_boards_board_idx), so a page deep down costs what the first
+// one does and a call shown meanwhile neither repeats nor skips one.
+func CallsOfBoard(ctx context.Context, board uuid.UUID, after BoardCallsAfter, limit int) ([]BoardCall, error) {
+	q, args := boardCallsRead+boardCallsOrder, []any{board, limit}
+	if !after.ShownAt.IsZero() {
+		// first_shown_at <= $3 starts the index's range; the rest leaves out
+		// the calls shown at that same instant up to and including after's.
+		q = boardCallsRead + `
+		AND b.first_shown_at <= $3 AND (b.first_shown_at < $3 OR b.session_id > $4)` + boardCallsOrder
+		args = append(args, after.ShownAt, after.Session)
+	}
+	return pgexec.Query(ctx, q,
+		func(r pgexec.Row) (BoardCall, error) {
+			var c BoardCall
+			err := r.Scan(&c.SessionID, &c.Room, &c.RoomSID, &c.StartedAt, &c.EndedAt, &c.OnStage, &c.ShownBy, &c.ShownAt, &c.People)
+			return c, err
+		}, args...)
 }

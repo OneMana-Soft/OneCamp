@@ -35,3 +35,17 @@ func TestManyTasksUpdateInOneBulkBody(t *testing.T) {
 		t.Fatalf("nothing to write: %q", body)
 	}
 }
+
+// UX-PROJECTS-H1-BE: a field taken off a task (No priority) is sent as null,
+// since a field an update leaves out keeps its old value; the rest are sent
+// as set.
+func TestAFieldTakenOffIsSentEmpty(t *testing.T) {
+	body, err := bulkUpdateBody([]*openSearchStruct.OpenSearchTask{{Uuid: "a", TaskUpdatedAt: 7}}, "task_priority")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := strings.Split(strings.TrimRight(body, "\n"), "\n")[1]
+	if !strings.Contains(doc, `"task_priority":null`) || !strings.Contains(doc, `"task_id":"a"`) || !strings.Contains(doc, `"updated_date":7`) {
+		t.Fatalf("doc: %s", doc)
+	}
+}

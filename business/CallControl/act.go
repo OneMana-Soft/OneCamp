@@ -297,12 +297,13 @@ func holdIn(ctx context.Context, s *callStateBusiness.Session, me *callStateBusi
 	}
 	n := 0
 	for _, p := range people {
-		if !livekitInit.IsPerson(p) {
+		// A companion's screen is held as its person's is (meet-04).
+		if !livekitInit.IsPerson(p) && !livekitInit.IsCompanion(p) {
 			continue
 		}
 		var allowed []string
 		runs := false
-		if q := s.Person(p.Identity); q != nil {
+		if q := s.Person(livekitInit.PersonOf(p.Identity)); q != nil {
 			allowed, runs = q.Allowed, model.RunsCall(q.Role)
 		}
 		changed, err := giveSources(ctx, s.Room, p, liveKitBusiness.PublishSources(held, allowed, runs))
@@ -365,8 +366,16 @@ func allow(ctx context.Context, s *callStateBusiness.Session, target *callStateB
 	if p == nil {
 		return ErrTargetGone
 	}
-	if _, err := giveSources(ctx, s.Room, p, liveKitBusiness.PublishSources(s.Held, allowed, model.RunsCall(target.Role))); err != nil {
+	// Let through on every device of theirs (meet-04).
+	devices, err := devicesOf(ctx, s.Room, target.Identity)
+	if err != nil {
 		return err
+	}
+	sources := liveKitBusiness.PublishSources(s.Held, allowed, model.RunsCall(target.Role))
+	for _, d := range devices {
+		if _, err := giveSources(ctx, s.Room, d, sources); err != nil {
+			return err
+		}
 	}
 	tellAttrs(s.Room, target.Identity, map[string]string{AttrAllowed: strings.Join(allowed, ",")})
 	if what != model.HoldShare || on {
@@ -541,22 +550,25 @@ func settle(err error) error {
 // mute turns off someone's tracks of the given sources, answering how many
 // were playing.
 func mute(ctx context.Context, room, identity string, sources []livekit.TrackSource) (int, error) {
-	p, err := livekitInit.LiveKitService.Participant(ctx, room, identity)
+	// On every device of theirs: a companion's screen is theirs (meet-04).
+	devices, err := devicesOf(ctx, room, identity)
 	if err != nil {
 		return 0, err
 	}
-	if p == nil {
+	if len(devices) == 0 {
 		return 0, ErrTargetGone
 	}
 	n := 0
-	for _, t := range p.Tracks {
-		if t == nil || t.Muted || !slices.Contains(sources, t.Source) {
-			continue
+	for _, p := range devices {
+		for _, t := range p.Tracks {
+			if t == nil || t.Muted || !slices.Contains(sources, t.Source) {
+				continue
+			}
+			if err := livekitInit.LiveKitService.MuteTrack(ctx, room, p.Identity, t.Sid); err != nil {
+				return n, err
+			}
+			n++
 		}
-		if err := livekitInit.LiveKitService.MuteTrack(ctx, room, identity, t.Sid); err != nil {
-			return n, err
-		}
-		n++
 	}
 	return n, nil
 }

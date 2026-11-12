@@ -299,6 +299,27 @@ func (w *workWorld) exec(q string, args ...any) {
 	}
 }
 
+// onTheirLists puts Website on each named person's own list of projects
+// (user_projects), as joining it writes. seedWorkWorld leaves those lists out,
+// so a read through them (the report's) finds Website only for those named.
+func (w *workWorld) onTheirLists(names ...string) {
+	w.t.Helper()
+	var got struct {
+		P []struct {
+			UID string `json:"uid"`
+		} `json:"p"`
+	}
+	raw := w.dg.Query(w.t, `{ p(func: eq(project_uuid, "`+w.project+`")) { uid } }`)
+	if err := json.Unmarshal(raw, &got); err != nil || len(got.P) != 1 {
+		w.t.Fatalf("Website in the graph: %s, %v", raw, err)
+	}
+	var mut []map[string]any
+	for _, n := range names {
+		mut = append(mut, map[string]any{"uid": w.account(n).UserDgraphInfo.Uid, "user_projects": []map[string]any{{"uid": got.P[0].UID}}})
+	}
+	w.dg.Mutate(w.t, mut)
+}
+
 // account is the person as the auth middleware puts them on a request.
 func (w *workWorld) account(name string) userModels.UserInfo {
 	w.t.Helper()

@@ -44,6 +44,13 @@ func init() {
 	})
 }
 
+// fileChanges are what a row says of a file put on an event or taken off
+// (eventFiles.go): the file's kind and id are its metadata, never a title.
+var fileChanges = map[string]string{
+	"added":   "added a file to an event",
+	"removed": "removed a file from an event",
+}
+
 // calendarChanges are the changes to a calendar itself the log records.
 var calendarChanges = map[resourceEventBusiness.Kind]bool{
 	resourceEventBusiness.CalendarShared:       true,
@@ -95,9 +102,12 @@ func eventChange(e resourceEventBusiness.Event) (string, map[string]interface{})
 	sort.Strings(keys)
 	for _, k := range keys {
 		switch k {
-		case "kind", "changed", "scope", "instance", "response", "from", "by":
+		case "kind", "changed", "scope", "instance", "response", "from", "by", "file_kind", "file_uuid":
 			meta[k] = e.Data[k]
 		}
+	}
+	if file, ok := fileChanges[e.Data["file"]]; ok && e.Kind == resourceEventBusiness.CalendarEventUpdated {
+		return file, meta
 	}
 	if c := e.Data["changed"]; c != "" {
 		what += " (" + strings.ReplaceAll(c, ",", ", ") + ")"

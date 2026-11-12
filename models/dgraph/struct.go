@@ -487,6 +487,10 @@ type DgraphBoard struct {
 	DeletedAt        *time.Time       `json:"board_deleted_at,omitempty"`
 	LinkedTasks      []*DgraphTask    `json:"linked_tasks,omitempty"`    // query-only: tasks linking this board
 	LinkedProjects   []*DgraphProject `json:"linked_projects,omitempty"` // query-only: projects linking this board
+	// Scratch marks a deleted board that was never anyone's to keep: one the
+	// app made and took away again (an import's board it couldn't record, a
+	// demo seed's spare). Deleted boards leaves it out; no restore takes it.
+	Scratch *bool `json:"board_scratch,omitempty"`
 }
 
 type DgraphBoardList struct {
@@ -600,9 +604,14 @@ type DgraphTask struct {
 	Key      string        `json:"task_key,omitempty"`
 	WorkType *TaskWorkType `json:"task_work_type,omitempty"`
 	// Hidden marks what a reader who may not see a restricted task is shown
-	// of it where a link to it stays (a parent, a dependency): its id and
-	// nothing else (models/taskread Stub). Never stored.
+	// of it where a link to it stays (a parent, a dependency): that a task is
+	// there, and nothing of which, not even its id (models/taskread Stub;
+	// V-678, main's C1). Never stored.
 	Hidden bool `json:"task_hidden,omitempty"`
+	// StubOf is the id of the task a stub stands for, kept for the server's
+	// own checks after a read (workAccess.KeepSeenEnds reads its project)
+	// and never answered or stored.
+	StubOf string `json:"-"`
 	// Restricted marks a restricted task the reader may see, for the lock on
 	// its row, card and panel (WA2b): set by models/taskread on every answer
 	// it keeps, never stored, never on a task the reader can't see.
@@ -726,6 +735,18 @@ type DgraphEvent struct {
 	// Call is the event's own call (calendar B11), while its address answers.
 	// Answers only, never stored here.
 	Call *EventCall `json:"event_call,omitempty"`
+	// Room is the event's call room, which every OneCamp event has (gcal-15
+	// head B): where a member joins it. Answers only, never stored here.
+	Room *EventRoom `json:"event_room,omitempty"`
+}
+
+// EventRoom is an event's call room as its readers see it (gcal-15 head B):
+// the app's page a member joins it at, and whether a guest link may be added
+// to it (guest access and its rooms on). No secret: the page asks for a
+// token, by the event's own rule, when someone joins.
+type EventRoom struct {
+	Join       string `json:"join"`
+	GuestLinks bool   `json:"guest_links"`
 }
 
 // EventCall is an event's own call as its readers see it: the address its
@@ -750,6 +771,11 @@ type EventTask struct {
 	Status      string `json:"task_status,omitempty"`
 	ProjectUUID string `json:"project_uuid,omitempty"`
 	ProjectName string `json:"project_name,omitempty"`
+	// BlockedOpen is how many open tasks it waits on in the reader's
+	// projects (TASK_BLOCKED_OPEN), and BlockedBy the first of them, by its
+	// uuid and name, when the reader may read it (CAL51-TB).
+	BlockedOpen int          `json:"task_blocked_open,omitempty"`
+	BlockedBy   []*EventTask `json:"task_blocked_by,omitempty"`
 }
 
 // EventGuest is one guest's answer to an event: needs_action, accepted,
@@ -902,7 +928,11 @@ const TASK_LIVE_FILTER = `not gt(task_deleted_at, "1970-01-01T00:00:00Z")`
 // reader is in count (DG10b): a blocker in another project they can't see
 // isn't there for them, not even as a number. The query must define
 // readerProjects (ReaderProjectsVar).
-const TASK_BLOCKED_OPEN = `task_blocked_open: count(task_blocked_by @facets(NOT eq(kind, "ss") AND NOT eq(kind, "ff") AND NOT eq(kind, "sf")) @filter(` + TASK_LIVE_FILTER + ` AND ` + TASK_OPEN_FILTER + ` AND uid_in(task_project, uid(readerProjects))))`
+const TASK_BLOCKED_OPEN = `task_blocked_open: count(task_blocked_by ` + TASK_OPEN_BLOCKERS + `)`
+
+// TASK_OPEN_BLOCKERS is the task_blocked_by edges TASK_BLOCKED_OPEN counts,
+// for a read that names them too (a calendar block's first blocker).
+const TASK_OPEN_BLOCKERS = `@facets(NOT eq(kind, "ss") AND NOT eq(kind, "ff") AND NOT eq(kind, "sf")) @filter(` + TASK_LIVE_FILTER + ` AND ` + TASK_OPEN_FILTER + ` AND uid_in(task_project, uid(readerProjects)))`
 
 const TASK_PRIORITY_URGENT = "urgent"
 const TASK_PRIORITY_HIGH = "high"
@@ -949,3 +979,18 @@ const ACTIVITY_TYPE_FIELD = "fieldUpdate"
 // (business/WorkTaxonomy).
 const ACTIVITY_TYPE_WORK_TYPE = "typeUpdate"
 const ACTIVITY_TYPE_REMOVE_DEPENDENCY = "dependencyRemove"
+
+// A typed link (relates, duplicates, clones) added to or taken off, on both
+// its tasks: NextState holds the other task's uuid, PrevState the link as
+// this task reads it ("relates to", "is duplicated by"). Blocking is a
+// dependency, never a link.
+const ACTIVITY_TYPE_ADD_LINK = "linkAdd"
+const ACTIVITY_TYPE_REMOVE_LINK = "linkRemove"
+
+// A task moved in the hierarchy: PrevState and NextState hold the uuids of
+// the task it sat under and the one it sits under now, "" for the top. The
+// task it left writes ACTIVITY_TYPE_REMOVE_SUB_TASK (NextState: the moved
+// task's uuid); the one it went under, ACTIVITY_TYPE_ADD_SUB_TASK with its
+// name, as making a sub-task does.
+const ACTIVITY_TYPE_PARENT = "parentUpdate"
+const ACTIVITY_TYPE_REMOVE_SUB_TASK = "subTaskRemove"

@@ -16,6 +16,7 @@ func TestProvidersRegistered(t *testing.T) {
 		{ProviderGmail, "google"},
 		{ProviderCalendar, "google"},
 		{ProviderGitHub, "github"},
+		{ProviderOutlookCalendar, "microsoft"},
 	}
 	for _, c := range cases {
 		p, ok := providerByID(c.id)
@@ -92,5 +93,37 @@ func TestProviderCopyIsBritishAndPlain(t *testing.T) {
 				t.Errorf("%s: %q has an em dash", p.ID, text)
 			}
 		}
+	}
+}
+
+// Outlook Calendar signs in through Microsoft's common endpoint (work
+// accounts and Outlook.com alike) for calendar sync's least scopes, and is
+// offered only once the admin has added a Microsoft app.
+func TestOutlookCalendarIsOfferedOnceTheAdminAddsAMicrosoftApp(t *testing.T) {
+	p, ok := providerByID(ProviderOutlookCalendar)
+	if !ok || p.AuthURL != "https://login.microsoftonline.com/common/oauth2/v2.0/authorize" || p.TokenURL != "https://login.microsoftonline.com/common/oauth2/v2.0/token" ||
+		strings.Join(p.Scopes, " ") != "offline_access User.Read Calendars.ReadWrite" || p.RevokeURL != "" {
+		t.Fatalf("provider %+v", p)
+	}
+	offered := func() bool {
+		for _, o := range Offered() {
+			if o.ID == ProviderOutlookCalendar {
+				return true
+			}
+		}
+		return false
+	}
+	t.Setenv("MICROSOFT_CLIENT_ID", "")
+	t.Setenv("MICROSOFT_CLIENT_SECRET", "")
+	if Configured(ProviderOutlookCalendar) || offered() {
+		t.Fatal("offered with no Microsoft app")
+	}
+	if len(Offered()) < 3 {
+		t.Fatalf("the other connectors aren't offered: %v", Offered())
+	}
+	t.Setenv("MICROSOFT_CLIENT_ID", "app-id")
+	t.Setenv("MICROSOFT_CLIENT_SECRET", "app-secret")
+	if !Configured(ProviderOutlookCalendar) || !offered() {
+		t.Fatal("not offered with a Microsoft app")
 	}
 }

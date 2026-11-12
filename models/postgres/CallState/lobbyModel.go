@@ -91,6 +91,17 @@ func MeetingOf(ctx context.Context, id string) (*Meeting, error) {
 	return &m, nil
 }
 
+// MeetingForUpdate answers a meeting's home, or nil, its row held until the
+// transaction on ctx ends (business/CallRoom: one guest link on an event's
+// room however many ask at once).
+func MeetingForUpdate(ctx context.Context, id string) (*Meeting, error) {
+	m, ok, err := pgexec.QueryOne(ctx, `SELECT `+meetingColumns+` FROM call_meetings WHERE id = $1 FOR UPDATE`, scanMeeting, id)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return &m, nil
+}
+
 // KindPersonal is a member's personal room (business/CallRoom).
 const KindPersonal = "personal"
 
@@ -110,6 +121,14 @@ func PersonalMeetingOf(ctx context.Context, owner uuid.UUID) (*Meeting, error) {
 // ArchiveMeeting closes a meeting for good, answering whether it was open.
 func ArchiveMeeting(ctx context.Context, id string, at time.Time) (bool, error) {
 	n, err := pgexec.Exec(ctx, `UPDATE call_meetings SET archived_at = $2 WHERE id = $1 AND archived_at IS NULL`, id, at)
+	return n > 0, err
+}
+
+// ReopenMeeting opens again a meeting closed at at (ArchiveMeeting's),
+// answering whether it was closed then: an event's call as its event comes
+// back from the trash (business/CallRoom ReopenEventCall).
+func ReopenMeeting(ctx context.Context, id string, at time.Time) (bool, error) {
+	n, err := pgexec.Exec(ctx, `UPDATE call_meetings SET archived_at = NULL WHERE id = $1 AND archived_at = $2`, id, at)
 	return n > 0, err
 }
 

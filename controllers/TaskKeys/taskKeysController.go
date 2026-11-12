@@ -139,6 +139,8 @@ func writeTypeRefusal(w http.ResponseWriter, r *http.Request, err error, where s
 	switch {
 	case errors.Is(err, workTaxonomy.ErrBadType):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": strings.TrimPrefix(err.Error(), workTaxonomy.ErrBadType.Error()+": ")})
+	case errors.Is(err, workTaxonomy.ErrHierarchy):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": err.Error()})
 	case errors.Is(err, workTaxonomy.ErrTypeNameTaken):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "The project already has a type of that name."})
 	case errors.Is(err, workTaxonomy.ErrNoType):

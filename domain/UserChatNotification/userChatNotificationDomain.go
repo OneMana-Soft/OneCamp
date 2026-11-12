@@ -151,32 +151,6 @@ func GetNotificationTypeByUserIdAndToUserId(ctx context.Context, userId string, 
 
 }
 
-func GetEligibleUsersForChatActivity(ctx context.Context, grpId string, userId string, mentionsList []string, limitToMentions bool) (userIds []string, err error) {
-	query := `
-		SELECT 
-			user_id
-		FROM 
-			users_chat_notification
-		WHERE 
-			grp_id = $1
-			AND user_id != $2
-			AND (
-					(notification_type = 'all' AND ($4 = false OR user_id = ANY($3))) OR
-				  	(notification_type = 'mention' AND user_id = ANY($3))
-				);
-	`
-
-	userIds, err = models.GetEligibleUsersForChatActivity(query, grpId, userId, mentionsList, limitToMentions)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetEligibleUsersForChatActivity Failed to get eligible users err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 // GetLevelsInConversation is the setting for the conversation grpId of each of
 // userIds who is in it, by lower-case user id; someone with no setting isn't
 // in it. The thread audience's read (notificationBusiness.ThreadAudience), as
@@ -266,4 +240,24 @@ func ForgetLeaversChatSettings(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	return forgot, nil
+}
+
+// MembersOnAll is who of the conversation grpId's people hears everything in
+// it (on "all"), by lower-case user id, every one of them. The Notification
+// Router's DM and call audience (business/Notify); whether a cause reaches
+// someone is its levelLets'.
+func MembersOnAll(ctx context.Context, grpId string) ([]string, error) {
+	ids, err := pgexec.Query(ctx, `
+		SELECT lower(user_id::text)
+		FROM users_chat_notification
+		WHERE grp_id = $1 AND notification_type = 'all'
+	`, func(r pgexec.Row) (id string, err error) {
+		err = r.Scan(&id)
+		return
+	}, grpId)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/MembersOnAll Failed to get the conversation's people on all err: %+v", err)
+		return nil, err
+	}
+	return ids, nil
 }

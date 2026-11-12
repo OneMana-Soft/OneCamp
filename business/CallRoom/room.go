@@ -51,10 +51,12 @@ var (
 	personalMeetingOf = model.PersonalMeetingOf
 	saveMeeting       = model.SaveMeeting
 	archiveMeeting    = model.ArchiveMeeting
+	reopenMeeting     = model.ReopenMeeting
 	setLobby          = callLobbyBusiness.SetLobby
 	title             = callLobbyBusiness.Title
 	liveLinks         = guestModel.ListActiveForResource
-	revokeLinks       = guestModel.RevokeLiveForResource
+	revokeLinks       = guestModel.RevokeLiveForResourceAt
+	reviveLinks       = guestModel.ReviveRevokedAt
 	newRoom           = guestBusiness.NewRoom
 	publishLink       = guestBusiness.PublishLink
 	removeGuests      = guestBusiness.RemoveMeetingGuests
@@ -260,14 +262,16 @@ func Close(ctx context.Context, owner uuid.UUID) error {
 }
 
 // closeMeeting ends a room's meeting, a person's or an event's: its links end
-// and the meeting is closed for good, in one transaction; then its guests are
-// put out of its call.
+// and the meeting is closed, at one moment, in one transaction; then its
+// guests are put out of its call. A person's room is closed for good; an
+// event's opens again with its event (ReopenEventCall), by that moment.
 func closeMeeting(ctx context.Context, m *model.Meeting) error {
+	at := now()
 	err := inTx(ctx, func(ctx context.Context) error {
-		if _, err := revokeLinks(ctx, guestModel.ResourceMeeting, roomOf(m)); err != nil {
+		if _, err := revokeLinks(ctx, guestModel.ResourceMeeting, roomOf(m), at); err != nil {
 			return err
 		}
-		_, err := archiveMeeting(ctx, m.ID, now())
+		_, err := archiveMeeting(ctx, m.ID, at)
 		return err
 	})
 	if err != nil {

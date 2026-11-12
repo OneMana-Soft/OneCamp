@@ -15,6 +15,8 @@ package integration
 // every test that put its own client in.
 
 import (
+	"encoding/json"
+	"sync"
 	"testing"
 
 	MQTT "github.com/eclipse/paho.mqtt.golang"
@@ -53,4 +55,66 @@ func UseMqttClient(t *testing.T, c MQTT.Client) {
 func StubMqttClient(t *testing.T) {
 	t.Helper()
 	UseMqttClient(t, unconnectedMqttClient())
+}
+
+// MqttRecorder is the server's MQTT client for a test that asks what was
+// published (RecordMqtt): it keeps each publish's topic and payload, in
+// order, and otherwise behaves as a client with no broker. The one recorder
+// for every test that reads publishes.
+type MqttRecorder struct {
+	MQTT.Client
+	mu  sync.Mutex
+	out []Published
+}
+
+// Published is one publish the server made.
+type Published struct {
+	Topic   string
+	Payload []byte
+}
+
+// RecordMqtt makes a recorder the server's MQTT client for the rest of the
+// test (UseMqttClient) and returns it.
+func RecordMqtt(t *testing.T) *MqttRecorder {
+	t.Helper()
+	r := &MqttRecorder{Client: unconnectedMqttClient()}
+	UseMqttClient(t, r)
+	return r
+}
+
+func (r *MqttRecorder) Publish(topic string, qos byte, retained bool, payload interface{}) MQTT.Token {
+	var b []byte
+	switch p := payload.(type) {
+	case []byte:
+		b = append([]byte(nil), p...)
+	case string:
+		b = []byte(p)
+	}
+	r.mu.Lock()
+	r.out = append(r.out, Published{Topic: topic, Payload: b})
+	r.mu.Unlock()
+	return r.Client.Publish(topic, qos, retained, payload)
+}
+
+// All is every publish so far, in order.
+func (r *MqttRecorder) All() []Published {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Published(nil), r.out...)
+}
+
+// Messages is the data of every typed message (models/mqtt Message: type and
+// data) of type msgType published on topic so far, in order.
+func (r *MqttRecorder) Messages(topic string, msgType int8) []json.RawMessage {
+	var out []json.RawMessage
+	for _, p := range r.All() {
+		var m struct {
+			Type int8            `json:"type"`
+			Data json.RawMessage `json:"data"`
+		}
+		if p.Topic == topic && json.Unmarshal(p.Payload, &m) == nil && m.Type == msgType {
+			out = append(out, m.Data)
+		}
+	}
+	return out
 }

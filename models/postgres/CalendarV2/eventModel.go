@@ -462,6 +462,19 @@ func GetMany(ctx context.Context, db DB, ids []uuid.UUID) ([]*Event, error) {
 	return queryEvents(ctx, db, `SELECT `+eventColumns+` FROM events e WHERE e.id = ANY($1::uuid[])`, uuidArray(ids))
 }
 
+// HoldingRoom is the live events, series and single ones (never an instance
+// changed on its own, which holds its series' call), that hold the call in
+// room: a series and a part of it split off by "this and following" share
+// one (gcal-15 head B: who may stay in it). events_call_room_idx (migration
+// 587) finds them, for the call_room <> ” this query says.
+func HoldingRoom(ctx context.Context, db DB, room string) ([]*Event, error) {
+	if room == "" {
+		return nil, nil
+	}
+	return queryEvents(ctx, db, `SELECT `+eventColumns+` FROM events e
+		WHERE e.call_room = $1 AND e.call_room <> '' AND e.deleted_at IS NULL AND e.series_id IS NULL LIMIT 100`, room)
+}
+
 // ByICalUIDs is the events, series and single ones (never an instance changed
 // on its own), named by these iCalendar UIDs, in the trash or not.
 func ByICalUIDs(ctx context.Context, db DB, uids []string) ([]*Event, error) {
@@ -544,13 +557,40 @@ const overlaps = `(
 	    AND (e.until_at IS NULL OR e.until_at >= $2 - (COALESCE(e.end_at - e.start_at, (e.end_date - e.start_date) * interval '1 day') + interval '1 day')))
 )`
 
-// TrashOf is person's events in the trash, newest first, deleted before
-// before (nil: from the newest), at most limit.
-func TrashOf(ctx context.Context, db DB, person uuid.UUID, before *time.Time, limit int) ([]*Event, error) {
+// TrashCursor is where a page of the trash goes on from (calendar V-603): the
+// last row the page before gave, by its deleted_at and its key, the id its
+// reader knows it by: an event's own id (Event, no Recurrence), or an
+// instance's, its series' id and its start. Rows deleted at once share
+// deleted_at, so the key orders them. A zero Event goes on from every row
+// deleted before DeletedAt, as an older client asks.
+type TrashCursor struct {
+	DeletedAt  time.Time
+	Event      uuid.UUID
+	Recurrence *time.Time
+}
+
+// trashKey is a trash row's key in SQL, (its event's id or its series',
+// its start as an instance or -infinity), the order of rows deleted at once.
+const trashKey = `(COALESCE(e.series_id, e.id), COALESCE(e.recurrence_id, '-infinity'::timestamptz))`
+
+// TrashOf is person's events in the trash, newest first, then by their key,
+// deleted since since and after after (nil: from the newest), at most limit.
+// Older ones stay in the trash, deleted, and are listed no more.
+func TrashOf(ctx context.Context, db DB, person uuid.UUID, since time.Time, after *TrashCursor, limit int) ([]*Event, error) {
+	var before *time.Time
+	var event uuid.NullUUID
+	var recurrence *time.Time
+	if after != nil {
+		before, recurrence = &after.DeletedAt, after.Recurrence
+		event = uuid.NullUUID{UUID: after.Event, Valid: after.Event != uuid.Nil}
+	}
 	return queryEvents(ctx, db, `SELECT `+eventColumns+` FROM events e
-		WHERE e.created_by = $1 AND e.deleted_at IS NOT NULL AND ($2::timestamptz IS NULL OR e.deleted_at < $2)
-		ORDER BY e.deleted_at DESC, e.id
-		LIMIT $3`, person, before, limit)
+		WHERE e.created_by = $1 AND e.deleted_at >= $4
+		  AND ($2::timestamptz IS NULL OR e.deleted_at < $2
+		       OR ($5::uuid IS NOT NULL AND e.deleted_at = $2
+		           AND `+trashKey+` > ($5::uuid, COALESCE($6::timestamptz, '-infinity'::timestamptz))))
+		ORDER BY e.deleted_at DESC, `+trashKey+`
+		LIMIT $3`, person, before, limit, since, event, recurrence)
 }
 
 // AwayOf is the out-of-office events of these people that could touch w, not

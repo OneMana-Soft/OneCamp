@@ -98,3 +98,32 @@ func UserUIDsByUUIDs(ctx context.Context, userUUIDs []uuid.UUID) (map[uuid.UUID]
 	}
 	return uids, nil
 }
+
+// LiveOwnNodesByUUIDs is each live person among ids, by uuid, as their own
+// graph node (ownNodes). Deleted people, and ids that are no one, are absent.
+// One query.
+func LiveOwnNodesByUUIDs(ctx context.Context, ids []string) (map[string]*dgraphStruct.DgraphUser, error) {
+	nodes, err := GetActiveDgraphUsersByUUIDsLight(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	return ownNodes(nodes), nil
+}
+
+// ownNodes is each person's own node among nodes, by uuid: the lowest uid
+// holding their user_uuid, which every read of a person by uuid takes
+// (UserUIDsByUUIDs; an import's later copies come after it, and may hold no
+// name). Pure.
+func ownNodes(nodes []*dgraphStruct.DgraphUser) map[string]*dgraphStruct.DgraphUser {
+	own := make(map[string]*dgraphStruct.DgraphUser, len(nodes))
+	for _, n := range nodes {
+		if n == nil || n.Uuid == "" || n.Uid == "" {
+			continue
+		}
+		if have, ok := own[n.Uuid]; ok && compareUIDs(have.Uid, n.Uid) <= 0 {
+			continue
+		}
+		own[n.Uuid] = n
+	}
+	return own
+}

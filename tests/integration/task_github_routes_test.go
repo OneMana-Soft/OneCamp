@@ -18,6 +18,9 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -35,6 +38,7 @@ import (
 	syncBusiness "github.com/akashc777/OneCamp/business"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	githubController "github.com/akashc777/OneCamp/controllers/GitHub"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	taskController "github.com/akashc777/OneCamp/controllers/Task"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -561,6 +565,42 @@ func (w *githubWorkspace) exec(q string, args ...any) {
 	}
 }
 
+// deliver posts a GitHub delivery about the repository ("acme/web") through
+// the webhook route, signed with secret ("" sends it unsigned; delivery ""
+// sends it without an id), and answers the route's status.
+func (w *githubWorkspace) deliver(repository, event, delivery, secret string, payload map[string]any) int {
+	w.t.Helper()
+	owner, name, _ := strings.Cut(repository, "/")
+	payload["repository"] = map[string]any{"full_name": repository, "name": name, "owner": map[string]any{"login": owner}, "default_branch": "main"}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/integration/github/webhook", bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Event", event)
+	if delivery != "" {
+		req.Header.Set("X-GitHub-Delivery", delivery)
+	}
+	if secret != "" {
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	}
+	rec := httptest.NewRecorder()
+	githubController.HandleGitHubWebhook(rec, req)
+	return rec.Code
+}
+
+// handled waits, up to 20 seconds, for the delivery's processing to complete.
+func (w *githubWorkspace) handled(t *testing.T, delivery string) {
+	t.Helper()
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		var status string
+		_ = w.db.PG.QueryRow(`SELECT status FROM github_webhook_deliveries WHERE delivery_id = $1`, delivery).Scan(&status)
+		if status == "completed" {
+			return
+		}
+	}
+	t.Fatalf("delivery %s wasn't handled", delivery)
+}
+
 // as is a request context signed in as the person.
 func (w *githubWorkspace) as(name string) context.Context {
 	w.t.Helper()
@@ -598,17 +638,19 @@ func (w *githubWorkspace) queued(task string) (state string) {
 // the handlers call through the default transport. An issue moved to another
 // repository (move) answers with its new address, as GitHub does. A
 // repository's webhooks are OneCamp's one (id 9), at the address it registers.
+// A search's terms (its q) are kept too, the last for each call (searched).
 type githubRecorder struct {
-	real  http.RoundTripper
-	mu    sync.Mutex
-	seen  []string
-	sent  map[string]string
-	moved map[string]string
+	real   http.RoundTripper
+	mu     sync.Mutex
+	seen   []string
+	sent   map[string]string
+	moved  map[string]string
+	search map[string]string
 }
 
 func recordGitHub(t *testing.T) *githubRecorder {
 	t.Helper()
-	g := &githubRecorder{real: http.DefaultTransport, sent: map[string]string{}, moved: map[string]string{}}
+	g := &githubRecorder{real: http.DefaultTransport, sent: map[string]string{}, moved: map[string]string{}, search: map[string]string{}}
 	http.DefaultTransport = g
 	t.Cleanup(func() { http.DefaultTransport = g.real })
 	return g
@@ -627,6 +669,9 @@ func (g *githubRecorder) RoundTrip(r *http.Request) (*http.Response, error) {
 	g.seen = append(g.seen, call)
 	if len(sent) > 0 {
 		g.sent[call] = string(sent)
+	}
+	if q := r.URL.Query(); q.Has("q") {
+		g.search[call] = q.Get("q")
 	}
 	address, moved := g.moved[r.URL.Path]
 	g.mu.Unlock()
@@ -658,6 +703,13 @@ func (g *githubRecorder) sentTo(call string) string {
 	return g.sent[call]
 }
 
+// searched is the q last sent with "METHOD /path", "" for none.
+func (g *githubRecorder) searched(call string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.search[call]
+}
+
 // move answers GitHub's API path with the address an issue has moved to.
 func (g *githubRecorder) move(path, address string) {
 	g.mu.Lock()
@@ -686,5 +738,6 @@ func (g *githubRecorder) reset() {
 	g.mu.Lock()
 	g.seen = nil
 	g.sent = map[string]string{}
+	g.search = map[string]string{}
 	g.mu.Unlock()
 }

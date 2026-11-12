@@ -14,9 +14,8 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Chat"
 	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
-	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifyBusiness "github.com/akashc777/OneCamp/business/Notify"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
-	userBusiness "github.com/akashc777/OneCamp/business/User"
 	chatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
@@ -210,13 +209,14 @@ type reactionTold struct {
 }
 
 // tellOfReaction tells the author of a message or a reply of a reaction to it,
-// never their own: on their activity, and by push and desktop notice through
-// the one way a push goes out (notificationBusiness.Deliver: their devices,
-// the desktop app, and pause, quiet hours and focus time). The push goes as
-// their setting for the conversation allows: "all" or "mention" (a reaction
-// to their message is addressed to them), never "block" or no setting. An
-// author who has left the group hears nothing of it, on their activity
-// either; when who is in it can't be read, nobody is told.
+// never their own, if they are in the conversation now: live on their
+// activity whatever their setting for it ("Nothing" too, as before A4 H2),
+// and through the router (business/Notify) in their Inbox as that setting
+// allows ("all" or "mention": a reaction to their message is addressed to
+// them; never "block" or no setting), never by push or badge (D2; it pushed
+// before A4 H2). Each emoji is its own notice, recorded once. An author who
+// has left the group hears nothing of it; when who is in it can't be read,
+// nobody is told.
 func tellOfReaction(r reactionTold) {
 	if r.author == "" || r.author == r.by.Uuid {
 		return
@@ -231,27 +231,30 @@ func tellOfReaction(r reactionTold) {
 		if len(in) == 0 {
 			return
 		}
+		// Through the one door (business/Notify Tell): its author in their
+		// Inbox alone, as their level lets (a reaction never pushes or
+		// badges, D2), recorded once per person who reacted and emoji, so
+		// a retry tells nobody twice.
+		notifyBusiness.Tell(ctx, notifyBusiness.Event{
+			ID:        fmt.Sprintf("%s:%s:%s:%s:%s", r.kind, r.grpID, r.on, r.by.Uuid, r.emoji),
+			Cause:     notifyBusiness.CauseReaction,
+			Actor:     r.by.Uuid,
+			Place:     notifyBusiness.Place{Kind: notifyBusiness.PlaceDM, ID: r.grpID},
+			Author:    r.author,
+			MessageID: r.on,
+			Push: map[string]string{
+				firebaseInit.FIREBASE_PUSH_DATA_TYPE:        r.kind,
+				firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:     r.grpID,
+				firebaseInit.FIREBASE_PUSH_DATA_TITLE:       r.title,
+				firebaseInit.FIREBASE_PUSH_DATA_BODY:        r.body,
+				firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID:   r.thread,
+				firebaseInit.FIREBASE_PUSH_DATA_USERNAME:    r.by.DisplayName(),
+				firebaseInit.FIREBASE_PUSH_DATA_REACTION_ID: r.emoji,
+			},
+		})
 	}
 	activityBusiness.PublishActivityToUser(r.author, &dgraphModels.UnifiedActivityItem{
 		ActivityType: mqttStruct.MESSAGE_ACTIVITY_REACTION,
 		Time:         time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	if r.grpID == "" {
-		return
-	}
-	hearers, err := chatNotificationBusiness.GetEligibleUsersForChatActivity(ctx, r.grpID, r.by.Uuid, []string{r.author}, true)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Chat tellOfReaction could not read who hears of %s: %+v", r.on, err)
-		return
-	}
-	notificationBusiness.Deliver(ctx, hearers, map[string]string{
-		firebaseInit.FIREBASE_PUSH_DATA_TYPE:        r.kind,
-		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:     r.grpID,
-		firebaseInit.FIREBASE_PUSH_DATA_TITLE:       r.title,
-		firebaseInit.FIREBASE_PUSH_DATA_BODY:        r.body,
-		firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID:   r.thread,
-		firebaseInit.FIREBASE_PUSH_DATA_USERNAME:    r.by.DisplayName(),
-		firebaseInit.FIREBASE_PUSH_DATA_ICON:        userBusiness.GetSignedProfileURL(ctx, r.by.ProfileKey),
-		firebaseInit.FIREBASE_PUSH_DATA_REACTION_ID: r.emoji,
-	}, fmt.Sprintf("%s:%s:%s:%s", r.kind, r.grpID, r.on, r.by.Uuid)) // one notice per person who reacted
 }

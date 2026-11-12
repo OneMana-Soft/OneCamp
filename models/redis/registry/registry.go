@@ -579,10 +579,23 @@ var CallUntranscribed = withArity(Spec{
 // which call is this. Asking LiveKit both on every line would be roughly a
 // hundred API calls a minute for a five-person meeting.
 //
+// RecordingStageTicket is the ticket a room keeps for its latest stage
+// recording (initializers/livekitInit): the nonce its recorder's ticket names.
+// Claimed once (DeleteIfHeld), replaced by the room's next start, dropped by a
+// grid start, revoked at the recording's end; it lasts as long as the ticket.
+var RecordingStageTicket = withArity(Spec{
+	Namespace:   "call:recording-stage",
+	TTL:         5 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryCall,
+	Description: "A room's latest stage recording's ticket nonce, for its recorder alone. Claimed once with DeleteIfHeld.",
+}, 1) // (roomName)
+
 // The short TTL is the security boundary. Someone who leaves the call can keep
 // posting for at most this long, and the lines they could post in that window
 // are lines they could have spoken a moment earlier, so the exposure is a
-// minute of their own words under their own name.
+// minute of their own words under their own name. Nothing that reads OTHER
+// people's lines may take presence from it (business/LiveKit connectedNow).
 var CallTranscriptGrant = withArity(Spec{
 	Namespace:   "call:transcript:grant",
 	TTL:         60 * time.Second,
@@ -812,8 +825,19 @@ var ApiBatchClaim = withArity(Spec{
 	TTL:         10 * time.Minute,
 	Datatype:    DatatypeString,
 	Category:    CategoryRateLimit,
-	Description: "A public-API batch's hold on its key while it is applied; let go when it ends, or after 10 minutes.",
+	Description: "A public-API batch's hold on its key while it is applied, by a token of its send's; let go by that send when it ends, or after 10 minutes.",
 }, 3) // (caller, route, key)
+
+// TreeLock is one change to a tree's shape at a time across every API
+// instance (business/Tree/graph): held by a token of its holder's, let go
+// only by it (store.DeleteIfHeld).
+var TreeLock = withArity(Spec{
+	Namespace:   "tree:lock",
+	TTL:         15 * time.Second,
+	Datatype:    DatatypeString,
+	Category:    CategoryProject,
+	Description: "A tree's lock while one change to its shape is applied; let go by its holder, or after 15 seconds.",
+}, 1) // (kind)
 
 // MCPToolReadRate bounds how fast one credential can READ through the MCP server.
 //

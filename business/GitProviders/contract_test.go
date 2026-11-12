@@ -3,6 +3,9 @@ package business
 import (
 	"context"
 	"errors"
+	"net/http"
+	"reflect"
+	"strings"
 	"testing"
 
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -52,5 +55,99 @@ func TestGitHubIsTodaysFunctions(t *testing.T) {
 	}
 	if err := gh.MakeBranch(context.Background(), task, "fix-it"); !errors.Is(err, ErrNotBuilt) {
 		t.Errorf("branch: %v", err)
+	}
+}
+
+// githubHook is a delivery as GitHub sends one.
+func githubHook(sig, delivery string) http.Header {
+	h := http.Header{}
+	h.Set("X-GitHub-Event", "push")
+	if sig != "" {
+		h.Set("X-Hub-Signature-256", sig)
+	}
+	if delivery != "" {
+		h.Set("X-GitHub-Delivery", delivery)
+	}
+	return h
+}
+
+// R2: every delivery is let in once, by its signature and its id, before
+// anything reads it: an unsigned or badly signed one is refused without
+// claiming its id, one with no id is refused, and a second delivery of the
+// same id (a replay) is refused, so it moves nothing twice.
+func TestGitHubVerifiesSignatureThenClaimsTheDelivery(t *testing.T) {
+	oldVerify, oldClaim := verifySignature, claimDelivery
+	t.Cleanup(func() { verifySignature, claimDelivery = oldVerify, oldClaim })
+	body := []byte(`{"repository":{"name":"web","owner":{"login":"acme"}}}`)
+	verifySignature = func(_ context.Context, b []byte, sig, event string) (bool, *githubLinkModel.GitHubLink) {
+		return sig == "sha256=good" && string(b) == string(body) && event == "push", nil
+	}
+	claimed := map[string]int{}
+	claimDelivery = func(_ context.Context, delivery, event string) (bool, error) {
+		claimed[delivery]++
+		if delivery == "broken" {
+			return false, errors.New("the database is down")
+		}
+		return claimed[delivery] == 1, nil
+	}
+	gh := Providers[GitHub]
+	ctx := context.Background()
+
+	for name, h := range map[string]http.Header{"unsigned": githubHook("", "d-1"), "badly signed": githubHook("sha256=bad", "d-1")} {
+		if _, err := gh.Verify(ctx, h, body); !errors.Is(err, ErrUnsigned) {
+			t.Errorf("%s: %v, want ErrUnsigned", name, err)
+		}
+	}
+	if claimed["d-1"] != 0 {
+		t.Errorf("a delivery that failed its signature claimed its id")
+	}
+	if _, err := gh.Verify(ctx, githubHook("sha256=good", ""), body); !errors.Is(err, ErrNoDelivery) {
+		t.Errorf("no delivery id: %v, want ErrNoDelivery", err)
+	}
+	hook, err := gh.Verify(ctx, githubHook("sha256=good", "d-1"), body)
+	if err != nil || hook.Event != "push" || hook.Delivery != "d-1" || string(hook.Body) != string(body) {
+		t.Errorf("first delivery: %+v %v", hook, err)
+	}
+	if _, err := gh.Verify(ctx, githubHook("sha256=good", "d-1"), body); !errors.Is(err, ErrReplayed) {
+		t.Errorf("replayed delivery: %v, want ErrReplayed", err)
+	}
+	if _, err := gh.Verify(ctx, githubHook("sha256=good", "broken"), body); err == nil || errors.Is(err, ErrReplayed) {
+		t.Errorf("a claim that failed: %v, want its error", err)
+	}
+}
+
+// A verified delivery is handled once and its outcome kept: done, or failed
+// with why (a panic included), so GitHub may deliver a failed one again.
+func TestGitHubHandleRecordsTheOutcome(t *testing.T) {
+	oldHandle, oldDone, oldFailed := handleEvent, deliveryDone, deliveryFailed
+	t.Cleanup(func() { handleEvent, deliveryDone, deliveryFailed = oldHandle, oldDone, oldFailed })
+	var done, failed []string
+	deliveryDone = func(_ context.Context, delivery string) error { done = append(done, delivery); return nil }
+	deliveryFailed = func(_ context.Context, delivery, why string) error {
+		failed = append(failed, delivery+": "+why)
+		return nil
+	}
+	handleEvent = func(_ context.Context, event string, body []byte) error {
+		switch string(body) {
+		case "fails":
+			return errors.New("no luck")
+		case "panics":
+			panic("boom")
+		}
+		return nil
+	}
+	gh := Providers[GitHub]
+	ctx := context.Background()
+	if err := gh.Handle(ctx, Hook{Event: "push", Delivery: "ok", Body: []byte("{}")}); err != nil {
+		t.Errorf("ok: %v", err)
+	}
+	if err := gh.Handle(ctx, Hook{Event: "push", Delivery: "bad", Body: []byte("fails")}); err == nil {
+		t.Error("a failed event answered no error")
+	}
+	if err := gh.Handle(ctx, Hook{Event: "push", Delivery: "boom", Body: []byte("panics")}); err == nil {
+		t.Error("a panic answered no error")
+	}
+	if !reflect.DeepEqual(done, []string{"ok"}) || len(failed) != 2 || !strings.HasPrefix(failed[0], "bad: no luck") || !strings.Contains(failed[1], "boom") {
+		t.Errorf("done %v failed %v", done, failed)
 	}
 }

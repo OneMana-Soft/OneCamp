@@ -14,9 +14,13 @@ package Calendar
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"time"
 
 	calendarSyncBusiness "github.com/akashc777/OneCamp/business/CalendarSync"
+	// Outlook's adapter registers itself (calendar B7), as icsurl's does.
+	_ "github.com/akashc777/OneCamp/business/CalendarSync/microsoft"
+	connectorBusiness "github.com/akashc777/OneCamp/business/Connector"
 	contentIOBusiness "github.com/akashc777/OneCamp/business/ContentIO"
 	ICS "github.com/akashc777/OneCamp/business/ICS"
 	integrationBusiness "github.com/akashc777/OneCamp/business/Integration"
@@ -33,8 +37,44 @@ const (
 	moveStuckAfter      = 15 * time.Minute
 )
 
-// ErrGoogleNotLinked is a move asked of someone who hasn't connected Google.
-var ErrGoogleNotLinked = inputError("Connect Google Calendar first, then move your calendars.")
+// ErrGoogleNotLinked is a move asked of someone who hasn't connected Google;
+// ErrOutlookNotLinked of someone who hasn't connected Outlook.
+var (
+	ErrGoogleNotLinked  = inputError("Connect Google Calendar first, then move your calendars.")
+	ErrOutlookNotLinked = inputError("Connect Outlook first, then move your calendars.")
+	// ErrNoSyncProvider is a move or a status asked of a provider calendars
+	// don't sync with both ways.
+	ErrNoSyncProvider = inputError("Calendars move from Google or Outlook.")
+)
+
+// syncWith is what differs between the providers calendars move from and
+// sync with both ways: their name, how a person's link is read, what a person
+// reads when it isn't there or is broken, and whether the admin has set the
+// provider up.
+type syncWith struct {
+	name      string
+	accountOf func(ctx context.Context, who *model.UserInfo) (string, bool, error)
+	notLinked error
+	brokenWhy string
+	connector string
+}
+
+// syncWithOf is a provider's syncWith; one calendars don't move from has
+// no accountOf.
+func syncWithOf(provider string) syncWith {
+	switch provider {
+	case "google":
+		return syncWith{name: "Google", accountOf: googleAccountOf, notLinked: ErrGoogleNotLinked, brokenWhy: syncBrokenWhy, connector: connectorBusiness.ProviderCalendar}
+	case "microsoft":
+		return syncWith{name: "Outlook", accountOf: microsoftAccountOf, notLinked: ErrOutlookNotLinked, brokenWhy: syncBrokenWhyMicrosoft, connector: connectorBusiness.ProviderOutlookCalendar}
+	}
+	return syncWith{name: provider, brokenWhy: "This account stopped answering. Connect it again."}
+}
+
+// twoWayProvider is whether calendars sync with provider both ways.
+func twoWayProvider(provider string) bool {
+	return syncWithOf(provider).accountOf != nil && slices.Contains(calendarSyncBusiness.Adapters.TwoWay(), provider)
+}
 
 // SyncStatus is where a person's move from a provider, and its sync, stand.
 type SyncStatus struct {
@@ -47,6 +87,9 @@ type SyncStatus struct {
 	Skipped      []contentIOBusiness.Skipped `json:"skipped,omitempty"`
 	Error        string                      `json:"error,omitempty"`
 	LastSyncedAt *time.Time                  `json:"last_synced_at,omitempty"`
+	// Available is whether the admin has set the provider up, so people
+	// can connect it.
+	Available bool `json:"available"`
 }
 
 // syncLedger keeps calendar sync's ledger; the service's is Postgres.
@@ -62,6 +105,9 @@ type syncLedger interface {
 	markSynced(ctx context.Context, id uuid.UUID) error
 	breakLink(ctx context.Context, id uuid.UUID, why string) error
 	calendarsOf(ctx context.Context, link uuid.UUID) ([]models.SyncCalendar, error)
+	// calendarsInto are the links' calendars that come into any of
+	// calendars, with their links' providers (origin.go).
+	calendarsInto(ctx context.Context, calendars []uuid.UUID) ([]models.SyncCalendar, error)
 	markReadOnly(ctx context.Context, link uuid.UUID, remote string) error
 	refsOf(ctx context.Context, link uuid.UUID) (map[uuid.UUID]models.SyncRef, error)
 	dropRefs(ctx context.Context, link uuid.UUID, events []uuid.UUID) error
@@ -123,6 +169,10 @@ func (postgresLedger) markReadOnly(ctx context.Context, link uuid.UUID, remote s
 
 func (postgresLedger) calendarsOf(ctx context.Context, link uuid.UUID) ([]models.SyncCalendar, error) {
 	return models.SyncCalendarsOf(ctx, link)
+}
+
+func (postgresLedger) calendarsInto(ctx context.Context, calendars []uuid.UUID) ([]models.SyncCalendar, error) {
+	return models.SyncCalendarsInto(ctx, calendars)
 }
 
 func (postgresLedger) refsOf(ctx context.Context, link uuid.UUID) (map[uuid.UUID]models.SyncRef, error) {
@@ -190,6 +240,12 @@ var googleAccountOf = func(ctx context.Context, who *model.UserInfo) (string, bo
 	return integrationBusiness.GoogleCalendarAccount(integration), true, nil
 }
 
+// microsoftAccountOf is the address of who's Outlook link, and whether they
+// have one; swapped in tests.
+var microsoftAccountOf = func(ctx context.Context, who *model.UserInfo) (string, bool, error) {
+	return connectorBusiness.LinkedAccount(ctx, personOf(who), connectorBusiness.ProviderOutlookCalendar)
+}
+
 // statusOf is a ledger row as the person sees it. Pure.
 func statusOf(provider string, l *models.SyncLink) *SyncStatus {
 	if l == nil {
@@ -201,22 +257,40 @@ func statusOf(provider string, l *models.SyncLink) *SyncStatus {
 	return st
 }
 
-// SyncStatus is where who's move from Google stands.
-func (s *service) SyncStatus(ctx context.Context, who *model.UserInfo) (*SyncStatus, error) {
+// SyncStatus is where who's own move from a provider stands, and whether the
+// admin has set the provider up.
+func (s *service) SyncStatus(ctx context.Context, who *model.UserInfo, provider string) (*SyncStatus, error) {
+	if !twoWayProvider(provider) {
+		return nil, ErrNoSyncProvider
+	}
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
-	l, err := s.ledger.linkOf(ctx, personOf(who), "google")
+	l, err := s.ledger.linkOf(ctx, personOf(who), provider)
 	if err != nil {
 		return nil, err
 	}
-	return statusOf("google", l), nil
+	return s.statusFor(provider, l), nil
 }
 
-// MoveFromGoogle starts moving every calendar of who's Google link into
-// OneCamp, in the background, and says where it stands. Asked again while a
-// move runs, it starts nothing.
-func (s *service) MoveFromGoogle(ctx context.Context, who *model.UserInfo) (*SyncStatus, error) {
+// statusFor is statusOf with whether the provider is set up.
+func (s *service) statusFor(provider string, l *models.SyncLink) *SyncStatus {
+	st := statusOf(provider, l)
+	st.Available = connectorConfigured(syncWithOf(provider).connector)
+	return st
+}
+
+// connectorConfigured is whether the admin has set a connector's provider
+// up; swapped in tests.
+var connectorConfigured = connectorBusiness.Configured
+
+// MoveFrom starts moving every calendar of who's own link at a provider
+// (Google, Outlook) into OneCamp, in the background, and says where it
+// stands. Asked again while a move runs, it starts nothing.
+func (s *service) MoveFrom(ctx context.Context, who *model.UserInfo, provider string) (*SyncStatus, error) {
+	if !twoWayProvider(provider) {
+		return nil, ErrNoSyncProvider
+	}
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
@@ -224,18 +298,19 @@ func (s *service) MoveFromGoogle(ctx context.Context, who *model.UserInfo) (*Syn
 	if me == uuid.Nil {
 		return nil, ErrEventNotFound
 	}
-	google, ok := syncProvider("google")
+	adapter, ok := syncProvider(provider)
 	if !ok {
 		return nil, ErrUnavailable
 	}
-	account, linked, err := googleAccountOf(ctx, who)
+	with := syncWithOf(provider)
+	account, linked, err := with.accountOf(ctx, who)
 	if err != nil {
 		return nil, err
 	}
 	if !linked {
-		return nil, ErrGoogleNotLinked
+		return nil, with.notLinked
 	}
-	link, started, err := s.ledger.startMove(ctx, me, "google", account)
+	link, started, err := s.ledger.startMove(ctx, me, provider, account)
 	if err != nil {
 		return nil, err
 	}
@@ -243,28 +318,29 @@ func (s *service) MoveFromGoogle(ctx context.Context, who *model.UserInfo) (*Syn
 		run := func() {
 			ctx, cancel := context.WithTimeout(context.Background(), moveFromGoogleLimit)
 			defer cancel()
-			s.runMove(ctx, who, link, google)
+			s.runMove(ctx, who, link, adapter)
 		}
 		if s.moveNow {
 			run()
 		} else {
 			helpers.GoSafeNamed("business/Calendar/moveFromGoogle", run)
 		}
-		if l, err := s.ledger.linkOf(ctx, me, "google"); err == nil && l != nil {
+		if l, err := s.ledger.linkOf(ctx, me, provider); err == nil && l != nil {
 			link = l
 		}
 	}
-	return statusOf("google", link), nil
+	return s.statusFor(provider, link), nil
 }
 
 // runMove moves each of the link's calendars in turn, keeping where it has
 // got, where each calendar went and where each event is at the provider.
 func (s *service) runMove(ctx context.Context, who *model.UserInfo, link *models.SyncLink, provider calendarSyncBusiness.Adapter) {
 	l := calendarSyncBusiness.Link{ID: link.ID, PersonUUID: link.PersonID.String(), Provider: link.Provider, Account: link.Account}
+	name := syncWithOf(link.Provider).name
 	remotes, err := provider.Calendars(ctx, l)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Calendar: a move from Google couldn't list its calendars: %v", err)
-		_ = s.ledger.finish(ctx, link.ID, models.SyncFailed, 0, 0, nil, "Your Google calendars couldn't be read. Connect Google again, then try once more.")
+		helpers.LogErrorWithContext(ctx, "business/Calendar: a move from %s couldn't list its calendars: %v", name, err)
+		_ = s.ledger.finish(ctx, link.ID, models.SyncFailed, 0, 0, nil, "Your "+name+" calendars couldn't be read. Connect "+name+" again, then try once more.")
 		return
 	}
 	var moved, unchanged int
@@ -272,8 +348,8 @@ func (s *service) runMove(ctx context.Context, who *model.UserInfo, link *models
 	for i, r := range remotes {
 		changes, cursor, err := provider.Pull(ctx, r, "")
 		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/Calendar: a move from Google couldn't read %q: %v", r.ID, err)
-			skipped = append(skipped, contentIOBusiness.Skipped{What: r.Name, Why: "It couldn't be read from Google."})
+			helpers.LogErrorWithContext(ctx, "business/Calendar: a move from %s couldn't read %q: %v", name, r.ID, err)
+			skipped = append(skipped, contentIOBusiness.Skipped{What: r.Name, Why: "It couldn't be read from " + name + "."})
 			continue
 		}
 		cal := ICS.Calendar{Name: r.Name, Zone: r.Zone}
@@ -298,7 +374,7 @@ func (s *service) runMove(ctx context.Context, who *model.UserInfo, link *models
 		}
 		made, err := s.importCalendars(ctx, who, []ICS.Calendar{cal}, share)
 		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/Calendar: a move from Google couldn't write %q: %v", r.ID, err)
+			helpers.LogErrorWithContext(ctx, "business/Calendar: a move from %s couldn't write %q: %v", name, r.ID, err)
 			skipped = append(skipped, contentIOBusiness.Skipped{What: r.Name, Why: "It couldn't be saved."})
 			continue
 		}
@@ -344,7 +420,7 @@ func (s *service) keepRefsOf(ctx context.Context, linkID uuid.UUID, remote strin
 		}
 	}
 	if err := s.ledger.keepRefs(ctx, refs); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Calendar: where moved events are at Google couldn't be kept: %v", err)
+		helpers.LogErrorWithContext(ctx, "business/Calendar: where moved events are at their provider couldn't be kept: %v", err)
 	}
 	return calendar
 }

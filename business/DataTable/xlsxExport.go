@@ -23,6 +23,7 @@ import (
 	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	query "github.com/akashc777/OneCamp/business/QuerySpec"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/currency"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -313,11 +314,8 @@ func (e *TableExport) number(f *model.Field, n float64) contentIOBusiness.Cell {
 	if f.Type == model.FieldDuration || format.Duration != "" {
 		return contentIOBusiness.DurationCell(n)
 	}
-	c := contentIOBusiness.Cell{Kind: contentIOBusiness.CellNumber, Number: n, Percent: format.Percent}
-	if format.Currency == "USD" || format.Currency == "INR" {
-		c.Currency = format.Currency
-	}
-	return c
+	// A currency that isn't one (stored before codes were checked) is none.
+	return contentIOBusiness.Cell{Kind: contentIOBusiness.CellNumber, Number: n, Percent: format.Percent, Currency: currency.Code(format.Currency)}
 }
 
 // moment is s, a day (2026-10-23) or a moment (RFC 3339), as a cell: a day

@@ -8,6 +8,8 @@ import (
 	"github.com/go-chi/cors"
 
 	importBusiness "github.com/akashc777/OneCamp/business/Import"
+	// Tells the admins when the free plan's limit refuses someone (its init).
+	_ "github.com/akashc777/OneCamp/business/Seats"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	"github.com/akashc777/OneCamp/helpers"
 
@@ -57,6 +59,7 @@ import (
 	projectUpdateController "github.com/akashc777/OneCamp/controllers/ProjectUpdate"
 	publicController "github.com/akashc777/OneCamp/controllers/Public"
 	recordingController "github.com/akashc777/OneCamp/controllers/Recording"
+	releaseController "github.com/akashc777/OneCamp/controllers/Release"
 	rowQueryController "github.com/akashc777/OneCamp/controllers/RowQuery"
 	savedItemController "github.com/akashc777/OneCamp/controllers/SavedItem"
 	scheduledMessageController "github.com/akashc777/OneCamp/controllers/ScheduledMessage"
@@ -348,6 +351,12 @@ func routes() *chi.Mux {
 	router.With(customMiddleware.CalendarFeedReadLimit()).Get("/public/calendar/{file}", eventController.PublicCalendarFeed)
 	// A project's cycles as a calendar (linear-12): a person's secret link, limited as a calendar's.
 	router.With(customMiddleware.CalendarFeedReadLimit()).Get("/public/cycles/{file}", cycleController.PublicCycleFeed)
+	// The recording stage's entrance (H3, meet-17): LiveKit's recorder, with the
+	// ticket of the recording it starts, is sent on to the web's layout page
+	// with a recorder's token; anything else is a bare 404
+	// (livekitController.OpenRecordingStage). Every recorder comes from the
+	// egress host, so the limit is generous.
+	router.With(customMiddleware.IPRateLimit("recording-stage", 120, "Too many requests from here. Wait a few minutes and try again.")).Get("/recording-stage/{ticket}", livekitController.OpenRecordingStage)
 	router.With(customMiddleware.LoginRateLimit("guest")).Get("/guest/meet/{token}", guestController.GetGuestMeeting)
 	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestJoin)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/meet/{token}/join", guestController.JoinGuestMeeting)
 	// A guest's own hand and feedback in a call, proved by their call token
@@ -386,6 +395,8 @@ func routes() *chi.Mux {
 	// (the attachment must belong to the grant's board). A board can load many
 	// images, so an address has a file's budget.
 	router.With(customMiddleware.FileReadLimit("guest-board")).Get("/guest/board-attachment/{token}/{obj_uuid}", guestController.GuestBoardAttachment)
+	// A board's polls for its link's guest (miro-28 polls on a slide): questions and tallies, read only.
+	router.With(customMiddleware.LinkReadLimit("guest-board-polls")).Get("/guest/board-polls/{token}", guestController.GuestBoardPolls)
 	// The same for a picture or file in a doc shared through a guest link (B4).
 	mountGuestDocAttachment(router)
 	// Docs published to the web (C6, D-25): public, each route protected in
@@ -492,8 +503,11 @@ func routes() *chi.Mux {
 		// Admin email config
 		// "Check for updates": asks onemana.dev only when an admin clicks.
 		r.Get("/updates", adminConfigController.CheckForUpdates)
-		// Seats used against the licence (a free licence covers a set number).
-		r.Get("/seats", adminConfigController.GetSeats)
+		// The plan: what the workspace is on, its seats against the licence
+		// (a free licence covers a set number), what it includes and the ways
+		// past the limit. /seats is the same answer, for older web builds.
+		r.Get("/plan", adminConfigController.GetPlan)
+		r.Get("/seats", adminConfigController.GetPlan)
 		r.Get("/config/email", adminConfigController.GetEmailConfig)
 		r.Post("/config/email", adminConfigController.UpdateEmailConfig)
 		r.Post("/config/email/logo", adminConfigController.UploadEmailLogo)
@@ -1374,6 +1388,16 @@ func routes() *chi.Mux {
 		r.Mount("/admin", adminUserRouter)
 	})
 
+	// The plan's prices, which this server asks onemana.dev for: an admin's,
+	// or the demo's shared visitor's for the demo's plan card. Not under
+	// /admin (the visitor isn't an admin) nor /config (every member reads it).
+	router.Group(func(r chi.Router) {
+		r.Use(customMiddleware.CSRFMiddleware)
+		r.Use(customMiddleware.VerifyAuth)
+		r.Use(customMiddleware.AdminOrDemoVisitor)
+		r.Get("/plan/prices", adminConfigController.GetPlanPrices)
+	})
+
 	docColabRouter.Group(func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(customMiddleware.VerifyInternalServiceRequest)
@@ -1504,6 +1528,7 @@ func routes() *chi.Mux {
 		r.Get("/checkTeamNameExist", teamController.CheckIfTeamNameExist)
 		r.Get("/teamListByUserUID", teamController.GetDgraphTeamListByUserDgraphUID)
 		r.Get("/teamListByAdminUID", teamController.GetDgraphTeamListByAdminDgraphUID)
+		r.Get("/forNewProject", teamController.TeamsForNewProject)
 		r.Post("/updateName", teamController.UpdateTeamName)
 		r.Post("/addMember", teamController.AddMemberToTeam)
 		r.Post("/addAdminRole", teamController.AddAdminMemberToTeam)
@@ -1536,6 +1561,7 @@ func routes() *chi.Mux {
 		r.Post("/{project_uuid}/save-as-template", projectTemplateController.SaveProjectAsTemplate)
 		r.Get("/getFile/{project_uuid}/{obj_uuid}", userController.GetProjectFile)
 		r.Get("/projectListByAdminUID", projectController.GetDgraphProjectListByAdminDgraphUID)
+		r.Get("/forNewTask", projectController.ProjectsForNewTask)
 		r.Post("/updateName", projectController.UpdateProjectName)
 		r.Get("/taskList/{project_uuid}", projectController.GetProjectTaskList)
 		r.Get("/taskListForKanban/{project_uuid}", projectController.GetProjectTaskListForKanban)
@@ -1626,6 +1652,18 @@ func routes() *chi.Mux {
 		r.Post("/{project_uuid}/cycles/schedule/stop", cycleController.StopCycleSchedule)
 		r.Get("/{project_uuid}/backlog", cycleController.Backlog)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/delete", cycleController.DeleteCycle)
+		// A project's releases (P10-1b, jira-04): members read, admins change;
+		// a deleted one comes back through POST /restore/release/{id}.
+		r.Get("/{project_uuid}/releases", releaseController.ListReleases)
+		r.Get("/{project_uuid}/releases/{release_id}", releaseController.GetRelease)
+		r.Get("/{project_uuid}/releases/{release_id}/burndown", releaseController.ReleaseBurndown)
+		r.Post("/{project_uuid}/releases", releaseController.CreateRelease)
+		r.Post("/{project_uuid}/releases/{release_id}/edit", releaseController.EditRelease)
+		r.Post("/{project_uuid}/releases/{release_id}/ship", releaseController.ShipRelease)
+		r.Post("/{project_uuid}/releases/{release_id}/delete", releaseController.DeleteRelease)
+		r.Post("/{project_uuid}/releases/{release_id}/tasks", releaseController.AddReleaseTasks)
+		r.Post("/{project_uuid}/releases/{release_id}/tasks/{task_uuid}/remove", releaseController.RemoveReleaseTask)
+		r.Post("/{project_uuid}/releases/{release_id}/notes/draft", releaseController.DraftReleaseNotes)
 		r.Get("/{project_uuid}/statuses", taskStatusController.List)
 		r.Post("/{project_uuid}/statuses", taskStatusController.Create)
 		r.Post("/{project_uuid}/statuses/reorder", taskStatusController.Reorder)
@@ -1639,6 +1677,8 @@ func routes() *chi.Mux {
 		r.Get("/{project_uuid}/fields", taskFieldController.ListFields)
 		r.Post("/{project_uuid}/fields", taskFieldController.CreateField)
 		r.Post("/{project_uuid}/fields/reorder", taskFieldController.ReorderFields)
+		// A formula as an admin writes it, checked without saving (J-F).
+		r.Post("/{project_uuid}/fields/preview", taskFieldController.PreviewField)
 		r.Post("/{project_uuid}/fields/{field_id}", taskFieldController.UpdateField)
 		r.Post("/{project_uuid}/fields/{field_id}/delete", taskFieldController.DeleteField)
 		// Task templates, the workspace's and each project's: router/taskTemplates.go.
@@ -1726,9 +1766,16 @@ func routes() *chi.Mux {
 		// What a move would push along, before it's made (DG10).
 		r.Get("/{task_uuid}/impact", taskController.TaskImpact)
 		r.Post("/dependency/delete", taskController.RemoveTaskDependency)
+		// The work hierarchy (jira-01 J-H): under an epic or a top task, or out.
+		r.Post("/parent", taskController.SetTaskParent)
+		// Typed links: relates, duplicates, clones (blocking is /dependency).
+		r.Post("/link", taskController.LinkTasks)
+		r.Post("/link/delete", taskController.UnlinkTasks)
+		r.Get("/{task_uuid}/links", taskController.TaskLinks)
 		r.Post("/updateTaskStatus", taskController.UpdateTaskStatus)
 		r.Get("/recurrence/{task_uuid}", taskController.GetTaskRecurrence)
 		r.Get("/cycle/{task_uuid}", cycleController.GetTaskCycle)
+		r.Get("/release/{task_uuid}", releaseController.GetTaskReleases)
 		r.Get("/clientReview/{task_uuid}", guestController.TaskClientReview)
 		// Time on tasks: a timer, time added by hand, and the person's own edits.
 		r.Get("/time/running", timeEntryController.RunningTimer)
@@ -1739,6 +1786,7 @@ func routes() *chi.Mux {
 		r.Post("/time/entry/{entry_id}/update", timeEntryController.UpdateTime)
 		r.Post("/time/entry/{entry_id}/delete", timeEntryController.DeleteTime)
 		r.Post("/cycle", cycleController.SetTaskCycle)
+		r.Post("/release", releaseController.SetTaskReleases)
 		r.Post("/recurrence", taskController.SetTaskRecurrence)
 		r.Get("/milestone/{task_uuid}", milestoneController.GetTaskMilestone)
 		r.Post("/milestone", milestoneController.SetTaskMilestone)
@@ -1761,14 +1809,14 @@ func routes() *chi.Mux {
 		r.Get("/getTaskActivityList/{task_uuid}", taskController.GetTaskActivityList)
 		r.Post("/github-link/{task_uuid}", taskController.LinkTaskToGitHub)
 		r.Post("/github-unlink/{task_uuid}", taskController.UnlinkTaskFromGitHub)
-		r.Post("/create-branch/{task_uuid}", taskController.CreateGitHubBranchForTask)
+		r.With(customMiddleware.NoGitHubWritesInDemo).Post("/create-branch/{task_uuid}", taskController.CreateGitHubBranchForTask)
 		r.Get("/github-activity/{task_uuid}", taskController.GetGitHubTaskActivity)
 		r.Get("/github-pr-reviews/{task_uuid}", taskController.GetGitHubPRReviews)
 		r.Get("/github-sync-status/{task_uuid}", taskController.GetGitHubSyncStatus)
-		r.Post("/github-retry-sync/{task_uuid}", taskController.RetryGitHubSync)
+		r.With(customMiddleware.NoGitHubWritesInDemo).Post("/github-retry-sync/{task_uuid}", taskController.RetryGitHubSync)
 		r.Post("/github-refresh/{task_uuid}", taskController.RefreshFromGitHub)
 
-		r.Post("/github-create-pr/{task_uuid}", taskController.CreateGitHubPRForTask)
+		r.With(customMiddleware.NoGitHubWritesInDemo).Post("/github-create-pr/{task_uuid}", taskController.CreateGitHubPRForTask)
 		r.Get("/github-search-issues/{task_uuid}", taskController.SearchGitHubIssues)
 		r.Get("/github-search-prs/{task_uuid}", taskController.SearchGitHubPRs)
 		r.Post("/github-bulk-link", taskController.BulkLinkTasksToGitHub)
@@ -1881,9 +1929,15 @@ func routes() *chi.Mux {
 	boardRouter.Group(func(r chi.Router) {
 		r.Post("/createBoard", boardController.CreateBoard)
 		r.Get("/getBoardInfo/{board_uuid}", boardController.GetBoardInfo)
+		// A board's calls (miro-27): the calls that showed it, as each one's own rules let the reader see them.
+		r.Get("/getBoardCalls/{board_uuid}", callsController.BoardCalls)
 		r.Get("/getBoardList", boardController.GetBoardList)
 		r.Post("/updateBoard", boardController.UpdateBoard)
 		r.Post("/deleteBoard", boardController.DeleteBoard)
+		// Deleted boards: the maker's, and an admin's every board that isn't private; a restore by them (UX-TB-H2-BE).
+		r.Get("/trash", boardController.GetBoardTrash)
+		r.Get("/trash/{board_uuid}", boardController.GetTrashedBoard)
+		r.Post("/restore", boardController.RestoreBoard)
 		r.Post("/aiGenerate", boardController.GenerateBoardDiagram)
 		r.Post("/aiGenerateStream", boardController.GenerateBoardDiagramStream)
 		r.Post("/aiPlan", boardController.PlanBoardDiagram)
@@ -1898,6 +1952,12 @@ func routes() *chi.Mux {
 		r.Post("/commentDelete", boardController.BoardCommentDelete)
 		r.Get("/getBoardSnapshots", boardController.GetBoardSnapshots)
 		r.Post("/restoreBoardSnapshot", boardController.RestoreBoardSnapshot)
+		// Presenter notes (miro-28 2a): who may present the board reads them, its edit right writes them.
+		r.Get("/getFrameNotes/{board_uuid}", boardController.GetFrameNotes)
+		r.Post("/saveFrameNote", boardController.SaveFrameNote)
+		// Polls on a slide (miro-28 4): its edit right starts one on a frame; whoever may open the board reads them.
+		r.Post("/polls", pollController.CreateBoardPoll)
+		r.Get("/polls/{board_uuid}", pollController.BoardPolls)
 		// Protected objects: the owner or an admin locks and lifts, each in the audit log (miro-44).
 		r.Post("/protect", boardController.ProtectBoardElements)
 		r.Post("/recordView", boardController.RecordBoardView)
@@ -1917,6 +1977,7 @@ func routes() *chi.Mux {
 		r.Post("/leaveEvent/{eventId}", eventController.LeaveEventController)
 		r.Post("/findTime", eventController.FindTime)
 		r.Post("/suggestTimes", eventController.SuggestTimes)
+		r.Post("/planWeek", eventController.PlanWeek)
 		r.Post("/hours", eventController.PeopleHours)
 		r.Post("/explain", eventController.ExplainTime)
 		r.Get("/status/{user_uuid}", eventController.PersonStatus)
@@ -1962,6 +2023,8 @@ func routes() *chi.Mux {
 		r.Get("/unified", activityController.GetUnifiedActivity)
 		// The Inbox marks the feed seen by asking; reading it marks nothing.
 		r.Post("/seen", activityController.MarkActivitySeen)
+		// The Inbox badge alone, for the app to read again.
+		r.Get("/unread", activityController.GetActivityUnread)
 	})
 
 	globalSearchRouter.Group(func(r chi.Router) {
@@ -2053,6 +2116,11 @@ func routes() *chi.Mux {
 			helpers.WriteJSON(w, http.StatusNotImplemented, helpers.Envolope{"msg": "AI features are not supported on this build"})
 		})
 		r.Post("/doc/complete/stream", func(w http.ResponseWriter, r *http.Request) {
+			helpers.WriteJSON(w, http.StatusNotImplemented, helpers.Envolope{"msg": "AI features are not supported on this build"})
+		})
+		// A call background from the member's words, made by their own model
+		// and painted in their browser (meet-09).
+		r.Post("/call-background", func(w http.ResponseWriter, r *http.Request) {
 			helpers.WriteJSON(w, http.StatusNotImplemented, helpers.Envolope{"msg": "AI features are not supported on this build"})
 		})
 		r.Post("/action/execute", func(w http.ResponseWriter, r *http.Request) {

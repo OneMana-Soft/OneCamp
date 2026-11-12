@@ -3,6 +3,8 @@ package business
 import (
 	"context"
 	"errors"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifyBusiness "github.com/akashc777/OneCamp/business/Notify"
 	"slices"
 	"strings"
 	"sync"
@@ -43,38 +45,46 @@ func replyIn(t *testing.T, levels map[string]string, repliers []string, message 
 	t.Helper()
 	var mu sync.Mutex
 	var got told
-	oldLevels, oldRepliers, oldDeliver, oldPublish, oldEmail := threadLevels, threadRepliers, deliverTo, publishActivityTo, emailChatComment
-	oldFollows, oldRecord := threadFollows, recordThreadReply
+	oldRepliers, oldTell, oldPublish, oldEmail := threadRepliers, tellThread, publishActivityTo, emailChatComment
+	oldRecord := recordThreadReply
 	t.Cleanup(func() {
-		threadLevels, threadRepliers, deliverTo, publishActivityTo, emailChatComment = oldLevels, oldRepliers, oldDeliver, oldPublish, oldEmail
-		threadFollows, recordThreadReply = oldFollows, oldRecord
+		threadRepliers, tellThread, publishActivityTo, emailChatComment = oldRepliers, oldTell, oldPublish, oldEmail
+		recordThreadReply = oldRecord
 		follows.on, follows.off = nil, nil
 	})
-	threadFollows = func(_ context.Context, root string) ([]string, []string, error) {
-		if root != message.Uuid {
-			t.Errorf("follows read for %q, want the thread's root %q", root, message.Uuid)
-		}
-		return follows.on, follows.off, nil
-	}
 	recordThreadReply = func(_ context.Context, r threadIndex.Reply) {
 		mu.Lock()
 		defer mu.Unlock()
 		got.recorded = append(got.recorded, r)
 	}
-	threadLevels = func(_ context.Context, _ string, ids []string) (map[string]string, error) {
-		out := map[string]string{}
-		for _, id := range ids {
-			if l, ok := levels[id]; ok {
-				out[strings.ToLower(id)] = l
-			}
-		}
-		return out, nil
-	}
 	threadRepliers = func(context.Context, string) ([]string, error) { return repliers, nil }
-	deliverTo = func(_ context.Context, to []string, _ map[string]string, _ string) {
+	// The router's plan of a thread reply (business/Notify, its own tests
+	// and parity): the thread's rule over the conversation's settings, each
+	// told by their strongest cause. Here the site's part is checked: the
+	// event it builds, and whom it tells what of those told.
+	tellThread = func(_ context.Context, ev notifyBusiness.Event) []notifyBusiness.Decision {
+		if ev.Place.ThreadRootID != message.Uuid {
+			t.Errorf("planned for thread %q, want the thread's root %q", ev.Place.ThreadRootID, message.Uuid)
+		}
+		lv := map[string]string{}
+		for id, l := range levels {
+			lv[strings.ToLower(id)] = l
+		}
+		aud := notificationBusiness.ThreadAudience(lv, ev.Actor, ev.Author, ev.Repliers, ev.Mentions, notificationBusiness.Follows{On: follows.on, Off: follows.off})
+		var ds []notifyBusiness.Decision
+		for _, id := range aud.Told {
+			c := notifyBusiness.CauseThreadReply
+			if slices.Contains(aud.Mentioned, id) {
+				c = notifyBusiness.CauseMention
+			} else if id == aud.Author {
+				c = notifyBusiness.CauseReplyToYou
+			}
+			ds = append(ds, notifyBusiness.Decision{UserID: id, Cause: c, To: []notifyBusiness.Delivery{notifyBusiness.ToPush}})
+		}
 		mu.Lock()
 		defer mu.Unlock()
-		got.pushed = append(got.pushed, to...)
+		got.pushed = append(got.pushed, aud.Told...)
+		return ds
 	}
 	publishActivityTo = func(to string, it *dgraphModels.UnifiedActivityItem) {
 		mu.Lock()
@@ -151,11 +161,11 @@ func TestADMThreadReplyReachesTheOtherPerson(t *testing.T) {
 // When who hears of it can't be read, nobody is told.
 func TestAThreadReplyWhoseAudienceFailsTellsNobody(t *testing.T) {
 	_ = replyIn(t, nil, nil, group(maya, maya, jonas), jonas)
-	threadLevels = func(context.Context, string, []string) (map[string]string, error) { return nil, errors.New("down") }
-	var pushed bool
-	deliverTo = func(context.Context, []string, map[string]string, string) { pushed = true }
+	threadRepliers = func(context.Context, string) ([]string, error) { return nil, errors.New("down") }
+	var told bool
+	tellThread = func(context.Context, notifyBusiness.Event) []notifyBusiness.Decision { told = true; return nil }
 	notifyChatThreadReply(time.Now(), "c1", "<p>x</p>", &dgraphStruct.DgraphUser{Uuid: jonas}, "grp", nil, group(maya, maya, jonas), false)
-	if pushed {
+	if told {
 		t.Error("told someone with no audience")
 	}
 }

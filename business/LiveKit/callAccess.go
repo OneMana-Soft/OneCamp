@@ -16,6 +16,7 @@ import (
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	"github.com/google/uuid"
 )
@@ -76,8 +77,10 @@ func conversationMember(ctx context.Context, roomName string, u *dgraphStruct.Dg
 
 // MemberMayBeInCall reports whether a member may be in the call in a room
 // now: someone who can open its conversation, or, in an instant meeting, the
-// person who started it, or someone let in through a link they opened as
-// themselves (HU13: a meeting's link, a room's address, a call's invite).
+// person who started it, or, in an event's call, whoever may read the
+// event's details (gcal-15 head B, eventCallMember), or someone let in
+// through a link they opened as themselves (HU13: a meeting's link, a room's
+// address, a call's invite).
 func MemberMayBeInCall(ctx context.Context, roomName, uid string) (bool, error) {
 	u, err := ActiveMember(ctx, uid)
 	if err != nil || u == nil {
@@ -85,7 +88,9 @@ func MemberMayBeInCall(ctx context.Context, roomName, uid string) (bool, error) 
 	}
 	var ok bool
 	if strings.HasPrefix(roomName, meetingRoomPrefix) {
-		ok, err = isMeetingHost(ctx, roomName, u)
+		if ok, err = isMeetingHost(ctx, roomName, u); err == nil && !ok {
+			ok, err = eventCallMember(ctx, roomName, u)
+		}
 	} else {
 		ok, err = conversationMember(ctx, roomName, u)
 	}
@@ -100,13 +105,30 @@ func MemberMayBeInCall(ctx context.Context, roomName, uid string) (bool, error) 
 	return rooms[roomName], err
 }
 
+// isMeetingHost is whether u runs the meeting in a room: whoever made its
+// first link, or, for a room with no link (an event's own room, made on its
+// first join: gcal-15 head B), its meeting's owner, the event's organiser.
 func isMeetingHost(ctx context.Context, roomName string, u *dgraphStruct.DgraphUser) (bool, error) {
 	creator, ok, err := guestModel.ResourceCreator(ctx, guestModel.ResourceMeeting, roomName)
-	if err != nil || !ok {
+	if err != nil {
 		return false, err
 	}
-	return creator.String() == u.Uuid, nil
+	if ok {
+		return creator.String() == u.Uuid, nil
+	}
+	id := strings.TrimPrefix(roomName, meetingRoomPrefix)
+	if _, perr := uuid.Parse(id); perr != nil {
+		return false, nil
+	}
+	m, err := meetingOwnerOf(ctx, id)
+	if err != nil || m == nil {
+		return false, err
+	}
+	return m.Owner.String() == u.Uuid, nil
 }
+
+// meetingOwnerOf reads a meeting's row, for its owner (a seam for tests).
+var meetingOwnerOf = callStateModel.MeetingOf
 
 // HostByRule reports whether someone runs the call in a room by who they are,
 // before anyone hands them the part: in a channel, its managers and the

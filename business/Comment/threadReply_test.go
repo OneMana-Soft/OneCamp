@@ -3,12 +3,12 @@ package business
 import (
 	"context"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	threadIndex "github.com/akashc777/OneCamp/business/ThreadIndex"
+	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
@@ -23,28 +23,27 @@ const (
 )
 
 type channelTold struct {
-	pushed, emailed []string
-	items           []struct{ to, kind string }
-	recorded        []threadIndex.Reply
+	notices  []ReplyNotice
+	emailed  []string
+	items    []struct{ to, kind string }
+	recorded []threadIndex.Reply
 }
 
 // replyInChannel runs a reply in a channel thread: Maya's post in #launch,
-// with the thread's earlier repliers, its index's followers and the members'
-// settings, and says who was told what and what the index was told.
-func replyInChannel(t *testing.T, levels map[string]string, repliers, on, off []string, by string, mentioned ...string) channelTold {
+// with the thread's earlier repliers, and the router answering told. It says
+// what the router was asked, who was told what and what the index was told.
+func replyInChannel(t *testing.T, told ReplyTold, repliers []string, by string, mentioned ...string) channelTold {
 	t.Helper()
 	var mu sync.Mutex
 	var got channelTold
-	old := []any{threadOfPost, levelsInChannel, recordReply, threadFollows, deliverReply, emailPostComment, publishToUser, signedProfileURL}
+	old := []any{threadOfPost, recordReply, tellReply, emailPostComment, publishToUser, signedProfileURL}
 	t.Cleanup(func() {
 		threadOfPost = old[0].(func(context.Context, string) (*dgraphStruct.DgraphPost, error))
-		levelsInChannel = old[1].(func(context.Context, string, []string) (map[string]string, error))
-		recordReply = old[2].(func(context.Context, threadIndex.Reply))
-		threadFollows = old[3].(func(context.Context, string) ([]string, []string, error))
-		deliverReply = old[4].(func(context.Context, []string, map[string]string, string))
-		emailPostComment = old[5].(func(string, string, string, string, string, string, string, []string))
-		publishToUser = old[6].(func(string, *dgraphModels.UnifiedActivityItem))
-		signedProfileURL = old[7].(func(context.Context, *string) string)
+		recordReply = old[1].(func(context.Context, threadIndex.Reply))
+		tellReply = old[2].(func(context.Context, ReplyNotice) ReplyTold)
+		emailPostComment = old[3].(func(string, string, string, string, string, string, string, []string))
+		publishToUser = old[4].(func(string, *dgraphModels.UnifiedActivityItem))
+		signedProfileURL = old[5].(func(context.Context, *string) string)
 	})
 	rootAt := time.Date(2026, 10, 18, 8, 0, 0, 0, time.UTC)
 	post := &dgraphStruct.DgraphPost{
@@ -60,30 +59,16 @@ func replyInChannel(t *testing.T, levels map[string]string, repliers, on, off []
 		}
 		return thread, nil
 	}
-	levelsInChannel = func(_ context.Context, _ string, ids []string) (map[string]string, error) {
-		out := map[string]string{}
-		for _, id := range ids {
-			if l, ok := levels[id]; ok {
-				out[strings.ToLower(id)] = l
-			}
-		}
-		return out, nil
-	}
-	threadFollows = func(_ context.Context, root string) ([]string, []string, error) {
-		if root != post.Uuid {
-			t.Errorf("follows read for %q, want the post %q", root, post.Uuid)
-		}
-		return on, off, nil
-	}
 	recordReply = func(_ context.Context, r threadIndex.Reply) {
 		mu.Lock()
 		defer mu.Unlock()
 		got.recorded = append(got.recorded, r)
 	}
-	deliverReply = func(_ context.Context, to []string, _ map[string]string, _ string) {
+	tellReply = func(_ context.Context, n ReplyNotice) ReplyTold {
 		mu.Lock()
 		defer mu.Unlock()
-		got.pushed = append(got.pushed, to...)
+		got.notices = append(got.notices, n)
+		return told
 	}
 	emailPostComment = func(_, _, _, _, _, _, _ string, to []string) {
 		mu.Lock()
@@ -110,8 +95,7 @@ func replyInChannel(t *testing.T, levels map[string]string, repliers, on, off []
 // A reply in a channel thread is recorded in the thread's index (chat P2):
 // the channel, the post and its author, the writer and those mentioned.
 func TestAChannelThreadReplyIsRecordedInTheIndex(t *testing.T) {
-	levels := map[string]string{pMaya: "all", pJonas: "all", pSam: "all"}
-	got := replyInChannel(t, levels, nil, nil, nil, pJonas, pSam)
+	got := replyInChannel(t, ReplyTold{}, nil, pJonas, pSam)
 	if len(got.recorded) != 1 {
 		t.Fatalf("recorded %d replies, want 1", len(got.recorded))
 	}
@@ -123,20 +107,34 @@ func TestAChannelThreadReplyIsRecordedInTheIndex(t *testing.T) {
 	}
 }
 
-// Who follows a channel thread by hand hears of its replies; who turned it
-// off doesn't, even its author, unless the reply mentions them.
-func TestFollowingAChannelThreadDecidesWhoHears(t *testing.T) {
-	levels := map[string]string{pMaya: "all", pJonas: "all", pSam: "all", pAda: "all"}
-	got := replyInChannel(t, levels, []string{pAda}, []string{pSam}, []string{pMaya, pAda}, pJonas)
-	if !slices.Equal(got.pushed, []string{pSam}) || !slices.Equal(got.emailed, got.pushed) {
-		t.Errorf("pushed %v, emailed %v: want sam alone, who follows it; maya and ada turned it off", got.pushed, got.emailed)
+// A reply in a channel thread goes through the one door (business/Notify,
+// A4 H2): the router is asked once, with the reply as its event (named by
+// post and reply, retracted by the reply's id, the post's author, those who
+// replied before and those mentioned), and the email and the live Activity
+// items go only to whom it told: the email to the thread's people, the reply
+// item to the post's author, a mention item to each one mentioned. Who
+// follows the thread or turned it off is the router's (threadAudience_test).
+func TestAChannelThreadReplyGoesThroughOneDoor(t *testing.T) {
+	told := ReplyTold{Thread: []string{pMaya, pSam, pAda}, RepliedTo: []string{pMaya}, Mentioned: []string{pSam}}
+	got := replyInChannel(t, told, []string{pAda, pJonas}, pJonas, pSam)
+	if len(got.notices) != 1 {
+		t.Fatalf("asked the router %d times, want once", len(got.notices))
 	}
-	for _, it := range got.items {
-		if it.to == pMaya && it.kind == mqttStruct.MESSAGE_ACTIVITY_COMMENT {
-			t.Error("maya turned her thread off, and still got the reply item")
-		}
+	n := got.notices[0]
+	if n.ID != "post_comment:post-1:c1" || n.MessageID != "c1" || n.Actor != pJonas || n.Author != pMaya ||
+		n.ChannelID != "launch" || n.PostID != "post-1" || !slices.Equal(n.Repliers, []string{pAda, pJonas}) ||
+		!slices.Equal(n.Mentions, []string{pSam}) || n.Push[firebaseInit.FIREBASE_PUSH_DATA_BODY] != "on it" {
+		t.Errorf("asked the router of %+v", n)
 	}
-	if got := replyInChannel(t, levels, []string{pAda}, nil, []string{pAda}, pJonas, pAda); !slices.Contains(got.pushed, pAda) {
-		t.Errorf("pushed %v: ada turned it off, but this reply mentions her", got.pushed)
+	if !slices.Equal(got.emailed, told.Thread) {
+		t.Errorf("emailed %v, want whom the thread's rule told %v", got.emailed, told.Thread)
+	}
+	want := []struct{ to, kind string }{{pMaya, mqttStruct.MESSAGE_ACTIVITY_COMMENT}, {pSam, mqttStruct.MESSAGE_ACTIVITY_MENTION}}
+	if !slices.Equal(got.items, want) {
+		t.Errorf("Activity items %v, want %v", got.items, want)
+	}
+	// Told nobody (a double fire, or all of them off): no email, no item.
+	if got := replyInChannel(t, ReplyTold{}, nil, pJonas, pSam); len(got.emailed) != 0 || len(got.items) != 0 {
+		t.Errorf("told nobody, yet emailed %v and sent items %v", got.emailed, got.items)
 	}
 }
