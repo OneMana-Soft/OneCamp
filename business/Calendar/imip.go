@@ -28,6 +28,7 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"html/template"
 	"net/url"
 	"strings"
 	"time"
@@ -474,7 +475,8 @@ func (s *service) mailGuest(ctx context.Context, g models.Attendee, organiser IC
 		why = organiser.Name + " sent this from OneCamp. The calendar file attached takes the meeting off your calendar."
 	}
 	htmlBody, text, err := emailService.Render(emailService.TemplateData{
-		RecipientName: g.Name, ActorName: organiser.Name, Title: title, Subtitle: mailWhen(e), Body: b.String(),
+		// The server's own HTML: every part of it someone wrote is escaped above.
+		RecipientName: g.Name, ActorName: organiser.Name, Title: title, Subtitle: mailWhen(e), BodyHTML: template.HTML(b.String()),
 		CTAText: "Answer", CTAURL: cta, BrandName: "OneCamp", Why: why,
 	})
 	if err != nil {

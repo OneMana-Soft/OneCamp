@@ -474,6 +474,7 @@ func TestTheOrganiserHearsOfAnswersInTheirInbox(t *testing.T) {
 // capturedMail is an email to a guest by email.
 type capturedMail struct {
 	to, subject, html string
+	text              string
 	ics               string
 }
 
@@ -487,7 +488,7 @@ func captureMail(t *testing.T, on bool) *[]capturedMail {
 	sendGuestMail = func(_ context.Context, opt emailService.SendOptions) error {
 		mu.Lock()
 		defer mu.Unlock()
-		m := capturedMail{to: opt.To, subject: opt.Subject, html: opt.HTML}
+		m := capturedMail{to: opt.To, subject: opt.Subject, html: opt.HTML, text: opt.Text}
 		for _, a := range opt.Attachments {
 			m.ics = strings.ReplaceAll(string(a.Content), "\r\n ", "")
 		}

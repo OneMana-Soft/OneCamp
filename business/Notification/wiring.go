@@ -29,8 +29,8 @@ func recoverDispatch(label string) {
 // or template logic.
 
 // trimSnippet trims a body to a sane preview length without breaking inside
-// a UTF-8 rune. The dispatcher template re-renders without HTML tags for
-// the plain-text alternative, so trimming on the rune boundary is enough.
+// a UTF-8 rune. The email shows the body as text, as it was written
+// (services/Email escapes it, once), so trimming is all this does.
 func trimSnippet(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= max {

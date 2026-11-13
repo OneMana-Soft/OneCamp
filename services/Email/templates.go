@@ -5,18 +5,27 @@ import (
 	"fmt"
 	"html/template"
 	"strings"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // TemplateData is the canonical input passed to every notification template.
 // We pre-render at enqueue time, so this struct only needs to capture the
 // values the template needs to display, not anything dynamic.
 type TemplateData struct {
-	RecipientName  string
-	ActorName      string
-	ActorAvatar    string // signed/public URL; can be empty
-	Title          string // headline above the message body
-	Subtitle       string // contextual line below the headline (e.g. "in #design")
-	Body           string // the actual message text (already HTML-escaped or sanitized)
+	RecipientName string
+	ActorName     string
+	ActorAvatar   string // signed/public URL; can be empty
+	Title         string // headline above the message body
+	Subtitle      string // contextual line below the headline (e.g. "in #design")
+	// Body is the message as people wrote it, plain text: the template shows
+	// it as text (it escapes it, once) and the plain-text part as written.
+	// Never escape it before Render.
+	Body string
+	// BodyHTML is a body the server built as HTML (an invitation's lines,
+	// answers and links), shown as it is: its builder escapes every part of
+	// it someone wrote. Empty for a body of text.
+	BodyHTML       template.HTML
 	CTAText        string
 	CTAURL         string
 	UnsubscribeURL string
@@ -71,7 +80,7 @@ const baseTemplateHTML = `<!doctype html>
                     {{end}}
                     <td valign="top">
                       <div style="font-size:13px; font-weight:600; color:#0f172a; margin-bottom:2px;">{{.ActorName | html}}</div>
-                      <div style="font-size:14px; color:#0f172a; line-height:1.55; word-break:break-word;">{{.Body | safehtml}}</div>
+                      <div style="font-size:14px; color:#0f172a; line-height:1.55; word-break:break-word;">{{.Body}}{{.BodyHTML}}</div>
                     </td>
                   </tr>
                 </table>
@@ -118,12 +127,6 @@ var baseTpl = template.Must(template.New("email").Funcs(template.FuncMap{
 	"html": func(s string) template.HTML {
 		return template.HTML(template.HTMLEscapeString(s))
 	},
-	// safehtml: trusts the input as already-sanitised HTML. The notification
-	// dispatcher strips raw HTML before calling Render and only passes through
-	// safe display strings.
-	"safehtml": func(s string) template.HTML {
-		return template.HTML(s)
-	},
 }).Parse(baseTemplateHTML))
 
 // Render returns the (HTML, plaintext) pair for a TemplateData. The plain-text
@@ -163,8 +166,11 @@ func renderPlainText(d TemplateData) string {
 		b.WriteString(d.ActorName + ":\n")
 	}
 	if d.Body != "" {
-		// Strip HTML tags from the body for the plaintext version.
-		b.WriteString(stripHTMLTags(d.Body) + "\n\n")
+		b.WriteString(d.Body + "\n\n")
+	}
+	if d.BodyHTML != "" {
+		// The server's HTML as text: its tags out, its escapes read back.
+		b.WriteString(helpers.HTMLToPlainText(string(d.BodyHTML)) + "\n\n")
 	}
 	if d.CTAURL != "" {
 		if d.CTAText != "" {
@@ -183,26 +189,4 @@ func renderPlainText(d TemplateData) string {
 		b.WriteString("Unsubscribe: " + d.UnsubscribeURL + "\n")
 	}
 	return b.String()
-}
-
-// stripHTMLTags is a small dependency-free tag stripper. Good enough for the
-// notification body which is plain text rendered into <span>s by the template.
-func stripHTMLTags(s string) string {
-	var b strings.Builder
-	depth := 0
-	for _, r := range s {
-		switch r {
-		case '<':
-			depth++
-		case '>':
-			if depth > 0 {
-				depth--
-			}
-		default:
-			if depth == 0 {
-				b.WriteRune(r)
-			}
-		}
-	}
-	return strings.TrimSpace(b.String())
 }

@@ -88,8 +88,9 @@ type Event struct {
 	ActorAvatar string
 	ActorUUID   string
 
-	// Subject + Body are user-facing copy. Body is treated as plain text
-	// inside <span>s in the rendered template — pre-strip HTML before passing.
+	// Subject + Body are user-facing copy, as people wrote them: plain text.
+	// The email shows Body as text (services/Email escapes it, once), so it
+	// is never escaped or stripped before it is passed.
 	SubjectLine string // becomes the email subject (e.g. "Akash mentioned you in #design")
 	Title       string // headline inside the email
 	Subtitle    string // smaller context line (e.g. "in #design")
