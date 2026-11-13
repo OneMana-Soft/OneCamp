@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"net/mail"
 	"regexp"
 	"strings"
@@ -634,7 +633,7 @@ func mailGuest(ctx context.Context, m guestMail) bool {
 		ActorName:     m.invite.Organizer.Name,
 		Title:         m.title,
 		Subtitle:      m.subtitle,
-		Body:          html.EscapeString(m.body),
+		Body:          m.body,
 		CTAText:       m.ctaText,
 		CTAURL:        m.ctaURL,
 		BrandName:     "OneCamp",
