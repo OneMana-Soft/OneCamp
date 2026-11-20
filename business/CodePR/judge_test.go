@@ -1,6 +1,7 @@
 package codepr
 
 import (
+	"github.com/akashc777/OneCamp/helpers"
 	"strings"
 	"testing"
 )
@@ -77,7 +78,7 @@ func TestParseScopeVerdict_InScopeDropsStrayConcern(t *testing.T) {
 func TestExtractFirstJSONObject_StringAwareBraces(t *testing.T) {
 	// A brace inside a string value must not close the object early.
 	in := `prefix {"concern":"has a } brace","in_scope":false} suffix`
-	obj := extractFirstJSONObject(in)
+	obj := helpers.ExtractJSON(in, '{')
 	if obj != `{"concern":"has a } brace","in_scope":false}` {
 		t.Fatalf("string-aware extraction failed: %q", obj)
 	}

@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken'
 import dotenv from 'dotenv'
 import { createCollabServer } from './collabServer.js'
 import { guardRedisExtension } from './guardRedis.js'
+import { retryUnanswered } from './apiRetry.js'
 import { createLiveServer } from './live/server.js'
 
 dotenv.config()
@@ -48,28 +49,12 @@ function internalSecret() {
 }
 
 // Internal API calls retry three times (2, 4, 8 s) when the API may answer
-// differently next time: no answer, a 5xx, 408 or 429. A 4xx is an answer
-// (not found, refused, not allowed), so it is returned at once.
+// differently next time (apiRetry.js).
 const api = axios.create({
     timeout: 15000,
 })
 
-api.interceptors.response.use(
-    (response) => response,
-    async (error) => {
-        const { config } = error
-        const status = error?.response?.status
-        const final = typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429
-        if (!config || final || config.__retryCount >= 3) {
-            return Promise.reject(error)
-        }
-        config.__retryCount = config.__retryCount || 0
-        config.__retryCount += 1
-        const delay = Math.pow(2, config.__retryCount) * 1000
-        await new Promise((resolve) => setTimeout(resolve, delay))
-        return api(config)
-    }
-)
+api.interceptors.response.use((response) => response, retryUnanswered(api))
 
 const collab = createCollabServer({
     port: process.env.PORT ? parseInt(process.env.PORT) : 1234,

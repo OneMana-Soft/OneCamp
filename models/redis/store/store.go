@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 	"sync"
@@ -499,6 +500,33 @@ func IncrByWithTTL(ctx context.Context, spec registry.Spec, args []string, delta
 		return 0, err
 	}
 	return incr.Val(), nil
+}
+
+// Generations start at a random value in [generationFloor, 2^62), far from 0
+// (the value a missing key is read as) and from each other.
+const generationFloor = int64(1) << 32
+
+// BumpGeneration moves a generation (a global counter that readers compare
+// with the one their cache was filled at; spec takes no args) to a value it
+// has not held, in one pipeline: SET NX at a random start, INCR, EXPIRE. So
+// a key that lapsed or was evicted comes back at a value no cache holds.
+// writer names the write, for the WARN a failed bump logs: until their max
+// age, caches then keep what the write changed. A no-op when Redis isn't
+// configured, where nobody reads a generation either.
+func BumpGeneration(ctx context.Context, spec registry.Spec, writer string) error {
+	if !IsAvailable() {
+		return nil
+	}
+	key := spec.Build()
+	pipe := redisInit.RedisClient.Pipeline()
+	pipe.SetNX(ctx, key, generationFloor+rand.Int64N(int64(1)<<62-generationFloor), spec.TTL)
+	pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, spec.TTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		helpers.LogWarnWithContext(ctx, "redis store: BumpGeneration failed key=%s writer=%s err=%+v", key, writer, err)
+		return err
+	}
+	return nil
 }
 
 // AllowFixedWindowN is AllowFixedWindow for a call that spends n at once (a

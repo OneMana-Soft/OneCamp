@@ -135,11 +135,11 @@ func TestTheWordsAreCheckedBeforeAnyModelIsAsked(t *testing.T) {
 func TestAIOffOrTooManyAsksRefuseInWords(t *testing.T) {
 	model := &sceneModel{answers: []string{madeScene}}
 	rec, body := askForBackground(t, sceneRuntime{fakeRuntime: fakeRuntime{off: true}, llm: model}, "Warm library")
-	if rec.Code != http.StatusServiceUnavailable || body["msg"] != "AI is switched off in this workspace." {
+	if rec.Code != http.StatusServiceUnavailable || body["msg"] != "AI is turned off for this workspace. An admin can turn it on under Admin > AI & agents." || rec.Header().Get("Retry-After") != "" {
 		t.Errorf("AI off: %d %v", rec.Code, body["msg"])
 	}
 	rec, body = askForBackground(t, sceneRuntime{fakeRuntime: fakeRuntime{limited: true}, llm: model}, "Warm library")
-	if rec.Code != http.StatusTooManyRequests {
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "42" {
 		t.Errorf("rate-limited: %d %v", rec.Code, body["msg"])
 	}
 	if model.chats != 0 {
@@ -242,7 +242,7 @@ func TestAProviderErrorQuotingTheWordsNeverReachesTheLog(t *testing.T) {
 // ask: the person is told so, as doc AI tells them, and nothing crashes.
 func TestAModelGoneAfterTheGateIsAIOffNotACrash(t *testing.T) {
 	rec, body := askForBackground(t, sceneRuntime{gone: true}, "Warm library")
-	if rec.Code != http.StatusServiceUnavailable || body["msg"] != "AI is switched off in this workspace." {
+	if rec.Code != http.StatusServiceUnavailable || body["msg"] != "AI is turned off for this workspace. An admin can turn it on under Admin > AI & agents." {
 		t.Errorf("no model after the gate: %d %v", rec.Code, body["msg"])
 	}
 }

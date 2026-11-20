@@ -41,6 +41,17 @@ type FeedView struct {
 	Live      bool       `json:"live"`
 	URL       string     `json:"url,omitempty"`
 	CreatedAt *time.Time `json:"created_at,omitempty"`
+	// LinksAllowed is whether the workspace allows links to calendars now,
+	// so a member knows before they make one: what a Make's refusal would
+	// tell them, the same for every member. Set by feedView.
+	LinksAllowed bool `json:"links_allowed"`
+}
+
+// feedView is v as its person reads it, with whether the workspace allows
+// links now: every read of a link answers through it, so none leaves that out.
+func feedView(ctx context.Context, v FeedView) *FeedView {
+	v.LinksAllowed = feedsAllowed(ctx)
+	return &v
 }
 
 // feedRefresh is how often a calendar app is asked to read the link again.
@@ -74,14 +85,19 @@ func FeedURL(raw string) string {
 // FeedTokenOf is the token in a link's last path element ("….ics"). Pure.
 func FeedTokenOf(file string) string { return strings.TrimSuffix(strings.TrimSpace(file), ".ics") }
 
-// Feed is person's link to the project's cycles: whether they have one, and since when.
+// Feed is person's link to the project's cycles: whether they have one, since
+// when, and whether the workspace allows links now.
 func Feed(ctx context.Context, project, person uuid.UUID) (*FeedView, error) {
 	f, err := liveFeed(ctx, project, person)
-	if err != nil || f == nil {
+	if err != nil {
 		return &FeedView{}, err
 	}
-	at := f.CreatedAt
-	return &FeedView{Live: true, CreatedAt: &at}, nil
+	var v FeedView
+	if f != nil {
+		at := f.CreatedAt
+		v.Live, v.CreatedAt = true, &at
+	}
+	return feedView(ctx, v), nil
 }
 
 // MakeFeed gives person a new link to the project's cycles, shown this once;
@@ -99,7 +115,7 @@ func MakeFeed(ctx context.Context, project, person uuid.UUID) (*FeedView, error)
 		return nil, err
 	}
 	now := time.Now()
-	return &FeedView{Live: true, URL: FeedURL(raw), CreatedAt: &now}, nil
+	return feedView(ctx, FeedView{Live: true, URL: FeedURL(raw), CreatedAt: &now}), nil
 }
 
 // StopFeed stops person's link to the project's cycles: it answers nothing at once.

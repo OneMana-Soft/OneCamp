@@ -344,3 +344,64 @@ func TestARestrictedTaskTheReaderMaySeeCarriesTheLock(t *testing.T) {
 		t.Fatal("a task read on its own")
 	}
 }
+
+func withWaiting(t *testing.T, w func(ctx context.Context) (map[string]bool, error)) {
+	t.Helper()
+	was := Waiting
+	Waiting = w
+	t.Cleanup(func() { Waiting = was })
+}
+
+// A task waiting in triage isn't the team's work yet, so lists and counts of
+// work leave it out; but it is hidden from no one. Its own reads, a search and
+// an answer already read still have it.
+func TestWhatWaitsInTriageIsLeftOutOfListsAndCountsOnly(t *testing.T) {
+	withDecide(t, func(context.Context, string) (map[string]bool, error) {
+		return map[string]bool{secret: true}, nil
+	})
+	reads := 0
+	withWaiting(t, func(context.Context) (map[string]bool, error) {
+		reads++
+		return map[string]bool{strings.ToUpper(open): true, "not-a-uuid": true, other: false}, nil
+	})
+	user := userModels.UserInfo{}
+	user.UserPostgresInfo.Id = uuid.MustParse("5a5c00a8-0000-4000-8000-0000000000aa")
+	ctx := Install(context.WithValue(context.Background(), helpers.UserInfoContextKey, user))
+
+	f, err := From(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	both := `NOT eq(task_uuid, ["` + secret + `","` + open + `"])`
+	if f.Cond() != both || f.Fill("@filter(has(task_name)"+Mark+")") != "@filter(has(task_name) AND "+both+")" {
+		t.Fatalf("lists and counts keep what waits in triage: %s", f.Cond())
+	}
+	if f.Hides(open) || len(f.IDs()) != 1 || f.IDs()[0] != secret {
+		t.Fatalf("what waits is hidden from no one, and a search still finds it: %v", f.IDs())
+	}
+	p := &dgraphStruct.DgraphProject{Tasks: []*dgraphStruct.DgraphTask{task(open, "New logo request")}}
+	f.Keep(p)
+	if len(p.Tasks) != 1 {
+		t.Fatal("an answer already read lost a task waiting in triage")
+	}
+	if r, _ := For(ctx, other); r.Cond() != both {
+		t.Fatalf("one recipient's lists (a digest) leave it out too: %s", r.Cond())
+	}
+
+	if again, _ := From(ctx); again.Cond() != both || reads != 2 {
+		t.Fatalf("worked out once per request and reader: %d reads", reads)
+	}
+	// A read with no audience (a sweeper, an import) sees every task.
+	if sys, _ := From(WithSystem(ctx)); sys.Cond() != "" {
+		t.Fatal("a system read left a task out")
+	}
+}
+
+func TestAListThatCantSayWhatWaitsFails(t *testing.T) {
+	withDecide(t, func(context.Context, string) (map[string]bool, error) { return nil, nil })
+	down := errors.New("triage store down")
+	withWaiting(t, func(context.Context) (map[string]bool, error) { return nil, down })
+	if _, err := From(context.Background()); !errors.Is(err, down) {
+		t.Fatalf("a list read went on without knowing what waits: %v", err)
+	}
+}

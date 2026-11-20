@@ -96,32 +96,21 @@ func UpdateTaskDeletedTimeToNullByUUID(ctx context.Context, query string, update
 	return exec(ctx, "UpdateTaskDeletedTimeToNullByUUID", query, updateTime, taskUUID)
 }
 
-func UpdateTaskGoogleCalendarId(ctx context.Context, query string, googleEventId *string, updatedAt time.Time, taskUUID uuid.UUID) error {
-	return exec(ctx, "UpdateTaskGoogleCalendarId", query, googleEventId, updatedAt, taskUUID)
-}
-
-// GetSyncedTaskGCalIds is the Google Calendar events of the live tasks
-// assigned to a person.
-func GetSyncedTaskGCalIds(ctx context.Context, userUID uuid.UUID) ([]string, error) {
-	ids, err := pgexec.Query(ctx, `
-		SELECT task_google_calendar_id
-		FROM tasks
-		WHERE task_assignee = $1 AND task_google_calendar_id IS NOT NULL AND task_google_calendar_id != '' AND deleted_at IS NULL
-	`, func(r pgexec.Row) (string, error) {
-		var s string
-		err := r.Scan(&s)
-		return s, err
-	}, userUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/GetSyncedTaskGCalIds Failed err: %+v", err)
-		return nil, err
-	}
-	return ids, nil
+// UpdateTaskGoogleCalendarId runs the domain's one write of a task's Google
+// id; was, when set, is the id the row must still hold for the write to land.
+func UpdateTaskGoogleCalendarId(ctx context.Context, query string, googleEventId *string, updatedAt time.Time, taskUUID uuid.UUID, was *string) error {
+	return exec(ctx, "UpdateTaskGoogleCalendarId", query, googleEventId, updatedAt, taskUUID, was)
 }
 
 // SetGitHubPRFieldsOnTask sets PR fields on a specific task by UUID.
 func SetGitHubPRFieldsOnTask(ctx context.Context, query string, taskUUID uuid.UUID, prNumber int, prURL string, branch string) error {
 	return exec(ctx, "SetGitHubPRFieldsOnTask", query, prNumber, prURL, branch, taskUUID)
+}
+
+// TakeGitHubPRIfNone sets PR fields, state and draft on a task that holds no
+// pull request, reporting whether it took them.
+func TakeGitHubPRIfNone(ctx context.Context, query string, taskUUID uuid.UUID, prNumber int, prURL string, branch string, prState string, isDraft bool) (bool, error) {
+	return scalarOrZero[bool](ctx, query, prNumber, prURL, branch, taskUUID, prState, isDraft)
 }
 
 // FindTaskUUIDByPRURL finds a task by its GitHub PR URL ("" for none).
@@ -163,6 +152,22 @@ func GetTaskLastSyncedAtByPRURL(ctx context.Context, query string, prURL string)
 // ClearGitHubIssueFieldsFromTask clears GitHub issue fields from a task.
 func ClearGitHubIssueFieldsFromTask(ctx context.Context, query string, taskUUID uuid.UUID) error {
 	return exec(ctx, "ClearGitHubIssueFieldsFromTask", query, taskUUID)
+}
+
+// StatusTouch is what a status change's write of a task said of it (domain/Task
+// TouchForStatus): whether it links a GitHub issue or pull request, and
+// whether its project runs its cycles on a schedule. Found is false when no
+// task has the id, so it said neither.
+type StatusTouch struct{ Found, Linked, Scheduled bool }
+
+// TouchForStatus runs the domain's status write of a task and reads what it
+// returns.
+func TouchForStatus(ctx context.Context, query string, currentTime time.Time, taskUUID uuid.UUID, project uuid.NullUUID) (StatusTouch, error) {
+	t, _, err := pgexec.QueryOne(ctx, query, func(r pgexec.Row) (StatusTouch, error) {
+		t := StatusTouch{Found: true}
+		return t, r.Scan(&t.Linked, &t.Scheduled)
+	}, currentTime, taskUUID, project)
+	return t, err
 }
 
 // GetTaskGitHubURLs returns the GitHub issue and PR URLs for a task.
@@ -208,6 +213,11 @@ func FindTaskUUIDsByGitHubBranch(ctx context.Context, query string, owner, name,
 // UpdateTaskPRState updates the GitHub PR state fields on a task.
 func UpdateTaskPRState(ctx context.Context, query string, taskUUID uuid.UUID, prState string, checkStatus string, reviewState string, isDraft *bool) error {
 	return exec(ctx, "UpdateTaskPRState", query, prState, checkStatus, reviewState, isDraft, taskUUID)
+}
+
+// SetTaskPRReviewState writes the task's pull request review decision.
+func SetTaskPRReviewState(ctx context.Context, query string, taskUUID uuid.UUID, reviewState string) error {
+	return exec(ctx, "SetTaskPRReviewState", query, reviewState, taskUUID)
 }
 
 // UpdateTaskPRInfo updates only PR number and URL for a task.
@@ -350,19 +360,16 @@ func GetGitHubMetaForTask(ctx context.Context, taskUUID uuid.UUID) (*GitHubMeta,
 	return m, nil
 }
 
-// GetGitHubMetaForTasks returns GitHub metadata for multiple tasks in a single query.
-func GetGitHubMetaForTasks(ctx context.Context, taskUUIDs []uuid.UUID) (map[uuid.UUID]*GitHubMeta, error) {
-	if len(taskUUIDs) == 0 {
-		return map[uuid.UUID]*GitHubMeta{}, nil
-	}
+// GitHubMetaRead is the tasks' GitHub metadata in one statement, as a read a
+// caller pipelines with others (pgexec.Batch); meta is what it read, once the
+// batch has run.
+func GitHubMetaRead(taskUUIDs []uuid.UUID) (read *pgexec.Read, meta func() (map[uuid.UUID]*GitHubMeta, error)) {
 	type row struct {
 		id uuid.UUID
 		m  *GitHubMeta
 	}
-	rows, err := pgexec.Query(ctx, `
-		SELECT id, github_issue_number, github_issue_url, github_pr_number, github_pr_url, github_branch,
-			   github_pr_state, github_pr_check_status, github_pr_review_state, github_pr_is_draft
-		FROM tasks WHERE id = ANY($1)`, func(r pgexec.Row) (row, error) {
+	var rows []row
+	read = pgexec.Rows(&rows, func(r pgexec.Row) (row, error) {
 		var d linkDest
 		out := row{m: &GitHubMeta{}}
 		if err := r.Scan(&out.id, &d.in, &d.iu, &d.pn, &d.pu, &d.b, &d.ps, &d.pcs, &d.rs, &d.draft); err != nil {
@@ -370,16 +377,20 @@ func GetGitHubMetaForTasks(ctx context.Context, taskUUIDs []uuid.UUID) (map[uuid
 		}
 		d.fill(out.m)
 		return out, nil
-	}, pq.Array(taskUUIDs))
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/GetGitHubMetaForTasks Failed err: %+v", err)
-		return nil, err
+	}, `
+		SELECT id, github_issue_number, github_issue_url, github_pr_number, github_pr_url, github_branch,
+			   github_pr_state, github_pr_check_status, github_pr_review_state, github_pr_is_draft
+		FROM tasks WHERE id = ANY($1)`, pq.Array(taskUUIDs))
+	return read, func() (map[uuid.UUID]*GitHubMeta, error) {
+		if read.Err != nil {
+			return nil, read.Err
+		}
+		result := make(map[uuid.UUID]*GitHubMeta, len(rows))
+		for _, r := range rows {
+			result[r.id] = r.m
+		}
+		return result, nil
 	}
-	result := make(map[uuid.UUID]*GitHubMeta, len(rows))
-	for _, r := range rows {
-		result[r.id] = r.m
-	}
-	return result, nil
 }
 
 // TouchTasks sets updated_at on many tasks, in one statement (PR2).
@@ -414,14 +425,16 @@ func SetGitHubIssueFieldsOnTasks(ctx context.Context, links []GitHubIssueLink) e
 	return err
 }
 
-// ClearGitHubLinkFromTasks unlinks tasks from GitHub, in one statement.
-func ClearGitHubLinkFromTasks(ctx context.Context, ids []uuid.UUID) error {
+// ClearGitHubLinkFromTasks runs query, unlinking tasks ids ($1) from GitHub.
+func ClearGitHubLinkFromTasks(ctx context.Context, query string, ids []uuid.UUID) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	_, err := pgexec.Exec(ctx, `UPDATE tasks SET github_issue_number = NULL, github_issue_url = NULL,
-		github_pr_number = NULL, github_pr_url = NULL, github_branch = NULL, github_pr_state = NULL,
-		github_pr_check_status = NULL, github_pr_review_state = NULL, github_pr_is_draft = false,
-		github_last_synced_at = NULL, updated_at = NOW() WHERE id = ANY($1::uuid[])`, pq.Array(ids))
+	_, err := pgexec.Exec(ctx, query, pq.Array(ids))
 	return err
+}
+
+// ClearGitHubLinkFromAllTasks runs query, unlinking every task from GitHub.
+func ClearGitHubLinkFromAllTasks(ctx context.Context, query string) error {
+	return exec(ctx, "ClearGitHubLinkFromAllTasks", query)
 }

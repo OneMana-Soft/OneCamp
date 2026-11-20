@@ -70,7 +70,10 @@ func MoveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Moving a card is changing its task (Work Access).
-	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
+	// The check's facts go down with ctx: what follows doesn't read the
+	// task's restriction again (projectaccess.AllowTaskOpen).
+	ctx, allowed := projectaccess.AllowTaskOpen(w, r, dgraphTaskInfo, workAccess.NeedEditTask)
+	if !allowed {
 		return
 	}
 

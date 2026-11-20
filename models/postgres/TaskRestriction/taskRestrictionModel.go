@@ -14,9 +14,11 @@ import (
 	"errors"
 	"time"
 
+	restrictionDomain "github.com/akashc777/OneCamp/domain/TaskRestriction"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
 	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
+	taskReadGeneration "github.com/akashc777/OneCamp/models/taskread/generation"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -56,10 +58,9 @@ func Candidates(ctx context.Context, reader uuid.UUID) ([]Candidate, error) {
 	}
 	return pgexec.Query(ctx, `
 		SELECT r.task_id, r.project_id, r.via_task_id,
-		       NOT ($1::uuid = '00000000-0000-0000-0000-000000000000'::uuid OR (`+keptOut("$1::uuid")+`)) AS let_in
+		       NOT ($1::uuid = '00000000-0000-0000-0000-000000000000'::uuid OR (`+restrictionDomain.KeptOut("$1::uuid")+`)) AS let_in
 		FROM task_restrictions r
-		JOIN tasks t ON t.id = r.task_id
-		LEFT JOIN tasks v ON v.id = r.via_task_id
+		`+restrictionDomain.Over+`
 		WHERE `+softDelete.Live("r"),
 		func(r pgexec.Row) (Candidate, error) {
 			var (
@@ -70,17 +71,6 @@ func Candidates(ctx context.Context, reader uuid.UUID) ([]Candidate, error) {
 			x.Via = via.UUID
 			return x, err
 		}, reader)
-}
-
-// keptOut is whether a restricted task's rows leave who out, over r (its
-// row), t (the task) and v (the task it is restricted with): neither made by
-// them, and no grant to them on it or on v.
-func keptOut(who string) string {
-	return `t.created_by IS DISTINCT FROM ` + who + `
-		AND (r.via_task_id IS NULL OR v.created_by IS DISTINCT FROM ` + who + `)
-		AND NOT EXISTS (SELECT 1 FROM task_restriction_grants g
-		                WHERE g.task_id = COALESCE(r.via_task_id, r.task_id) AND g.user_id = ` + who + `
-		                AND ` + softDelete.Live("g") + `)`
 }
 
 // CandidatesAmong is Candidates for each of readers (people; nobody has none
@@ -101,11 +91,10 @@ func CandidatesAmong(ctx context.Context, readers []uuid.UUID) (map[uuid.UUID][]
 	}
 	rows, err := pgexec.Query(ctx, `
 		SELECT rd.id, r.task_id, r.project_id, r.via_task_id,
-		       NOT (rd.id = '00000000-0000-0000-0000-000000000000'::uuid OR (`+keptOut("rd.id")+`)) AS let_in
+		       NOT (rd.id = '00000000-0000-0000-0000-000000000000'::uuid OR (`+restrictionDomain.KeptOut("rd.id")+`)) AS let_in
 		FROM unnest($1::uuid[]) AS rd(id)
 		CROSS JOIN task_restrictions r
-		JOIN tasks t ON t.id = r.task_id
-		LEFT JOIN tasks v ON v.id = r.via_task_id
+		`+restrictionDomain.Over+`
 		WHERE `+softDelete.Live("r"),
 		func(r pgexec.Row) (row, error) {
 			var (
@@ -260,6 +249,7 @@ func Restrict(ctx context.Context, taskID, projectID, by uuid.UUID, grants, unde
 				return err
 			}
 		}
+		taskReadGeneration.Bump(ctx, "TaskRestriction.Restrict")
 		return nil
 	})
 }
@@ -296,12 +286,15 @@ func InheritAll(ctx context.Context, tasks, under []uuid.UUID, by uuid.UUID, now
 	for i := range tasks {
 		below[i], above[i] = tasks[i].String(), under[i].String()
 	}
-	_, err := pgexec.Exec(ctx, `
+	n, err := pgexec.Exec(ctx, `
 		INSERT INTO task_restrictions (task_id, project_id, restricted_by, restricted_at, via_task_id)
 		SELECT n.task_id, r.project_id, $3::uuid, $4::timestamptz, COALESCE(r.via_task_id, r.task_id)
 		FROM unnest($1::uuid[], $2::uuid[]) AS n(task_id, from_id)
 		JOIN task_restrictions r ON r.task_id = n.from_id AND `+softDelete.Live("r")+` AND COALESCE(r.via_task_id, r.task_id) <> n.task_id
 		`+revivedWith, pq.Array(below), pq.Array(above), nullable(by), now)
+	if n > 0 {
+		taskReadGeneration.Bump(ctx, "TaskRestriction.InheritAll")
+	}
 	return err
 }
 
@@ -334,6 +327,7 @@ func Unrestrict(ctx context.Context, taskID, by uuid.UUID) (bool, error) {
 			return err
 		}
 		lifted = true
+		taskReadGeneration.Bump(ctx, "TaskRestriction.Unrestrict")
 		// The tasks restricted with it open with it, and whoever was let in goes too.
 		if _, err := pgexec.Exec(ctx, `
 			UPDATE task_restrictions SET deleted_at = NOW(), deleted_by = $2::uuid
@@ -361,11 +355,14 @@ func DropGrantsIn(ctx context.Context, projectIDs []uuid.UUID, userID, by uuid.U
 	if len(ids) == 0 {
 		return nil
 	}
-	_, err := pgexec.Exec(ctx, `
+	n, err := pgexec.Exec(ctx, `
 		UPDATE task_restriction_grants g SET deleted_at = NOW(), deleted_by = $3::uuid
 		FROM task_restrictions r
 		WHERE g.task_id = r.task_id AND r.project_id = ANY($1::uuid[]) AND g.user_id = $2::uuid AND `+softDelete.Live("g"),
 		pq.Array(ids), userID, nullable(by))
+	if n > 0 {
+		taskReadGeneration.Bump(ctx, "TaskRestriction.DropGrantsIn")
+	}
 	return err
 }
 

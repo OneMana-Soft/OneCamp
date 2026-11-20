@@ -3,13 +3,14 @@ package business
 // Call Quality Telemetry (calls A5, #56): what each person's own app saw of
 // their connection in a call, every 10 s, sent about once a minute.
 //
-// Only someone in the live call sends, and only their own: a member through
-// their session (Record), a guest through the call token this server minted
-// for them (RecordGuest, Call Control's GuestOf). What is kept is numbers in
-// their ranges, the session and the call's identity: no names, no addresses.
-// Whoever runs the call, and the workspace's admins, read why it stuttered for
-// each person (Why); admins read the install's days (Days), rolled up once a
-// day (RollUpDays).
+// Only someone in the call sends, and only their own: a member through their
+// session (Record), a guest through the call token this server minted for
+// them (RecordGuest, Call Control's GuestOf). Their last batch goes as they
+// leave, so it is kept for a short while after (leaveGrace). What is kept is
+// numbers in their ranges, the session and the call's identity: no names, no
+// addresses. Whoever runs the call, and the workspace's admins, read why it
+// stuttered for each person (Why); admins read the install's days (Days),
+// rolled up once a day (RollUpDays).
 //
 // Not in the work graph: these are numbers about a connection, not work.
 // Nothing links to them, and the session they hang off is Call State's.
@@ -32,8 +33,9 @@ import (
 const MaxBatch = 12
 
 var (
-	// ErrNotInCall is someone not in the live call: they left, it ended, it
-	// never was, or the token isn't one this server minted for it.
+	// ErrNotInCall is someone not in the call: they left it, or it ended,
+	// longer ago than leaveGrace, they were put out of it, it never was, or
+	// the token isn't one this server minted for it.
 	ErrNotInCall = errors.New("callquality: not in this call")
 	// ErrThroughToken is a send through an API token: only a person's own app sends.
 	ErrThroughToken = errors.New("callquality: not through an API token")
@@ -64,18 +66,18 @@ type Sample struct {
 var seams = struct {
 	now     func() time.Time
 	session func(context.Context, string) (*callStateBusiness.Session, error)
-	current func(context.Context, callStateBusiness.Ref) (*callStateBusiness.Session, error)
+	latest  func(context.Context, string) (*callStateBusiness.Session, error)
 	guestOf func(string) (string, string, error)
 	insert  func(context.Context, []qualityModel.Sample) (int64, error)
 }{
 	now:     time.Now,
 	session: callStateBusiness.Get,
-	current: callStateBusiness.Current,
+	latest:  callStateBusiness.LatestInRoom,
 	guestOf: callControlBusiness.GuestOf,
 	insert:  qualityModel.Insert,
 }
 
-// Record keeps a member's own samples of the live call in session.
+// Record keeps a member's own samples of the call in session.
 func Record(ctx context.Context, actor *dgraphStruct.DgraphUser, session string, batch []Sample) (int, error) {
 	if helpers.ActsThroughToken(ctx) {
 		return 0, ErrThroughToken
@@ -93,8 +95,9 @@ func Record(ctx context.Context, actor *dgraphStruct.DgraphUser, session string,
 	return keep(ctx, s, actor.Uid, batch)
 }
 
-// RecordGuest keeps a guest's own samples of the live call their call token
-// is for.
+// RecordGuest keeps a guest's own samples of the call in the room their call
+// token is for: a call's own room or one of its breakout rooms, its latest
+// call, going on or just over.
 func RecordGuest(ctx context.Context, token string, batch []Sample) (int, error) {
 	if len(batch) == 0 || len(batch) > MaxBatch {
 		return 0, ErrTooMany
@@ -103,33 +106,51 @@ func RecordGuest(ctx context.Context, token string, batch []Sample) (int, error)
 	if err != nil {
 		return 0, ErrNotInCall
 	}
-	ref, _, ok := callStateBusiness.RefOfRoom(room)
-	if !ok {
+	if _, _, ok := callStateBusiness.RefOfRoom(room); !ok {
 		return 0, ErrNotInCall
 	}
-	s, err := seams.current(ctx, ref)
+	s, err := seams.latest(ctx, room)
 	if err != nil {
 		return 0, err
-	}
-	if s != nil && s.Room != room {
-		return 0, ErrNotInCall
 	}
 	return keep(ctx, s, identity, batch)
 }
 
-// keep writes identity's samples of s, once they are in it now: one per 10 s,
-// so a batch sent again adds nothing. Answers how many it wrote.
+// leaveGrace is how long after someone left a call, or it ended, their own
+// samples of it are still kept: 2 minutes. Their app sends its last batch (a
+// keepalive request of at most MaxBatch samples of 10 s) as the call goes
+// from their screen, right after the room let them go, so their leave, or the
+// call's end for the last one out, often lands first. Two minutes covers a
+// slow tab or network without letting someone who left write to it later.
+const leaveGrace = 2 * time.Minute
+
+// keep writes identity's samples of s: someone in its record, never put out
+// of it, while they are in it or within leaveGrace of their leaving it or its
+// end, and only of their own time in it. One per 10 s, so a batch sent again
+// adds nothing. Answers how many it wrote.
 func keep(ctx context.Context, s *callStateBusiness.Session, identity string, batch []Sample) (int, error) {
-	if s == nil || !s.Live {
+	if s == nil {
 		return 0, ErrNotInCall
 	}
-	if p := s.Person(identity); p == nil || !p.In {
+	p := s.Person(identity)
+	if p == nil || p.Removed {
 		return 0, ErrNotInCall
 	}
 	now := seams.now()
+	// left is when their time in it ended: when they left it, or it ended;
+	// nil while they are in it.
+	var left *time.Time
+	if !s.Live || !p.In {
+		if left = p.LeftAt; left == nil {
+			left = s.EndedAt
+		}
+		if left == nil || now.Sub(*left) > leaveGrace {
+			return 0, ErrNotInCall
+		}
+	}
 	rows := make([]qualityModel.Sample, 0, len(batch))
 	for _, x := range batch {
-		if r, ok := row(s, identity, x, now); ok {
+		if r, ok := row(s, identity, x, now, left); ok {
 			rows = append(rows, r)
 		}
 	}
@@ -145,11 +166,12 @@ func keep(ctx context.Context, s *callStateBusiness.Session, identity string, ba
 const sampleEvery = 10 * time.Second
 
 // row is a sample as it is kept: at the start of its 10 s, each number
-// within its range, and nothing from before the call or from the future.
-// Pure.
-func row(s *callStateBusiness.Session, identity string, x Sample, now time.Time) (qualityModel.Sample, bool) {
+// within its range, and nothing from before the call, from the future, or
+// from more than one sample's 10 s after left (when the person's time in the
+// call ended, nil while it goes on). Pure.
+func row(s *callStateBusiness.Session, identity string, x Sample, now time.Time, left *time.Time) (qualityModel.Sample, bool) {
 	at := now.Add(-time.Duration(x.AgoMs) * time.Millisecond)
-	if at.Before(s.StartedAt.Add(-time.Minute)) || at.After(now.Add(5*time.Second)) {
+	if at.Before(s.StartedAt.Add(-time.Minute)) || at.After(now.Add(5*time.Second)) || (left != nil && at.After(left.Add(sampleEvery))) {
 		return qualityModel.Sample{}, false
 	}
 	at = at.Truncate(sampleEvery)

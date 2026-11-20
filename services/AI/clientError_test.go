@@ -31,9 +31,11 @@ func TestClientErrorKeepsTheWordsWrittenForPeople(t *testing.T) {
 		fmt.Errorf("base URL is not a valid URL: %w", parseErr),
 		fmt.Errorf("couldn't check what you can do in project 'Launch': %w", errors.New("you're not a member of this project")),
 	} {
+		// A caller that lets ClientError pick the status is answering a failure no case names: the generic line
+		// (UX-IA-H3 M2). A caller that keeps its own status (a 400 on the person's input) keeps their words.
 		status, words := ClientError(context.Background(), err)
-		if status != http.StatusInternalServerError || words != err.Error() {
-			t.Errorf("ClientError(%q) = %d %q: the words written for people were replaced", err, status, words)
+		if status != http.StatusInternalServerError || words != genericFailure {
+			t.Errorf("ClientError(%q) = %d %q, want the generic line", err, status, words)
 		}
 		if got := ClientWords(context.Background(), err); got != err.Error() {
 			t.Errorf("ClientWords(%q) = %q: the words written for people were replaced", err, got)

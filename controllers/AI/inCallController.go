@@ -196,12 +196,11 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 
 	svc := ai.GetService()
 	if svc == nil || !svc.IsEnabled() {
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "AI is not enabled"})
+		answerAIOff(w)
 		return
 	}
 	if err := svc.Resiliency.PreCheck(ctx, userInfo.UserDgraphInfo.Uuid); err != nil {
-		code, words := ai.ClientError(ctx, err)
-		helpers.WriteJSON(w, code, helpers.Envolope{"msg": words})
+		answerPreCheck(w, ctx, err)
 		return
 	}
 
@@ -220,7 +219,7 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Streaming not supported"})
+		answerNoStream(w)
 		return
 	}
 
@@ -238,6 +237,8 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := svc.Resiliency.CB.Allow(); err != nil {
+		// The stream's first frame: no header has gone yet, so the breaker's minute can still be said.
+		ai.SetRetryAfter(w.Header(), err, "AI is busy, try again in a moment")
 		writeSSEError(w, flusher, "AI is busy, try again in a moment")
 		broadcastInCallAnswer(ctx, req, asker, "", "AI is busy, try again in a moment")
 		return
@@ -402,4 +403,12 @@ func callerCanAccessRoom(ctx context.Context, userInfo *userModels.UserInfo, roo
 		}
 		return ch.IsMember == 1 || ch.IsAdmin == 1
 	}
+}
+
+// answerPreCheck answers an in-call ask the breaker or the limiter refused, in ClientError's words, with
+// Retry-After when they say try again (the breaker's minute, the limiter's own window).
+func answerPreCheck(w http.ResponseWriter, ctx context.Context, err error) {
+	code, words := ai.ClientError(ctx, err)
+	ai.SetRetryAfter(w.Header(), err, words)
+	helpers.WriteJSON(w, code, helpers.Envolope{"msg": words})
 }

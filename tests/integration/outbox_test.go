@@ -102,14 +102,14 @@ func addReleased(t *testing.T, e outboxBusiness.Entry) int64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := outboxBusiness.Add(ctx, tx, e)
+	id, err := addOneEvent(ctx, tx, e)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if err := outboxBusiness.Release(ctx, id); err != nil {
+	if err := outboxBusiness.ReleaseMany(ctx, []int64{id}); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -148,7 +148,7 @@ func TestTheOutboxGivesEachEventToEachSinkOnceAcrossTwoDrains(t *testing.T) {
 	}
 	// An event written in a transaction that rolls back was never there.
 	tx, _ := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
-	if _, err := outboxBusiness.Add(ctx, tx, outboxBusiness.Entry{Topic: topic, Kind: "test.made", Key: "k0", Entities: map[string]string{"n": "rolled-back"}}); err != nil {
+	if _, err := addOneEvent(ctx, tx, outboxBusiness.Entry{Topic: topic, Kind: "test.made", Key: "k0", Entities: map[string]string{"n": "rolled-back"}}); err != nil {
 		t.Fatal(err)
 	}
 	_ = tx.Rollback()
@@ -208,7 +208,7 @@ func TestTheOutboxDeliversAKeysEventsOldestFirstWhoeverDeliversFirst(t *testing.
 	}})
 	first := addReleased(t, outboxBusiness.Entry{Topic: topic, Kind: "test.made", Key: "channel:c1", Entities: map[string]string{"n": "1"}})
 	second := addReleased(t, outboxBusiness.Entry{Topic: topic, Kind: "test.made", Key: "channel:c1", Entities: map[string]string{"n": "2"}})
-	outboxBusiness.Deliver(second)
+	outboxBusiness.DeliverMany([]int64{second})
 	helpers.SettleBackground(10 * time.Second)
 	mu.Lock()
 	early := strings.Join(ran, ",")
@@ -216,7 +216,7 @@ func TestTheOutboxDeliversAKeysEventsOldestFirstWhoeverDeliversFirst(t *testing.
 	if early != "" {
 		t.Fatalf("ran %q while the key's earlier event waited", early)
 	}
-	outboxBusiness.Deliver(first)
+	outboxBusiness.DeliverMany([]int64{first})
 	helpers.SettleBackground(10 * time.Second)
 	mu.Lock()
 	defer mu.Unlock()
@@ -402,7 +402,7 @@ func TestTheOutboxDecidesAHeldEventByItsTopicOnceItsWriterHadItsTime(t *testing.
 	})
 	held := func(n string) int64 {
 		tx, _ := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
-		id, err := outboxBusiness.Add(ctx, tx, outboxBusiness.Entry{Topic: topic, Kind: "test.made", Key: "k-" + n, Entities: map[string]string{"n": n}})
+		id, err := addOneEvent(ctx, tx, outboxBusiness.Entry{Topic: topic, Kind: "test.made", Key: "k-" + n, Entities: map[string]string{"n": n}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -480,4 +480,14 @@ func TestTheOutboxPurgeKeepsDeadEventsLongerThanDoneOnes(t *testing.T) {
 			t.Errorf("row %d kept = %v, want %v", id, n == 1, want)
 		}
 	}
+}
+
+// addOneEvent is outbox AddMany for one entry, inside ex: the id of the event
+// it wrote held.
+func addOneEvent(ctx context.Context, ex outboxModels.Execer, e outboxBusiness.Entry) (int64, error) {
+	ids, err := outboxBusiness.AddMany(ctx, ex, []outboxBusiness.Entry{e})
+	if err != nil {
+		return 0, err
+	}
+	return ids[0], nil
 }

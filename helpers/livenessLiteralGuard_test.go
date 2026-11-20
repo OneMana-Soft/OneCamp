@@ -20,9 +20,10 @@ import (
 // GetDgraphProjectRanks, spell it through Live; 160 with V-140, whose one read
 // of a recording for its delete or restore spells it through Deleted; 158 with
 // V-161, which moved the runs list's and the overview counts' project filters
-// onto Live). It only goes down: move a filter onto Live or Deleted, then
+// onto Live; 143 with H5B, whose one page function per kind spells it once).
+// It only goes down: move a filter onto Live or Deleted, then
 // lower this to the count the test reports.
-const epochLiteralBaseline = 157
+const epochLiteralBaseline = 143
 
 // The liveness boundary is spelled in one place.
 //

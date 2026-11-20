@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	messageDomain "github.com/akashc777/OneCamp/domain/Message"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -153,16 +154,16 @@ func TestForwardsAndQuotesOnEveryPage(t *testing.T) {
 	// around the forward (a link to it).
 	pages := func(t *testing.T) map[string]map[string]*dgraphStruct.DgraphPost {
 		t.Helper()
-		older, err := postDomain.GetDgraphOldPostFromDgraph(ctx, general.String(), base.Add(100*time.Second))
+		older, err := postDomain.PostPage(ctx, general.String(), messageDomain.Older, base.Add(100*time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}
-		newer, err := postDomain.GetDgraphNewPostFromDgraph(ctx, general.String(), base.Add(5*time.Second))
+		newer, err := postDomain.PostPage(ctx, general.String(), messageDomain.Newer, base.Add(5*time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}
 		forwardAt := base.Add(10 * time.Second)
-		around, err := postDomain.GetDgraphNewPostIncludiongPostFromDgraph(ctx, general.String(), &forwardAt)
+		around, err := postDomain.PostPage(ctx, general.String(), messageDomain.NewerFrom, forwardAt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -170,7 +171,7 @@ func TestForwardsAndQuotesOnEveryPage(t *testing.T) {
 	}
 
 	t.Run("past the newest ten, a forward shows what it forwarded and a reply its quote", func(t *testing.T) {
-		latest, err := postDomain.GetDgraphLatestPostFromDgraph(ctx, general.String())
+		latest, err := postDomain.PostPage(ctx, general.String(), messageDomain.Latest, time.Time{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -218,10 +219,11 @@ func TestForwardsAndQuotesOnEveryPage(t *testing.T) {
 		}
 		gone(t, "the forward's thread", thread.ForwaredPost)
 
-		chats, err := chatDomain.GetDgraphLatestChatFromDgraph(ctx, grp)
+		page, err := chatDomain.ChatPage(ctx, grp, messageDomain.Latest, time.Time{}, "")
 		if err != nil {
 			t.Fatal(err)
 		}
+		chats := page.Chats
 		var fwd *dgraphStruct.DgraphChat
 		for _, c := range chats {
 			if c.FwdMsgChat != nil {

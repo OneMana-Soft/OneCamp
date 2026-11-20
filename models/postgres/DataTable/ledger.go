@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	tableDomain "github.com/akashc777/OneCamp/domain/DataTable"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
@@ -245,7 +246,7 @@ func recordTx(ctx context.Context, tx *sql.Tx, cs *ChangeSet) error {
 	for i, c := range cs.Changes {
 		ids[i], fields[i], before[i], after[i] = c.Row, c.Field, jsonText(c.Before), jsonText(c.After)
 	}
-	// The lists go to pgx as they are, as in CellsOf.
+	// The lists go to pgx as they are, as in CellsOfMany.
 	_, err := tx.ExecContext(ctx, `INSERT INTO data_table_changes (change_set, seq, table_id, row_id, field, before, after, at)
 		SELECT $1, c.seq, $2, c.row_id, c.field, NULLIF(c.before, '')::jsonb, NULLIF(c.after, '')::jsonb, $3
 		FROM unnest($4::uuid[], $5::text[], $6::text[], $7::text[]) WITH ORDINALITY AS c(row_id, field, before, after, seq)`,
@@ -1242,52 +1243,57 @@ func removeLinks(ctx context.Context, tx *sql.Tx, change FieldLinks) ([]storedLi
 }
 
 // changeLinksMade makes the links changes add between rows live says exist,
-// in tx, each after those made before, and says which it made. A row that
-// would link to more than maxPerRow rows through a field makes it
-// ErrTooManyLinks.
+// in tx, each after those made before in its change, and says which it made:
+// field by field, as changes first name them, each field's in the order they
+// were made. A field's links are made in one statement (MakeLinksSQL), and
+// its rows' counts checked in one, however many rows' changes name it: a
+// link is made at the moment it would be alone, its change's place for it,
+// so a row's links keep their order. A row that would link to more than
+// maxPerRow rows through a field makes it ErrTooManyLinks.
 func changeLinksMade(ctx context.Context, tx *sql.Tx, changes []FieldLinks, live map[uuid.UUID]bool, maxPerRow int) ([]storedLink, error) {
-	var out []storedLink
+	type adds struct {
+		from, to []uuid.UUID
+		at       []int64
+	}
+	byField := map[uuid.UUID]*adds{}
+	var fields []uuid.UUID
 	for _, c := range changes {
-		var add []Link
+		var n int64
 		for _, l := range c.Add {
-			if live[l.From] && live[l.To] {
-				add = append(add, l)
+			if !live[l.From] || !live[l.To] {
+				continue
 			}
+			a := byField[c.Field]
+			if a == nil {
+				a = &adds{}
+				byField[c.Field] = a
+				fields = append(fields, c.Field)
+			}
+			n++
+			a.from, a.to, a.at = append(a.from, l.From), append(a.to, l.To), append(a.at, n)
 		}
-		if len(add) == 0 {
-			continue
-		}
-		from, to := linkPairs(add)
-		rs, err := tx.QueryContext(ctx, `INSERT INTO data_table_links (field_id, from_row, to_row, created_at)
-			SELECT $1, p.f, p.t, NOW() + p.i * INTERVAL '1 microsecond' FROM unnest($2::uuid[], $3::uuid[]) WITH ORDINALITY AS p(f, t, i)
-			ON CONFLICT DO NOTHING RETURNING from_row, to_row, created_at`, c.Field, pq.Array(from), pq.Array(to))
-		if err != nil {
-			return nil, err
-		}
+	}
+	txc := pgexec.WithTx(ctx, tx)
+	var out []storedLink
+	for _, field := range fields {
+		a := byField[field]
 		type made struct {
 			l  storedLink
 			at time.Time
 		}
-		var ms []made
-		for rs.Next() {
-			m := made{l: storedLink{Field: c.Field}}
-			if err := rs.Scan(&m.l.From, &m.l.To, &m.at); err != nil {
-				rs.Close()
-				return nil, err
-			}
-			ms = append(ms, m)
-		}
-		rs.Close()
-		if err := rs.Err(); err != nil {
+		ms, err := pgexec.Query(txc, tableDomain.MakeLinksSQL, func(r pgexec.Row) (m made, err error) {
+			m.l.Field = field
+			err = r.Scan(&m.l.From, &m.l.To, &m.at)
+			return m, err
+		}, field, pq.Array(a.from), pq.Array(a.to), pq.Array(a.at))
+		if err != nil {
 			return nil, err
 		}
 		sort.SliceStable(ms, func(i, j int) bool { return ms[i].at.Before(ms[j].at) })
 		for _, m := range ms {
 			out = append(out, m.l)
 		}
-		over, err := pgexec.Scalar[int](pgexec.WithTx(ctx, tx), `SELECT COUNT(*) FROM (SELECT from_row FROM data_table_links
-			WHERE field_id = $1 AND from_row = ANY($2) GROUP BY from_row HAVING COUNT(*) > $3) x`,
-			c.Field, pq.Array(from), maxPerRow)
+		over, err := pgexec.Scalar[int](txc, tableDomain.OverLinkedSQL, field, pq.Array(a.from), maxPerRow)
 		if err != nil {
 			return nil, err
 		}

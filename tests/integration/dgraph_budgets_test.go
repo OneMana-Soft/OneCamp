@@ -180,8 +180,16 @@ func (c *roundTrips) intercept(ctx context.Context, method string, req, reply an
 func countingClient(t *testing.T, endpoint string) *roundTrips {
 	t.Helper()
 	c := &roundTrips{}
+	throughInterceptor(t, endpoint, c.intercept)
+	return c
+}
+
+// throughInterceptor points the project's graph client at the test's Dgraph
+// through a connection whose every call goes through in, until t ends.
+func throughInterceptor(t *testing.T, endpoint string, in grpc.UnaryClientInterceptor) {
+	t.Helper()
 	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithUnaryInterceptor(c.intercept),
+		grpc.WithUnaryInterceptor(in),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256<<20)))
 	if err != nil {
 		t.Fatalf("a counting graph client: %v", err)
@@ -192,7 +200,6 @@ func countingClient(t *testing.T, endpoint string) *roundTrips {
 		dgraphInit.DgraphClient = live
 		_ = conn.Close()
 	})
-	return c
 }
 
 func percentile(sorted []time.Duration, p float64) time.Duration {

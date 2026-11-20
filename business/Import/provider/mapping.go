@@ -118,3 +118,15 @@ func ProposeStatuses(values []string, defaults map[string]string) map[string]str
 	}
 	return out
 }
+
+// InTriage is whether a source task waits in its source's triage: its status
+// is triage (Linear's state type, as its default map keys it), or the plan
+// read its status as one of that kind (a triage state the team renamed).
+// Pure.
+func InTriage(status string, kinds map[string]string) bool {
+	key := strings.TrimSpace(strings.ToLower(status))
+	if key == "" {
+		return false
+	}
+	return key == "triage" || strings.TrimSpace(strings.ToLower(kinds[key])) == "triage"
+}

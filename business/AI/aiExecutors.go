@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
+	triageBusiness "github.com/akashc777/OneCamp/business/Triage"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
@@ -116,21 +119,21 @@ func executeSendMessage(ctx context.Context, action ai.ProposedAction, userUUID 
 	// (admins_only) channel only channel admins may post.
 	dgraphChannel, err := channelDomain.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 	if err != nil || dgraphChannel == nil || dgraphChannel.Uuid == "" {
-		return "", nil, fmt.Errorf("channel not found or you don't have access")
+		return "", nil, ai.ForPeople(http.StatusNotFound, "channel not found or you don't have access")
 	}
 	if helpers.IsSoftDeleted(dgraphChannel.DeletedAt) {
-		return "", nil, fmt.Errorf("channel not found or you don't have access")
+		return "", nil, ai.ForPeople(http.StatusNotFound, "channel not found or you don't have access")
 	}
 	if dgraphChannel.IsMember == 0 {
-		return "", nil, fmt.Errorf("you are not a member of this channel")
+		return "", nil, ai.ForPeople(http.StatusForbidden, "you are not a member of this channel")
 	}
 	if dgraphChannel.PostPolicy == "admins_only" && dgraphChannel.IsAdmin == 0 {
-		return "", nil, fmt.Errorf("only channel admins can post in this announcement channel")
+		return "", nil, ai.ForPeople(http.StatusForbidden, "only channel admins can post in this announcement channel")
 	}
 	// Through an API token (MCP, or an agent run a token asked for), never as one
 	// of its admins: they post in it in the app, as themselves.
 	if dgraphChannel.PostPolicy == "admins_only" && helpers.ActsThroughToken(ctx) {
-		return "", nil, fmt.Errorf("only channel admins can post in this announcement channel, in the app: a token posts as a member")
+		return "", nil, ai.ForPeople(http.StatusForbidden, "only channel admins can post in this announcement channel, in the app: a token posts as a member")
 	}
 
 	// Render the model's text rather than wrapping it. A single <p> collapses
@@ -195,12 +198,12 @@ func executeSendDM(ctx context.Context, action ai.ProposedAction, userUUID strin
 		foundUsers, uErr := domainUser.GetUserListWithSearchText(ctx, userUUID, cleanUname)
 		foundUsers = demoReachable(ctx, userUUID, foundUsers)
 		if uErr != nil || len(foundUsers) == 0 {
-			return "", nil, fmt.Errorf("could not find user '%s' in workspace", toUUIDStr)
+			return "", nil, ai.ForPeople(http.StatusNotFound, fmt.Sprintf("could not find user '%s' in workspace", toUUIDStr))
 		}
 		to := personNamed(foundUsers, cleanUname, false)
 		if to == nil {
-			return "", nil, fmt.Errorf("more than one person matches %q: %s. Ask which one is meant, or send to their @handle",
-				toUUIDStr, peopleByNameAndHandle(foundUsers))
+			return "", nil, ai.ForPeople(http.StatusBadRequest, fmt.Sprintf("more than one person matches %q: %s. Ask which one is meant, or send to their @handle",
+				toUUIDStr, peopleByNameAndHandle(foundUsers)))
 		}
 		toUUIDStr = to.Uuid
 		var parseErr error
@@ -224,10 +227,10 @@ func executeSendDM(ctx context.Context, action ai.ProposedAction, userUUID strin
 	// paths now ask business/Principal the same question, so they cannot drift again.
 	sendToDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, toUUIDStr)
 	if err != nil {
-		return "", nil, fmt.Errorf("recipient not found")
+		return "", nil, ai.ForPeople(http.StatusNotFound, "recipient not found")
 	}
 	if e := principalBusiness.CanReceiveDirectMessage(sendToDgraphInfo); !e.Allowed {
-		return "", nil, fmt.Errorf("%s", e.Reason)
+		return "", nil, ai.ForPeople(http.StatusForbidden, e.Reason)
 	}
 	if err := demoRefuses(ctx, userUUID, sendToDgraphInfo); err != nil {
 		return "", nil, err
@@ -298,10 +301,10 @@ func executeSendGroupChat(ctx context.Context, action ai.ProposedAction, userUUI
 	// Verify group membership and get participants
 	dgraphDm, err := chatBusiness.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, grpID)
 	if err != nil || dgraphDm == nil {
-		return "", nil, fmt.Errorf("group not found")
+		return "", nil, ai.ForPeople(http.StatusNotFound, "group not found")
 	}
 	if dgraphDm.ParticipantIsMember == 0 {
-		return "", nil, fmt.Errorf("not authorized to send to this group")
+		return "", nil, ai.ForPeople(http.StatusForbidden, "not authorized to send to this group")
 	}
 
 	// See executeSendMessage: rendered, not wrapped, so newlines survive.
@@ -382,10 +385,10 @@ func executeCreateTask(ctx context.Context, action ai.ProposedAction, userUUID s
 		return "", nil, fmt.Errorf("failed to look up project: %w", err)
 	}
 	if dgraphProject == nil || dgraphProject.Uuid == "" {
-		return "", nil, fmt.Errorf("project not found or you don't have access")
+		return "", nil, ai.ForPeople(http.StatusNotFound, "project not found or you don't have access")
 	}
 	if !dgraphProject.ReaderIsIn() {
-		return "", nil, fmt.Errorf("project not found or you don't have access")
+		return "", nil, ai.ForPeople(http.StatusNotFound, "project not found or you don't have access")
 	}
 	standing, err := workAccess.Of(ctx, userInfo.UserDgraphInfo.Uuid, dgraphProject)
 	if err != nil {
@@ -416,6 +419,13 @@ func executeCreateTask(ctx context.Context, action ai.ProposedAction, userUUID s
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create task: %w", err)
 	}
+	// Work made from outside the app (an AI teammate, a token, MCP) waits in
+	// a project with triage on; the member's own assistant's never does.
+	held := false
+	if src, outside := cameFromOutside(ctx, userInfo.UserPostgresInfo.Id); outside {
+		held = arriveInTriage(ctx, "business/AI executeCreateTask", projectParsedUUID, taskID, src,
+			triageBusiness.Requester{UserUUID: &userInfo.UserPostgresInfo.Id})
+	}
 	key := taskKeys.KeyOf(ctx, taskID)
 	called := taskKeys.Named(key, `"`+taskName+`"`)
 
@@ -428,7 +438,10 @@ func executeCreateTask(ctx context.Context, action ai.ProposedAction, userUUID s
 	if assigneeDgraph != nil {
 		msg += ", assigned to " + assigneeDgraph.UserName
 	}
-	return msg, map[string]string{"tool": "create_task", "task_uuid": taskID.String(), "key": key}, nil
+	if held {
+		msg += triageBusiness.WaitsNote
+	}
+	return msg, map[string]string{"tool": "create_task", "task_uuid": taskID.String(), "key": key, "in_triage": strconv.FormatBool(held)}, nil
 }
 
 // normalizeTaskPriority maps whatever the model emits for a task priority onto
@@ -455,7 +468,7 @@ func resolveAssigneeRef(ctx context.Context, actingUserUUID, ref string, strict 
 	if _, err := uuid.Parse(ref); err == nil {
 		u, uerr := userBusiness.GetDgraphUserInfoByUUID(ctx, ref)
 		if uerr != nil || u == nil {
-			return nil, fmt.Errorf("could not find the user to assign")
+			return nil, ai.ForPeople(http.StatusNotFound, "could not find the user to assign")
 		}
 		if err := demoRefuses(ctx, actingUserUUID, u); err != nil {
 			return nil, err
@@ -467,12 +480,12 @@ func resolveAssigneeRef(ctx context.Context, actingUserUUID, ref string, strict 
 	found, err := domainUser.GetUserListWithSearchText(ctx, actingUserUUID, cleanName)
 	found = demoReachable(ctx, actingUserUUID, found)
 	if err != nil || len(found) == 0 {
-		return nil, fmt.Errorf("could not find a user matching %q to assign", ref)
+		return nil, ai.ForPeople(http.StatusNotFound, fmt.Sprintf("could not find a user matching %q to assign", ref))
 	}
 	if u := personNamed(found, strings.TrimSpace(cleanName), strict); u != nil {
 		return u, nil
 	}
-	return nil, fmt.Errorf("more than one user matches %q - please be more specific", ref)
+	return nil, ai.ForPeople(http.StatusBadRequest, fmt.Sprintf("more than one user matches %q - please be more specific", ref))
 }
 
 // personNamed is the one of found, the people a search for name turned up,
@@ -562,7 +575,7 @@ func loadTaskForUpdate(ctx context.Context, taskUUIDStr, userUUID string) (*user
 	// The task's id, or its key ("Q4-12").
 	taskID, err := taskKeys.Ref(ctx, taskUUIDStr)
 	if errors.Is(err, taskKeys.ErrNoTask) {
-		return nil, nil, fmt.Errorf("task not found or you don't have access")
+		return nil, nil, ai.ForPeople(http.StatusNotFound, "task not found or you don't have access")
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("couldn't look the task up: %w", err)
@@ -573,7 +586,7 @@ func loadTaskForUpdate(ctx context.Context, taskUUIDStr, userUUID string) (*user
 	}
 	dgraphTask, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskID.String(), userInfo.UserDgraphInfo.Uid)
 	if err != nil || dgraphTask == nil {
-		return nil, nil, fmt.Errorf("task not found or you don't have access")
+		return nil, nil, ai.ForPeople(http.StatusNotFound, "task not found or you don't have access")
 	}
 	standing, facts, err := workAccess.OfTask(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Uid, dgraphTask)
 	if err != nil {

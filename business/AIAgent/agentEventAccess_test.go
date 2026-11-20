@@ -3,9 +3,11 @@ package business
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -14,7 +16,8 @@ import (
 )
 
 // fakeReach is a sponsor who can read channel "open", is in project "mine"
-// and can view table "t1". Lookups of "broken" fail.
+// and can view table "t1". Lookups of "broken" fail; "gone" names nothing (a
+// read that found nothing, as the graph's models answer one).
 func fakeReach() sponsorReach {
 	answer := func(yes string) func(context.Context, string, string) (bool, error) {
 		return func(_ context.Context, user, id string) (bool, error) {
@@ -23,6 +26,9 @@ func fakeReach() sponsorReach {
 			}
 			if id == "broken" {
 				return false, errors.New("lookup failed")
+			}
+			if id == "gone" {
+				return false, helpers.NotFound("nothing by that id in dgraph")
 			}
 			return id == yes, nil
 		}
@@ -84,13 +90,79 @@ func TestSavingAnAgentChecksWhereItPoints(t *testing.T) {
 		{"scoped to one they can't", model.TriggerMention, `{}`, `{"channel_ids":["open","secret"]}`, errScopeChannel},
 		{"scoped to their project", model.TriggerSchedule, `{}`, `{"project_ids":["mine"]}`, nil},
 		{"scoped to another project", model.TriggerSchedule, `{}`, `{"project_ids":["theirs"]}`, errScopeProject},
-		{"a scope lookup that fails", model.TriggerMention, `{}`, `{"channel_ids":["broken"]}`, errScopeChannel},
+		{"scoped to a channel that isn't there", model.TriggerMention, `{}`, `{"channel_ids":["gone"]}`, errScopeChannel},
+		{"scoped to a project that isn't there", model.TriggerSchedule, `{}`, `{"project_ids":["gone"]}`, errScopeProject},
+		{"moves in a project that isn't there", model.TriggerEvent, `{"event":"task.status_changed","project_id":"gone"}`, "", errScopeProject},
 	}
 	for _, c := range cases {
 		if got := r.checkReach(context.Background(), "sponsor", c.triggerType, c.cfg, c.scope); !errors.Is(got, c.want) {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
 	}
+}
+
+// V-1281: a read that failed is ours, not the person's. Saving an agent whose
+// check couldn't read the graph still refuses (it never saves on a failed
+// read), in the same words for the form, but not as a helpers.Refusal: an
+// install answers it 500 in its own words instead of 400 "choose ...", and the
+// cause is logged where the check ran. A real no and a "not there" stay the
+// refusal itself (TestSavingAnAgentChecksWhereItPoints).
+func TestAFailedReadOnSavingAnAgentIsNoRefusal(t *testing.T) {
+	r := fakeReach()
+	for _, c := range []struct {
+		name             string
+		triggerType, cfg string
+		scope            string
+		refusal          error
+	}{
+		{"moves in a project whose read failed", model.TriggerEvent, `{"event":"task.status_changed","project_id":"broken"}`, "", errScopeProject},
+		{"scoped to a channel whose read failed", model.TriggerMention, `{}`, `{"channel_ids":["open","broken"]}`, errScopeChannel},
+		{"scoped to a project whose read failed", model.TriggerSchedule, `{}`, `{"project_ids":["broken"]}`, errScopeProject},
+	} {
+		logs := captureErrorLogs(t)
+		got := r.checkReach(context.Background(), "sponsor", c.triggerType, c.cfg, c.scope)
+		if got == nil {
+			t.Errorf("%s: saved on a failed read", c.name)
+			continue
+		}
+		var refused *helpers.Refusal
+		if errors.As(got, &refused) || errors.Is(got, c.refusal) {
+			t.Errorf("%s: answered as the refusal %#v, want a failure an install answers 500", c.name, got)
+		}
+		if got.Error() != c.refusal.Error() {
+			t.Errorf("%s: the form would read %q, want %q", c.name, got.Error(), c.refusal.Error())
+		}
+		if line := logs.String(); !strings.Contains(line, "lookup failed") || !strings.Contains(line, "checkReach") {
+			t.Errorf("%s: the cause isn't logged at the check: %q", c.name, line)
+		}
+	}
+}
+
+// captureErrorLogs is what helpers logs at ERROR until the test ends.
+func captureErrorLogs(t *testing.T) *lockedBuffer {
+	t.Helper()
+	prev := helpers.Logger
+	b := &lockedBuffer{}
+	helpers.Logger = slog.New(slog.NewTextHandler(b, &slog.HandlerOptions{Level: slog.LevelError}))
+	t.Cleanup(func() { helpers.Logger = prev })
+	return b
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 func TestAnAmbientAgentConsidersOnlyChannelsItsSponsorReads(t *testing.T) {

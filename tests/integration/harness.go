@@ -297,19 +297,25 @@ type pgServer struct {
 // TestTheTestsThatApplyMigrationsGetADatabaseMigratedFromBlank reads the test
 // files and fails when this list and theirs differ.
 var migratesItself = map[string]bool{
+	"TestSLATimersMigrationUpDownUp":                            true,
+	"TestCalendarRoomsMigrationUpDownUp":                        true,
 	"TestTaskFieldFormulaMigrationUpDownUp":                     true,
 	"TestCalendarReminderEmailMigrationUpDownUp":                true,
 	"TestCalendarEmailKindsMigrationUpDownUp":                   true,
 	"TestCalendarEventFilesMigrationUpDownUp":                   true,
 	"TestCalendarEventTaskLinksMigrationUpDownUp":               true,
+	"TestCalendarEventRecapsMigrationUpDownUp":                  true,
+	"TestJ04CMigration593UpDownUp":                              true,
 	"TestChangeSetOperationsMigrationDownUp":                    true,
 	"TestContentIOJobsWaitReadyForAChoice":                      true,
 	"TestComputedStoreMigrationUpDownUp":                        true,
 	"TestApprovalsAnyItemMigrationUpDownUp":                     true,
 	"TestBookingPages":                                          true,
+	"TestBookingQuestionsAndTeamHostsMigrationUpDownUp":         true,
 	"TestCalendarAttendanceMigrationUpDownUp":                   true,
 	"TestCalendarContainersMigrationUpDownUp":                   true,
 	"TestCalendarFeedsMigrationUpDownUp":                        true,
+	"TestCalendarFeedTargetsMigrationUpDownUp":                  true,
 	"TestCalendarImportMigrationUpDownUp":                       true,
 	"TestCallStateMigrationUpDownUp":                            true,
 	"TestCallAdmissionsMigrationUpDownUp":                       true,
@@ -352,6 +358,8 @@ var migratesItself = map[string]bool{
 	"TestEmailLookupIndexSurvivesAddressesThatDifferOnlyInCase": true,
 	"TestEarlierSlackImportsMessagesAreKeyedByConversation":     true,
 	"TestGrantsSoftDeleteMigrationUpDownUp":                     true,
+	"TestTasksGoogleCalendarIdIndexMigrationUpDownUp":           true,
+	"TestBoptSmallIndexCleanupMigrationUpDownUp":                true,
 
 	// The grants migration's up file again, as an upgrade applies it to an
 	// install from before the first-admin setup mark (admin_setup_once_test.go).
@@ -388,6 +396,20 @@ var migratesItself = map[string]bool{
 
 	// Migration 584 (V-698) takes money values off the kept change log; its "kept log" step applies it itself.
 	"TestV698MoneyFieldsAreForProjectAdminsOnly": true,
+
+	// Migration 597 (V-986) keeps a review per pull request; its test runs its own SQL down, up and up again.
+	"TestMigration597ReviewsPerPullRequestGoDownAndUpAgain": true,
+
+	// Migration 602 (V-1060) keeps each review by its id; its test runs its own SQL down, up and up again.
+	"TestMigration602ReviewIdsGoDownAndUpAgain": true,
+	// ... and from rows written in 597's shape, before 602.
+	"TestMigration602RunsFromRowsWrittenBeforeIt": true,
+
+	// Migration 592 (A4 H4, a push waits while you're in OneCamp) runs its own SQL down, up and up again.
+	"TestNotificationDeliveriesWaitingMigrationUpDownUp": true,
+
+	// Migration 599 (A4 H5, a dismissal in Priority) runs its own SQL down, up and up again.
+	"TestInboxMarksMigrationUpDownUp": true,
 }
 
 var thePostgres shared[pgServer]

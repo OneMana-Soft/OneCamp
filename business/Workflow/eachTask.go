@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -38,6 +39,9 @@ const (
 // runEachTask runs a schedule rule's steps for each open task of its project
 // its conditions hold for, as one run.
 func (cw *compiledWorkflow) runEachTask(ctx context.Context, ev triggerEvent, now time.Time) {
+	// One run: what it makes Urgent is told when it's done, each assignee once.
+	ctx, tellUrgent := taskBusiness.GatherUrgent(ctx)
+	defer tellUrgent()
 	if !access.allows(ctx, cw.createdBy, ev) {
 		cw.recordSkip(ctx, ev, now, "Skipped: the rule's owner isn't in the project any more")
 		return

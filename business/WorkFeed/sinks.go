@@ -70,15 +70,37 @@ func RegisterSink(s Sink) {
 // as the write did: a workflow's or an agent's write never wakes a listener
 // that would answer it again (helpers.WithWorkflowGenerated), and a listener
 // knows whose words it was (business/Webhook handoffOrigin).
-var marks = []struct {
-	name string
-	is   func(context.Context) bool
-	with func(context.Context) context.Context
-}{
-	{"workflow", helpers.IsWorkflowGenerated, helpers.WithWorkflowGenerated},
-	{"agent_write", helpers.IsAgentWrite, helpers.WithAgentWrite},
-	{"github", helpers.IsGitHubOrigin, helpers.WithGitHubOrigin},
-	{"public_submission", helpers.IsPublicSubmission, helpers.WithPublicSubmission},
+// A mark's value is "1", or for a stranger's submission the door it came
+// through (an entry written before doors were named carries "1": a form).
+var marks = []mark{
+	flag("workflow", helpers.IsWorkflowGenerated, helpers.WithWorkflowGenerated),
+	flag("agent_write", helpers.IsAgentWrite, helpers.WithAgentWrite),
+	flag("github", helpers.IsGitHubOrigin, helpers.WithGitHubOrigin),
+	{"public_submission", helpers.SubmissionDoor, func(ctx context.Context, door string) context.Context {
+		if door == "1" {
+			door = helpers.FormDoor
+		}
+		return helpers.WithSubmissionDoor(ctx, door)
+	}},
+}
+
+// mark is one of the writer's marks: its name in the entry, its value on a
+// ctx ("" when off) and how a sink's ctx takes it back.
+type mark struct {
+	name  string
+	value func(context.Context) string
+	with  func(context.Context, string) context.Context
+}
+
+// flag is a mark that is on or off.
+func flag(name string, is func(context.Context) bool, with func(context.Context) context.Context) mark {
+	value := func(ctx context.Context) string {
+		if is(ctx) {
+			return "1"
+		}
+		return ""
+	}
+	return mark{name, value, func(ctx context.Context, _ string) context.Context { return with(ctx) }}
 }
 
 // eventsFor is the Outbox entries for changes just numbered seqs, one for each
@@ -99,8 +121,8 @@ func eventsFor(ctx context.Context, changes []Change, seqs []int64) []outboxBusi
 		}
 		entities := map[string]string{"sequence": strconv.FormatInt(seqs[i], 10), c.ResourceKind: c.ResourceUUID, "project": c.ProjectUUID}
 		for _, m := range marks {
-			if m.is(ctx) {
-				entities[m.name] = "1"
+			if v := m.value(ctx); v != "" {
+				entities[m.name] = v
 			}
 		}
 		out = append(out, outboxBusiness.Entry{Topic: Topic, Kind: c.Kind, Key: c.ResourceKind + ":" + c.ResourceUUID,
@@ -125,8 +147,8 @@ func runSink(ctx context.Context, s Sink, ev outboxBusiness.Event) error {
 		return nil
 	}
 	for _, m := range marks {
-		if ev.Entities[m.name] == "1" {
-			ctx = m.with(ctx)
+		if v := ev.Entities[m.name]; v != "" {
+			ctx = m.with(ctx, v)
 		}
 	}
 	return s.Run(ctx, ev.EventID, entryOf(rows[0]))

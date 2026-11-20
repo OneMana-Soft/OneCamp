@@ -48,8 +48,9 @@ func UseAPIKeyFrom(resolve func() string) {
 
 // What a send can fail on before it reaches the provider.
 var (
-	// ErrNotConfigured: no sending key, so nothing can be sent.
-	ErrNotConfigured = errors.New("transactional email is disabled: no sending key is set")
+	// ErrNotConfigured: no sending key, or the public demo, so nothing can be
+	// sent (EssentialEmailEnabled).
+	ErrNotConfigured = errors.New("transactional email is disabled: no sending key is set, or this is the public demo")
 	// ErrBadSender and ErrBadRecipient: an address that is not one.
 	ErrBadSender    = errors.New("invalid sender email")
 	ErrBadRecipient = errors.New("invalid recipient email")
@@ -269,11 +270,13 @@ func SendEmail(ctx context.Context, from string, to string, subject string, html
 // limits and basic deliverability headers. Callers that need retries should
 // wrap this and persist their state in the email queue (the worker does this).
 //
-// Returns an error when RESEND_API_KEY is empty so callers can surface the
-// failure visibly. The notification worker already gates on IsEmailEnabled();
+// Returns ErrNotConfigured when no send may go (EssentialEmailEnabled: no key,
+// or the public demo) so callers can surface the failure visibly. Every
+// sender passes here, so no mail path, today's or a later one, sends on the
+// demo. The notification worker already gates on NotificationEmailEnabled();
 // direct callers (password-reset, invitation) must handle the error.
 func SendEmailWithOptions(ctx context.Context, opt SendOptions) (SendResult, error) {
-	apiKey := apiKeyFrom()
+	apiKey := sendingKey()
 	if apiKey == "" {
 		return SendResult{}, ErrNotConfigured
 	}

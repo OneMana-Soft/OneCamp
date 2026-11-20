@@ -264,6 +264,13 @@ func dialContext(ctx context.Context, network, address string) (net.Conn, error)
 	return Policy{}.dial(ctx, network, address)
 }
 
+// Dial is p's dialer for a client that speaks another protocol than HTTP
+// (the mail door's IMAP): the same checks as every fetch, the name resolved
+// once and an address it vetted dialled, so DNS rebinding is refused too.
+func (p Policy) Dial(ctx context.Context, network, address string) (net.Conn, error) {
+	return p.dial(ctx, network, address)
+}
+
 // dial is the transport's dialer: it checks the host again, resolves it once,
 // and connects to an address it checked, never to the name. It runs for every
 // connection, so every redirect hop is checked here too.

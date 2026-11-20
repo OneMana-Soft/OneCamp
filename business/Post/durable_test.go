@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/akashc777/OneCamp/helpers"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -48,14 +49,14 @@ func recordSteps(t *testing.T, s *steps) {
 		s.did = append(s.did, "node")
 		return nil, s.nodeErr
 	}
-	release = func(_ context.Context, id int64) error {
-		s.did = append(s.did, fmt.Sprintf("release %d", id))
-		if id == s.unreleased {
+	release = func(_ context.Context, ids []int64) error {
+		s.did = append(s.did, fmt.Sprintf("release %v", ids))
+		if slices.Contains(ids, s.unreleased) {
 			return errors.New("postgres away")
 		}
 		return nil
 	}
-	deliver = func(id int64) { s.did = append(s.did, fmt.Sprintf("deliver %d", id)) }
+	deliver = func(ids []int64) { s.did = append(s.did, fmt.Sprintf("deliver %v", ids)) }
 	takeBack = func(_ context.Context, post uuid.UUID, events []int64) error {
 		s.tookBack = append(s.tookBack, fmt.Sprintf("%s %v", post, events))
 		return nil
@@ -81,7 +82,7 @@ func TestADurablePostIsReleasedAndDeliveredOnceItsNodeIsWritten(t *testing.T) {
 	if err != nil || out == nil || out.Uuid == "" {
 		t.Fatalf("%+v %v", out, err)
 	}
-	if got := strings.Join(s.did, ", "); got != "rows local-1, node, release 7, deliver 7, release 8, deliver 8" {
+	if got := strings.Join(s.did, ", "); got != "rows local-1, node, release [7 8], deliver [7 8]" {
 		t.Errorf("steps: %s", got)
 	}
 	if len(s.tookBack) != 0 {
@@ -111,7 +112,7 @@ func TestAnEventItsWriterCouldntReleaseIsLeftToItsResolver(t *testing.T) {
 	if err != nil || out == nil {
 		t.Fatalf("the post is written, so it answers: %+v %v", out, err)
 	}
-	if got := strings.Join(s.did, ", "); got != "rows local-1, node, release 7, release 8, deliver 8" {
+	if got := strings.Join(s.did, ", "); got != "rows local-1, node, release [7 8]" {
 		t.Errorf("steps: %s: a held event isn't delivered, and the other goes on", got)
 	}
 	if len(s.tookBack) != 0 {

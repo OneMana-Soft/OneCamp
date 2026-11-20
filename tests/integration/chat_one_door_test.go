@@ -27,6 +27,7 @@ import (
 	conversationController "github.com/akashc777/OneCamp/controllers/Conversation"
 	notificationController "github.com/akashc777/OneCamp/controllers/Notification"
 	postController "github.com/akashc777/OneCamp/controllers/Post"
+	activityDomain "github.com/akashc777/OneCamp/domain/Activity"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
@@ -455,7 +456,9 @@ func TestOneDoorEachReactionIsToldItsAuthor(t *testing.T) {
 
 // An author on "Nothing" for the conversation still gets a reaction's live
 // item on their Activity, as before A4 H2 (the setting gated only the push):
-// no row, as the router's Inbox decision has it, and never a push (D2).
+// no row, as the router's Inbox decision has it, and never a push (D2). The
+// one level rule keeps it so (NOTIF M1 R4, business/NotifyLevel's doc): a
+// reaction to their own message is theirs alone.
 func TestOneDoorAReactionReachesAnAuthorOnNothing(t *testing.T) {
 	w := newReachWorld(t)
 	mq := integration.RecordMqtt(t)
@@ -668,8 +671,8 @@ func (w *reachWorld) addsMentions(t *testing.T, e mentionEdit) {
 		t.Errorf("after the delete: Sam has %d notice rows of the edit, want 1 (kept: every delete is soft)", n)
 	}
 	key := followModels.MentionKey(e.saveKind, e.msg) + "|" + w.people["sam"].String()
-	if held, err := followModels.HeldNotices(context.Background(), []string{key}); err != nil || !held[key] {
-		t.Errorf("after the delete: the edit's notice isn't held (%v, %v), so the graph's mention would list it again", held, err)
+	if s, err := activityDomain.ReaderPageSettings(context.Background(), w.people["sam"].String(), []string{key}, nil, nil); err != nil || !s.Held[key] {
+		t.Errorf("after the delete: the edit's notice isn't held (%v, %v), so the graph's mention would list it again", s.Held, err)
 	}
 }
 

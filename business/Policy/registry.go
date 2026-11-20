@@ -1,6 +1,7 @@
 package business
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,7 +29,13 @@ const (
 	KindInt    = "int"
 	KindList   = "list"
 	KindChoice = "choice"
+	// KindObject is one JSON object a panel of its own keeps for a scope
+	// (ObjectPolicy); never the workspace's, never in the admin's list.
+	KindObject = "object"
 )
+
+// MaxObjectBytes bounds an object policy's value.
+const MaxObjectBytes = 4 << 10
 
 var (
 	// ErrUnknownPolicy is a key no policy has.
@@ -56,6 +63,10 @@ type spec struct {
 // what a rule would remove before it's saved.
 const OwnerRetention = "retention"
 
+// OwnerTriage is a project's triage panel (business/Triage), which keeps its
+// rota after checking everyone on it is in the project.
+const OwnerTriage = "triage"
+
 // ErrNotOwner is an owned policy set by something other than its panel.
 var ErrNotOwner = errors.New("policy: that policy is set in its own panel")
 
@@ -71,6 +82,8 @@ var ownedSpecs = []spec{
 	{key: BoardRetentionDays.Key, kind: KindInt, def: BoardRetentionDays.Default, min: 0, max: 3650, owner: OwnerRetention,
 		label: "Remove boards that have been in the trash this many days",
 		help:  "0 keeps them. Boards that aren't in the trash are never removed. People on a hold keep theirs, deleted ones included."},
+	{key: ProjectsTriageRota.Key, kind: KindObject, scopes: []string{ScopeProject}, owner: OwnerTriage,
+		label: "Triage rota", help: "Who is on triage duty in turns: the people, how many weeks a turn lasts, and the day the first turn starts."},
 }
 
 // specs are every policy, in the order an admin sees them.
@@ -86,15 +99,21 @@ var specs = []spec{
 		help:  "Versions older than this are removed at the next tidy, within six hours. Named and pinned versions are always kept."},
 	{key: ProjectsEditWho.Key, kind: KindChoice, def: ProjectsEditWho.Default, choices: ProjectsEditWho.Choices, scopes: []string{ScopeProject},
 		label: "Who can change tasks", help: "Members, members on the tasks assigned to them, or admins only. Each project can choose its own."},
+	{key: ProjectsTriage.Key, kind: KindBool, def: ProjectsTriage.Default, scopes: []string{ScopeProject},
+		label: "Triage incoming work", help: "Tasks from forms and the API wait in triage until someone accepts them. Each project can choose its own."},
+	{key: ProjectsTriagePriority.Key, kind: KindBool, def: ProjectsTriagePriority.Default, scopes: []string{ScopeProject},
+		label: "A priority before accepting", help: "A task waiting in triage needs a priority before it is accepted. Each project can choose its own."},
 	{key: ProjectsCreateWho.Key, kind: KindChoice, def: ProjectsCreateWho.Default, choices: ProjectsCreateWho.Choices,
 		label: "Who can make projects", help: "A team's admins, or everyone in the team."},
+	{key: ProjectsSLA.Key, kind: KindBool, def: ProjectsSLA.Default, scopes: []string{ScopeProject},
+		label: "SLA timers", help: "Tasks matching a rule are due within its time, counted in the project's work week. Each project can choose its own."},
 	{key: ChatBroadcastMembers.Key, kind: KindBool, def: ChatBroadcastMembers.Default, scopes: []string{ScopeChannel},
 		label: "Members can notify a whole channel", help: "@channel, @here and @everyone. A channel's managers and admins always can. Each channel can choose its own."},
 	{key: ChatBroadcastConfirmAt.Key, kind: KindInt, def: ChatBroadcastConfirmAt.Default, min: 0, max: 100000,
 		label: "Ask before notifying this many people", help: "Notifying a channel this size or larger asks first. 0 never asks."},
 	{key: ChatBroadcastAdminsOnlyAt.Key, kind: KindInt, def: ChatBroadcastAdminsOnlyAt.Default, min: 0, max: 100000,
 		label: "Only admins notify channels larger than", help: "In a channel with more members than this, only its managers and admins can notify all of it. 0 sets no limit."},
-	{key: CalendarFreeBusy.Key, kind: KindBool, def: CalendarFreeBusy.Default,
+	{key: CalendarFreeBusy.Key, kind: KindBool, def: CalendarFreeBusy.Default, scopes: []string{ScopePerson},
 		label: "Members see when others are busy", help: "Only when, never what. A calendar shared with someone shows what it's shared to show."},
 	{key: CalendarFeedsAllowed.Key, kind: KindBool, def: CalendarFeedsAllowed.Default,
 		label: "Members can show a calendar in another app", help: "A secret link per calendar for Google Calendar, Apple Calendar or Outlook. Off, every link stops working at once."},
@@ -466,6 +485,16 @@ func canonical(s spec, value json.RawMessage) (stored, shown string, err error) 
 		}
 		raw, _ := json.Marshal(out)
 		return string(raw), describe(out), nil
+	case KindObject:
+		if len(value) > MaxObjectBytes {
+			return bad(fmt.Sprintf("it's at most %d bytes", MaxObjectBytes))
+		}
+		var fields map[string]json.RawMessage
+		var buf bytes.Buffer
+		if json.Unmarshal(value, &fields) != nil || fields == nil || json.Compact(&buf, value) != nil {
+			return bad("it's one object, like {\"weeks\": 1}")
+		}
+		return buf.String(), buf.String(), nil
 	case KindChoice:
 		var v string
 		if json.Unmarshal(value, &v) != nil || !s.choice().Allows(v) {

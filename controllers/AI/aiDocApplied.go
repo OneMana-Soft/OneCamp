@@ -17,6 +17,7 @@ import (
 	business "github.com/akashc777/OneCamp/business/AI"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	ai "github.com/akashc777/OneCamp/services/AI"
 )
 
 // writeDocAccessError answers a doc refusal; ok is false for any other error.
@@ -37,7 +38,9 @@ func writeDocAccessError(w http.ResponseWriter, err error) bool {
 // record goes through it, as the stream does.
 func limitedDocAI(w http.ResponseWriter, r *http.Request, userUUID string) bool {
 	if err := docAIRun.CheckRateLimit(r.Context(), userUUID); err != nil {
-		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": "You've asked AI a lot in the last minute. Try again in a moment."})
+		const words = "You've asked AI a lot in the last minute. Try again in a moment."
+		ai.SetRetryAfter(w.Header(), err, words)
+		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": words})
 		return false
 	}
 	return true

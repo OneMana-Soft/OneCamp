@@ -18,6 +18,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	"github.com/akashc777/OneCamp/models/taskread"
+	taskReadGeneration "github.com/akashc777/OneCamp/models/taskread/generation"
 	"github.com/google/uuid"
 )
 
@@ -28,15 +29,23 @@ func init() {
 // Seams for tests: the rows and the graph the decision reads, and who may be
 // granted.
 var (
-	restrictionCandidates = restrictionModel.Candidates
-	readStanding          = taskDomain.GetTasksStandingFor
-	mayReadTask           = taskDomain.InProject
-	tasksBelow            = taskDomain.GetTasksBelow
-	restrict              = restrictionModel.Restrict
-	inherit               = restrictionModel.Inherit
-	inheritAll            = restrictionModel.InheritAll
-	unrestrict            = restrictionModel.Unrestrict
+	restrictionCandidates = func(ctx context.Context, reader uuid.UUID) ([]restrictionModel.Candidate, error) {
+		return keptCandidates.Get(ctx, reader.String(), func(ctx context.Context) ([]restrictionModel.Candidate, error) {
+			return restrictionModel.Candidates(ctx, reader)
+		})
+	}
+	readStanding = taskDomain.GetTasksStandingFor
+	mayReadTask  = taskDomain.InProject
+	tasksBelow   = taskDomain.GetTasksBelow
+	restrict     = restrictionModel.Restrict
+	inherit      = restrictionModel.Inherit
+	inheritAll   = restrictionModel.InheritAll
+	unrestrict   = restrictionModel.Unrestrict
 )
+
+// keptCandidates keeps each reader's restriction rows for the generation of the
+// decision's rows (models/taskread/generation).
+var keptCandidates = taskReadGeneration.NewCache[[]restrictionModel.Candidate]()
 
 // hiddenFor is every restricted task, by lower-case uuid, true for those
 // reader (a user uuid) may not see and false for those they may, which carry

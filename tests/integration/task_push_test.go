@@ -46,6 +46,7 @@ import (
 // taskWorld is the projects above, what was pushed in them and who heard.
 type taskWorld struct {
 	env                *integration.Env
+	dg                 *integration.DgraphEnv
 	broker             *noticeBroker
 	people             map[string]uuid.UUID
 	uids               map[string]string
@@ -72,6 +73,7 @@ func newTaskWorld(t *testing.T) *taskWorld {
 	}
 	integration.SetupRedis(t)
 	dg := integration.SetupDgraph(t)
+	w.dg = dg
 	integration.UseMqttClient(t, w.broker)
 	search := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(rw, `{"took":1,"errors":false,"items":[],"updated":0,"failures":[]}`)
@@ -137,7 +139,7 @@ func newTaskWorld(t *testing.T) *taskWorld {
 		map[string]any{"uid": "_:launch", "dgraph.type": "Project", "project_uuid": w.launch, "project_name": "Spring launch", "project_deleted_at": live,
 			"project_team": ref("team"), "project_members": inLaunch, "project_admins": refs("maya"), "project_created_by": ref("maya")},
 		map[string]any{"uid": "_:quiet", "dgraph.type": "Project", "project_uuid": w.quiet, "project_name": "Quiet room", "project_deleted_at": live,
-			"project_team": ref("team"), "project_members": refs("maya", "mo"), "project_admins": refs("maya"), "project_created_by": ref("maya")},
+			"project_team": ref("team"), "project_members": refs("maya", "mo", "kay"), "project_admins": refs("maya"), "project_created_by": ref("maya")},
 		map[string]any{"uid": "_:kit", "dgraph.type": "Task", "task_uuid": w.kit, "task_name": "Press kit", "task_status": "todo",
 			"task_deleted_at": live, "task_project": ref("launch"), "task_created_by": ref("maya"), "task_assignee": ref("olu"),
 			"task_comments": []map[string]any{earlier("ben"), earlier("tom"), earlier("lee")}},
@@ -226,6 +228,10 @@ func within(d time.Duration, cond func() bool) bool {
 //     had commented in, so less than someone who asked for mentions only: Sam,
 //     mentioned, and Olu, given the task, heard nothing;
 //   - Lee, off the project, was pushed the comment by the setting left behind.
+//
+// By the one level rule (NOTIF M1), "Mentions and threads you're in" hears a
+// task's thread they are in: Tom, on mentions only, commented on "Press kit"
+// before (newTaskWorld's task_comments), so he hears the comment unnamed.
 func TestATaskCommentReachesWhomItIsFor(t *testing.T) {
 	w := newTaskWorld(t)
 	out := w.call(t, taskController.CreateTaskComment, map[string]any{"task_uuid": w.kit,
@@ -233,11 +239,11 @@ func TestATaskCommentReachesWhomItIsFor(t *testing.T) {
 	if !within(20*time.Second, func() bool { return len(w.pushedTo("task_comment", w.kit)) > 0 }) {
 		t.Fatal("the comment was pushed to nobody")
 	}
-	if got, want := w.pushedTo("task_comment", w.kit), []string{"tok-ben", "tok-mo", "tok-sam"}; !slices.Equal(got, want) {
-		t.Errorf("the comment was pushed to %v, want %v: Ben commented before, Sam and Mo are mentioned; never Maya, who wrote it, "+
-			"Tom (mentions only, not mentioned), Kay (not in the thread), Dex (deactivated) or Lee (off the project); Olu has no device", got, want)
+	if got, want := w.pushedTo("task_comment", w.kit), []string{"tok-ben", "tok-mo", "tok-sam", "tok-tom"}; !slices.Equal(got, want) {
+		t.Errorf("the comment was pushed to %v, want %v: Ben and Tom (mentions only, in the thread) commented before, Sam and Mo are mentioned; "+
+			"never Maya, who wrote it, Kay (not in the thread), Dex (deactivated) or Lee (off the project); Olu has no device", got, want)
 	}
-	if got, want := w.noticed("task_comment:"+w.kit+":"+out["comment_id"]), []string{"ben", "mo", "olu", "sam"}; !slices.Equal(got, want) {
+	if got, want := w.noticed("task_comment:"+w.kit+":"+out["comment_id"]), []string{"ben", "mo", "olu", "sam", "tom"}; !slices.Equal(got, want) {
 		t.Errorf("the comment's desktop notice reached %v, want %v: Olu is given the task and uses only the desktop app", got, want)
 	}
 }
@@ -287,6 +293,21 @@ func TestANewTaskReachesItsReadersAndWhomItIsGivenTo(t *testing.T) {
 		}
 		if !within(10*time.Second, emailed) {
 			t.Error("Mo wasn't emailed the task given to them")
+		}
+	})
+	t.Run("whom it's given to, with no setting for its project", func(t *testing.T) {
+		// Kay is in the Quiet room with no setting for it (a row never
+		// written): no setting hears, so she is pushed and noticed as the
+		// email tells her; Mo, who hears of mentions only, isn't named.
+		task := w.call(t, taskController.CreateTask, map[string]any{"task_project_uuid": w.quiet, "task_name": "Load-in",
+			"task_assignee_uuid": w.people["kay"].String()})["task_uuid"]
+		if !within(20*time.Second, func() bool { return len(w.pushedTo("task", task)) > 0 }) {
+			t.Error("the new task wasn't pushed to Kay, who it's given to and has no setting for its project")
+		} else if got := w.pushedTo("task", task); !slices.Equal(got, []string{"tok-kay"}) {
+			t.Errorf("the new task was pushed to %v, want Kay's device", got)
+		}
+		if got := w.noticed("task:" + task); !slices.Equal(got, []string{"kay"}) {
+			t.Errorf("the new task's desktop notice reached %v, want Kay", got)
 		}
 	})
 }

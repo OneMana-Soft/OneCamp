@@ -440,6 +440,7 @@ func (a Adapter) push(ctx context.Context, op calendarSyncBusiness.Op) (calendar
 		return calendarSyncBusiness.Ref{ExternalID: op.ExternalID, ETag: made.ChangeKey}, nil
 	}
 	if op.Kind == "create" {
+		ev.TransactionID = createKey(op)
 		err = a.call(ctx, person, http.MethodPost, a.Base+"/me/calendars/"+url.PathEscape(op.Remote.ID)+"/events", ev, &made)
 	} else {
 		made.ID = op.ExternalID
@@ -509,4 +510,14 @@ func (Adapter) Watch(context.Context, calendarSyncBusiness.Remote) (calendarSync
 
 func (Adapter) Stop(context.Context, calendarSyncBusiness.Watch) error {
 	return errors.ErrUnsupported
+}
+
+// createKey is a create's transactionId: one for the link, the calendar there
+// and the event, whoever sends it (the outbox's sink or the sweep) and however
+// often.
+// Graph dedupes by transactionId for a while only: a re-create of the same
+// (link, calendar, event) much later (restored after its copy there was
+// deleted) reuses the key, and Graph then makes it again, as it should.
+func createKey(op calendarSyncBusiness.Op) string {
+	return uuid.NewSHA1(op.Remote.Link.ID, []byte(op.Remote.ID+"\x00"+op.EventUUID.String())).String()
 }

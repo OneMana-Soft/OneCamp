@@ -62,14 +62,14 @@ func couldRead(board *dgraphStruct.DgraphBoard, userUUID string) bool {
 }
 
 // CanEdit is who may change a board's canvas, and so add a picture to it:
-// its creator and the people it's shared with to edit, whether or not it is
-// private; nobody, once it is deleted. Everyone else who may read it joins
+// its creator, its co-owners and the people it's shared with to edit, whether
+// or not it is private; nobody, once it is deleted. Everyone else who may read it joins
 // the live canvas read-only (BoardCollabAuthorize).
 func CanEdit(board *dgraphStruct.DgraphBoard, userUUID string) bool {
 	if board == nil || isDeleted(board) {
 		return false
 	}
-	return board.HasEditAccess > 0 || (board.CreatedBy != nil && board.CreatedBy.Uuid == userUUID)
+	return board.HasEditAccess > 0 || board.HasOwnerAccess > 0 || IsOwner(board, userUUID)
 }
 
 // CanPresent is who may present a board: show its frames as slides, put it on

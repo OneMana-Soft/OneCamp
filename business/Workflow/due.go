@@ -30,6 +30,7 @@ import (
 	"time"
 
 	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
+	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -136,6 +137,10 @@ func taskVars(t *dgraphStruct.DgraphTask) map[string]string {
 
 // sweepDue runs the due triggers whose time has come.
 func sweepDue(ctx context.Context) error {
+	// One sweep: what its runs make Urgent is told when it's done, each
+	// assignee once.
+	ctx, tellUrgent := taskBusiness.GatherUrgent(ctx)
+	defer tellUrgent()
 	now := clock()
 	byProject := map[string][]*compiledWorkflow{}
 	ahead := 0

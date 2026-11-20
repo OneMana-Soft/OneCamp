@@ -51,6 +51,15 @@ type ChoicePolicy struct {
 	Choices []string
 }
 
+// ObjectPolicy is a policy whose value is one JSON object that a panel of its
+// own (Owner) keeps for a scope, shaped and checked by that panel: a project's
+// triage rota. It has no workspace value and no default: a scope keeps one or
+// doesn't (ObjectIn, SetObjectIn).
+type ObjectPolicy struct {
+	Key   string
+	Owner string
+}
+
 // Allows is whether v is one of the policy's choices. Pure.
 func (p ChoicePolicy) Allows(v string) bool {
 	for _, c := range p.Choices {
@@ -75,6 +84,12 @@ const ScopeProject = "project"
 
 // ScopeChannel is a channel's own value (chat P3: "Allow @channel and @here").
 const ScopeChannel = "channel"
+
+// ScopePerson is a person's own value, which only they set: their choice to
+// keep when they're busy to themselves (calendar.freebusy.members, gcal-14).
+// A policy a person sets for themselves narrows the workspace's, never widens
+// it: its readers ask the workspace's first.
+const ScopePerson = "person"
 
 var (
 	// ChatLinesJoinsInLarge shows joins and leaves as lines in a public
@@ -138,6 +153,12 @@ var (
 	ProjectsCreateWho = ChoicePolicy{Key: "projects.create.who", Default: "team_admins", Choices: []string{"team_admins", "team_members"}}
 	// ProjectsTriage turns a project's triage on (B1).
 	ProjectsTriage = BoolPolicy{Key: "projects.triage", Default: false}
+	// ProjectsTriagePriority asks for a priority before work leaves a
+	// project's triage: an accept of a task without one is refused (linear-04).
+	ProjectsTriagePriority = BoolPolicy{Key: "projects.triage.priority", Default: false}
+	// ProjectsTriageRota is who is on a project's triage duty, in turns
+	// (business/Triage Rota), kept by the triage panel (linear-21 H2).
+	ProjectsTriageRota = ObjectPolicy{Key: "projects.triage.rota", Owner: OwnerTriage}
 	// ProjectsWIPHard makes a board's work-in-progress limits hard (A7).
 	ProjectsWIPHard = BoolPolicy{Key: "projects.wip.hard", Default: false}
 	// ProjectsAutoCloseDays closes tasks nobody touched for this many days;
@@ -148,6 +169,9 @@ var (
 	ProjectsGuests = ChoicePolicy{Key: "projects.guests", Default: "follow", Choices: []string{"follow", "on", "off"}}
 	// ProjectsAITriage suggests a triage decision for a new task [AI] (B11).
 	ProjectsAITriage = BoolPolicy{Key: "projects.ai.triage", Default: false}
+	// ProjectsSLA times a project's work against its SLA rules (linear-24):
+	// off, no timer starts, none shows and none alerts; nothing is removed.
+	ProjectsSLA = BoolPolicy{Key: "projects.sla", Default: false}
 )
 
 // The chat programme's mention policies (design/chat-vs-slack/PROGRAM.md B5,
@@ -188,8 +212,14 @@ type Store interface {
 	BoolIn(ctx context.Context, p BoolPolicy, s Scope) bool
 	IntIn(ctx context.Context, p IntPolicy, s Scope) int
 	ChoiceIn(ctx context.Context, p ChoicePolicy, s Scope) string
+	// ObjectIn reads an object policy's value for one scope into into; set
+	// is false when the scope keeps none (there is no workspace value).
+	ObjectIn(ctx context.Context, p ObjectPolicy, s Scope, into any) (set bool, err error)
 	// PrimeScopes reads many scopes' values at once, ahead of asking each.
 	PrimeScopes(ctx context.Context, kind string, ids []string)
+	// BoolsIn answers a policy for many scopes of one kind in one read, or
+	// ErrScopesUnread when their values couldn't be read.
+	BoolsIn(ctx context.Context, p BoolPolicy, kind string, ids []string) (map[string]bool, error)
 	// Require refuses a request when p is off for the signed-in member. Admins
 	// always pass.
 	Require(p BoolPolicy) func(http.Handler) http.Handler

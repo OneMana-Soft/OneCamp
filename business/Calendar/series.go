@@ -226,6 +226,11 @@ type seriesOverrides map[uuid.UUID]map[int64]*models.Event
 // show in w: back as far as the longest instance, so one that started before
 // w and runs into it is found too.
 func (s *service) overridesFor(ctx context.Context, rows []*models.Event, w models.Window) (seriesOverrides, error) {
+	return overridesRead(ctx, rows, w, s.store.overridesOf)
+}
+
+// overridesRead is overridesFor reading through read (a store, or a transaction).
+func overridesRead(ctx context.Context, rows []*models.Event, w models.Window, read func(context.Context, []uuid.UUID, models.Window) ([]*models.Event, error)) (seriesOverrides, error) {
 	var seriesIDs []uuid.UUID
 	reach := w
 	for _, e := range rows {
@@ -240,7 +245,7 @@ func (s *service) overridesFor(ctx context.Context, rows []*models.Event, w mode
 	if len(seriesIDs) == 0 {
 		return overrides, nil
 	}
-	ovs, err := s.store.overridesOf(ctx, seriesIDs, reach)
+	ovs, err := read(ctx, seriesIDs, reach)
 	if err != nil {
 		return nil, err
 	}

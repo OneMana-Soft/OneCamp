@@ -2,13 +2,13 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/authcookie"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
-	"github.com/google/uuid"
 )
 
 func VerifyRefreshTokenForLogout(next http.Handler) http.Handler {
@@ -31,9 +31,9 @@ func VerifyRefreshTokenForLogout(next http.Handler) http.Handler {
 			return
 		}
 
-		emptyUUID := uuid.UUID{}
 		userDBInfo, err := domain.GetUserByUUID(ctx, userUUID)
-		if err == nil && userDBInfo.Id == emptyUUID {
+		if errors.Is(err, helpers.ErrNotFound) {
+			// No one by that uuid: signing out still clears the cookies.
 			next.ServeHTTP(w, r)
 			return
 		}

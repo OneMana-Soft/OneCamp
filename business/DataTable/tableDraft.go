@@ -181,7 +181,7 @@ func draftInputs(gen *generatedTable) (TableInput, []FieldInput, error) {
 }
 
 func parseGeneratedTable(raw string) (*generatedTable, error) {
-	js := extractJSONObjectFrom(raw)
+	js := helpers.ExtractJSON(raw, '{')
 	if js == "" {
 		return nil, fmt.Errorf("no JSON object found")
 	}
@@ -220,46 +220,4 @@ func tableGenSystemPrompt() string {
 		"4. If workspace context is provided and the description refers to existing work (e.g. 'action items from #engineering', 'leads we discussed'), derive the seed rows from that real content. If the context is not relevant, ignore it and use plausible examples.",
 		"5. Do NOT invent ids or reference external systems. Output a single valid JSON object and nothing else.",
 	}, "\n")
-}
-
-// extractJSONObjectFrom is a local copy of the tolerant JSON-object extractor
-// (the workflow package has its own; we avoid a cross-package dependency).
-func extractJSONObjectFrom(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	start := strings.IndexByte(s, '{')
-	if start < 0 {
-		return ""
-	}
-	depth := 0
-	inString := false
-	escaped := false
-	for i := start; i < len(s); i++ {
-		c := s[i]
-		if inString {
-			switch {
-			case escaped:
-				escaped = false
-			case c == '\\':
-				escaped = true
-			case c == '"':
-				inString = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inString = true
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return s[start : i+1]
-			}
-		}
-	}
-	return ""
 }

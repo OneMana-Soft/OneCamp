@@ -21,11 +21,22 @@ package Calendar
 //     of the owner's (booked or not) forgets them at once. An event made since
 //     shows within the minute.
 //
-// Booking never trusts any of it: Book reads the page and the calendars again
-// before it takes a slot.
+// A team page (gcal-7 H4a) caches more: its hosts with their names (a page's
+// entry) and the accepted hosts' busy times (each answer). A host accepting
+// or leaving (AnswerBookingHost), and the owner saving the host list, which
+// invites some and takes others off (SaveBookingPage), forget the owner's
+// entries at once, as a page change does. Forgetting is this instance's
+// alone: on another API instance a stale entry lives out its minute, so for
+// up to a minute a public page there can still name a host who left or was
+// taken off, with their busy time still taking slots out, and a host who
+// accepted since doesn't count there yet.
+//
+// Booking never trusts any of it: Book reads the page, its hosts and the
+// calendars again before it takes a slot.
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -48,10 +59,12 @@ const (
 	unreadBusyTTL = 10 * time.Second
 )
 
-// Swapped in tests: how a page is loaded, and how busy times are read.
+// Swapped in tests: how a page is loaded, and how busy times are read (a
+// slot check's, readBusy, with the event being moved left out).
 var (
 	loadLive = loadPage
 	busyFor  = BusyFor
+	readBusy = ReadBusy
 )
 
 type pageEntry struct {
@@ -60,7 +73,9 @@ type pageEntry struct {
 }
 
 type answerEntry struct {
-	owner   string
+	// people are whose calendars it was cut from: the owner, then a team
+	// page's accepted hosts.
+	people  []string
 	page    *PublicPage
 	expires time.Time
 }
@@ -113,11 +128,20 @@ func (c *bookingPagesCache) live(ctx context.Context, slug string, now time.Time
 	return l, nil
 }
 
-// generation is how often owner's entries have been forgotten.
-func (c *bookingPagesCache) generation(owner string) uint64 {
+// generation is how often people's entries have been forgotten, all told:
+// it only grows, so any one of them forgotten changes it.
+func (c *bookingPagesCache) generation(people ...string) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.gen[owner]
+	return c.genLocked(people)
+}
+
+func (c *bookingPagesCache) genLocked(people []string) uint64 {
+	var n uint64
+	for _, p := range people {
+		n += c.gen[p]
+	}
+	return n
 }
 
 func (c *bookingPagesCache) answer(key string, now time.Time) *PublicPage {
@@ -129,12 +153,14 @@ func (c *bookingPagesCache) answer(key string, now time.Time) *PublicPage {
 	return nil
 }
 
-// putAnswer keeps a page's answer for a minute, unless its owner's entries
-// were forgotten since gen.
-func (c *bookingPagesCache) putAnswer(key, owner string, gen uint64, p *PublicPage, now time.Time) {
+// putAnswer keeps a page's answer for a minute, unless one of the people it
+// was cut from (its owner and a team page's accepted hosts) had their entries
+// forgotten since gen.
+func (c *bookingPagesCache) putAnswer(key, owner string, gen uint64, p *PublicPage, now time.Time, hosts ...string) {
+	people := append([]string{owner}, hosts...)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.gen[owner] != gen {
+	if c.genLocked(people) != gen {
 		return
 	}
 	if len(c.answers) >= maxBookingAnswers {
@@ -147,7 +173,7 @@ func (c *bookingPagesCache) putAnswer(key, owner string, gen uint64, p *PublicPa
 			return // never flush what visitors are using
 		}
 	}
-	c.answers[key] = answerEntry{owner: owner, page: p, expires: now.Add(bookingCacheTTL)}
+	c.answers[key] = answerEntry{people: people, page: p, expires: now.Add(bookingCacheTTL)}
 }
 
 // busyOf is when owner is busy between from and to, read at most once a
@@ -177,7 +203,13 @@ func (c *bookingPagesCache) busyOf(ctx context.Context, owner string, from, to, 
 			}
 		}
 		c.mu.Unlock()
-		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), busyReadTimeout)
+		// The read outlives the visit that started it (others may wait on
+		// it), but not the team read's one timeout (teamBusy).
+		deadline := time.Now().Add(busyReadTimeout)
+		if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+			deadline = d
+		}
+		rctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 		defer cancel()
 		busy, err := busyFor(rctx, owner, lo, hi)
 		if err != nil {
@@ -246,7 +278,7 @@ func (c *bookingPagesCache) forgetBusy(people ...string) {
 func (c *bookingPagesCache) forgetBusyLocked(owner string) {
 	delete(c.busy, owner)
 	for k, e := range c.answers {
-		if e.owner == owner {
+		if slices.Contains(e.people, owner) {
 			delete(c.answers, k)
 		}
 	}

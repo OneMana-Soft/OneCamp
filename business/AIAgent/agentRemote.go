@@ -82,7 +82,7 @@ func resolveRemoteCard(ctx context.Context, protocol, endpoint, header, secret s
 	defer cancel()
 	card, err := fetchA2ACardFn(cctx, endpoint, header, secret, safefetch.EndpointPolicy(addedByAdmin))
 	if err != nil {
-		return nil, fmt.Errorf("%s", remoteCheckError(err, addedByAdmin))
+		return nil, checkRefused(remoteCheckError(err, addedByAdmin))
 	}
 	return json.Marshal(card)
 }

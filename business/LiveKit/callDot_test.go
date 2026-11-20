@@ -34,19 +34,25 @@ var (
 // and ListParticipants. A room that isn't given doesn't exist, and LiveKit says
 // so as it does. It answers what it was asked. A listing comes back in the
 // order the names were asked (every room by name when none were), so a dot
-// that stops at the first person asks the same rooms every run.
+// that stops at the first person asks the same rooms every run. The rooms can
+// change under it (askedOf.set), and a request can be made to fail as a
+// LiveKit that can't answer fails (askedOf.failing).
 func fakeRooms(t *testing.T, rooms map[string][]*livekit.ParticipantInfo) *askedOf {
 	t.Helper()
 	const key, secret = "test-key", "test-secret-long-enough-to-sign-with"
-	asked := &askedOf{n: map[string]int{}}
+	asked := &askedOf{n: map[string]int{}, rooms: rooms, fails: map[string]bool{}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var out proto.Message
+		rooms := asked.now()
 		switch path.Base(r.URL.Path) {
 		case "ListRooms":
 			var req livekit.ListRoomsRequest
 			_ = proto.Unmarshal(body, &req)
-			asked.add("ListRooms")
+			if asked.add("ListRooms") {
+				cantAnswer(w)
+				return
+			}
 			names := req.Names
 			if len(names) == 0 {
 				names = slices.Sorted(maps.Keys(rooms))
@@ -61,7 +67,10 @@ func fakeRooms(t *testing.T, rooms map[string][]*livekit.ParticipantInfo) *asked
 		case "ListParticipants":
 			var req livekit.ListParticipantsRequest
 			_ = proto.Unmarshal(body, &req)
-			asked.add("ListParticipants " + req.Room)
+			if asked.add("ListParticipants " + req.Room) {
+				cantAnswer(w)
+				return
+			}
 			in, ok := rooms[req.Room]
 			if !ok {
 				w.Header().Set("Content-Type", "application/json")
@@ -84,20 +93,75 @@ func fakeRooms(t *testing.T, rooms map[string][]*livekit.ParticipantInfo) *asked
 		LiveKitClient: lksdk.NewRoomServiceClient(server.URL, key, secret),
 		Config:        &livekitInit.LiveKitConfigStruct{HostURL: server.URL, ApiKey: key, ApiSecret: secret},
 	}
+	// Another call server has other calls: nothing kept from the last one.
+	CallRoomsChanged()
+	t.Cleanup(CallRoomsChanged)
 	return asked
 }
 
-// askedOf counts the requests a fake LiveKit was sent, by method and room. Its
-// server writes it while the test reads it.
-type askedOf struct {
-	mu sync.Mutex
-	n  map[string]int
+// cantAnswer is LiveKit failing a request: not a missing room, an error.
+func cantAnswer(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	_, _ = w.Write([]byte(`{"code":"internal","msg":"the call server can't answer"}`))
 }
 
-func (a *askedOf) add(request string) {
+// askedOf counts the requests a fake LiveKit was sent, by method and room, and
+// holds the rooms it answers from and the requests it fails. Its server reads
+// and writes it while the test does.
+type askedOf struct {
+	mu    sync.Mutex
+	n     map[string]int
+	rooms map[string][]*livekit.ParticipantInfo
+	fails map[string]bool
+	// while is what happens while a request is answered (whileAsked).
+	while map[string]func()
+}
+
+// add counts a request, does what happens while it's answered, and says
+// whether it fails.
+func (a *askedOf) add(request string) bool {
+	a.mu.Lock()
+	a.n[request]++
+	fails, while := a.fails[request], a.while[request]
+	a.mu.Unlock()
+	if while != nil {
+		while()
+	}
+	return fails
+}
+
+// whileAsked has something happen while a request is being answered (nil:
+// nothing), as a webhook comes in while a read is under way.
+func (a *askedOf) whileAsked(request string, do func()) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.n[request]++
+	if a.while == nil {
+		a.while = map[string]func(){}
+	}
+	a.while[request] = do
+}
+
+// now is the rooms as they are, for one answer.
+func (a *askedOf) now() map[string][]*livekit.ParticipantInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return maps.Clone(a.rooms)
+}
+
+// set changes the rooms, as people come and go.
+func (a *askedOf) set(rooms map[string][]*livekit.ParticipantInfo) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.rooms = rooms
+}
+
+// failing makes a request ("ListRooms", "ListParticipants <room>") fail, or
+// answer again.
+func (a *askedOf) failing(request string, fails bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.fails[request] = fails
 }
 
 func (a *askedOf) counts() map[string]int {
@@ -253,5 +317,124 @@ func TestACallsDotStopsAtTheFirstPersonInItsBreakoutRooms(t *testing.T) {
 	}
 	if got["ListParticipants "+own] != 1 || got["ListRooms"] != 1 || breakouts != 1 {
 		t.Errorf("with a person in each of 10 breakout rooms, the dot asked LiveKit %v; want its own room, one listing and one breakout room", got)
+	}
+}
+
+// H3C (BACKEND-OPT, 19 Nov 2026). The sidebar asked LiveKit for every room on
+// every load, then who was in each room someone was in: one listing plus one
+// more per call going on, each time anybody opened the app. The answer is kept
+// for 3 seconds, so the loads in that time ask LiveKit nothing. What a load is
+// handed is its own: changing it changes no other load's.
+func TestTheSidebarAsksLiveKitOnceWithinTheTTL(t *testing.T) {
+	asked := fakeRooms(t, map[string][]*livekit.ParticipantInfo{"a": {aPerson}, "b": {aPerson}, "quiet": nil})
+	roomsOfCalls(t, nil)
+	ctx := context.Background()
+	for load := 1; load <= 2; load++ {
+		lit, err := HumanActiveRoomNames(ctx)
+		if err != nil || len(lit) != 2 || !lit["a"] || !lit["b"] {
+			t.Fatalf("load %d: the sidebar's dots %v (%v), want a and b lit", load, lit, err)
+		}
+		lit["someone else's"] = true
+	}
+	want := map[string]int{"ListRooms": 1, "ListParticipants a": 1, "ListParticipants b": 1}
+	if got := asked.counts(); !maps.Equal(got, want) {
+		t.Errorf("two sidebar loads within 3 s asked LiveKit %v; want %v, one read for both", got, want)
+	}
+}
+
+// A read that failed is never kept, nor one that is missing a room: LiveKit's
+// listing failing fails that load and the next asks again; a room whose people
+// couldn't be read counts as nobody's for that load (the sidebar still
+// answers, as it always did), and the next load asks again.
+func TestARoomReadThatFailedIsNotKept(t *testing.T) {
+	roomsOfCalls(t, nil)
+	ctx := context.Background()
+	t.Run("LiveKit's listing failed", func(t *testing.T) {
+		asked := fakeRooms(t, map[string][]*livekit.ParticipantInfo{"a": {aPerson}})
+		asked.failing("ListRooms", true)
+		if lit, err := HumanActiveRoomNames(ctx); err == nil {
+			t.Fatalf("a listing LiveKit failed lit %v, want its error", lit)
+		}
+		asked.failing("ListRooms", false)
+		if lit, err := HumanActiveRoomNames(ctx); err != nil || !lit["a"] {
+			t.Fatalf("the next load's dots %v (%v), want a lit", lit, err)
+		}
+		if got := asked.counts()["ListRooms"]; got != 2 {
+			t.Errorf("a failed listing and the load after it asked LiveKit %d times, want 2: a failure is never kept", got)
+		}
+	})
+	t.Run("one room's people couldn't be read", func(t *testing.T) {
+		asked := fakeRooms(t, map[string][]*livekit.ParticipantInfo{"a": {aPerson}, "b": {aPerson}})
+		asked.failing("ListParticipants b", true)
+		if lit, err := HumanActiveRoomNames(ctx); err != nil || !lit["a"] || lit["b"] {
+			t.Fatalf("with b unreadable the sidebar's dots %v (%v), want a lit and b out for this load", lit, err)
+		}
+		asked.failing("ListParticipants b", false)
+		if lit, err := HumanActiveRoomNames(ctx); err != nil || !lit["a"] || !lit["b"] {
+			t.Fatalf("the next load's dots %v (%v), want a and b lit: a read missing a room is never kept", lit, err)
+		}
+		if got := asked.counts(); got["ListRooms"] != 2 || got["ListParticipants b"] != 2 {
+			t.Errorf("a read missing b and the load after it asked LiveKit %v, want 2 listings and b read twice", got)
+		}
+	})
+}
+
+// The kept answer only lights the sidebar's dots, rows of the reader's own
+// conversations. It never answers whether a call is going on for a join, a
+// ring or a recording (IsCallActive), nor whether its room is there to join
+// (CheckRoomExists): those ask LiveKit every time, a kept answer or not.
+func TestTheJoinPathAsksLiveKitEveryTime(t *testing.T) {
+	asked := fakeRooms(t, map[string][]*livekit.ParticipantInfo{"a": {aPerson}})
+	roomsOfCalls(t, nil)
+	ctx := context.Background()
+	if lit, err := HumanActiveRoomNames(ctx); err != nil || !lit["a"] {
+		t.Fatalf("the sidebar's dots %v (%v), want a lit", lit, err)
+	}
+	// The call ends, and its webhook hasn't come.
+	asked.set(map[string][]*livekit.ParticipantInfo{})
+	for try := 1; try <= 2; try++ {
+		if active, err := IsCallActive(ctx, "a"); err != nil || active {
+			t.Errorf("try %d: the ended call is going on %v (%v), want over", try, active, err)
+		}
+		if exists, err := CheckRoomExists(ctx, "a"); err != nil || exists {
+			t.Errorf("try %d: the ended call's room is there %v (%v), want gone", try, exists, err)
+		}
+	}
+	want := map[string]int{"ListRooms": 3, "ListParticipants a": 3}
+	if got := asked.counts(); !maps.Equal(got, want) {
+		t.Errorf("a sidebar load and two joins asked LiveKit %v; want %v, each join asking", got, want)
+	}
+}
+
+// A call event empties the kept answer (CallRoomsChanged, which the webhook
+// calls for room_finished, participant_joined and participant_left once the
+// room is found ours: tests/integration TestACallEventEmptiesTheRoomsCache
+// sends each). A read under way when one comes serves its own load and isn't
+// kept: it may have been answered before the change.
+func TestCallRoomsChangedEmptiesTheRoomsCache(t *testing.T) {
+	asked := fakeRooms(t, map[string][]*livekit.ParticipantInfo{"a": {aPerson}})
+	roomsOfCalls(t, nil)
+	ctx := context.Background()
+	dots := func(want string, when string) {
+		t.Helper()
+		lit, err := HumanActiveRoomNames(ctx)
+		if err != nil || len(lit) != 1 || !lit[want] {
+			t.Fatalf("%s: the sidebar's dots %v (%v), want %s lit alone", when, lit, err, want)
+		}
+	}
+	dots("a", "a call in a")
+	asked.set(map[string][]*livekit.ParticipantInfo{"b": {aPerson}})
+	dots("a", "the call moved to b, its event not here yet: the answer kept")
+	CallRoomsChanged()
+	dots("b", "once its event is here")
+
+	asked.set(map[string][]*livekit.ParticipantInfo{"c": {aPerson}})
+	CallRoomsChanged()
+	asked.whileAsked("ListRooms", CallRoomsChanged)
+	dots("c", "an event while LiveKit was being asked")
+	asked.whileAsked("ListRooms", nil)
+	dots("c", "the load after it")
+	if got := asked.counts()["ListRooms"]; got != 4 {
+		t.Errorf("LiveKit was asked for its rooms %d times, want 4: a load, one after the event, the one the next event overtook and the one after it", got)
 	}
 }

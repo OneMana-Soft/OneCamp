@@ -42,7 +42,7 @@ func handleAsk(ctx context.Context, cc CommandContext) (*commandAdapter.CommandR
 
 	svc := ai.GetService()
 	if svc == nil || !svc.IsEnabled() {
-		return errorResponse("OneCamp AI isn't enabled yet. An admin can turn it on under Admin → AI Models."), nil
+		return errorResponse("OneCamp AI isn't enabled yet. An admin can turn it on under Admin → AI & agents."), nil
 	}
 
 	// Bound the call so a slow model can't hang the request.
@@ -92,7 +92,7 @@ func handleAsk(ctx context.Context, cc CommandContext) (*commandAdapter.CommandR
 func testOneCampAI(_ context.Context, _ uuid.UUID) *commandAdapter.AppTestResult {
 	svc := ai.GetService()
 	if svc == nil || !svc.IsEnabled() {
-		return &commandAdapter.AppTestResult{Success: false, Message: "OneCamp AI is not enabled. Turn it on under Admin → AI Models."}
+		return &commandAdapter.AppTestResult{Success: false, Message: "OneCamp AI is not enabled. Turn it on under Admin → AI & agents."}
 	}
 	if cfg := ai.GetConfig(); cfg != nil {
 		return &commandAdapter.AppTestResult{Success: true, Message: fmt.Sprintf("Ready — using %s / %s.", cfg.Provider(), cfg.ActiveModel())}

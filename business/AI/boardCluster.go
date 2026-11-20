@@ -181,7 +181,7 @@ type boardClusterRaw struct {
 // the client didn't send), each item is assigned to at most one theme (first
 // wins), empty themes are dropped, and theme count is capped.
 func parseBoardClusters(raw string, validIDs map[string]bool) (*parsedClusters, error) {
-	js := extractJSONObject(raw)
+	js := helpers.ExtractJSON(raw, '{')
 	if js == "" {
 		return nil, fmt.Errorf("no JSON object found")
 	}

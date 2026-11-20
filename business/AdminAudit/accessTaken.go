@@ -54,7 +54,7 @@ func Given(shifts []AccessShift) []AccessShift {
 
 // RoleShifts is how a change to who holds which role on something moves each
 // person it names. before is each holder's level now; add and remove are the
-// change's user uuids by level ("edit", "comment", "view"). A person ends with
+// change's user uuids by level ("full", "edit", "comment", "view"). A person ends with
 // the highest level they hold after the change. Ids are matched as the role
 // writer stores them, in lower case. People the change doesn't name, and names
 // that move nothing, are left out; the order is the change's first mention of
@@ -78,7 +78,7 @@ func RoleShifts(before map[string]string, add, remove map[string][]string) []Acc
 			held[id] = map[string]bool{}
 		}
 	}
-	for _, l := range []string{"edit", "comment", "view"} {
+	for _, l := range []string{"full", "edit", "comment", "view"} {
 		for _, id := range remove[l] {
 			if id = strings.ToLower(id); id != "" {
 				note(id)
@@ -86,7 +86,7 @@ func RoleShifts(before map[string]string, add, remove map[string][]string) []Acc
 			}
 		}
 	}
-	for _, l := range []string{"edit", "comment", "view"} {
+	for _, l := range []string{"full", "edit", "comment", "view"} {
 		for _, id := range add[l] {
 			if id = strings.ToLower(id); id != "" {
 				note(id)

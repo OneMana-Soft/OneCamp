@@ -145,8 +145,8 @@ var (
 // (ownerScopesNow, memoryScopes: the check every memory reader uses). ok is
 // false when the profile can't be read: then nothing is sent.
 func readableDigestItems(ctx context.Context, ownerID uuid.UUID, items []*memoryModels.MemoryItem) ([]*memoryModels.MemoryItem, bool) {
-	scopes := ownerScopesNow(ctx, ownerID)
-	if scopes == nil {
+	scopes, err := ownerScopesNow(ctx, ownerID)
+	if err != nil || scopes == nil {
 		return nil, false
 	}
 	return scopes.readable(items), true

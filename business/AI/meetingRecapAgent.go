@@ -75,7 +75,7 @@ Produce a concise recap with EXACTLY these sections, in this order, using markdo
 - Each concrete decision made. If none, write "- None".
 
 **📋 Action Items**
-- Each task someone committed to, prefixed with the owner when stated (e.g. "@name: do X by Friday"). If none, write "- None".
+- Each task someone committed to, one per line, as "@Name: the task" when the transcript says who will do it, else "the task" alone; end it with "(due YYYY-MM-DD)" when the transcript states a deadline, the date looked up in the days listed before the transcript (e.g. "@Maya: send the deck (due 2026-11-14)"). If none, write "- None".
 
 Rules:
 - The transcript may be in ANY language, or mix several. Understand it regardless of language.
@@ -119,6 +119,42 @@ func MaybeRunMeetingRecap(call liveKitBusiness.FinishedCall) {
 	})
 }
 
+func init() { liveKitBusiness.OnRecapMade(callsAreSummarised) }
+
+// recapsOn answers the settings and the model a meeting recap is written with,
+// or nil settings while the workspace writes none: AI off, the recap off (it is
+// opt-in), or no model ready. The one rule for the recap at a call's end and
+// for what every call screen is told before it (callsAreSummarised).
+func recapsOn(ctx context.Context) (*aiModels.AISettings, *ai.AIService, error) {
+	settings, err := aiModels.GetSettings(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load settings: %w", err)
+	}
+	svc := ai.GetService()
+	if !recapsAreOn(settings, svc) {
+		return nil, nil, nil
+	}
+	return settings, svc, nil
+}
+
+// recapsAreOn is recapsOn's rule: AI on, the recap on, and a model ready.
+// Pure.
+func recapsAreOn(settings *aiModels.AISettings, svc *ai.AIService) bool {
+	return settings.Enabled && settings.MeetingRecapEnabled && svc.IsEnabled()
+}
+
+// callsAreSummarised answers every call screen whether a call that keeps its
+// transcript gets a recap (business/LiveKit's switch, OnRecapMade). Settings
+// that can't be read answer no: a screen never promises what the server can't
+// vouch for.
+func callsAreSummarised(ctx context.Context) bool {
+	settings, _, err := recapsOn(ctx)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/AI/callsAreSummarised: %+v", err)
+	}
+	return settings != nil
+}
+
 // recapWindowSlack widens the call's window when picking the recordings made
 // during it (domain/Recording CallWindowSlack, which a board's calls use too).
 const recapWindowSlack = recordingDomain.CallWindowSlack
@@ -131,18 +167,13 @@ func runMeetingRecap(ctx context.Context, call liveKitBusiness.FinishedCall) err
 		return nil
 	}
 
-	// 1. Gate on settings.
-	settings, err := aiModels.GetSettings(ctx)
+	// 1. Gate on settings, by the rule every call screen was told by.
+	settings, svc, err := recapsOn(ctx)
 	if err != nil {
-		return fmt.Errorf("load settings: %w", err)
+		return err
 	}
-	if !settings.Enabled || !settings.MeetingRecapEnabled {
+	if settings == nil {
 		return nil // feature off — silent no-op
-	}
-
-	svc := ai.GetService()
-	if !svc.IsEnabled() {
-		return nil
 	}
 
 	// Where the recap goes: the call's conversation, or for an event's call
@@ -206,7 +237,7 @@ func runMeetingRecap(ctx context.Context, call liveKitBusiness.FinishedCall) err
 	if err := svc.Resiliency.CB.Allow(); err != nil {
 		return fmt.Errorf("circuit open, skipping recap: %w", err)
 	}
-	recap, err := svc.SummarizeFor(ctx, ai.PurposeMeetings, transcript, composeRecapPrompt(settings.MeetingRecapInstructions))
+	recap, err := svc.SummarizeFor(ctx, ai.PurposeMeetings, recapCalendar(call.Ended)+transcript, composeRecapPrompt(settings.MeetingRecapInstructions))
 	if err != nil {
 		svc.Resiliency.CB.RecordResult(err)
 		return fmt.Errorf("summarize: %w", err)
@@ -224,46 +255,9 @@ func runMeetingRecap(ctx context.Context, call liveKitBusiness.FinishedCall) err
 		return nil
 	}
 
-	// 7-8. Deliver the recap, authored by the first participant who
-	// actually has access to the surface. Trying candidates in order makes
-	// delivery resilient to a lead speaker who left the workspace or was
-	// removed from the channel after the call.
-	if len(speakerUIDs) == 0 {
-		return fmt.Errorf("no resolvable participant to author recap")
-	}
-	// 8. The notes document (opt-in), BEFORE delivery, so the message can link
-	//    to it. A document nobody can reach from the call it describes is a
-	//    document nobody finds.
-	//
-	//    Ordering it first costs nothing it used to protect: every failure here
-	//    is swallowed into an empty id, so the recap is delivered either way and
-	//    the only difference is whether it carries a link. What must never
-	//    happen is the document becoming a reason the message does not arrive.
-	// What the transcript could not hear, said once, in both places it is
-	// written down.
-	gapNote := transcriptGapNote(ctx, call.SessionKey)
-
-	notesDocUUID := ""
-	if settings.MeetingNotesDocEnabled {
-		docUUID, derr := createMeetingNotesDoc(ctx, home.surfaceName(ctx, roomName, helpers.FirstNonBlank(speakerUIDs...)), call, home, speakerUIDs, recap, gapNote, lines, nameByUID)
-		if derr != nil {
-			helpers.LogErrorWithContext(ctx, "AI meeting recap: notes document for room %q failed: %+v", roomName, derr)
-		} else if docUUID != "" {
-			notesDocUUID = docUUID
-			helpers.LogInfoWithContext(ctx, "AI meeting recap: notes document %s written for room %q", docUUID, roomName)
-		}
-	}
-
-	// 9. Deliver it, then note on the call's transcript what it made: the
-	//    notes, and for an event's call the conversation it went to, which the
-	//    event links to. An event with no conversation keeps its notes alone.
-	authorUUID := ""
-	if home.conv.Kind != "" {
-		authorUUID, err = deliverRecapWithFallback(ctx, home, speakerUIDs, recap, egressID, notesDocUUID, gapNote)
-	}
-	if rerr := recordCallArtefacts(ctx, call.SessionKey, notesDocUUID, home.recapChat(authorUUID != "")); rerr != nil {
-		helpers.LogErrorWithContext(ctx, "AI meeting recap: could not note the call's artefacts for room %q: %+v", roomName, rerr)
-	}
+	// 7-9. Deliver it, write its notes, keep it on the call and tell an
+	//      event's people (deliverAndKeepRecap).
+	authorUUID, err := deliverAndKeepRecap(ctx, call, home, settings.MeetingNotesDocEnabled, speakerUIDs, recap, egressID, lines, nameByUID)
 	if err != nil || authorUUID == "" {
 		return err
 	}
@@ -276,6 +270,66 @@ func runMeetingRecap(ctx context.Context, call liveKitBusiness.FinishedCall) err
 	//    and high-signal.
 	extractMemoryFromRecap(ctx, home.conv, roomName, authorUUID, recap)
 	return nil
+}
+
+// The recap's notes document, its delivery and what the transcript couldn't
+// hear (seams for tests).
+var (
+	makeNotesDoc   = createMeetingNotesDoc
+	deliverRecapTo = deliverRecapWithFallback
+	gapNoteOf      = transcriptGapNote
+)
+
+// deliverAndKeepRecap delivers a call's recap (the model's words, never its
+// transcript) where the call keeps it, writes its notes document when they
+// are on, keeps it on the call's transcript node and tells an event's people
+// of it (keepRecap). It answers who the recap was posted as ("" for nowhere:
+// an event with no conversation keeps it on the event alone).
+func deliverAndKeepRecap(ctx context.Context, call liveKitBusiness.FinishedCall, home recapHome, notesOn bool, speakerUIDs []string, recap, egressID string,
+	lines []transcriptDomain.TranscriptLine, nameByUID map[string]string) (string, error) {
+	roomName := call.Room
+	// 7-8. Deliver the recap, authored by the first participant who
+	// actually has access to the surface. Trying candidates in order makes
+	// delivery resilient to a lead speaker who left the workspace or was
+	// removed from the channel after the call.
+	if len(speakerUIDs) == 0 {
+		return "", fmt.Errorf("no resolvable participant to author recap")
+	}
+	// 8. The notes document (opt-in), BEFORE delivery, so the message can link
+	//    to it. A document nobody can reach from the call it describes is a
+	//    document nobody finds.
+	//
+	//    Ordering it first costs nothing it used to protect: every failure here
+	//    is swallowed into an empty id, so the recap is delivered either way and
+	//    the only difference is whether it carries a link. What must never
+	//    happen is the document becoming a reason the message does not arrive.
+	// What the transcript could not hear, said once, in both places it is
+	// written down.
+	gapNote := gapNoteOf(ctx, call.SessionKey)
+
+	notesDocUUID := ""
+	if notesOn {
+		docUUID, derr := makeNotesDoc(ctx, home.surfaceName(ctx, roomName, helpers.FirstNonBlank(speakerUIDs...)), call, home, speakerUIDs, recap, gapNote, lines, nameByUID)
+		if derr != nil {
+			helpers.LogErrorWithContext(ctx, "AI meeting recap: notes document for room %q failed: %+v", roomName, derr)
+		} else if docUUID != "" {
+			notesDocUUID = docUUID
+			helpers.LogInfoWithContext(ctx, "AI meeting recap: notes document %s written for room %q", docUUID, roomName)
+		}
+	}
+
+	// 9. Deliver it, then keep on the call's transcript what it made: the
+	//    recap's words and action items (always), the notes, and for an
+	//    event's call the conversation it went to, which the event links to;
+	//    and tell an event's people (keepRecap). An event with no
+	//    conversation keeps them on the event alone.
+	authorUUID := ""
+	var err error
+	if home.conv.Kind != "" {
+		authorUUID, err = deliverRecapTo(ctx, home, speakerUIDs, recap, egressID, notesDocUUID, gapNote)
+	}
+	keepRecap(ctx, call, home, recap, notesDocUUID, home.recapChat(authorUUID != ""))
+	return authorUUID, err
 }
 
 // firstNonEmpty returns the first non-blank string, or "".
@@ -837,7 +891,7 @@ func htmlAttrEscape(s string) string {
 func recapToHTML(recap, playAttrs, notesDocUUID, gapNote string) string {
 	var sb strings.Builder
 	sb.WriteString("<p><strong>🤖 Meeting Recap</strong></p>")
-	sb.WriteString(modelTextToHTML(recap))
+	sb.WriteString(modelTextToHTML(recapForChat(recap)))
 	if attrs := strings.TrimSpace(playAttrs); attrs != "" {
 		sb.WriteString(fmt.Sprintf(`<div data-type="recording-embed"%s></div>`, playAttrs))
 	}

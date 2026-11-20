@@ -37,6 +37,7 @@ type relationWorld struct {
 	ctx    context.Context
 	me     Actor
 	member Actor
+	env    *integration.Env
 }
 
 func newRelationWorld(t *testing.T) *relationWorld {
@@ -54,7 +55,7 @@ func newRelationWorld(t *testing.T) *relationWorld {
 		}
 		return id
 	}
-	return &relationWorld{t: t, ctx: ctx, me: Actor{UserID: user("owner")}, member: Actor{UserID: user("member")}}
+	return &relationWorld{t: t, ctx: ctx, me: Actor{UserID: user("owner")}, member: Actor{UserID: user("member")}, env: env}
 }
 
 func (w *relationWorld) table(name string) (*model.DataTable, *model.Field) {

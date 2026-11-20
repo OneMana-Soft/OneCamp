@@ -1,13 +1,19 @@
 package controllers
 
 // POST /tables/{id}/export: a view of a table as an Excel workbook
-// (business/DataTable xlsxExport.go), written as it streams out.
+// (business/DataTable xlsxExport.go); POST /tables/export: every table the
+// reader can open as one, a sheet each (tablesExport.go). Each is written as
+// it streams out, and each is one row in the workspace's admin audit log.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 
+	adminAuditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	business "github.com/akashc777/OneCamp/business/DataTable"
 	query "github.com/akashc777/OneCamp/business/QuerySpec"
 	rowQuery "github.com/akashc777/OneCamp/business/RowQuery"
@@ -38,15 +44,55 @@ func ExportTable(w http.ResponseWriter, r *http.Request) {
 		WriteQueryErr(w, r, err)
 		return
 	}
+	recordExport(r, "table.exported", "Exported a table to Excel", []string{id.String()})
+	sendWorkbook(ctx, w, export.Name, export.WriteXLSX)
+}
+
+// ExportTables POST /tables/export → every table the reader can open as one
+// .xlsx file, a sheet each; a reader who can open none, or more than one
+// workbook holds, is refused in words (422).
+func ExportTables(w http.ResponseWriter, r *http.Request) {
+	ctx := readerCtx(r)
+	export, err := business.PrepareTablesExport(ctx, actorFrom(r))
+	if err != nil {
+		if business.IsTablesExportRefused(err) {
+			helpers.WriteJSON(w, http.StatusUnprocessableEntity, helpers.Envolope{"msg": err.Error()})
+			return
+		}
+		WriteQueryErr(w, r, err)
+		return
+	}
+	tables := export.Tables()
+	recordExport(r, "tables.exported", fmt.Sprintf("Exported every table they can open to Excel, %d in one workbook", len(tables)), tables)
+	sendWorkbook(ctx, w, "Tables", export.WriteXLSX)
+}
+
+// recordExport writes an export's one row in the workspace's admin audit log,
+// under the tables' area: who exported, the ids of the tables the workbook
+// holds (never their names: a private table's name isn't the log's to show),
+// and when. A workbook is the tables' data leaving OneCamp. The row is written
+// as the workspace export's is (controllers/ContentIO): handed to the log's
+// writer once the export is allowed, before the file streams out; a row that
+// can't be written is logged there, and the export goes ahead.
+func recordExport(r *http.Request, action, summary string, tables []string) {
+	adminAuditBusiness.Record(r, action, adminAuditBusiness.CategoryTables, summary,
+		map[string]interface{}{"table_ids": tables, "format": "xlsx"})
+}
+
+// sendWorkbook answers an Excel workbook, its file named name, as write
+// writes it.
+func sendWorkbook(ctx context.Context, w http.ResponseWriter, name string, write func(context.Context, io.Writer) ([]string, error)) {
 	h := w.Header()
 	h.Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-	h.Set("Content-Disposition", uploadsafe.BuildDisposition(uploadsafe.SanitiseFileName(export.Name, 80)+".xlsx"))
+	h.Set("Content-Disposition", uploadsafe.BuildDisposition(uploadsafe.SanitiseFileName(name, 80)+".xlsx"))
 	h.Set("Cache-Control", "no-store")
-	if _, err := export.WriteXLSX(ctx, w); err != nil {
+	if _, err := write(ctx, w); err != nil {
 		// The file has begun, so no answer can say so: the connection ends
 		// unfinished, and the reader's download fails rather than keeping
-		// part of a workbook.
-		helpers.LogErrorWithContext(ctx, "controllers/DataTable ExportTable: %v", err)
+		// part of a workbook. The line never names the file: for one
+		// table's export it is the table's name, and a private table's name
+		// isn't the log's to show.
+		helpers.LogErrorWithContext(ctx, "controllers/DataTable a workbook broke off: %v", err)
 		panic(http.ErrAbortHandler)
 	}
 }

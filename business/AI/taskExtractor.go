@@ -33,6 +33,7 @@ import (
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	triageBusiness "github.com/akashc777/OneCamp/business/Triage"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
@@ -380,9 +381,8 @@ func decodeTaskItems(out string) (items []rawProposedTask, ok bool) {
 	s := strings.TrimSpace(out)
 	s = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(s, "```json"), "```"), "```")
 	s = strings.TrimSpace(s)
-	if start, end := strings.Index(s, "{"), strings.LastIndex(s, "}"); start != -1 && end > start &&
-		(strings.Index(s, "[") == -1 || start < strings.Index(s, "[")) {
-		obj := s[start : end+1]
+	if open, arr := strings.IndexByte(s, '{'), strings.IndexByte(s, '['); open != -1 && (arr == -1 || open < arr) {
+		obj := helpers.ExtractJSON(s, '{')
 		var wrapped struct {
 			Tasks *[]rawProposedTask `json:"tasks"`
 		}
@@ -394,7 +394,7 @@ func decodeTaskItems(out string) (items []rawProposedTask, ok bool) {
 			return []rawProposedTask{one}, true
 		}
 	}
-	if js := extractJSONArray(s); js != "" {
+	if js := helpers.ExtractJSON(s, '['); js != "" {
 		if json.Unmarshal([]byte(js), &items) == nil {
 			return items, true
 		}
@@ -455,39 +455,70 @@ func normalizeDueDate(s string) string {
 // CreateTasksFromProposals creates the chosen tasks in the target project AS
 // the user, through the normal task path (Work Access checked once). Each
 // task's assignee is resolved (uuid or name) and its due date set when
-// present. Returns the count created and any per-task failures (best-effort;
-// one bad task never aborts the batch). Generic: works for any source.
-func CreateTasksFromProposals(ctx context.Context, userInfo *userModels.UserInfo, projectUUID string, tasks []ProposedTask) (created int, failed int, err error) {
+// present. Returns the count created, any per-task failures (best-effort;
+// one bad task never aborts the batch) and how many of those made wait in
+// the project's triage (work from a conversation is triage's, linear-21
+// H1). Generic: works for any source.
+func CreateTasksFromProposals(ctx context.Context, userInfo *userModels.UserInfo, projectUUID string, tasks []ProposedTask) (created, failed, held int, err error) {
 	if len(tasks) == 0 {
-		return 0, 0, fmt.Errorf("no tasks to create")
+		return 0, 0, 0, fmt.Errorf("no tasks to create")
 	}
-	projectParsed, perr := uuid.Parse(strings.TrimSpace(projectUUID))
-	if perr != nil {
-		return 0, 0, fmt.Errorf("invalid project id")
-	}
-	dgraphProject, derr := projectDomain.GetBasicDgraphProjectInfo(ctx, projectUUID, userInfo.UserDgraphInfo.Uid)
-	if derr != nil || dgraphProject == nil || dgraphProject.Uuid == "" {
-		return 0, 0, fmt.Errorf("project not found or you don't have access")
-	}
-	if !dgraphProject.ReaderIsIn() {
-		return 0, 0, fmt.Errorf("project not found or you don't have access")
-	}
-	standing, serr := workAccess.Of(ctx, userInfo.UserDgraphInfo.Uuid, dgraphProject)
-	if serr != nil {
-		return 0, 0, fmt.Errorf("couldn't check what you can do in project '%s': %w", dgraphProject.Name, serr)
-	}
-	if err := standing.Check(workAccess.NeedCreateTask); err != nil {
-		return 0, 0, fmt.Errorf("project '%s': %w", dgraphProject.Name, err)
+	projectParsed, dgraphProject, err := projectToAddTasksTo(ctx, userInfo, projectUUID)
+	if err != nil {
+		return 0, 0, 0, err
 	}
 
 	for _, t := range tasks {
-		if _, cerr := createProposedTask(ctx, userInfo, projectParsed, dgraphProject, t, strings.TrimSpace(t.Description)); cerr != nil {
+		taskUUID, cerr := createProposedTask(ctx, userInfo, projectParsed, dgraphProject, t, strings.TrimSpace(t.Description))
+		if cerr != nil {
 			failed++
 			continue
 		}
 		created++
+		if arriveInTriage(ctx, "business/AI CreateTasksFromProposals", projectParsed, taskUUID, triageBusiness.FromChat,
+			triageBusiness.Requester{UserUUID: &userInfo.UserPostgresInfo.Id}) {
+			held++
+		}
 	}
-	return created, failed, nil
+	return created, failed, held, nil
+}
+
+// ProjectRefusal is a project someone may not add tasks to: there is no such
+// project, they can't see it, or Work Access doesn't let them add tasks to
+// it. Its words say which, as the person may be told.
+type ProjectRefusal struct {
+	msg string
+	err error
+}
+
+func (e *ProjectRefusal) Error() string { return e.msg }
+
+// Unwrap is Work Access's refusal, when it is one.
+func (e *ProjectRefusal) Unwrap() error { return e.err }
+
+// projectToAddTasksTo is the project (by its uuid) as the person sees it, when
+// they may add tasks to it (Work Access, checked once): the one rule every
+// way of making tasks from talk keeps. A ProjectRefusal for any other.
+func projectToAddTasksTo(ctx context.Context, userInfo *userModels.UserInfo, projectUUID string) (uuid.UUID, *dgraphStruct.DgraphProject, error) {
+	projectParsed, perr := uuid.Parse(strings.TrimSpace(projectUUID))
+	if perr != nil {
+		return uuid.Nil, nil, &ProjectRefusal{msg: "invalid project id"}
+	}
+	dgraphProject, derr := projectDomain.GetBasicDgraphProjectInfo(ctx, projectUUID, userInfo.UserDgraphInfo.Uid)
+	if derr != nil || dgraphProject == nil || dgraphProject.Uuid == "" {
+		return uuid.Nil, nil, &ProjectRefusal{msg: "project not found or you don't have access"}
+	}
+	if !dgraphProject.ReaderIsIn() {
+		return uuid.Nil, nil, &ProjectRefusal{msg: "project not found or you don't have access"}
+	}
+	standing, serr := workAccess.Of(ctx, userInfo.UserDgraphInfo.Uuid, dgraphProject)
+	if serr != nil {
+		return uuid.Nil, nil, fmt.Errorf("couldn't check what you can do in project '%s': %w", dgraphProject.Name, serr)
+	}
+	if err := standing.Check(workAccess.NeedCreateTask); err != nil {
+		return uuid.Nil, nil, &ProjectRefusal{msg: fmt.Sprintf("project '%s': %v", dgraphProject.Name, err), err: err}
+	}
+	return projectParsed, dgraphProject, nil
 }
 
 // createProposedTask makes one proposed task in a project the person is an

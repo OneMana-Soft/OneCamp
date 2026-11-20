@@ -593,12 +593,12 @@ func CreateTasksFromExtraction(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
 		return
 	}
-	created, failed, err := business.CreateTasksFromProposals(ctx, &userInfo, req.ProjectUUID, req.Tasks)
+	created, failed, held, err := business.CreateTasksFromProposals(ctx, &userInfo, req.ProjectUUID, req.Tasks)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(r.Context(), err)})
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": map[string]int{"created": created, "failed": failed}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": map[string]int{"created": created, "failed": failed, "in_triage": held}})
 }
 
 // AIActivityProof handles GET /ai/activity/proof — the record of what the AI

@@ -65,6 +65,7 @@ const (
 	CauseCalendarRSVP      Cause = "calendar.rsvp"      // a guest answered their invitation
 	CauseCalendarReminder  Cause = "calendar.reminder"  // an event they're on starts soon
 	CauseCalendarBooking   Cause = "calendar.booking"   // someone booked, moved or cancelled time with them
+	CauseCalendarRecap     Cause = "calendar.recap"     // the recap of an event's call they're on (gcal-new-event-notes)
 
 	// A test notice a person sent themselves from Settings > Notifications
 	// (A4 H3, Test): to their own devices alone, held as any notice is, and
@@ -156,6 +157,11 @@ type Decision struct {
 	// keeps back until HoldTill: email then, push, desktop and sound never.
 	Held     []Delivery `json:"held,omitempty"`
 	HoldTill *time.Time `json:"hold_till,omitempty"`
+	// Waiting are the deliveries that wait until WaitTill while the person
+	// is in OneCamp (A4 H4: their push, for their notify.push_delay), and
+	// aren't sent if they read the message first.
+	Waiting  []Delivery `json:"waiting,omitempty"`
+	WaitTill *time.Time `json:"wait_till,omitempty"`
 	// Note says why someone named is told nothing: NotInPlace for a person
 	// mentioned where they aren't (the composer's invite prompt, TN-63).
 	Note string `json:"note,omitempty"`
@@ -178,9 +184,10 @@ type Trace struct {
 }
 
 // DeliveryState is one delivery of an event to the person asking, as the
-// router recorded it: "sent", "held" (until HoldUntil), "dropped" (held,
-// then its message was deleted) or "retracted" (sent, then deleted). At is
-// when it was recorded.
+// router recorded it: "sent", "held" (until HoldUntil), "waiting" (until
+// HoldUntil, while they're in OneCamp), "dropped" (held, or waiting and then
+// read first, its message deleted or a hold begun: never sent) or
+// "retracted" (sent, then deleted). At is when it was recorded.
 type DeliveryState struct {
 	Delivery  Delivery   `json:"delivery"`
 	State     string     `json:"state"`
@@ -189,7 +196,8 @@ type DeliveryState struct {
 }
 
 // Step is one planning step's verdict: Step is "audience", "access",
-// "cause", "preference" or "hold", Verdict a code the web app words, and
+// "cause", "preference", "hold" or "wait" (only when the push waits, verdict
+// "in_onecamp"), Verdict a code the web app words, and
 // Causes the causes the step found or chose.
 type Step struct {
 	Step    string  `json:"step"`
@@ -207,8 +215,8 @@ type Router interface {
 	// the change that caused it: a delivery or a record that fails is logged.
 	Deliver(ctx context.Context, ev Event, ds []Decision) []Decision
 	// Retract takes back the notices of a deleted message: what was sent is
-	// marked retracted, what was still held is dropped and never sent, and
-	// the inbox notices it made leave the inbox (soft).
+	// marked retracted, what was still held or waiting is dropped and never
+	// sent, and the inbox notices it made leave the inbox (soft).
 	Retract(ctx context.Context, messageID string)
 	// Explain is asker's own part in ev, step by step. It reads only, and
 	// only asker's own settings.

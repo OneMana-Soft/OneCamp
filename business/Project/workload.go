@@ -199,30 +199,16 @@ func GetWorkload(ctx context.Context, readerUID, readerUUID string, readerIsAdmi
 			w.Undated = append(w.Undated, UndatedCount{ProjectUUID: pr.UUID, UserUUID: who, Count: counts[who]})
 		}
 	}
-	// Time off of the people shown, and no one else's: from the calendar's
-	// one store when its events are there, else from the graph's away events.
-	if helpers.CalendarReadsFromStore() {
-		shown := make([]string, 0, len(people))
-		for id := range people {
-			shown = append(shown, id)
-		}
-		away, err := calendarBusiness.AwaySpans(ctx, shown, from, until)
-		if err != nil {
-			return nil, err
-		}
-		for _, a := range away {
-			if people[a.Person] != nil {
-				w.Away = append(w.Away, AwaySpan{UserUUID: a.Person, Start: a.Start, End: a.End})
-			}
-		}
-	} else {
-		for _, e := range read.Away {
-			if e.CreatedBy == nil || people[e.CreatedBy.Uuid] == nil || e.StartTime == nil || e.EndTime == nil || !e.EndTime.After(*e.StartTime) {
-				continue
-			}
-			w.Away = append(w.Away, AwaySpan{UserUUID: e.CreatedBy.Uuid, Start: *e.StartTime, End: *e.EndTime})
-		}
+	// Time off of the people shown whose busy times the reader may see.
+	shown := make([]string, 0, len(people))
+	for id := range people {
+		shown = append(shown, id)
 	}
+	away, err := awayShown(ctx, readerUUID, shown, from, until, helpers.CalendarReadsFromStore(), read.Away)
+	if err != nil {
+		return nil, err
+	}
+	w.Away = append(w.Away, away...)
 	sort.SliceStable(w.Tasks, func(i, j int) bool { return lastOf(w.Tasks[i]).After(lastOf(w.Tasks[j])) })
 	if len(w.Tasks) > maxWorkloadTasks {
 		w.Tasks, w.Truncated = w.Tasks[:maxWorkloadTasks], true
@@ -282,4 +268,50 @@ func SetCapacity(ctx context.Context, readerUUID string, readerIsAdmin bool, use
 		}
 	}
 	return nil
+}
+
+// The calendar's one rule for whose busy times an asker sees, and its time
+// off; tests swap them.
+var (
+	peopleSeenBy = calendarBusiness.PeopleSeenBy
+	awaySpans    = calendarBusiness.AwaySpans
+)
+
+// awayShown is the time off, between from and until, of each of people whose
+// busy times readerUUID may see, by the calendar's one rule (PeopleSeenBy:
+// their own always; anyone else's while the workspace shows members' busy
+// times and that person hasn't kept theirs to themselves). Someone hidden
+// from the reader adds no time off, so their capacity reads as whole, and
+// when whose shows can't be decided nobody's is read. From the calendar's
+// one store when its events are there (fromStore), else from graph, the
+// graph's away events.
+func awayShown(ctx context.Context, readerUUID string, people []string, from, until time.Time, fromStore bool, graph []*dgraphStruct.DgraphEvent) ([]AwaySpan, error) {
+	seen, _, err := peopleSeenBy(ctx, readerUUID, people)
+	if err != nil {
+		return nil, err
+	}
+	shown := make(map[string]bool, len(seen))
+	for _, id := range seen {
+		shown[id] = true
+	}
+	out := []AwaySpan{}
+	if fromStore {
+		away, err := awaySpans(ctx, seen, from, until)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range away {
+			if shown[a.Person] {
+				out = append(out, AwaySpan{UserUUID: a.Person, Start: a.Start, End: a.End})
+			}
+		}
+		return out, nil
+	}
+	for _, e := range graph {
+		if e.CreatedBy == nil || !shown[e.CreatedBy.Uuid] || e.StartTime == nil || e.EndTime == nil || !e.EndTime.After(*e.StartTime) {
+			continue
+		}
+		out = append(out, AwaySpan{UserUUID: e.CreatedBy.Uuid, Start: *e.StartTime, End: *e.EndTime})
+	}
+	return out, nil
 }

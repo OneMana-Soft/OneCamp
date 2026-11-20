@@ -57,7 +57,7 @@ type fakeRuntime struct {
 func (f fakeRuntime) Enabled() bool { return !f.off }
 func (f fakeRuntime) CheckRateLimit(context.Context, string) error {
 	if f.limited {
-		return ai.ErrRateLimited
+		return ai.RateLimitedFor(42 * time.Second)
 	}
 	return nil
 }
@@ -178,7 +178,7 @@ func TestDocAIRefusesWhatItCantRunInWords(t *testing.T) {
 		status int
 		msg    string
 	}{
-		{fakeRuntime{off: true}, DocAIRequest{Action: "improve", Text: "x"}, 503, "AI is switched off in this workspace."},
+		{fakeRuntime{off: true}, DocAIRequest{Action: "improve", Text: "x"}, 503, "AI is turned off for this workspace. An admin can turn it on under Admin > AI & agents."},
 		{fakeRuntime{limited: true}, DocAIRequest{Action: "improve", Text: "x"}, 429, "You've asked AI a lot in the last minute. Try again in a moment."},
 		{fakeRuntime{}, DocAIRequest{Action: "delete_everything"}, 400, "That isn't an action the AI bar knows."},
 		{fakeRuntime{}, DocAIRequest{Action: "improve"}, 400, "Select some text first, then ask again."},

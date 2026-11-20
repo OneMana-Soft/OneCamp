@@ -34,13 +34,21 @@ func (f artefactKeysOnly) CallArtefactKeys(_ context.Context, who *model.UserInf
 // not found.
 func TestOnlyWhoMayReadAnEventPlaysItsCallsRecordings(t *testing.T) {
 	ev, maya, sam := uuid.New(), uuid.New(), uuid.New()
-	wasEvents, wasRec := business.Events, eventRecording
-	t.Cleanup(func() { business.Events, eventRecording = wasEvents, wasRec })
+	wasEvents, wasRec, wasWrite := business.Events, eventRecording, writeRecordingURL
+	t.Cleanup(func() { business.Events, eventRecording, writeRecordingURL = wasEvents, wasRec, wasWrite })
+	// The link answers by the one read rule, asked about the event's call room,
+	// for the asker, by the key asked (its answers: controllers/httpx).
+	writeRecordingURL = func(w http.ResponseWriter, _ *http.Request, rec *dgraphStruct.DgraphRecording, room, identity, key string) {
+		if room != "r1" || identity != "0x"+maya.String()[:4] || key != rec.EgressId {
+			t.Errorf("the rule was asked about room %q for %q by key %q", room, identity, key)
+		}
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "recording"})
+	}
 	business.Events = artefactKeysOnly{keys: func(who *model.UserInfo, id string) (business.CallKeys, error) {
 		if id != "e1" || who.UserPostgresInfo.Id != maya {
 			return business.CallKeys{}, business.ErrEventNotFound
 		}
-		return business.CallKeys{Events: []uuid.UUID{ev}}, nil
+		return business.CallKeys{Events: []uuid.UUID{ev}, Room: "r1"}, nil
 	}}
 	eventRecording = func(_ context.Context, keys business.CallKeys, key string) (*dgraphStruct.DgraphRecording, error) {
 		if key == "EG_1" && slices.Contains(keys.Events, ev) {
@@ -55,7 +63,7 @@ func TestOnlyWhoMayReadAnEventPlaysItsCallsRecordings(t *testing.T) {
 		rc.URLParams.Add("eventId", "e1")
 		rc.URLParams.Add("key", key)
 		info := model.UserInfo{}
-		info.UserPostgresInfo.Id, info.UserDgraphInfo.Uuid = who, who.String()
+		info.UserPostgresInfo.Id, info.UserDgraphInfo.Uuid, info.UserDgraphInfo.Uid = who, who.String(), "0x"+who.String()[:4]
 		ctx := context.WithValue(context.WithValue(r.Context(), chi.RouteCtxKey, rc), helpers.UserInfoContextKey, info)
 		w := httptest.NewRecorder()
 		GetCalendarEventCallRecording(w, r.WithContext(ctx))

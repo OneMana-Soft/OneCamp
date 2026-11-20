@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/akashc777/OneCamp/helpers"
 	"strings"
 
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -71,7 +72,7 @@ func buildScopeGuardPrompt(task, diff string) []ai.ChatMessage {
 // an unparseable or empty reply yields {InScope: true} — so the judge never
 // blocks a change on its own parsing failure. Pure.
 func parseScopeVerdict(raw string) Verdict {
-	obj := extractFirstJSONObject(raw)
+	obj := helpers.ExtractJSON(raw, '{')
 	if obj == "" {
 		return Verdict{InScope: true}
 	}
@@ -145,46 +146,6 @@ func firstString(m map[string]interface{}, keys ...string) string {
 		if v, ok := m[k]; ok {
 			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
 				return strings.TrimSpace(s)
-			}
-		}
-	}
-	return ""
-}
-
-// extractFirstJSONObject returns the first balanced {...} object in s (ignoring
-// braces inside strings), or "" when there is none. This tolerates a fenced
-// block, leading/trailing prose, or a bare object — whatever the model emits.
-// Pure.
-func extractFirstJSONObject(s string) string {
-	start := strings.IndexByte(s, '{')
-	if start < 0 {
-		return ""
-	}
-	depth := 0
-	inStr := false
-	esc := false
-	for i := start; i < len(s); i++ {
-		c := s[i]
-		if inStr {
-			switch {
-			case esc:
-				esc = false
-			case c == '\\':
-				esc = true
-			case c == '"':
-				inStr = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inStr = true
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return s[start : i+1]
 			}
 		}
 	}

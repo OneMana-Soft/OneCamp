@@ -279,7 +279,7 @@ func checkQuery(d Dashboard, kind string, q Query) (Query, error) {
 	case KindBreakdown:
 		by, ok := projectBusiness.InsightBy(q.By)
 		if !ok {
-			return q, refuse("A breakdown widget is by project, person, priority, type, status, labels, cycle, estimate or a custom field.")
+			return q, refuse("A breakdown widget is by project, person, priority, type, status, labels, cycle, estimate, SLA or a custom field.")
 		}
 		if !breakdownMeasures[q.Measure] {
 			return q, refuse("A breakdown widget counts tasks or adds up their effort.")

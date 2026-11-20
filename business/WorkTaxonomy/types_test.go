@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"errors"
+	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -258,5 +259,30 @@ func TestTheTypeFilterNamesOnlyTypedTasks(t *testing.T) {
 	}
 	if FilterID != "task_work_type" {
 		t.Errorf("the filter's id is %q; the web sends task_work_type", FilterID)
+	}
+}
+
+// A type change reaches the Work Change Log, as every task change does, so an
+// SLA rule by type (business/SLA) matches the task again.
+func TestATypeChangeReachesTheChangeLog(t *testing.T) {
+	task := &dgraphStruct.DgraphTask{Uuid: uuid.NewString(), Project: &dgraphStruct.DgraphProject{Uuid: uuid.NewString()}}
+	by := &dgraphStruct.DgraphUser{Uid: "0x9", Uuid: uuid.NewString()}
+	bug := &model.Type{ID: TypeBug, Builtin: "bug", Name: "Bug", Icon: "bug"}
+	swap(t, &setTaskType, func(context.Context, uuid.UUID, *uuid.UUID) (*model.Type, *model.Type, error) { return nil, bug, nil })
+	swap(t, &writeLine, func(context.Context, *dgraphStruct.DgraphTask, []string) error { return nil })
+	var logged []workFeed.TaskChange
+	swap(t, &recordTasks, func(_ context.Context, who string, changes ...workFeed.TaskChange) []workFeed.Entry {
+		if who != by.Uuid {
+			t.Errorf("logged as %q", who)
+		}
+		logged = append(logged, changes...)
+		return nil
+	})
+	if _, err := SetTaskType(context.Background(), task, &TypeBug, by); err != nil {
+		t.Fatal(err)
+	}
+	if len(logged) != 1 || logged[0].Kind != workFeed.KindUpdated || logged[0].Project != task.Project.Uuid ||
+		logged[0].Fields[0] != "task_work_type" || logged[0].Task.WorkType == nil || logged[0].Task.WorkType.Builtin != "bug" {
+		t.Errorf("logged %+v", logged)
 	}
 }

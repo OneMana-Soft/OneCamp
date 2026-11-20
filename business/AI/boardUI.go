@@ -10,6 +10,7 @@ package business
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/akashc777/OneCamp/helpers"
 	"strings"
 )
 
@@ -63,7 +64,7 @@ func boardUISystemPrompt(diagramType string) string {
 
 // parseUIMockup extracts and validates the model's JSON object.
 func parseUIMockup(raw string) (*uiMockupRaw, error) {
-	js := extractJSONObject(raw)
+	js := helpers.ExtractJSON(raw, '{')
 	if js == "" {
 		return nil, fmt.Errorf("no JSON object found")
 	}

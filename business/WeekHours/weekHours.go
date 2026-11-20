@@ -33,7 +33,19 @@ type Hours struct {
 	// Week is each weekday's ranges, keyed "0" (Sunday) to "6"; a day it
 	// leaves out is off. When set it stands for Days, Start and End.
 	Week map[string][]Span `json:"week,omitempty"`
+	// Dates are days of their own, keyed "2026-12-24" by the hours' zone:
+	// that day's ranges in place of its weekday's, none ([]) for a day off;
+	// at most MaxDates. Windows and FreeSlots (business/Calendar) read them
+	// through SpansFor; Inside and NextOpen don't (the push gate mirrors them
+	// in SQL, and a person's schedule keeps no dates).
+	Dates map[string][]Span `json:"dates,omitempty"`
 }
+
+// MaxDates is how many dates hours may keep ranges of their own for.
+const MaxDates = 60
+
+// dateLayout is how a date of the hours' own is written.
+const dateLayout = "2006-01-02"
 
 // Span is a stretch of a day, between two wall-clock times ("09:00",
 // "12:30"); "24:00" ends one at midnight.
@@ -52,9 +64,7 @@ func (s Span) Minutes() (int, int, bool) {
 // SpansOn is a weekday's ranges in order, read as Check reads them. Pure.
 func (w Hours) SpansOn(d time.Weekday) []Span {
 	if w.Week != nil {
-		out := append([]Span(nil), w.Week[strconv.Itoa(int(d))]...)
-		sort.Slice(out, func(i, j int) bool { a, _, _ := out[i].Minutes(); b, _, _ := out[j].Minutes(); return a < b })
-		return out
+		return ordered(w.Week[strconv.Itoa(int(d))])
 	}
 	for _, day := range w.Days {
 		if time.Weekday(day) == d {
@@ -62,6 +72,35 @@ func (w Hours) SpansOn(d time.Weekday) []Span {
 		}
 	}
 	return nil
+}
+
+// SpansFor is a day's ranges in order: its date's own when the hours keep
+// that date (none for a day off), else its weekday's. day is any time that
+// day by the hours' zone. Pure.
+func (w Hours) SpansFor(day time.Time) []Span {
+	if spans, ok := w.Dates[day.Format(dateLayout)]; ok {
+		return ordered(spans)
+	}
+	return w.SpansOn(day.Weekday())
+}
+
+// PastDate is the earliest of the hours' dates before local's day (local is
+// now, by the hours' zone), if any. Pure.
+func (w Hours) PastDate(local time.Time) (string, bool) {
+	today, first := local.Format(dateLayout), ""
+	for key := range w.Dates {
+		if key < today && (first == "" || key < first) {
+			first = key
+		}
+	}
+	return first, first != ""
+}
+
+// ordered is a copy of a day's ranges, earliest first.
+func ordered(spans []Span) []Span {
+	out := append([]Span(nil), spans...)
+	sort.Slice(out, func(i, j int) bool { a, _, _ := out[i].Minutes(); b, _, _ := out[j].Minutes(); return a < b })
+	return out
 }
 
 // Refused is hours, or a request about them, that can't be taken as given;
@@ -83,8 +122,57 @@ func clock(s string) (int, int, bool) {
 	return hh, mm, true
 }
 
-// Check validates the hours and returns their zone.
+// Check validates the hours, their dates too, and returns their zone.
 func (w Hours) Check() (*time.Location, error) {
+	loc, err := w.checkDays()
+	if err != nil {
+		return nil, err
+	}
+	if err := w.checkDates(); err != nil {
+		return nil, err
+	}
+	return loc, nil
+}
+
+// checkDates validates the hours' dates: at most MaxDates, each a real day
+// written YYYY-MM-DD, its ranges read as a weekday's are.
+func (w Hours) checkDates() error {
+	if len(w.Dates) > MaxDates {
+		return &Refused{"Set hours of their own for up to " + strconv.Itoa(MaxDates) + " dates."}
+	}
+	for key, spans := range w.Dates {
+		if d, err := time.Parse(dateLayout, key); err != nil || d.Format(dateLayout) != key {
+			return &Refused{"Dates look like 2026-12-24."}
+		}
+		if err := checkSpans(ordered(spans)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkSpans validates a day's ranges, earliest first: each reads, ends
+// after it starts, and starts no earlier than the one before ends.
+func checkSpans(ordered []Span) error {
+	last := -1
+	for _, s := range ordered {
+		a, b, ok := s.Minutes()
+		if !ok {
+			return &Refused{"Hours look like 09:00."}
+		}
+		if b <= a {
+			return &Refused{"Each range has to end after it starts."}
+		}
+		if a < last {
+			return &Refused{"A day's ranges can't overlap."}
+		}
+		last = b
+	}
+	return nil
+}
+
+// checkDays validates the week (Week, or Days with Start and End) and its zone.
+func (w Hours) checkDays() (*time.Location, error) {
 	if w.Week != nil {
 		return w.checkWeek()
 	}
@@ -120,22 +208,11 @@ func (w Hours) checkWeek() (*time.Location, error) {
 		if err != nil || d < 0 || d > 6 || strconv.Itoa(d) != key {
 			return nil, &Refused{"Days run from Sunday (0) to Saturday (6)."}
 		}
-		ordered := w.SpansOn(time.Weekday(d))
-		last := -1
-		for _, s := range ordered {
-			a, b, ok := s.Minutes()
-			if !ok {
-				return nil, &Refused{"Hours look like 09:00."}
-			}
-			if b <= a {
-				return nil, &Refused{"Each range has to end after it starts."}
-			}
-			if a < last {
-				return nil, &Refused{"A day's ranges can't overlap."}
-			}
-			last = b
-			any = true
+		spans := w.SpansOn(time.Weekday(d))
+		if err := checkSpans(spans); err != nil {
+			return nil, err
 		}
+		any = any || len(spans) > 0
 	}
 	if !any {
 		return nil, &Refused{"Pick at least one day."}
@@ -158,7 +235,7 @@ func Windows(hours Hours, from, to time.Time) []Interval {
 	var out []Interval
 	local := from.In(loc)
 	for day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc); day.Before(to); day = day.AddDate(0, 0, 1) {
-		for _, s := range hours.SpansOn(day.Weekday()) {
+		for _, s := range hours.SpansFor(day) {
 			a, b, _ := s.Minutes()
 			open := time.Date(day.Year(), day.Month(), day.Day(), a/60, a%60, 0, 0, loc)
 			shut := time.Date(day.Year(), day.Month(), day.Day(), b/60, b%60, 0, 0, loc)
@@ -250,3 +327,36 @@ func (w Hours) NextOpen(t time.Time, within time.Duration) (time.Time, bool) {
 // before the limit: a zone changes a few times a year (Go adds a year's
 // start or end), so 1024 is centuries of search.
 const nextOpenPasses = 1024
+
+// afterChunk is how much calendar time After reads the hours' windows for at
+// once, and afterLimit how far ahead it looks before saying the count never
+// ends (hours open a minute a week reach a year's target within a century).
+const (
+	afterChunk = 28 * 24 * time.Hour
+	afterLimit = 100 * 366 * 24 * time.Hour
+)
+
+// After is the instant d of the hours' open time after from: an SLA's target
+// counted in a project's business hours (linear-24), past closed days and
+// across daylight-saving changes as Windows reads them. Nothing to count (d
+// at most 0) is from itself; false is hours that can't be read, or that don't
+// cover d within afterLimit. Pure.
+func After(hours Hours, from time.Time, d time.Duration) (time.Time, bool) {
+	if d <= 0 {
+		return from, true
+	}
+	if _, err := hours.Check(); err != nil {
+		return time.Time{}, false
+	}
+	left := d
+	for cur, end := from, from.Add(afterLimit); cur.Before(end); cur = cur.Add(afterChunk) {
+		for _, w := range Windows(hours, cur, cur.Add(afterChunk)) {
+			span := w.End.Sub(w.Start)
+			if span >= left {
+				return w.Start.Add(left).In(from.Location()), true
+			}
+			left -= span
+		}
+	}
+	return time.Time{}, false
+}

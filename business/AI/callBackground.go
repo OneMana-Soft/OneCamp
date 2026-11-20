@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/akashc777/OneCamp/helpers"
 	"regexp"
 	"strings"
 
@@ -85,8 +86,14 @@ func MakeCallRecipe(ctx context.Context, llm ai.LLMProvider, cb *ai.CircuitBreak
 // aren't #RRGGBB, extras not in the set, repeats and fields it doesn't know are
 // dropped; the first five colours and three extras are kept, upper-cased hex.
 func readCallRecipe(raw string) (CallRecipe, bool) {
-	js := extractJSONObject(StripReasoning(raw))
+	answer := StripReasoning(raw)
+	js := helpers.ExtractJSON(answer, '{')
 	if js == "" {
+		return CallRecipe{}, false
+	}
+	// A second recipe after the first (a list of two) is two answers, and
+	// neither is taken.
+	if rest := answer[strings.Index(answer, js)+len(js):]; helpers.ExtractJSON(rest, '{') != "" {
 		return CallRecipe{}, false
 	}
 	var loose struct {

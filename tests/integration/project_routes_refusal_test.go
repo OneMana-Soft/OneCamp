@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	triageController "github.com/akashc777/OneCamp/controllers/Triage"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -108,6 +109,7 @@ func TestEveryProjectRouteRefusesWhoItIsntFor(t *testing.T) {
 		{"reads its forms", formController.ListForms, nil},
 		{"reads its glance", projectController.ProjectGlance, nil},
 		{"reads who can change its tasks", projectController.ProjectPolicies, nil},
+		{"reads its triage rota", triageController.Rota, nil},
 		{"reads its timeline", projectController.ProjectTimeline, nil},
 		{"reads its goals", goalController.ProjectGoals, nil},
 		{"reads its key", taskKeysController.ProjectKey, nil},
@@ -146,6 +148,7 @@ func TestEveryProjectRouteRefusesWhoItIsntFor(t *testing.T) {
 		{"changes a type", taskKeysController.UpdateProjectType, map[string]any{"name": "Chore"}},
 		{"archives a type", taskKeysController.ArchiveProjectType, nil},
 		{"chooses who can change its tasks", projectController.SetProjectPolicy, map[string]any{"value": "admins"}},
+		{"sets its triage rota", triageController.SetRota, map[string]any{"people": []string{}, "weeks": 1, "start": "2026-11-02"}},
 		{"adds a rule", workflowController.CreateProjectRule, map[string]any{"name": "Close it"}},
 		{"changes a rule", workflowController.UpdateProjectRule, map[string]any{"name": "Close it now"}},
 		{"turns a rule off", workflowController.SetProjectRuleActive, map[string]any{"active": false}},

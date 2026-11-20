@@ -78,31 +78,7 @@ func GetMqttConfig(ctx context.Context, userUUID string, isSystemAdmin bool) (mq
 }
 
 func PublishPost(mqttPost *mqttStruct.MqttPost, channelId string) {
-	ctx := context.Background()
-
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_POST,
-		Data: mqttPost,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishPost failed to marshal mqttPost struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishPost", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishPost failed to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForChannelMessage(channelId), mqttStruct.MESSAGE_POST, mqttPost, "PublishPost")
 }
 
 // PublishChannelUpdate notifies every member currently subscribed to a
@@ -112,174 +88,28 @@ func PublishPost(mqttPost *mqttStruct.MqttPost, channelId string) {
 // idempotent: a dropped or duplicated event simply means the next focus/poll
 // reconciles the state.
 func PublishChannelUpdate(channelId string, action string) {
-	ctx := context.Background()
-
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_CHANNEL_UPDATE,
-		Data: &mqttStruct.MqttChannelUpdate{
-			Type:        mqttStruct.TYPE_UPDATE,
-			ChannelUUID: channelId,
-			Action:      action,
-		},
-	}
-	marshalled, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishChannelUpdate failed to marshal MqttChannelUpdate struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalled)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChannelUpdate", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishChannelUpdate failed to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForChannelMessage(channelId), mqttStruct.MESSAGE_CHANNEL_UPDATE,
+		&mqttStruct.MqttChannelUpdate{Type: mqttStruct.TYPE_UPDATE, ChannelUUID: channelId, Action: action}, "PublishChannelUpdate")
 }
 
 func PublishChannelCall(mqttChannelCall *mqttStruct.MqttChannelCall, channelId string) {
-	ctx := context.Background()
-
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_CHANNEL_CALL,
-		Data: mqttChannelCall,
-	}
-	marshalMqttChannelCall, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PubliPublishChannelCallshPost failed to marshal mqttChannelCall struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalMqttChannelCall)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChannelCall", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishChannelCall failed to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForChannelMessage(channelId), mqttStruct.MESSAGE_CHANNEL_CALL, mqttChannelCall, "PublishChannelCall")
 }
 
 func PublishChatCall(mqttChatCall *mqttStruct.MqttChatCall, grpId string) {
-	ctx := context.Background()
-
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_CHAT_CALL,
-		Data: mqttChatCall,
-	}
-	marshalMqttChannelCall, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishChatCall failed to marshal mqttChatCall struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmMessage(grpId), 1, false, marshalMqttChannelCall)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChatCall", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishChatCall failed to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForDmMessage(grpId), mqttStruct.MESSAGE_CHAT_CALL, mqttChatCall, "PublishChatCall")
 }
 
 func PublishPostReaction(mqttPostReaction *mqttStruct.MqttPostReaction, channelId string) {
-	ctx := context.Background()
-
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_POST_REACTION,
-		Data: mqttPostReaction,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishPostReaction failed to marshal mqttPostReaction struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishPostReaction", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishPostReactionfailed to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForChannelMessage(channelId), mqttStruct.MESSAGE_POST_REACTION, mqttPostReaction, "PublishPostReaction")
 }
 
 func PublishDocCommentReaction(mqttDocCommentReaction *mqttStruct.MqttDocCommentReaction, docId string) {
-	ctx := context.Background()
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_DOC_COMMENT_REACTION,
-		Data: mqttDocCommentReaction,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishDocCommentReaction failed to marshal mqttDocCommentReaction struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDoc(docId), 1, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishDocCommentReaction", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishDocCommentReaction to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForDoc(docId), mqttStruct.MESSAGE_DOC_COMMENT_REACTION, mqttDocCommentReaction, "PublishDocCommentReaction")
 }
 
 func PublishPostCommentReaction(mqttPostCommentReaction *mqttStruct.MqttPostCommentReaction, channelId string) {
-	ctx := context.Background()
-
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_POST_COMMENT_REACTION,
-		Data: mqttPostCommentReaction,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishPostCommentReaction failed to marshal mqttPostCommentReaction struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishPostCommentReaction", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishPostCommentReaction to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForChannelMessage(channelId), mqttStruct.MESSAGE_POST_COMMENT_REACTION, mqttPostCommentReaction, "PublishPostCommentReaction")
 }
 
 // publishToProject sends one message to everyone in a project; tasks are the
@@ -307,8 +137,23 @@ var sendToProject = func(ctx context.Context, projectID string, kind int8, data 
 // publishToTopic sends one message of a kind to a topic. what names the
 // publisher in the log.
 func publishToTopic(ctx context.Context, topic string, kind int8, data any, what string) {
-	if mqttInit.MqttClient == nil {
-		// No broker connected (a test, a tool): nobody is listening.
+	publishTo(ctx, []string{topic}, qosAtLeastOnce, kind, data, what)
+}
+
+// The delivery a publish asks the broker for: a message at least once, a
+// passing signal (typing, presence) at most once.
+const (
+	qosAtMostOnce  byte = 0
+	qosAtLeastOnce byte = 1
+)
+
+// publishTo is every publish (D1): the message {kind, data} is marshalled
+// once and sent, never retained, to each distinct topic at qos, and a
+// goroutine waits for the broker's answer and logs a failure. With no broker
+// connected (a test, a tool, a one-shot command) nobody is listening, so it
+// sends nothing. what names the publisher in the log.
+func publishTo(ctx context.Context, topics []string, qos byte, kind int8, data any, what string) {
+	if mqttInit.MqttClient == nil || len(topics) == 0 {
 		return
 	}
 	payload, err := json.Marshal(mqttStruct.Message{Type: kind, Data: data})
@@ -316,13 +161,20 @@ func publishToTopic(ctx context.Context, topic string, kind int8, data any, what
 		helpers.LogErrorWithContext(ctx, "business/%s marshal err: %+v", what, err)
 		return
 	}
-	res := mqttInit.MqttClient.Publish(topic, 1, false, payload)
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:publishToTopic", func() {
-		_ = res.WaitTimeout(mqttInit.PublishWait)
-		if res.Error() != nil {
-			helpers.LogErrorWithContext(ctx, "business/%s publish err: %+v", what, res.Error())
+	sent := make(map[string]bool, len(topics))
+	for _, topic := range topics {
+		if topic == "" || sent[topic] {
+			continue
 		}
-	})
+		sent[topic] = true
+		res := mqttInit.MqttClient.Publish(topic, qos, false, payload)
+		helpers.GoSafeNamed("business/Mqtt/mqttBusiness:publishTo", func() {
+			_ = res.WaitTimeout(mqttInit.PublishWait)
+			if res.Error() != nil {
+				helpers.LogErrorWithContext(ctx, "business/%s publish to %s err: %+v", what, topic, res.Error())
+			}
+		})
+	}
 }
 
 // PublishCallState tells a call's conversation that the call changed: a
@@ -444,57 +296,11 @@ func PublishTaskCommentReaction(mqttTaskCommentReaction *mqttStruct.MqttTaskComm
 const TypingRepublishInterval = 3 * time.Second
 
 func PublishChannelTyping(mqttChannelTyping *mqttStruct.MqttChannelTyping, channelId string) {
-	ctx := context.Background()
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_POST_TYPING,
-		Data: mqttChannelTyping,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishChannelTyping failed to marshal mqttPostReaction struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelTyping(channelId), 0, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChannelTyping", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishChannelTyping to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishTo(context.Background(), []string{helpers.GetMqttTopicForChannelTyping(channelId)}, qosAtMostOnce, mqttStruct.MESSAGE_POST_TYPING, mqttChannelTyping, "PublishChannelTyping")
 }
 
 func PublishDocComment(mqttDocComment *mqttStruct.MqttDocComment, docId string) {
-	ctx := context.Background()
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_DOC_COMMENT,
-		Data: mqttDocComment,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishDocComment failed to marshal mqttPostComment struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDoc(docId), 1, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishDocComment", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishDocComment to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForDoc(docId), mqttStruct.MESSAGE_DOC_COMMENT, mqttDocComment, "PublishDocComment")
 }
 
 // PublishTaskComment tells a task's project about a comment on the task.
@@ -506,253 +312,39 @@ func PublishTaskComment(mqttTaskComment *mqttStruct.MqttTaskComment, projectId s
 }
 
 func PublishPostComment(mqttPostCommentCount *mqttStruct.MqttPostComment, channelId string) {
-	ctx := context.Background()
-
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_POST_COMMENT,
-		Data: mqttPostCommentCount,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishPostComment failed to marshal mqttPostCommentCount struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishPostComment", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishPostComment to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForChannelMessage(channelId), mqttStruct.MESSAGE_POST_COMMENT, mqttPostCommentCount, "PublishPostComment")
 }
 
 func PublishChat(mqttChat *mqttStruct.MqttChat, grpId string) {
-	ctx := context.Background()
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_CHAT,
-		Data: mqttChat,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishChat failed to marshal mqttChat struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmMessage(grpId), 1, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChat", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishChat failed to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForDmMessage(grpId), mqttStruct.MESSAGE_CHAT, mqttChat, "PublishChat")
 }
 
 func PublishChatReaction(mqttChatReaction *mqttStruct.MqttChatReaction, grpId string) {
-	ctx := context.Background()
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_CHAT_REACTION,
-		Data: mqttChatReaction,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishChatReaction failed to marshal mqttChatReaction struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmMessage(grpId), 1, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChatReaction", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishChatReaction failed to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForDmMessage(grpId), mqttStruct.MESSAGE_CHAT_REACTION, mqttChatReaction, "PublishChatReaction")
 }
 
 func PublishChatCommentReaction(mqttChatCommentReaction *mqttStruct.MqttChatCommentReaction, grpId string) {
-	ctx := context.Background()
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_CHAT_COMMENT_REACTION,
-		Data: mqttChatCommentReaction,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishChatCommentReaction failed to marshal mqttChatCommentReaction struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmMessage(grpId), 1, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChatCommentReaction", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishChatCommentReaction failed to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForDmMessage(grpId), mqttStruct.MESSAGE_CHAT_COMMENT_REACTION, mqttChatCommentReaction, "PublishChatCommentReaction")
 }
 
 func PublishChatTyping(mqttChatTyping *mqttStruct.MqttChatTyping, grpId string) {
-	ctx := context.Background()
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_CHAT_TYPING,
-		Data: mqttChatTyping,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishChatTyping failed to marshal mqttChatTyping struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmTyping(grpId), 0, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChatTyping", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishChatTyping to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishTo(context.Background(), []string{helpers.GetMqttTopicForDmTyping(grpId)}, qosAtMostOnce, mqttStruct.MESSAGE_CHAT_TYPING, mqttChatTyping, "PublishChatTyping")
 }
 
 func PublishUserEmojiStatus(mqttUserEmoji *mqttStruct.MqttUserEmojiStatus) {
-	ctx := context.Background()
-	mqttMessaage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_USER_EMOJI_STATUS,
-		Data: mqttUserEmoji,
-	}
-
-	marshalMqttUserEmojiStatus, err := json.Marshal(mqttMessaage)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishUserEmojiStatus failed to marshal mqttUserEmojiStatus struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetPublicUsersStatusTopic(), 1, false, marshalMqttUserEmojiStatus)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishUserEmojiStatus", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishUserEmojiStatus to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
-
+	publishToTopic(context.Background(), helpers.GetPublicUsersStatusTopic(), mqttStruct.MESSAGE_USER_EMOJI_STATUS, mqttUserEmoji, "PublishUserEmojiStatus")
 }
 
 func PublishUserStatus(mqttUserStatus *mqttStruct.MqttUserStatus) {
-	ctx := context.Background()
-	mqttMessaage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_USER_STATUS,
-		Data: mqttUserStatus,
-	}
-
-	marshalMqttUserStatus, err := json.Marshal(mqttMessaage)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishUserStatus failed to marshal mqttUserStatus struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetPublicUsersStatusTopic(), 1, false, marshalMqttUserStatus)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishUserStatus", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishUserStatus to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
-
+	publishToTopic(context.Background(), helpers.GetPublicUsersStatusTopic(), mqttStruct.MESSAGE_USER_STATUS, mqttUserStatus, "PublishUserStatus")
 }
 
 func PublishChatComment(mqttChatComment *mqttStruct.MqttChatComment, grpId string) {
-	ctx := context.Background()
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_CHAT_COMMENT,
-		Data: mqttChatComment,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishChatComment failed to marshal mqttChatComment struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmMessage(grpId), 1, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChatComment", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishChatComment to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForDmMessage(grpId), mqttStruct.MESSAGE_CHAT_COMMENT, mqttChatComment, "PublishChatComment")
 }
 
 func PublishActivity(mqttActivity *mqttStruct.MqttActivity, userUUID string) {
-	ctx := context.Background()
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_ACTIVITY,
-		Data: mqttActivity,
-	}
-	marshalMqttActivity, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishActivity failed to marshal mqttActivity struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForUserActivity(userUUID), 1, false, marshalMqttActivity)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishActivity", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishActivity failed to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForUserActivity(userUUID), mqttStruct.MESSAGE_ACTIVITY, mqttActivity, "PublishActivity")
 }
 
 // PublishMessageToUser publishes an arbitrary typed message to a single user's
@@ -761,25 +353,7 @@ func PublishActivity(mqttActivity *mqttStruct.MqttActivity, userUUID string) {
 // own MESSAGE_* type. Best-effort: marshal/publish errors are logged, never
 // propagated, since these are fire-and-forget live updates.
 func PublishMessageToUser(userUUID string, msgType int8, data interface{}) {
-	ctx := context.Background()
-	if mqttInit.MqttClient == nil {
-		return
-	}
-	payload, err := json.Marshal(mqttStruct.Message{Type: msgType, Data: data})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishMessageToUser failed to marshal message err: %+v", err)
-		return
-	}
-	token := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForUserActivity(userUUID), 1, false, payload)
-	go func() {
-		defer func() { _ = recover() }()
-		_ = token.WaitTimeout(mqttInit.PublishWait)
-		if token.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishMessageToUser failed to publish to mqtt err: %+v", token.Error())
-		}
-	}()
+	publishToTopic(context.Background(), helpers.GetMqttTopicForUserActivity(userUUID), msgType, data, "PublishMessageToUser")
 }
 
 // PublishToTopics publishes ONE typed message to several topics at once —
@@ -791,33 +365,7 @@ func PublishMessageToUser(userUUID string, msgType int8, data interface{}) {
 // once, duplicate/blank topics are skipped, and every publish is fire-and-forget
 // (a broker hiccup must never fail the operation that triggered the event).
 func PublishToTopics(topics []string, msgType int8, data interface{}) {
-	ctx := context.Background()
-	if mqttInit.MqttClient == nil || len(topics) == 0 {
-		return
-	}
-	payload, err := json.Marshal(mqttStruct.Message{Type: msgType, Data: data})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishToTopics failed to marshal message err: %+v", err)
-		return
-	}
-	sent := make(map[string]bool, len(topics))
-	for _, topic := range topics {
-		if topic == "" || sent[topic] {
-			continue
-		}
-		sent[topic] = true
-		name := topic
-		token := mqttInit.MqttClient.Publish(topic, 1, false, payload)
-		go func() {
-			defer func() { _ = recover() }()
-			_ = token.WaitTimeout(mqttInit.PublishWait)
-			if token.Error() != nil {
-				helpers.LogErrorWithContext(ctx,
-					"business/PublishToTopics failed to publish to %s err: %+v", name, token.Error())
-			}
-		}()
-	}
+	publishTo(context.Background(), topics, qosAtLeastOnce, msgType, data, "PublishToTopics")
 }
 
 // PublishConversationAccess tells each of people, on their own activity topic
@@ -873,54 +421,13 @@ func PublishGitHubSync(mqttGitHubSync *mqttStruct.MqttGitHubSync, projectId stri
 func PublishArchiveJobStatus(mqttArchiveJob *mqttStruct.MqttArchiveJobStatus) {
 	defer func() {
 		if r := recover(); r != nil {
-			helpers.MessageLogs.ErrorLog.Printf(
-				"business/PublishArchiveJobStatus recovered from panic: %v",
-				r)
+			helpers.MessageLogs.ErrorLog.Printf("business/PublishArchiveJobStatus recovered from panic: %v", r)
 		}
 	}()
-
-	if mqttArchiveJob == nil {
+	if mqttArchiveJob == nil || mqttInit.MqttClient == nil || !mqttInit.MqttClient.IsConnected() {
 		return
 	}
-
-	ctx := context.Background()
-
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_ARCHIVE_JOB_STATUS,
-		Data: mqttArchiveJob,
-	}
-	marshalled, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishArchiveJobStatus failed to marshal mqttArchiveJob struct err: %+v",
-			err)
-		return
-	}
-
-	if mqttInit.MqttClient == nil || !mqttInit.MqttClient.IsConnected() {
-		// Broker not connected (e.g. dev without EMQX). The FE polling
-		// fallback handles this; don't fail loudly.
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForAdminBroadcast(), 1, false, marshalled)
-
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				helpers.MessageLogs.ErrorLog.Printf(
-					"business/PublishArchiveJobStatus result-wait recovered from panic: %v",
-					r)
-			}
-		}()
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishArchiveJobStatus failed to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	}()
+	publishToTopic(context.Background(), helpers.GetMqttTopicForAdminBroadcast(), mqttStruct.MESSAGE_ARCHIVE_JOB_STATUS, mqttArchiveJob, "PublishArchiveJobStatus")
 }
 
 // PublishSlackImportProgress sends a single Slack-import progress event
@@ -933,46 +440,21 @@ func PublishArchiveJobStatus(mqttArchiveJob *mqttStruct.MqttArchiveJobStatus) {
 func PublishSlackImportProgress(p *mqttStruct.MqttSlackImportProgress) {
 	defer func() {
 		if r := recover(); r != nil {
-			helpers.MessageLogs.ErrorLog.Printf(
-				"business/PublishSlackImportProgress recovered from panic: %v", r)
+			helpers.MessageLogs.ErrorLog.Printf("business/PublishSlackImportProgress recovered from panic: %v", r)
 		}
 	}()
-
-	if p == nil {
+	if p == nil || mqttInit.MqttClient == nil || !mqttInit.MqttClient.IsConnected() {
 		return
 	}
-
-	ctx := context.Background()
-	marshalled, err := importProgressPayload(p)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishSlackImportProgress marshal err: %+v", err)
-		return
-	}
-
-	if mqttInit.MqttClient == nil || !mqttInit.MqttClient.IsConnected() {
-		return
-	}
-
-	res := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForAdminBroadcast(), 1, false, marshalled)
-	go func() {
-		defer func() { _ = recover() }()
-		_ = res.WaitTimeout(mqttInit.PublishWait)
-		if res.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishSlackImportProgress publish err: %+v", res.Error())
-		}
-	}()
+	publishToTopic(context.Background(), helpers.GetMqttTopicForAdminBroadcast(), mqttStruct.MESSAGE_SLACK_IMPORT_PROGRESS, importProgressSent(p), "PublishSlackImportProgress")
 }
 
-// importProgressPayload is an import's progress event as every admin's page
-// receives it. Its error goes without URL query strings: a provider's network
-// error carries its request's URL, and Trello's carries the key and token in
-// it. The caller's event is left as it is. Pure.
-func importProgressPayload(p *mqttStruct.MqttSlackImportProgress) ([]byte, error) {
+// importProgressSent is p as it is sent: an error's URLs without their
+// queries, which can carry a signed link's token. Pure.
+func importProgressSent(p *mqttStruct.MqttSlackImportProgress) *mqttStruct.MqttSlackImportProgress {
 	sent := *p
 	sent.ErrorMessage = helpers.WithoutURLQueries(p.ErrorMessage)
-	return json.Marshal(mqttStruct.Message{Type: mqttStruct.MESSAGE_SLACK_IMPORT_PROGRESS, Data: &sent})
+	return &sent
 }
 
 // PublishTableRow broadcasts a data-table row change (create/update/delete) to
@@ -980,48 +462,14 @@ func importProgressPayload(p *mqttStruct.MqttSlackImportProgress) ([]byte, error
 // should carry the action + row id (+ row for create/update). Fire-and-forget:
 // errors are logged, never propagated, and a missing client is a no-op.
 func PublishTableRow(tableId string, data interface{}) {
-	ctx := context.Background()
-	if mqttInit.MqttClient == nil {
-		return
-	}
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_TABLE_ROW,
-		Data: data,
-	}
-	payload, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/PublishTableRow marshal err: %+v", err)
-		return
-	}
-	res := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForTable(tableId), 1, false, payload)
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishTableRow", func() {
-		_ = res.WaitTimeout(mqttInit.PublishWait)
-		if res.Error() != nil {
-			helpers.LogErrorWithContext(ctx, "business/PublishTableRow publish err: %+v", res.Error())
-		}
-	})
+	publishToTopic(context.Background(), helpers.GetMqttTopicForTable(tableId), mqttStruct.MESSAGE_TABLE_ROW, data, "PublishTableRow")
 }
 
 // PublishTablePresence tells a table's open pages who is on it and where
 // (tables A7), on its presence topic. QoS 0: a lost one is replaced by the
 // next, and a page that subscribes late reads the people it answers itself.
 func PublishTablePresence(tableId string, data interface{}) {
-	ctx := context.Background()
-	if mqttInit.MqttClient == nil {
-		return
-	}
-	payload, err := json.Marshal(mqttStruct.Message{Type: mqttStruct.MESSAGE_TABLE_ROW, Data: data})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/PublishTablePresence marshal err: %+v", err)
-		return
-	}
-	res := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForTablePresence(tableId), 0, false, payload)
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishTablePresence", func() {
-		_ = res.WaitTimeout(mqttInit.PublishWait)
-		if res.Error() != nil {
-			helpers.LogErrorWithContext(ctx, "business/PublishTablePresence publish err: %+v", res.Error())
-		}
-	})
+	publishTo(context.Background(), []string{helpers.GetMqttTopicForTablePresence(tableId)}, qosAtMostOnce, mqttStruct.MESSAGE_TABLE_ROW, data, "PublishTablePresence")
 }
 
 // PublishPollUpdate tells a channel's clients that one of its polls changed.
@@ -1040,17 +488,5 @@ func PublishBoardPollUpdate(boardId, pollId, frameId string, kind int8) {
 }
 
 func publishPollUpdate(topic string, update *mqttStruct.MqttPollUpdate) {
-	ctx := context.Background()
-	marshalled, err := json.Marshal(mqttStruct.Message{Type: mqttStruct.MESSAGE_POLL_UPDATE, Data: update})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/PublishPollUpdate marshal err: %+v", err)
-		return
-	}
-	res := mqttInit.MqttClient.Publish(topic, 1, false, marshalled)
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishPollUpdate", func() {
-		_ = res.WaitTimeout(mqttInit.PublishWait)
-		if res.Error() != nil {
-			helpers.LogErrorWithContext(ctx, "business/PublishPollUpdate publish err: %+v", res.Error())
-		}
-	})
+	publishToTopic(context.Background(), topic, mqttStruct.MESSAGE_POLL_UPDATE, update, "PublishPollUpdate")
 }

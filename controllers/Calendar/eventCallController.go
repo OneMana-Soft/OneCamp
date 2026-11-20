@@ -4,15 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
+	transcriptExport "github.com/akashc777/OneCamp/business/TranscriptExport"
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 
 	business "github.com/akashc777/OneCamp/business/Calendar"
 	callRoomBusiness "github.com/akashc777/OneCamp/business/CallRoom"
 	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -143,11 +148,17 @@ func GetCalendarEventCallArtefacts(w http.ResponseWriter, r *http.Request) {
 // eventRecording finds a recording an event's call made (a seam for tests).
 var eventRecording = callStateBusiness.EventRecording
 
+// writeRecordingURL answers a recording's link by the one read rule (a seam
+// for tests: the rule reads the calls' state).
+var writeRecordingURL = httpx.WriteRecordingURL
+
 // GetCalendarEventCallRecording answers the playback link of a recording an
 // event's call made (meet-02), for whoever may read the event by the
 // calendar's own rule, as its "Recordings & notes" are; anyone else is told
 // there is no such event, and a key that is no recording of this event's is
-// not found. GET /calendar/events/{eventId}/call/artefacts/{key}/recording
+// not found. While the event's call goes on, one it made is for the people
+// connected to it (the one read rule, httpx.WriteRecordingURL), and anyone
+// else finds none. GET /calendar/events/{eventId}/call/artefacts/{key}/recording
 func GetCalendarEventCallRecording(w http.ResponseWriter, r *http.Request) {
 	who, ok := member(w, r)
 	if !ok {
@@ -168,12 +179,16 @@ func GetCalendarEventCallRecording(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteRecordingRefusal(w, http.StatusNotFound)
 		return
 	}
-	httpx.WriteRecordingURL(w, r, rec)
+	writeRecordingURL(w, r, rec, keys.Room, who.UserDgraphInfo.Uid, chi.URLParam(r, "key"))
 }
 
 // eventTranscript reads a page of the transcript of a recording an event's
 // call made (a seam for tests).
 var eventTranscript = callStateBusiness.EventTranscript
+
+// transcriptOpenTo is the one read rule a call's transcript follows while
+// the call goes on (V-860; a seam for tests).
+var transcriptOpenTo = liveKitBusiness.TranscriptOpenTo
 
 // A transcript's page: 20 lines unless asked, at most 100, as a
 // conversation's recording transcript pages.
@@ -201,14 +216,22 @@ func GetCalendarEventCallTranscript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page := helpers.PageParam(r.URL.Query(), transcriptPageSize, transcriptPageMax)
-	rec, err := eventTranscript(r.Context(), keys, chi.URLParam(r, "key"), page)
-	if err != nil {
-		helpers.LogErrorWithContext(r.Context(), "controllers/GetCalendarEventCallTranscript: %+v", err)
-		helpers.WriteRetryLater(w, httpx.TranscriptUnavailable)
-		return
-	}
+	rec := transcriptExport.Answer(w, r, page, func(p helpers.Page) (*dgraphStruct.DgraphRecording, string) {
+		rec, err := eventTranscript(r.Context(), keys, chi.URLParam(r, "key"), p)
+		if err != nil {
+			helpers.LogErrorWithContext(r.Context(), "controllers/GetCalendarEventCallTranscript: %+v", err)
+			helpers.WriteRetryLater(w, httpx.TranscriptUnavailable)
+			return nil, ""
+		}
+		// While the event's call goes on, what it recorded is for the people
+		// connected to it (the one read rule): the missing answer.
+		if rec == nil || !transcriptOpenTo(r.Context(), keys.Room, who.UserDgraphInfo.Uid, chi.URLParam(r, "key"), rec.StartedAt) {
+			httpx.WriteRecordingRefusal(w, http.StatusNotFound)
+			return nil, ""
+		}
+		return rec, "event"
+	})
 	if rec == nil {
-		httpx.WriteRecordingRefusal(w, http.StatusNotFound)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
@@ -271,6 +294,79 @@ func changeEventCallArtefact(w http.ResponseWriter, r *http.Request, where strin
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": done})
+}
+
+// makeEventActionTask makes the task of an action item of an event's call
+// (a seam for tests).
+var makeEventActionTask = business.MakeActionTask
+
+// MakeCalendarEventCallActionTask makes the task of one action item of an
+// event's call's recap (gcal-new-event-notes), in the project the body names,
+// and puts it on the event: for whoever may change the event by the
+// calendar's own rule (as linking a task to it) and may add tasks to that
+// project. An item made a task already answers that task (200), a new one is
+// 201. A guest who may only read the event is refused as for any change,
+// anyone else is told there is no such event, and an item the event's calls
+// don't have is not found.
+// POST /calendar/events/{eventId}/call/artefacts/{key}/action-items/{index}/task {"project_uuid": "..."}
+func MakeCalendarEventCallActionTask(w http.ResponseWriter, r *http.Request) {
+	who, ok := member(w, r)
+	if !ok {
+		return
+	}
+	index, err := strconv.Atoi(chi.URLParam(r, "index"))
+	if err != nil || index < 0 {
+		helpers.WriteNotFound(w, "There's no such action item on this event.")
+		return
+	}
+	var body struct {
+		ProjectUUID string `json:"project_uuid"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil || strings.TrimSpace(body.ProjectUUID) == "" {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Pick the project the task goes in."})
+		return
+	}
+	task, err := makeEventActionTask(r.Context(), who, chi.URLParam(r, "eventId"), chi.URLParam(r, "key"), index, body.ProjectUUID)
+	switch {
+	case errors.Is(err, business.ErrNoActionItem):
+		helpers.WriteNotFound(w, "There's no such action item on this event.")
+	case errors.Is(err, business.ErrActionItemBusy):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "That task is being made just now. Look again in a moment."})
+	case errors.Is(err, business.ErrCantAddTasks):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Y" + strings.TrimPrefix(err.Error(), "y") + "."})
+	case err != nil:
+		writeEventCallError(w, r, "MakeCalendarEventCallActionTask", err)
+	case task.Made:
+		helpers.WriteJSON(w, http.StatusCreated, helpers.Envolope{"data": task})
+	default:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": task})
+	}
+}
+
+// SetCalendarEventRecapToGuests turns the organiser's "Send the recap to
+// guests" on or off for an event (gcal-new-event-notes): its call's recap,
+// its words and action items alone, is emailed to its guests by email. The
+// organiser's alone; a guest who may change the event is refused, anyone
+// else told there is no such event. Answers the event as they read it now.
+// POST /calendar/events/{eventId}/call/recap-to-guests {"on": bool}
+func SetCalendarEventRecapToGuests(w http.ResponseWriter, r *http.Request) {
+	who, ok := member(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		On *bool `json:"on"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body); err != nil || body.On == nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That request couldn't be read."})
+		return
+	}
+	e, err := business.Events.SetRecapToGuests(r.Context(), who, chi.URLParam(r, "eventId"), *body.On)
+	if err != nil {
+		writeEventCallError(w, r, "SetCalendarEventRecapToGuests", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": e})
 }
 
 // SetCalendarEventCallLobby makes an event's invitees knock at its call like

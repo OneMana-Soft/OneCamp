@@ -94,17 +94,31 @@ func PrepareExport(ctx context.Context, table uuid.UUID, actor Actor, in ExportI
 	if (in.Spec != nil && in.Rows != nil) || len(in.Rows) > maxExportRowIDs {
 		return nil, errExportRows
 	}
-	next := viewRows(t.Id, actor, in.Spec, in.Rows)
-	e := &TableExport{Name: t.Name, fields: fields, zone: zoneFrom(ctx), next: next}
-	if e.rows, e.more, err = next(ctx); err != nil {
+	e := newTableExport(ctx, t, fields, viewRows(t.Id, actor, in.Spec, in.Rows), in.Widths)
+	e.plan(ctx, actor, all)
+	if e.rows, e.more, err = e.next(ctx); err != nil {
 		// The rows' read checks again (RowsByID): access lost since is as above.
 		return nil, unseen(err)
 	}
-	e.kinds = resultKinds(planComputed(asViewer(ctx, actor), all).program, fields)
-	for _, f := range fields {
-		e.columns = append(e.columns, e.column(f, in.Widths[f.Id.String()]))
-	}
 	return e, nil
+}
+
+// newTableExport is t's export of fields at widths, its rows read by next as
+// they're written, the first window too: the one way a table's sheet is made,
+// alone or among every table's (tablesExport.go). It reads nothing; plan
+// readies its cells.
+func newTableExport(ctx context.Context, t *model.DataTable, fields []*model.Field, next rowWindows, widths map[string]float64) *TableExport {
+	e := &TableExport{Name: t.Name, fields: fields, zone: zoneFrom(ctx), next: next, more: true}
+	for _, f := range fields {
+		e.columns = append(e.columns, e.column(f, widths[f.Id.String()]))
+	}
+	return e
+}
+
+// plan works out what each formula and rollup among the export's fields
+// gives, for actor, from all, its table's live fields.
+func (e *TableExport) plan(ctx context.Context, actor Actor, all []*model.Field) {
+	e.kinds = resultKinds(planComputed(asViewer(ctx, actor), all).program, e.fields)
 }
 
 // unseen is err with a table the reader can't open said as one that isn't
@@ -194,7 +208,25 @@ func rowsNamed(table uuid.UUID, actor Actor, ids []uuid.UUID) rowWindows {
 // read, and answers what was cut to Excel's limits, which its Notes sheet
 // says too.
 func (e *TableExport) WriteXLSX(ctx context.Context, w io.Writer) ([]string, error) {
-	rows := func(row func([]contentIOBusiness.Cell) error) error {
+	return writeWorkbook(ctx, w, []*TableExport{e})
+}
+
+// writeWorkbook writes exports to w as one Excel workbook, a sheet each in
+// their order, each sheet's rows as they're read, and answers what was cut
+// to Excel's limits (a sheet's name among them), which its Notes sheet says
+// too.
+func writeWorkbook(ctx context.Context, w io.Writer, exports []*TableExport) ([]string, error) {
+	sheets := make([]contentIOBusiness.WorkbookSheet, len(exports))
+	for i, e := range exports {
+		sheets[i] = contentIOBusiness.WorkbookSheet{Name: e.Name, Columns: e.columns, Rows: e.sheetRows(ctx)}
+	}
+	return contentIOBusiness.WriteXLSX(w, sheets)
+}
+
+// sheetRows hands each of the export's rows to row as its sheet's cells, a
+// window at a time, those read already first.
+func (e *TableExport) sheetRows(ctx context.Context) func(row func([]contentIOBusiness.Cell) error) error {
+	return func(row func([]contentIOBusiness.Cell) error) error {
 		for {
 			for _, r := range e.rows {
 				values := parseRowValues(r.Values)
@@ -215,7 +247,6 @@ func (e *TableExport) WriteXLSX(ctx context.Context, w io.Writer) ([]string, err
 			}
 		}
 	}
-	return contentIOBusiness.WriteXLSX(w, []contentIOBusiness.WorkbookSheet{{Name: e.Name, Columns: e.columns, Rows: rows}})
 }
 
 // exportFormat is a number field's format (its config's "format"), as the

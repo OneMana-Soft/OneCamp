@@ -151,24 +151,31 @@ var errUnidentifiedRequester = errors.New("this was asked for by someone who cou
 // per-type special case in which the two could disagree, and the sponsor's DMs,
 // private docs and memory fall out because they fail the requester's half.
 //
+// It also answers the readers the search is made for, each with the projects
+// that grant them a task: userUUID, and the requester when there is one. Each
+// search hands them to keepAssigned, which checks a task hit that one of their
+// projects doesn't cover against the task as it is now, since the entry's
+// assignee may name someone the task has gone from.
+//
 // Fails closed: a requester whose scope cannot be resolved stops the search
 // rather than letting it run with the sponsor's reach alone.
-func runPermissionFilter(ctx context.Context, userUUID string, channelUUIDs, projectUUIDs, grpIDs []string) (string, error) {
+func runPermissionFilter(ctx context.Context, userUUID string, channelUUIDs, projectUUIDs, grpIDs []string) (string, []taskReader, error) {
 	base := buildPermissionFilter(userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	readers := []taskReader{readerIn(userUUID, projectUUIDs)}
 	requester, _, ok := RunRequester(ctx)
 	if !ok {
-		return base, nil
+		return base, readers, nil
 	}
 	if requester == "" {
-		return "", errUnidentifiedRequester
+		return "", nil, errUnidentifiedRequester
 	}
 	if readerScopeResolver == nil {
-		return "", fmt.Errorf("could not tell what the person who asked can see, so nothing was searched")
+		return "", nil, fmt.Errorf("could not tell what the person who asked can see, so nothing was searched")
 	}
 	scope, err := readerScopeResolver(ctx, requester)
 	if err != nil {
-		return "", fmt.Errorf("could not tell what the person who asked can see, so nothing was searched: %w", err)
+		return "", nil, fmt.Errorf("could not tell what the person who asked can see, so nothing was searched: %w", err)
 	}
 	theirs := buildPermissionFilter(requester, scope.Channels, scope.Projects, scope.GrpIDs)
-	return fmt.Sprintf(`{"bool": {"must": [%s, %s]}}`, base, theirs), nil
+	return fmt.Sprintf(`{"bool": {"must": [%s, %s]}}`, base, theirs), append(readers, readerIn(requester, scope.Projects)), nil
 }

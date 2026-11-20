@@ -34,6 +34,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/models/taskread/generation"
 	"github.com/google/uuid"
 )
 
@@ -44,6 +45,14 @@ import (
 // (a program or a test that doesn't link it), every restricted task is hidden
 // from everyone: nothing that can't say who may see one ever shows one.
 var Decide func(ctx context.Context, reader string) (map[string]bool, error)
+
+// Waiting is the tasks waiting in triage, by uuid: true. They aren't the
+// team's work until triage decides them, so lists and counts of work leave
+// them out (Cond), but they are hidden from no one: a read of the task, a
+// search and an answer already read have them, and the triage queue reads
+// them by id. business/Triage sets it as it loads; until it does, nothing
+// waits.
+var Waiting func(ctx context.Context) (map[string]bool, error)
 
 // everyRestricted is every restricted task, by uuid: what is hidden while
 // nothing decides (Decide unset). A seam for tests.
@@ -60,12 +69,15 @@ var everyRestricted = func(ctx context.Context) (map[string]bool, error) {
 }
 
 // Filter is the restricted tasks one reader may not see, and those they may
-// (which carry the lock). The zero Filter hides nothing. Safe for concurrent
+// (which carry the lock), with what waits in triage, which only lists and
+// counts leave out (Cond). The zero Filter hides nothing. Safe for concurrent
 // use: it is never changed once made.
 type Filter struct {
 	hidden map[string]bool
 	// shown are the restricted tasks the reader may see.
 	shown map[string]bool
+	// waiting are the tasks waiting in triage (Waiting).
+	waiting map[string]bool
 }
 
 type ctxKey int
@@ -109,6 +121,20 @@ func (h *holder) decision(reader string) *decision {
 // out once however many reads it makes. The first middleware calls it.
 func Install(ctx context.Context) context.Context {
 	return context.WithValue(ctx, holderKey, &holder{})
+}
+
+// Detached is ctx without its cancel, for the work a request sets off that
+// outlives it and may write (an event's listeners: workflows, rules, agents,
+// bridges). A read's ctx (generation.Cacheable, a GET) comes back unmarked,
+// with a place of its own: that work decides who may see a task from the
+// rows, never from a kept entry nor from the decision the read had worked
+// out. A write's ctx keeps what it has: the request read the rows already.
+func Detached(ctx context.Context) context.Context {
+	out := context.WithoutCancel(ctx)
+	if !generation.IsCacheable(out) {
+		return out
+	}
+	return Install(generation.Uncacheable(out))
 }
 
 // WithSystem marks reads through ctx as having no audience: a sweeper, an
@@ -181,9 +207,9 @@ func System(ctx context.Context) bool {
 }
 
 // From is the filter for the reader of ctx (ReaderOf): worked out once per
-// request and reader where Install left a place for it. With no reader it
-// hides every restricted task; WithSystem hides nothing. An error is the
-// decision failing, and the read should fail with it.
+// request and reader where Install left a place for it. With no reader
+// it hides every restricted task; WithSystem hides nothing and leaves nothing
+// out. An error is the decision failing, and the read should fail with it.
 func From(ctx context.Context) (Filter, error) {
 	if System(ctx) {
 		return Filter{}, nil
@@ -203,41 +229,61 @@ func For(ctx context.Context, userUUID string) (Filter, error) {
 	return decide(ctx, strings.ToLower(strings.TrimSpace(userUUID)))
 }
 
-func decide(ctx context.Context, reader string) (Filter, error) {
-	decider := Decide
-	if decider == nil {
-		decider = func(ctx context.Context, _ string) (map[string]bool, error) { return everyRestricted(ctx) }
+// Decider is what decides now: Decide, or, while nothing does, every
+// restricted task hidden from everyone.
+func Decider() func(ctx context.Context, reader string) (map[string]bool, error) {
+	if Decide != nil {
+		return Decide
 	}
-	hidden, err := decider(ctx, reader)
+	return func(ctx context.Context, _ string) (map[string]bool, error) { return everyRestricted(ctx) }
+}
+
+func decide(ctx context.Context, reader string) (Filter, error) {
+	hidden, err := Decider()(ctx, reader)
 	if err != nil {
 		return Filter{}, err
 	}
-	return Of(hidden), nil
+	f := Of(hidden)
+	if Waiting == nil {
+		return f, nil
+	}
+	waiting, err := Waiting(ctx)
+	if err != nil {
+		return Filter{}, err
+	}
+	for id, w := range waiting {
+		if w {
+			add(&f.waiting, id)
+		}
+	}
+	return f, nil
 }
 
 // Of is the filter that hides the tasks named true, and marks those named
-// false restricted (any case; anything that isn't a uuid names no task and is
-// dropped). For WorkAccess, and for tests.
+// false restricted. For WorkAccess, and for tests.
 func Of(taskUUIDs map[string]bool) Filter {
-	if len(taskUUIDs) == 0 {
-		return Filter{}
-	}
 	var f Filter
 	for id, hide := range taskUUIDs {
-		p, err := uuid.Parse(strings.TrimSpace(id))
-		if err != nil {
-			continue
-		}
-		into := &f.shown
 		if hide {
-			into = &f.hidden
+			add(&f.hidden, id)
+		} else {
+			add(&f.shown, id)
 		}
-		if *into == nil {
-			*into = map[string]bool{}
-		}
-		(*into)[p.String()] = true
 	}
 	return f
+}
+
+// add puts id into *set as a parsed uuid, in any case; anything that isn't a
+// uuid names no task and is dropped, so nothing from outside reaches a query.
+func add(set *map[string]bool, id string) {
+	p, err := uuid.Parse(strings.TrimSpace(id))
+	if err != nil {
+		return
+	}
+	if *set == nil {
+		*set = map[string]bool{}
+	}
+	(*set)[p.String()] = true
 }
 
 // Restricted is whether the task is a restricted one the reader may see.
@@ -267,14 +313,21 @@ func (f Filter) IDs() []string {
 	return out
 }
 
-// Cond is a graph filter condition that leaves the hidden tasks out of a
-// block of tasks, or "" when nothing is hidden. Every id is a parsed uuid (Of),
-// so nothing from outside reaches the query.
+// Cond is a graph filter condition that leaves the hidden tasks, and what
+// waits in triage, out of a block of tasks, or "" when there are none. Every
+// id is a parsed uuid (add), so nothing from outside reaches the query.
 func (f Filter) Cond() string {
-	if len(f.hidden) == 0 {
+	if len(f.hidden) == 0 && len(f.waiting) == 0 {
 		return ""
 	}
-	list, _ := json.Marshal(f.IDs())
+	out := f.IDs()
+	for id := range f.waiting {
+		if !f.hidden[id] {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	list, _ := json.Marshal(out)
 	return "NOT eq(task_uuid, " + string(list) + ")"
 }
 

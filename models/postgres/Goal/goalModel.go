@@ -10,6 +10,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -127,9 +128,9 @@ func date(t *time.Time) any {
 	return t.Format(DateLayout)
 }
 
-// treeLock serialises changes to the goal tree, so two parent changes made at
-// once can't close a loop that neither saw.
-const treeLock = `SELECT pg_advisory_xact_lock(hashtext('onecamp.goals.tree'))`
+// TreeLockKey names the transaction lock that serialises changes to the goal
+// tree, so two parent changes made at once can't close a loop that neither saw.
+const TreeLockKey = "onecamp.goals.tree"
 
 // tree is every live goal's place in the tree, read inside tx.
 func tree(ctx context.Context, tx *sql.Tx) ([]Node, error) {
@@ -160,7 +161,7 @@ func inTree(check func([]Node) error, write func(ctx context.Context, tx *sql.Tx
 	}
 	defer func() { _ = tx.Rollback() }()
 	if check != nil {
-		if _, err := tx.ExecContext(ctx, treeLock); err != nil {
+		if err := pgexec.LockXact(pgexec.WithTx(ctx, tx), TreeLockKey); err != nil {
 			return err
 		}
 		nodes, err := tree(ctx, tx)

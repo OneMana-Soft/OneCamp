@@ -168,7 +168,8 @@ func groupInput(w Write) *chatAdapter.ChatInfo {
 }
 
 // onceKey is the place a send is once in, as the routes name it, so a retry
-// through the pipeline and one through a route are the same send. Pure.
+// through the pipeline and one through a route are the same send; a thread's
+// replies are once in their thread (ReplyInPostThread, ReplyInChatThread). Pure.
 func onceKey(w Write, me string) string {
 	switch w.To.Kind {
 	case conversationBusiness.KindChannel:
@@ -179,6 +180,8 @@ func onceKey(w Write, me string) string {
 		}
 	case conversationBusiness.KindGroup:
 		return "grp:" + w.To.ID
+	case conversationBusiness.KindThread:
+		return "th:" + w.To.ID
 	}
 	return ""
 }

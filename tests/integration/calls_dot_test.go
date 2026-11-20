@@ -100,10 +100,13 @@ func listingCaughtUp(t *testing.T, ctx context.Context, rooms ...string) {
 
 // dotIs reads a channel's call dot as who sees it, on the channel's header and
 // in their sidebar (its own route), once LiveKit's listing of the call's rooms
-// has caught up, and wants both lit, or both out.
+// has caught up, and wants both lit, or both out. The joins and leaves here
+// send no webhook, so it empties the sidebar's kept answer as theirs would
+// (CallRoomsChanged; calls_dot_cache_test.go sends the events themselves).
 func dotIs(t *testing.T, ctx context.Context, channel string, who *dgraphStruct.DgraphUser, want bool, when string, rooms ...string) {
 	t.Helper()
 	listingCaughtUp(t, ctx, append([]string{channel}, rooms...)...)
+	liveKitBusiness.CallRoomsChanged()
 	header, err := channelBusiness.GetChannelCallActiveStatus(ctx, channel)
 	if err != nil {
 		t.Fatalf("%s: the channel's header dot: %v", when, err)

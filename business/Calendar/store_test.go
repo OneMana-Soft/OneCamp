@@ -238,16 +238,20 @@ type memFeed struct {
 	revoked bool
 }
 
-func (m *memStore) liveFeed(_ context.Context, calendar, person uuid.UUID) (*models.Feed, error) {
+func (m *memStore) latestFeed(_ context.Context, calendar, person uuid.UUID) (*models.Feed, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var last *models.Feed
 	for _, f := range m.feeds {
-		if !f.revoked && f.CalendarID == calendar && f.PersonID == person {
+		if f.CalendarID == calendar && f.PersonID == person {
 			c := f.Feed
-			return &c, nil
+			if !f.revoked {
+				return &c, nil
+			}
+			last = &c
 		}
 	}
-	return nil, nil
+	return last, nil
 }
 
 func (m *memStore) feedByHash(_ context.Context, hash []byte) (*models.Feed, error) {
@@ -265,25 +269,73 @@ func (m *memStore) feedByHash(_ context.Context, hash []byte) (*models.Feed, err
 func (m *memStore) makeFeed(_ context.Context, f models.Feed) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	replaced := m.revokeLocked(f.CalendarID, f.PersonID)
+	replaced := ""
+	if old := m.revokeLocked(f.CalendarID, f.PersonID, f.PersonID); old != nil {
+		replaced = old.Scope
+	}
 	m.feeds = append(m.feeds, memFeed{Feed: f})
 	return replaced, nil
 }
 
-func (m *memStore) revokeFeed(_ context.Context, calendar, person uuid.UUID) (string, error) {
+func (m *memStore) revokeFeed(_ context.Context, calendar, person uuid.UUID) (*models.Feed, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.revokeLocked(calendar, person), nil
+	return m.revokeLocked(calendar, person, person), nil
 }
 
-// revokeLocked stops person's live feed of a calendar and gives its scope, ""
-// when none was live, as calendar_feeds_live_idx keeps one at most. m.mu held.
-func (m *memStore) revokeLocked(calendar, person uuid.UUID) string {
-	stopped := ""
+func (m *memStore) liveFeeds(_ context.Context, limit int) ([]*models.Feed, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*models.Feed
+	for i := len(m.feeds) - 1; i >= 0 && len(out) < limit; i-- {
+		if !m.feeds[i].revoked {
+			c := m.feeds[i].Feed
+			out = append(out, &c)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) feedRead(_ context.Context, id uuid.UUID, _ time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.feeds {
+		if m.feeds[i].ID == id && !m.feeds[i].revoked {
+			now := time.Now()
+			m.feeds[i].LastReadAt = &now
+		}
+	}
+	return nil
+}
+
+func (m *memStore) revokeFeedByID(_ context.Context, id, by uuid.UUID) (*models.Feed, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.feeds {
+		if m.feeds[i].ID == id && !m.feeds[i].revoked {
+			c := m.feeds[i].Feed
+			m.stopLocked(i, by)
+			return &c, nil
+		}
+	}
+	return nil, nil
+}
+
+// stopLocked stops the i-th feed, as by. m.mu held.
+func (m *memStore) stopLocked(i int, by uuid.UUID) {
+	at := time.Now()
+	m.feeds[i].revoked, m.feeds[i].RevokedAt, m.feeds[i].RevokedBy = true, &at, &by
+}
+
+// revokeLocked stops person's live feed of a calendar and gives it as it
+// was, nil when none was live, as calendar_feeds_live_idx keeps one at most. m.mu held.
+func (m *memStore) revokeLocked(calendar, person, by uuid.UUID) *models.Feed {
+	var stopped *models.Feed
 	for i := range m.feeds {
 		if m.feeds[i].CalendarID == calendar && m.feeds[i].PersonID == person && !m.feeds[i].revoked {
-			m.feeds[i].revoked = true
-			stopped = m.feeds[i].Scope
+			m.stopLocked(i, by)
+			c := m.feeds[i].Feed
+			stopped = &c
 		}
 	}
 	return stopped
@@ -464,14 +516,17 @@ func (m *memStore) deleteSubscribedEvents(_ context.Context, calendar uuid.UUID,
 	return nil
 }
 
-func (m *memStore) containerCalendars(_ context.Context, kind string, limit int) ([]models.Calendar, error) {
+func (m *memStore) containerCalendars(_ context.Context, kinds []string, limit int) ([]models.Calendar, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []models.Calendar
-	for k, c := range m.containers {
-		ck, cid, _ := strings.Cut(k, "/")
-		if ck == kind && len(out) < limit {
-			out = append(out, models.Calendar{ID: c, Kind: ck, ContainerKind: ck, ContainerID: cid})
+	for _, kind := range kinds {
+		n := 0
+		for k, c := range m.containers {
+			ck, cid, _ := strings.Cut(k, "/")
+			if ck == kind && n < limit {
+				out, n = append(out, models.Calendar{ID: c, Kind: ck, ContainerKind: ck, ContainerID: cid}), n+1
+			}
 		}
 	}
 	return out, nil
@@ -786,6 +841,11 @@ func (m *memStore) known(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]bool
 
 // membersNow is everyone with an account but those the test marks as no
 // members now.
+// heldRooms is none: rooms are kept in Postgres alone (tests/integration).
+func (m *memStore) heldRooms(context.Context, []uuid.UUID) (map[uuid.UUID][]models.Room, error) {
+	return nil, nil
+}
+
 func (m *memStore) membersNow(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1103,6 +1163,17 @@ func (m *memStore) setCallRoom(_ context.Context, id uuid.UUID, room, was string
 			o.CallRoom = room
 		}
 	}
+	return true, nil
+}
+
+func (m *memStore) setRecapToGuests(_ context.Context, id uuid.UUID, on bool) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.events[id]
+	if e == nil || e.DeletedAt != nil || e.RecapToGuests == on {
+		return false, nil
+	}
+	e.RecapToGuests = on
 	return true, nil
 }
 

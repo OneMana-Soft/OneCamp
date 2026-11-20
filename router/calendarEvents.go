@@ -23,6 +23,11 @@ func mountCalendarEvents(rt calendarRouters) {
 	rt.Member.Get("/calendar/sync/{provider}", eventController.SyncStatus)
 	rt.Member.Post("/calendar/sync/{provider}/move", eventController.MoveFrom)
 	rt.Member.Post("/calendar/projects/{projectId}/calendar", eventController.ProjectCalendar)
+	rt.Member.Post("/calendar/channels/{channelId}/calendar", eventController.ChannelCalendar)
+	rt.Member.Post("/calendar/teams/{teamId}/calendar", eventController.TeamCalendar)
+	// Each person's own choice to keep when they're busy to themselves.
+	rt.Member.Get("/calendar/freebusy", eventController.MyFreeBusy)
+	rt.Member.Put("/calendar/freebusy", eventController.SetMyFreeBusy)
 	rt.Member.Get("/calendar/calendars", eventController.ListCalendars)
 	rt.Member.Get("/calendar/calendars/events", eventController.ListEventsOnCalendars)
 	rt.Member.Get("/calendar/people/{userId}/calendar", eventController.PersonCalendar)

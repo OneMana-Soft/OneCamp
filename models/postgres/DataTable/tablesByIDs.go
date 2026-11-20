@@ -11,7 +11,7 @@ import (
 
 // TablesByIDs is the tables among ids, deleted ones too (their DeletedAt
 // says so), in no particular order: what a decision about many tables reads
-// at once. The ids go to pgx as they are (CellsOf says why).
+// at once. The ids go to pgx as they are (CellsOfMany says why).
 func TablesByIDs(ctx context.Context, ids []uuid.UUID) ([]*DataTable, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -49,4 +49,14 @@ func FieldsOfTables(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID][]*Fiel
 		out[f.TableId] = append(out[f.TableId], f)
 	}
 	return out, err
+}
+
+// CountRowsOfTables is how many live rows the tables among ids hold together,
+// counting at most limit+1, so a count past limit says it is, in one read.
+func CountRowsOfTables(ctx context.Context, ids []uuid.UUID, limit int) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	return pgexec.Scalar[int](ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM data_table_rows
+		WHERE table_id = ANY($1) AND deleted_at IS NULL LIMIT $2) n`, ids, limit+1)
 }

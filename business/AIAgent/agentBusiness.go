@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	userBusiness "github.com/akashc777/OneCamp/business/User"
@@ -321,16 +322,23 @@ func validateAgentModelPref(ctx context.Context, modelPref *string) error {
 	}
 	id, err := uuid.Parse(strings.TrimSpace(*modelPref))
 	if err != nil {
-		return fmt.Errorf("invalid model selection")
+		return checkRefused("invalid model selection")
 	}
 	m, err := aiModels.GetAuthorizedModel(ctx, id)
 	if err != nil {
-		return fmt.Errorf("selected model is not available")
+		return checkRefused("selected model is not available")
 	}
 	if !m.Usable() {
-		return fmt.Errorf("model %q is not available (it or its provider is disabled)", m.DisplayLabel())
+		return checkRefused(fmt.Sprintf("model %q is not available (it or its provider is disabled)", m.DisplayLabel()))
 	}
 	return nil
+}
+
+// checkRefused is a check that refused, in the person's words: theirs to
+// change, not ours to retry, so an install answers it 400 as the agent form
+// does, not 500 (CR-444 D1).
+func checkRefused(msg string) error {
+	return &helpers.Refusal{Status: http.StatusBadRequest, Msg: msg}
 }
 
 // CreateAgent validates and persists a new agent owned by createdBy.
@@ -340,7 +348,8 @@ func CreateAgent(ctx context.Context, in AgentInput, createdBy uuid.UUID) (*mode
 	}
 	v, err := validate(&in)
 	if err != nil {
-		return nil, err
+		// validate reads nothing: what it refuses is the input's.
+		return nil, checkRefused(err.Error())
 	}
 	if err := validateAgentModelPref(ctx, v.modelPref); err != nil {
 		return nil, err
@@ -377,7 +386,7 @@ func CreateAgent(ctx context.Context, in AgentInput, createdBy uuid.UUID) (*mode
 	// What its remote may reach follows whoever adds it.
 	addedByAdmin := creatorIsAdmin(ctx, &createdBy)
 	if msg := remoteReachRefusal(a.AGUIEndpoint, addedByAdmin); msg != "" {
-		return nil, fmt.Errorf("%s", msg)
+		return nil, checkRefused(msg)
 	}
 	if a.RemoteCard, err = resolveRemoteCard(ctx, v.remoteProtocol, a.AGUIEndpoint, a.AGUIAuthHeader, a.AGUIAuthSecret, addedByAdmin); err != nil {
 		return nil, err

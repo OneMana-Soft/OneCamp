@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	triageBusiness "github.com/akashc777/OneCamp/business/Triage"
 	"slices"
 	"sort"
 	"strings"
@@ -39,6 +40,9 @@ const (
 	ActionComment     = "add_comment"
 	ActionAddSubtask  = "add_subtask"
 	ActionNotify      = "notify"
+	// ActionTriage decides arriving work through the triage queue
+	// (task_arrived rules only): accept into a status, or decline.
+	ActionTriage = "triage"
 )
 
 // MaxActionsPerBranch bounds a task rule's actions in each branch.
@@ -52,6 +56,7 @@ const (
 	AssignCreator     = "creator"
 	AssignActor       = "actor" // whoever made the change the rule heard
 	AssignNobody      = "nobody"
+	AssignOnDuty      = "on_duty" // whoever the project's triage rota has on duty
 )
 
 // Whom notify tells.
@@ -60,12 +65,13 @@ const (
 	NotifyCreator  = "creator"
 	NotifyActor    = "actor"
 	NotifyPeople   = "people"
+	NotifyOnDuty   = "on_duty"
 )
 
 // maxPool bounds the people an assign or notify names.
 const maxPool = 50
 
-var taskActions = []string{ActionSetStatus, ActionSetPriority, ActionAssign, ActionSetDue, ActionComment, ActionAddSubtask, ActionNotify, ActionAskAgent}
+var taskActions = []string{ActionSetStatus, ActionSetPriority, ActionAssign, ActionSetDue, ActionComment, ActionAddSubtask, ActionNotify, ActionAskAgent, ActionTriage}
 
 func isTaskAction(t string) bool { return slices.Contains(taskActions, t) }
 
@@ -73,7 +79,7 @@ func isTaskAction(t string) bool { return slices.Contains(taskActions, t) }
 var taskTriggers = []string{workflowModel.TriggerTaskCreated, workflowModel.TriggerTaskStatusChanged,
 	workflowModel.TriggerTaskAssigned, workflowModel.TriggerTaskFieldChanged,
 	workflowModel.TriggerTaskDueSoon, workflowModel.TriggerTaskOverdue, workflowModel.TriggerFormSubmitted,
-	workflowModel.TriggerApprovalDecided}
+	workflowModel.TriggerApprovalDecided, workflowModel.TriggerTaskArrived}
 
 func isTaskTrigger(t string) bool { return slices.Contains(taskTriggers, t) }
 
@@ -101,10 +107,10 @@ func validateTaskAction(act *WorkflowAction) error {
 				return fmt.Errorf("pick the person to assign")
 			}
 		case AssignRoundRobin, AssignLeastLoaded:
-		case AssignCreator, AssignActor, AssignNobody:
+		case AssignCreator, AssignActor, AssignNobody, AssignOnDuty:
 			act.UserIDs = nil
 		default:
-			return fmt.Errorf("assign to a person, by turns, to whoever has least, to its creator, or to nobody")
+			return fmt.Errorf("assign to a person, by turns, to whoever has least, to whoever is on triage duty, to its creator, or to nobody")
 		}
 	case ActionSetDue:
 		if act.DueInDays != nil && (*act.DueInDays < 0 || *act.DueInDays > 365) {
@@ -149,14 +155,30 @@ func validateTaskAction(act *WorkflowAction) error {
 			return fmt.Errorf("a notice is at most 300 characters")
 		}
 		switch act.Notify {
-		case NotifyAssignee, NotifyCreator, NotifyActor:
+		case NotifyAssignee, NotifyCreator, NotifyActor, NotifyOnDuty:
 			act.UserIDs = nil
 		case NotifyPeople:
 			if len(act.UserIDs) == 0 {
 				return fmt.Errorf("pick who to tell")
 			}
 		default:
-			return fmt.Errorf("tell the assignee, the creator, whoever made the change, or people you pick")
+			return fmt.Errorf("tell the assignee, the creator, whoever made the change, whoever is on triage duty, or people you pick")
+		}
+	case ActionTriage:
+		act.Decision = strings.ToLower(strings.TrimSpace(act.Decision))
+		act.Status = strings.TrimSpace(act.Status)
+		switch triageBusiness.Decision(act.Decision) {
+		case triageBusiness.Accept:
+		case triageBusiness.Decline:
+			act.Status = ""
+			if act.Text == "" {
+				return fmt.Errorf("say why it's declined: the requester is told")
+			}
+			if len(act.Text) > triageBusiness.MaxReason {
+				return fmt.Errorf("a reason is at most %d characters", triageBusiness.MaxReason)
+			}
+		default:
+			return fmt.Errorf("a rule accepts or declines what arrives")
 		}
 	}
 	if len(act.UserIDs) > maxPool {
@@ -179,7 +201,7 @@ func checkTaskActionsIn(ctx context.Context, projectID string, branches ...[]Wor
 	for _, actions := range branches {
 		for i := range actions {
 			act := &actions[i]
-			if act.Type == ActionSetStatus {
+			if act.Type == ActionSetStatus || (act.Type == ActionTriage && act.Status != "") {
 				r, err := taskStatusBusiness.Resolve(ctx, projectID, act.Status)
 				if errors.Is(err, taskStatusBusiness.ErrUnknownStatus) {
 					return fmt.Errorf("%q is not a status of this project. %s", act.Status, taskStatusBusiness.Describe(ctx, projectID))
@@ -400,8 +422,21 @@ func (cw *compiledWorkflow) runTaskAction(ctx context.Context, act WorkflowActio
 			return step
 		}
 		step.Made, step.Detail = id, said
+	case ActionTriage:
+		c := triageBusiness.Choice{Decision: triageBusiness.Decision(act.Decision), Status: act.Status, Reason: act.Text}
+		if err := decideAs(ctx, rc.owner, rc.taskID(), c); err != nil {
+			return fail(err)
+		}
+		step.Detail = act.Decision + "ed"
+		if c.Decision == triageBusiness.Decline {
+			step.Detail = "declined: " + truncate(act.Text, 80)
+		}
 	case ActionNotify:
-		people, err := readersAmong(ctx, rc.task.Uuid, cw.whomToTell(act, ev, rc))
+		whom, err := cw.whomToTell(ctx, act, ev, rc)
+		if err != nil {
+			return fail(err)
+		}
+		people, err := readersAmong(ctx, rc.task.Uuid, whom)
 		if err != nil {
 			return fail(err)
 		}
@@ -443,6 +478,20 @@ func (cw *compiledWorkflow) pickAssignee(ctx context.Context, act WorkflowAction
 			return "", fmt.Errorf("nobody made the change")
 		}
 		return ev.targetUserUUID, nil
+	case AssignOnDuty:
+		who, err := onDutyNow(ctx, rc)
+		if err != nil {
+			return "", err
+		}
+		// Someone on the rota who has left the project is no one to give it to.
+		in, err := cw.pool(ctx, WorkflowAction{UserIDs: []string{who}}, rc)
+		if err != nil {
+			return "", err
+		}
+		if len(in) == 0 {
+			return "", fmt.Errorf("whoever is on triage duty isn't in the project any more")
+		}
+		return who, nil
 	}
 	pool, err := cw.pool(ctx, act, rc)
 	if err != nil {
@@ -520,24 +569,30 @@ func (cw *compiledWorkflow) pool(ctx context.Context, act WorkflowAction, rc *ru
 }
 
 // whomToTell is who a notify action tells.
-func (cw *compiledWorkflow) whomToTell(act WorkflowAction, ev triggerEvent, rc *runCtx) []string {
+func (cw *compiledWorkflow) whomToTell(ctx context.Context, act WorkflowAction, ev triggerEvent, rc *runCtx) ([]string, error) {
 	switch act.Notify {
+	case NotifyOnDuty:
+		who, err := onDutyNow(ctx, rc)
+		if err != nil {
+			return nil, err
+		}
+		return []string{who}, nil
 	case NotifyAssignee:
 		if rc.task.Assignee != nil && rc.task.Assignee.Uuid != "" {
-			return []string{rc.task.Assignee.Uuid}
+			return []string{rc.task.Assignee.Uuid}, nil
 		}
 	case NotifyCreator:
 		if rc.task.CreatedBy != nil && rc.task.CreatedBy.Uuid != "" {
-			return []string{rc.task.CreatedBy.Uuid}
+			return []string{rc.task.CreatedBy.Uuid}, nil
 		}
 	case NotifyActor:
 		if ev.targetUserUUID != "" {
-			return []string{ev.targetUserUUID}
+			return []string{ev.targetUserUUID}, nil
 		}
 	case NotifyPeople:
-		return act.UserIDs
+		return act.UserIDs, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // readersAmong is the people, in order and once each, who may open the task

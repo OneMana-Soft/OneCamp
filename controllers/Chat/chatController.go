@@ -5,6 +5,7 @@ import (
 	"errors"
 	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
+	transcriptExport "github.com/akashc777/OneCamp/business/TranscriptExport"
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	"net/http"
 	"strconv"
@@ -21,6 +22,7 @@ import (
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	chatDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Chat"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
@@ -728,507 +730,6 @@ func GetUserChatListWithLatestChat(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func GetOldGroupChats(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	grpIdString := chi.URLParam(r, "grp_id")
-	epochTimeString := chi.URLParam(r, "time_stamp")
-
-	// The message the page starts next to (helpers.PageEdge).
-	edge, err := helpers.PageEdgeOf(r, epochTimeString)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
-		return
-	}
-
-	if len(grpIdString) == 0 {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse grpId string",
-			"err": err,
-		})
-		return
-	}
-
-	dgraphDm, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, grpIdString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetOldGroupChats Failed to get grp chat info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get grp chat info",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphDm.ParticipantIsMember == 0 {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
-		return
-	}
-
-	chats, err := business.GetDgraphOldGroupChatFromDgraph(ctx, edge, grpIdString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetOldGroupChats Failed to get chats info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chats",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got chat list successfully!", "data": chats})
-
-}
-
-func GetOldChats(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	secondUserUUIDString := chi.URLParam(r, "user_uuid")
-	epochTimeString := chi.URLParam(r, "time_stamp")
-
-	// The message the page starts next to (helpers.PageEdge).
-	edge, err := helpers.PageEdgeOf(r, epochTimeString)
-	if err != nil {
-		// A malformed time in the URL is the caller's mistake: say so, don't panic.
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
-		return
-	}
-
-	secondUserUUID, err := uuid.Parse(secondUserUUIDString)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/getOldChats Failed to parse userUUID string err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to pas userUUID string",
-			"err": err,
-		})
-		return
-	}
-
-	secondUserInfo, err := userBusiness.GetUserByUUID(ctx, secondUserUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/getOldChats Failed to get user info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user info",
-			"err": err,
-		})
-		return
-	}
-
-	if secondUserInfo == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/getOldChats Failed to get user")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user info",
-			"err": err,
-		})
-		return
-	}
-
-	chats, err := business.GetDgraphOldChatFromDgraph(ctx, edge, userInfo.UserDgraphInfo.Uuid, secondUserUUIDString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/getOldChats Failed to get chats info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chats",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got chat list successfully!", "data": chats})
-
-}
-
-func GetNewGroupChatsIncludingChat(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	grpIdString := chi.URLParam(r, "grp_id")
-
-	chatUUIDString := chi.URLParam(r, "chat_uuid")
-
-	if chatUUIDString == "" || grpIdString == "" {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse chatUUID ot grpId string",
-		})
-		return
-	}
-
-	dgraphDm, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, grpIdString)
-
-	if err != nil || dgraphDm == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewGroupChatsIncludingChat Failed to get group chat info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get group chat",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphDm.ParticipantIsMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
-		return
-	}
-
-	dgraphChatInfo, err := business.GetDgraphChatOnlyTextByUUID(ctx, chatUUIDString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewGroupChatsIncludingChat Failed to get chats info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chats",
-			"err": err,
-		})
-		return
-	}
-
-	chats, err := business.GetDgraphNewGroupChatIncludingChatFromDgraph(ctx, *dgraphChatInfo.CreatedAt, grpIdString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewGroupChatsIncludingChat Failed to get chats info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chats",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got chat list successfully!", "data": chats})
-
-}
-
-func GetNewChatsIncludingChat(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	secondUserUUIDString := chi.URLParam(r, "user_uuid")
-
-	chatUUIDString := chi.URLParam(r, "chat_uuid")
-
-	if chatUUIDString == "" || secondUserUUIDString == "" {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse chatUUID string",
-		})
-		return
-	}
-
-	dgraphChatInfo, err := business.GetDgraphChatOnlyTextByUUID(ctx, chatUUIDString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewChatsIncludingChat Failed to get chats info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chats",
-			"err": err,
-		})
-		return
-	}
-
-	chats, err := business.GetDgraphNewChatIncludingChatFromDgraph(ctx, *dgraphChatInfo.CreatedAt, userInfo.UserDgraphInfo.Uuid, secondUserUUIDString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewChats Failed to get chats info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chats",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got chat list successfully!", "data": chats})
-
-}
-
-func GetNewGroupChats(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	grpIdString := chi.URLParam(r, "grp_id")
-	epochTimeString := chi.URLParam(r, "time_stamp")
-
-	// The message the page starts next to (helpers.PageEdge).
-	edge, err := helpers.PageEdgeOf(r, epochTimeString)
-	if err != nil {
-		// A malformed time in the URL is the caller's mistake: say so, don't panic.
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
-		return
-	}
-
-	dgraphDm, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, grpIdString)
-
-	if err != nil || dgraphDm == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewGroupChats Failed to get grp chat info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get grp chat info",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphDm.ParticipantIsMember == 0 {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
-		return
-	}
-
-	chats, err := business.GetDgraphNewGroupChatFromDgraph(ctx, edge, grpIdString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewGroupChats Failed to get chats info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chats",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got chat list successfully!", "data": chats})
-
-}
-
-func GetNewChats(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	secondUserUUIDString := chi.URLParam(r, "user_uuid")
-	epochTimeString := chi.URLParam(r, "time_stamp")
-
-	// The message the page starts next to (helpers.PageEdge).
-	edge, err := helpers.PageEdgeOf(r, epochTimeString)
-	if err != nil {
-		// A malformed time in the URL is the caller's mistake: say so, don't panic.
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
-		return
-	}
-
-	secondUserUUID, err := uuid.Parse(secondUserUUIDString)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewChats Failed to parse userUUID string err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to pas userUUID string",
-			"err": err,
-		})
-		return
-	}
-
-	secondUserInfo, err := userBusiness.GetUserByUUID(ctx, secondUserUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewChats Failed to get user info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user info",
-			"err": err,
-		})
-		return
-	}
-
-	if secondUserInfo == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewChats Failed to get user")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user info",
-			"err": err,
-		})
-		return
-	}
-
-	chats, err := business.GetDgraphNewChatFromDgraph(ctx, edge, userInfo.UserDgraphInfo.Uuid, secondUserUUIDString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewChats Failed to get chats info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chats",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got chat list successfully!", "data": chats})
-
-}
-
-func GetLatestGroupChats(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	grpIdString := chi.URLParam(r, "grp_id")
-
-	if len(grpIdString) == 0 {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse grpId string",
-		})
-		return
-	}
-
-	dgraphDm, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, grpIdString)
-
-	if err != nil || dgraphDm == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetLatestGroupChats Failed to get user info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user info",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphDm.ParticipantIsMember == 0 {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
-		return
-	}
-
-	chats, err := business.GetDgraphLatestGroupChatFromDgraph(ctx, userInfo.UserPostgresInfo.Id, grpIdString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetLatestGroupChats Failed to get chats info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chats",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got chat list successfully!", "data": chats})
-
-}
-
-func GetLatestChats(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	secondUserUUIDString := chi.URLParam(r, "user_uuid")
-
-	secondUserUUID, err := uuid.Parse(secondUserUUIDString)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetLatestChats Failed to parse userUUID string err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to pas userUUID string",
-			"err": err,
-		})
-		return
-	}
-
-	secondUserInfo, err := userBusiness.GetUserByUUID(ctx, secondUserUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetLatestChats Failed to get user info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user info",
-			"err": err,
-		})
-		return
-	}
-
-	if secondUserInfo == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetLatestChats Failed to get user")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user info",
-			"err": err,
-		})
-		return
-	}
-
-	chats, err := business.GetDgraphLatestChatFromDgraph(ctx, userInfo.UserPostgresInfo.Id, secondUserUUIDString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetLatestChats Failed to get chats info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chats",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got chat list successfully!", "data": chats})
-
-}
-
 func CreateOrUpdateChatReaction(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -1339,53 +840,6 @@ func DeleteChatReaction(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "removed reaction successfully!"})
 }
 
-func GetDgraphChatByUUIDWithAllComments(w http.ResponseWriter, r *http.Request) {
-	chatId := chi.URLParam(r, "chat_uuid")
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	dgraphChat, err := business.GetDgraphChatBasicByUUID(ctx, chatId, userInfo.UserDgraphInfo.Uid)
-
-	// A message that isn't there, or isn't in a conversation, is a 404, as a
-	// deleted one is; a graph that doesn't answer is a 503 the page can try
-	// again (helpers.WriteReadFailure).
-	if err == nil && (dgraphChat == nil || dgraphChat.DM == nil) {
-		err = chatDgraphModels.ErrNotFound
-	}
-	if err != nil {
-		helpers.WriteReadFailure(w, r, err, "thread", "controllers/GetDgraphChatByUUIDWithAllComments")
-		return
-	}
-
-	if dgraphChat.DM.ParticipantIsMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You're not in this conversation."})
-		return
-	}
-
-	// The thread itself, answered the same way: a failed read was a 400 that
-	// said the request was wrong.
-	dgraphChatWithAllComments, err := business.GetDgraphChatByUUIDWithAllComments(ctx, chatId)
-	if err == nil && dgraphChatWithAllComments == nil {
-		err = chatDgraphModels.ErrNotFound
-	}
-	if err != nil {
-		helpers.WriteReadFailure(w, r, err, "thread", "controllers/GetDgraphChatByUUIDWithAllComments")
-		return
-	}
-
-	// A deleted message's thread shows nothing of it: a placeholder over its
-	// replies, or no thread when there are none (business.ChatThreadForMember).
-	thread, ok := business.ChatThreadForMember(dgraphChatWithAllComments)
-	if !ok {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got reaction comment successfully!", "data": thread})
-
-}
-
 func CreateChatComment(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -1439,8 +893,16 @@ func CreateChatComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	createdComment, err := business.CreateChatComment(ctx, &commentInfo, &userInfo, mentionsDgraphUsersList, dgraphChat.DM.GroupingId, dgraphChat.From.Uid, dgraphChat)
+	// Once per client id: a reply sent again after a lost answer is the same
+	// reply (messagePipeline.ReplyInChatThread).
+	createdComment, err := messagePipeline.ReplyInChatThread(ctx, &userInfo, &commentInfo, mentionsDgraphUsersList, dgraphChat.DM.GroupingId, dgraphChat.From.Uid, dgraphChat)
 
+	// A repeat whose first try is still going, or a guard that can't answer,
+	// says so as a chat's send does (CR-373 F1).
+	if rj, ok := sendBusiness.AsRejection(err); ok {
+		writeSendError(w, rj)
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateChatComment Failed to create chat comment err: %+v",
@@ -2457,40 +1919,7 @@ func GetChatRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	dgraphDm, err := business.GetDMRecordingTranscript(ctx, grpIdString, userInfo.UserDgraphInfo.Uid, egressIdString, pageIndex, pageSize)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChatRecordingTranscript Failed to get dm dgraph info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Couldn't load the recording's transcript.",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphDm == nil || dgraphDm.ParticipantIsMember == 0 || len(dgraphDm.Recordings) == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
-	}
-
-	pageCount := uint64(1)
-
-	if pageSize > 0 {
-		pageCount = (dgraphDm.Recordings[0].TranscriptCount + uint64(pageSize) - 1) / uint64(pageSize)
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg":       "got dm info successfully!",
-		"data":      dgraphDm.Recordings[0],
-		"pageCount": pageCount,
-	})
-
+	answerChatTranscript(w, r, "GetChatRecordingTranscript", "direct", userInfo, grpIdString, egressIdString, pageIndex, pageSize)
 }
 
 func GetGrpChatRecordingTranscript(w http.ResponseWriter, r *http.Request) {
@@ -2536,40 +1965,50 @@ func GetGrpChatRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	dgraphDm, err := business.GetDMRecordingTranscript(ctx, grpIdString, userInfo.UserDgraphInfo.Uid, egressIdString, pageIndex, pageSize)
+	answerChatTranscript(w, r, "GetGrpChatRecordingTranscript", "group", userInfo, grpIdString, egressIdString, pageIndex, pageSize)
+}
 
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetGrpChatRecordingTranscript Failed to get dm dgraph info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Couldn't load the recording's transcript.",
-			"err": err,
-		})
+// answerChatTranscript answers a page of a chat's (a DM's or a group's)
+// recording transcript for the person asking, or, with ?format=, the whole
+// transcript as a file from one capped read: the missing recording's answer
+// when they aren't in the chat, it has no such recording, or, while a call
+// goes on there, the one read rule (TranscriptOpenTo: only for the people
+// connected to it) says no. route names the handler in the error log, place
+// names the kind of chat in an export's file name, and userInfo is the person
+// asking.
+func answerChatTranscript(w http.ResponseWriter, r *http.Request, route, place string, userInfo userModels.UserInfo, grpIdString, egressIdString string, pageIndex, pageSize int) {
+	ctx := r.Context()
+	rec := transcriptExport.Answer(w, r, helpers.Page{Index: pageIndex, Size: pageSize}, func(p helpers.Page) (*dgraphStruct.DgraphRecording, string) {
+		dgraphDm, err := business.GetDMRecordingTranscript(ctx, grpIdString, userInfo.UserDgraphInfo.Uid, egressIdString, p.Index, p.Size)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/%s Failed to get dm dgraph info err: %+v", route, err)
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+				"msg": "Couldn't load the recording's transcript.",
+				"err": err,
+			})
+			return nil, ""
+		}
+		if dgraphDm == nil || dgraphDm.ParticipantIsMember == 0 || len(dgraphDm.Recordings) == 0 ||
+			!liveKitBusiness.TranscriptOpenTo(ctx, grpIdString, userInfo.UserDgraphInfo.Uid, egressIdString, dgraphDm.Recordings[0].StartedAt) {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
+				"msg": "Not Authorised",
+			})
+			return nil, ""
+		}
+		return dgraphDm.Recordings[0], place
+	})
+	if rec == nil {
 		return
 	}
-
-	if dgraphDm == nil || dgraphDm.ParticipantIsMember == 0 || len(dgraphDm.Recordings) == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
-	}
-
 	pageCount := uint64(1)
-
 	if pageSize > 0 {
-		pageCount = (dgraphDm.Recordings[0].TranscriptCount + uint64(pageSize) - 1) / uint64(pageSize)
+		pageCount = (rec.TranscriptCount + uint64(pageSize) - 1) / uint64(pageSize)
 	}
-
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":       "got dm info successfully!",
-		"data":      dgraphDm.Recordings[0],
+		"data":      rec,
 		"pageCount": pageCount,
 	})
-
 }
 
 // writeSendError answers a refused send with the status and message the rule

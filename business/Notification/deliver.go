@@ -52,12 +52,36 @@ func DeliverThroughPause(ctx context.Context, recipients []string, pushData map[
 	return deliver(ctx, recipients, pushData, noticeID, fcmDomain.ReachableThroughPause)
 }
 
+// Half is a part of one notice (A4 H4): the desktop notice, the push, or
+// both, as everyone but a waiting push is told. The halves go the same way,
+// past the same gate, from the same data.
+type Half uint8
+
+const (
+	DesktopHalf Half = 1 << iota
+	PushHalf
+	BothHalves = DesktopHalf | PushHalf
+)
+
+// DeliverHalfThroughPause is DeliverThroughPause for one half: the desktop
+// notice of a push that waits while its person is in OneCamp, now, and the
+// push itself when its wait ends (business/Notify).
+func DeliverHalfThroughPause(ctx context.Context, half Half, recipients []string, pushData map[string]string, noticeID string) error {
+	return deliverHalves(ctx, half, recipients, pushData, noticeID, fcmDomain.ReachableThroughPause)
+}
+
 // fcmBatch is how many devices one push call may name (Firebase's limit).
 const fcmBatch = 500
 
 // deliver sends the notices and the push, and says what failed: the read of
 // who may be told (then nobody is), or the push.
 func deliver(ctx context.Context, recipients []string, pushData map[string]string, noticeID string,
+	reach func(context.Context, []string) ([]string, []string, error)) error {
+	return deliverHalves(ctx, BothHalves, recipients, pushData, noticeID, reach)
+}
+
+// deliverHalves is deliver for the halves named.
+func deliverHalves(ctx context.Context, half Half, recipients []string, pushData map[string]string, noticeID string,
 	reach func(context.Context, []string) ([]string, []string, error)) error {
 	ctx = context.WithoutCancel(ctx)
 	users, tokens, err := reach(ctx, recipients)
@@ -70,11 +94,15 @@ func deliver(ctx context.Context, recipients []string, pushData map[string]strin
 
 	// The notices first: they cost a publish each, where the push waits on
 	// Firebase. Built before the push, which writes into pushData.
-	notice := desktopNotice(pushData, noticeID, time.Now())
-	for _, u := range users {
-		mqttBusiness.PublishMessageToUser(u, mqttStruct.MESSAGE_DESKTOP_NOTICE, &notice)
+	if half&DesktopHalf != 0 {
+		notice := desktopNotice(pushData, noticeID, time.Now())
+		for _, u := range users {
+			mqttBusiness.PublishMessageToUser(u, mqttStruct.MESSAGE_DESKTOP_NOTICE, &notice)
+		}
 	}
-
+	if half&PushHalf == 0 {
+		return nil
+	}
 	for batch := range slices.Chunk(tokens, fcmBatch) {
 		if err := firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, batch); err != nil {
 			return fmt.Errorf("push failed: %w", err)
@@ -115,6 +143,31 @@ func desktopNotice(pushData map[string]string, noticeID string, now time.Time) m
 		}
 	}
 	return n
+}
+
+// previewKeys are what a waiting push keeps of its data: what the push shows
+// (its title and short body) and the ids it opens; never the sender's name or
+// icon, nor anything else.
+var previewKeys = []string{
+	firebaseInit.FIREBASE_PUSH_DATA_TITLE, firebaseInit.FIREBASE_PUSH_DATA_BODY,
+	firebaseInit.FIREBASE_PUSH_DATA_TYPE, firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID,
+	firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID, firebaseInit.FIREBASE_PUSH_DATA_REACTION_ID,
+	firebaseInit.FIREBASE_PUSH_DATA_TAG, firebaseInit.FIREBASE_PUSH_DATA_SENDER_KIND,
+}
+
+// PushPreview is what a push that waits keeps of pushData until it is sent
+// (A4 H4): its title, its body cut to a short preview, and its ids. Pure.
+func PushPreview(pushData map[string]string) map[string]string {
+	out := make(map[string]string, len(previewKeys))
+	for _, k := range previewKeys {
+		if v, ok := pushData[k]; ok {
+			out[k] = v
+		}
+	}
+	if body, ok := out[firebaseInit.FIREBASE_PUSH_DATA_BODY]; ok {
+		out[firebaseInit.FIREBASE_PUSH_DATA_BODY] = helpers.CutPushBody(body, helpers.PushBodyMax)
+	}
+	return out
 }
 
 // noticeSize is how much n weighs as the message on the topic.

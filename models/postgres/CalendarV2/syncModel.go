@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"time"
 
+	calendarV2Domain "github.com/akashc777/OneCamp/domain/CalendarV2"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
@@ -41,14 +42,20 @@ type SyncLink struct {
 	UpdatedAt    time.Time
 }
 
-const syncLinkColumns = `id, person_id, provider, account, state, progress, moved, unchanged, skipped, error, last_synced_at, updated_at`
+const syncLinkColumns = calendarV2Domain.SyncLinkColumns
 
 func scanSyncLink(s pgexec.Row) (*SyncLink, error) {
 	var l SyncLink
-	if err := s.Scan(&l.ID, &l.PersonID, &l.Provider, &l.Account, &l.State, &l.Progress, &l.Moved, &l.Unchanged, &l.Skipped, &l.Error, &l.LastSyncedAt, &l.UpdatedAt); err != nil {
+	if err := s.Scan(syncLinkFields(&l)...); err != nil {
 		return nil, err
 	}
 	return &l, nil
+}
+
+// syncLinkFields are where a row of syncLinkColumns scans into l, then extra
+// for the columns a statement reads after them.
+func syncLinkFields(l *SyncLink, extra ...any) []any {
+	return append([]any{&l.ID, &l.PersonID, &l.Provider, &l.Account, &l.State, &l.Progress, &l.Moved, &l.Unchanged, &l.Skipped, &l.Error, &l.LastSyncedAt, &l.UpdatedAt}, extra...)
 }
 
 // SyncLinkOf is person's link to provider, or nil.
@@ -89,14 +96,13 @@ func SetSyncProgress(ctx context.Context, id uuid.UUID, progress int) error {
 }
 
 // FinishMove records a move's end: synced, with what it moved, found there
-// already and left out; or failed, with why.
+// already and left out; or failed, with why. A link no longer moving (an
+// admin broke it meanwhile) is left as it is.
 func FinishMove(ctx context.Context, id uuid.UUID, state string, moved, unchanged int, skipped json.RawMessage, why string) error {
 	if len(skipped) == 0 {
 		skipped = json.RawMessage("[]")
 	}
-	_, err := pgexec.Exec(ctx, `UPDATE calendar_sync_links SET state = $2::varchar, progress = CASE WHEN $2::varchar = 'synced' THEN 100 ELSE progress END,
-		moved = $3, unchanged = $4, skipped = $5::jsonb, error = $6, last_synced_at = CASE WHEN $2::varchar = 'synced' THEN NOW() ELSE last_synced_at END, updated_at = NOW()
-		WHERE id = $1`, id, state, moved, unchanged, string(skipped), why)
+	_, err := pgexec.Exec(ctx, calendarV2Domain.FinishMove, id, state, moved, unchanged, string(skipped), why)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.FinishMove err: %+v", err)
 	}
@@ -205,21 +211,37 @@ func KeepSyncRefs(ctx context.Context, refs []SyncRef) error {
 }
 
 // SyncedLinks are the links whose move has finished, to keep in step, at
-// most limit, the longest unsynced first. A deactivated person's links wait:
-// nothing of theirs is synced, and they don't hold others' places.
+// most limit, the longest unsynced first. A link whose last pass couldn't
+// read its provider takes its turn from that pass (updated_at), so links that
+// keep failing never hold the first places of every sweep. A deactivated
+// person's links wait: nothing of theirs is synced, and they don't hold
+// others' places.
 func SyncedLinks(ctx context.Context, provider string, limit int) ([]*SyncLink, error) {
-	out, err := pgexec.Query(ctx, `SELECT `+syncLinkColumns+` FROM calendar_sync_links WHERE provider = $1 AND state = 'synced'
-		AND EXISTS (SELECT 1 FROM users u WHERE u.id = calendar_sync_links.person_id AND u.deleted_at IS NULL)
-		ORDER BY last_synced_at NULLS FIRST LIMIT $2`, scanSyncLink, provider, limit)
+	out, err := pgexec.Query(ctx, calendarV2Domain.SyncedLinks, scanSyncLink, provider, limit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.SyncedLinks err: %+v", err)
 	}
 	return out, err
 }
 
-// MarkSynced stamps a link as in step now.
-func MarkSynced(ctx context.Context, id uuid.UUID) error {
-	_, err := pgexec.Exec(ctx, `UPDATE calendar_sync_links SET last_synced_at = NOW(), updated_at = NOW() WHERE id = $1`, id)
+// SyncedLinksOf is person's links SyncedLinks would give, of every provider
+// (the calendar.sync outbox sink's read: one person's, by its key).
+func SyncedLinksOf(ctx context.Context, person uuid.UUID) ([]*SyncLink, error) {
+	out, err := pgexec.Query(ctx, calendarV2Domain.SyncedLinksOf, scanSyncLink, person)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CalendarV2.SyncedLinksOf err: %+v", err)
+	}
+	return out, err
+}
+
+// MarkSynced ends a pass of a synced link: readErr is why a calendar of it
+// couldn't be read (a class), kept as its error, or "" when all could, which
+// clears it and stamps the link in step now. A link that isn't synced (broken,
+// or moving again) keeps its own error, which is the person's to read.
+func MarkSynced(ctx context.Context, id uuid.UUID, readErr string) error {
+	_, err := pgexec.Exec(ctx, `UPDATE calendar_sync_links SET error = $2,
+			last_synced_at = CASE WHEN $2::text = '' THEN NOW() ELSE last_synced_at END, updated_at = NOW()
+		WHERE id = $1 AND state = 'synced'`, id, readErr)
 	return err
 }
 
@@ -295,14 +317,27 @@ func SyncCalendarsInto(ctx context.Context, calendars []uuid.UUID) ([]SyncCalend
 
 // SyncRefsOf are where a link's events are at the provider, by event.
 func SyncRefsOf(ctx context.Context, link uuid.UUID) (map[uuid.UUID]SyncRef, error) {
-	refs, err := pgexec.Query(ctx, `SELECT link_id, remote_id, external_id, event_id, etag, updated_at FROM calendar_sync_refs WHERE link_id = $1`,
+	return syncRefs(ctx, "SyncRefsOf", calendarV2Domain.SyncRefsOf, link)
+}
+
+// SyncRefsAmong is SyncRefsOf for these events only (the calendar.sync
+// outbox sink's read, by the refs' key).
+func SyncRefsAmong(ctx context.Context, link uuid.UUID, events []uuid.UUID) (map[uuid.UUID]SyncRef, error) {
+	if len(events) == 0 {
+		return map[uuid.UUID]SyncRef{}, nil
+	}
+	return syncRefs(ctx, "SyncRefsAmong", calendarV2Domain.SyncRefsAmong, link, uuidArray(events))
+}
+
+func syncRefs(ctx context.Context, name, query string, args ...any) (map[uuid.UUID]SyncRef, error) {
+	refs, err := pgexec.Query(ctx, query,
 		func(row pgexec.Row) (SyncRef, error) {
 			var r SyncRef
 			err := row.Scan(&r.LinkID, &r.RemoteID, &r.ExternalID, &r.EventID, &r.ETag, &r.UpdatedAt)
 			return r, err
-		}, link)
+		}, args...)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/CalendarV2.SyncRefsOf err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "models/CalendarV2.%s err: %+v", name, err)
 		return nil, err
 	}
 	out := make(map[uuid.UUID]SyncRef, len(refs))
@@ -348,16 +383,18 @@ const syncRefusalWhy = 500
 // KeepSyncRefusal records a refusal, stamped no earlier than now or the
 // event's own last change (or any of its instances'), as KeepSyncRefs
 // stamps a ref: the event waits until RetryAt, or until it changes after
-// this.
-func KeepSyncRefusal(ctx context.Context, r SyncRefusal, now time.Time) error {
-	_, err := pgexec.Exec(ctx, `INSERT INTO calendar_sync_refusals (link_id, event_id, tries, retry_at, why, updated_at)
+// this. made is whether it made the refusal's row (none was kept for the
+// event): what is told of a refusal is told once.
+func KeepSyncRefusal(ctx context.Context, r SyncRefusal, now time.Time) (made bool, err error) {
+	made, err = pgexec.Scalar[bool](ctx, `INSERT INTO calendar_sync_refusals (link_id, event_id, tries, retry_at, why, updated_at)
 		VALUES ($1, $2, $3, $4, $5, GREATEST($6::timestamptz, (SELECT max(e.updated_at) FROM events e WHERE e.id = $2 OR e.series_id = $2)))
-		ON CONFLICT (link_id, event_id) DO UPDATE SET tries = EXCLUDED.tries, retry_at = EXCLUDED.retry_at, why = EXCLUDED.why, updated_at = EXCLUDED.updated_at`,
+		ON CONFLICT (link_id, event_id) DO UPDATE SET tries = EXCLUDED.tries, retry_at = EXCLUDED.retry_at, why = EXCLUDED.why, updated_at = EXCLUDED.updated_at
+		RETURNING (xmax = 0)`,
 		r.LinkID, r.EventID, r.Tries, r.RetryAt, helpers.TruncateRunes(r.Why, syncRefusalWhy), now)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.KeepSyncRefusal err: %+v", err)
 	}
-	return err
+	return made, err
 }
 
 // SyncRefusalsOf are the refusals of these of a link's events, by event.
@@ -393,19 +430,17 @@ func ChangedSince(ctx context.Context, db DB, link, person uuid.UUID, calendars 
 	if len(calendars) == 0 {
 		return nil, nil
 	}
-	return queryEvents(ctx, db, `SELECT `+eventColumns+` FROM events e
-		LEFT JOIN calendar_sync_refs r ON r.link_id = $1 AND r.event_id = e.id
-		LEFT JOIN calendar_sync_refusals f ON f.link_id = $1 AND f.event_id = e.id
-		WHERE e.series_id IS NULL AND e.created_by = $2 AND e.calendar_id = ANY($3::uuid[])
-		  AND ((r.event_id IS NULL AND e.deleted_at IS NULL)
-		    OR e.updated_at > r.updated_at
-		    OR EXISTS (SELECT 1 FROM events o WHERE o.series_id = e.id AND o.updated_at > r.updated_at)
-		    OR f.retry_at <= $5)
-		  AND NOT (f.event_id IS NOT NULL AND (f.retry_at IS NULL OR f.retry_at > $5)
-		    AND f.updated_at >= e.updated_at
-		    AND NOT EXISTS (SELECT 1 FROM events o WHERE o.series_id = e.id AND o.updated_at > f.updated_at))
-		ORDER BY e.updated_at, e.id
-		LIMIT $4`, link, person, uuidArray(calendars), limit, now)
+	return queryEvents(ctx, db, calendarV2Domain.ChangedSince, link, person, uuidArray(calendars), limit, now)
+}
+
+// ChangedAmong is ChangedSince narrowed to these events: what of theirs is
+// OneCamp's to push now (the calendar.sync outbox sink, one event a
+// delivery). It reads them by id, so it costs what they are, not the link.
+func ChangedAmong(ctx context.Context, db DB, link, person uuid.UUID, calendars, events []uuid.UUID, now time.Time) ([]*Event, error) {
+	if len(calendars) == 0 || len(events) == 0 {
+		return nil, nil
+	}
+	return queryEvents(ctx, db, calendarV2Domain.ChangedAmong, link, person, uuidArray(calendars), uuidArray(events), now)
 }
 
 // Subscription is a calendar read from an address (calendar B8, the

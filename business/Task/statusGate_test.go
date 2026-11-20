@@ -34,3 +34,29 @@ func TestAStatusChangeAsksTheGateFirst(t *testing.T) {
 		t.Errorf("a move to where it is: %v, asked %v", err, asked)
 	}
 }
+
+// A move's note says the gate found no open request only for its own task
+// and only once the gate noted it (H4W): WentOn closes as before wherever
+// nothing was noted, the task had one open, or another task is asked about.
+func TestAMoveNoteSpeaksOnlyForItsOwnTask(t *testing.T) {
+	task, other := uuid.New(), uuid.New()
+	if NoOpenRequest(context.Background(), task) {
+		t.Fatal("a context with no move says no request is open")
+	}
+	ctx := withMoveNote(context.Background(), task)
+	if NoOpenRequest(ctx, task) {
+		t.Fatal("a move the gate noted nothing for says no request is open")
+	}
+	NoteOpenRequest(ctx, other, false)
+	if NoOpenRequest(ctx, task) || NoOpenRequest(ctx, other) {
+		t.Fatal("a note about another task spoke for the move")
+	}
+	NoteOpenRequest(ctx, task, true)
+	if NoOpenRequest(ctx, task) {
+		t.Fatal("a task with an open request says none is open")
+	}
+	NoteOpenRequest(ctx, task, false)
+	if !NoOpenRequest(ctx, task) {
+		t.Fatal("a task the gate found with no open request should say so")
+	}
+}

@@ -48,14 +48,16 @@ func starts(old, next string) bool {
 	return notYet && started
 }
 
-// runningCycle is the project's cycle running at now, or nil. Pure.
-func runningCycle(cycles []cycleModel.Cycle, now time.Time) *cycleModel.Cycle {
-	for i := range cycles {
-		if State(cycles[i], now) == "current" {
-			return &cycles[i]
+// runningAt is the project's cycles running at now: two or more only
+// where its cycles run side by side (parallel cycles). Pure.
+func runningAt(cycles []cycleModel.Cycle, now time.Time) []cycleModel.Cycle {
+	var out []cycleModel.Cycle
+	for _, c := range cycles {
+		if State(c, now) == "current" {
+			out = append(out, c)
 		}
 	}
-	return nil
+	return out
 }
 
 func startedJoinsCycle(ctx context.Context, eventType string, data map[string]interface{}) {
@@ -70,6 +72,11 @@ func startedJoinsCycle(ctx context.Context, eventType string, data map[string]in
 	if err != nil {
 		return
 	}
+	// The status change's own write found the project has no schedule
+	// (business/Task setStatus): nothing to join, and nothing to read again.
+	if helpers.NoCycleSchedule(ctx, project) {
+		return
+	}
 	task, err := uuid.Parse(str("task_id"))
 	if err != nil {
 		return
@@ -80,7 +87,9 @@ func startedJoinsCycle(ctx context.Context, eventType string, data map[string]in
 }
 
 // joinRunningCycle puts a task that started into its project's running cycle,
-// when the project's schedule says so and the task is in no cycle yet.
+// when the project's schedule says so, the task is in no cycle yet and one
+// cycle runs (a scheduled project's cycles never run side by side, but a
+// schedule set before is no promise of that, so this reads them all).
 func joinRunningCycle(ctx context.Context, project, task uuid.UUID, now time.Time) error {
 	s, err := scheduleOfProject(ctx, project)
 	if err != nil || s == nil || !s.AddStarted {
@@ -90,13 +99,14 @@ func joinRunningCycle(ctx context.Context, project, task uuid.UUID, now time.Tim
 	if err != nil {
 		return err
 	}
-	running := runningCycle(cycles, now)
-	if running == nil {
+	// With two running side by side, which one is the person's call.
+	running := runningAt(cycles, now)
+	if len(running) != 1 {
 		return nil
 	}
 	in, err := cycleOfTask(task)
 	if err != nil || in != nil {
 		return err
 	}
-	return putTaskInCycle(task, &running.Id)
+	return putTaskInCycle(task, &running[0].Id)
 }

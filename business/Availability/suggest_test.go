@@ -125,3 +125,14 @@ func TestTwentyPeopleOverFourteenDaysRankInBudget(t *testing.T) {
 		t.Errorf("ranking 20 people over 14 days took %v of CPU, over %v", took, budget)
 	}
 }
+
+// A room the meeting needs that is booked rules the time out, even when
+// everyone is free then.
+func TestABookedRoomsTimeIsNeverOffered(t *testing.T) {
+	from := time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
+	got := Rank([]Person{{ID: "me", Name: "You"}}, Ask{Duration: time.Hour, Step: time.Hour, From: from, To: from.Add(3 * time.Hour),
+		RoomsBusy: []iv{{Start: from.Add(time.Hour), End: from.Add(90 * time.Minute)}}})
+	if len(got) != 2 || !got[0].Start.Equal(from) || !got[1].Start.Equal(from.Add(2*time.Hour)) {
+		t.Errorf("%+v", got)
+	}
+}

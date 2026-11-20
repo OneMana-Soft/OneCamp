@@ -372,3 +372,43 @@ func TestABoardSettleOutlivesItsRequestWithinItsBound(t *testing.T) {
 		}
 	}
 }
+
+// A board link's page header names the board as no one in particular asks it
+// (miro-33 M-1: no principal, so no users row, is made to read it): a live
+// board's trimmed name; a deleted or missing one has none and isn't live; the
+// graph not answering is an error.
+func TestLiveTitleIsTheBoardsNameAskedAsNoOne(t *testing.T) {
+	deleted := time.Now().Add(-time.Hour)
+	var askedFor []string
+	old := readBoardsAccess
+	t.Cleanup(func() { readBoardsAccess = old })
+	readBoardsAccess = func(_ context.Context, ids []string, userUUID string) ([]*dgraphStruct.DgraphBoard, error) {
+		askedFor = append(askedFor, userUUID)
+		switch ids[0] {
+		case "down":
+			return nil, errors.New("graph down")
+		case "binned":
+			return []*dgraphStruct.DgraphBoard{{Uuid: "binned", Title: "Old plan", DeletedAt: &deleted}}, nil
+		case "gone":
+			return nil, nil
+		}
+		return []*dgraphStruct.DgraphBoard{{Uuid: "LIVE", Title: "  Launch retro "}}, nil
+	}
+	ctx := context.Background()
+	if title, live, err := LiveTitle(ctx, "live"); err != nil || !live || title != "Launch retro" {
+		t.Errorf("a live board: %q %v %v, want \"Launch retro\" live", title, live, err)
+	}
+	for _, id := range []string{"binned", "gone"} {
+		if title, live, err := LiveTitle(ctx, id); err != nil || live || title != "" {
+			t.Errorf("board %s: %q %v %v, want no name and not live", id, title, live, err)
+		}
+	}
+	if _, live, err := LiveTitle(ctx, "down"); err == nil || live {
+		t.Errorf("the graph down: live %v err %v, want an error", live, err)
+	}
+	for _, who := range askedFor {
+		if who != "" {
+			t.Errorf("asked as %q, want no one in particular", who)
+		}
+	}
+}

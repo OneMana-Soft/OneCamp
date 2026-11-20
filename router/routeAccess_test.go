@@ -79,7 +79,7 @@ import (
 const routeAccessPath = "testdata/route-access.tsv"
 
 // todoCeiling is how many lines still say TODO. It only goes down.
-const todoCeiling = 539
+const todoCeiling = 537
 
 type accessLine struct {
 	Method, Pattern, Gate, Token, Demo, Check, Refusal, Note string

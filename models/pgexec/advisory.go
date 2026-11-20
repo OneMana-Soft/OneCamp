@@ -2,6 +2,7 @@ package pgexec
 
 import (
 	"context"
+	"errors"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 )
@@ -42,7 +43,7 @@ func TryAdvisoryLock(ctx context.Context, key int64) (release func() error, held
 func Capped(ctx context.Context, key string, limit int, count func(context.Context) (int, error), add func(context.Context) error) (bool, error) {
 	added := false
 	err := InTx(ctx, func(ctx context.Context) error {
-		if _, err := Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, key); err != nil {
+		if err := LockXact(ctx, key); err != nil {
 			return err
 		}
 		n, err := count(ctx)
@@ -56,4 +57,38 @@ func Capped(ctx context.Context, key string, limit int, count func(context.Conte
 		return nil
 	})
 	return added && err == nil, err
+}
+
+// ErrNotInTx is what LockXact returns outside a transaction: a transaction
+// lock taken there ends with its own statement and guards nothing.
+var ErrNotInTx = errors.New("pgexec: a transaction lock needs a transaction (take it inside InTx)")
+
+// WideKey names a transaction lock by text hashed to 64 bits
+// (hashtextextended(key, 0)), the way the tables' locks are named
+// (models/postgres/DataTable): the same name as a string would be a different
+// lock.
+type WideKey string
+
+// LockXact takes the transaction advisory lock named key in the transaction
+// ctx carries (InTx, InTxFor or WithTx); the transaction's end lets it go.
+// Outside one it returns ErrNotInTx without a round trip. A string key is
+// hashed with hashtext, a WideKey with hashtextextended, and an int64 is the
+// key itself: each the value its lock had before LockXact, since a key that
+// changed would let a process of the last release and one of this release,
+// running side by side while one replaces the other, each hold "the lock" at
+// once. Every transaction lock goes through here
+// (helpers/advisoryLockGuard_test.go).
+func LockXact[K string | WideKey | int64](ctx context.Context, key K) error {
+	if !inTx(ctx) {
+		return ErrNotInTx
+	}
+	q, arg := `SELECT pg_advisory_xact_lock(hashtext($1))`, any(key)
+	switch k := any(key).(type) {
+	case WideKey:
+		q, arg = `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, string(k)
+	case int64:
+		q = `SELECT pg_advisory_xact_lock($1)`
+	}
+	_, err := Exec(ctx, q, arg)
+	return err
 }

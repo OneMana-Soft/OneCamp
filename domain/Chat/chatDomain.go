@@ -10,6 +10,7 @@ import (
 
 	messageDomain "github.com/akashc777/OneCamp/domain/Message"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Chat"
 	dgraphUserModels "github.com/akashc777/OneCamp/models/dgraph/User"
@@ -23,18 +24,42 @@ import (
 
 const CHAT_COUNT = 10
 
+// insertChat writes a message's row: $1 id, $2 author, $3 conversation, $4
+// an imported message's original time (helpers.WithImportTimestamp) or NULL.
+const insertChat = `
+		INSERT INTO chats (id, created_by, grp_id, created_at, updated_at)
+		VALUES ($1, $2, $3, COALESCE($4, NOW()), COALESCE($4, NOW()))`
+
 func CreateChat(ctx context.Context, chatId uuid.UUID, createdBy uuid.UUID, grpId string) (err error) {
 	// An imported message keeps its original time (helpers.WithImportTimestamp).
-	_, err = pgexec.Exec(ctx, `
-		INSERT INTO chats (id, created_by, grp_id, created_at, updated_at)
-		VALUES ($1, $2, $3, COALESCE($4, NOW()), COALESCE($4, NOW()))`,
-		chatId, createdBy, grpId, helpers.GetImportTimestamp(ctx))
+	_, err = pgexec.Exec(ctx, insertChat, chatId, createdBy, grpId, helpers.GetImportTimestamp(ctx))
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/CreateChat Failed to create new chat err: %+v",
 			err)
 		return
+	}
+	return
+}
+
+// CreateChatReadBySender is CreateChat with its author's read mark of the
+// conversation moved up to readAt in the same statement, as
+// LastSeenChat.CreateOrUpdateLastSeenChat moves it (never back): a sent
+// message's two writes in one round trip, in ctx's transaction if it has one.
+func CreateChatReadBySender(ctx context.Context, chatId uuid.UUID, createdBy uuid.UUID, grpId string, readAt time.Time) (err error) {
+	_, err = pgexec.Exec(ctx, `
+		WITH c AS (`+insertChat+`
+		RETURNING created_by, grp_id)
+		INSERT INTO last_seen_chat (user_id, grp_id, user_last_seen)
+		SELECT created_by, grp_id, $5::timestamptz FROM c
+		ON CONFLICT (user_id, grp_id)
+		DO UPDATE SET user_last_seen = GREATEST(last_seen_chat.user_last_seen, EXCLUDED.user_last_seen)`,
+		chatId, createdBy, grpId, helpers.GetImportTimestamp(ctx), readAt)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/CreateChatReadBySender Failed to create new chat err: %+v",
+			err)
 	}
 	return
 }
@@ -431,23 +456,14 @@ func GetUserChatListWithLatestChat(ctx context.Context, userUUID string) (dgraph
 
 // pageChats reads a page of a DM's or group's messages, each with its
 // thread's people (domain/Message KeepChatRepliers): every page query's one read.
-func pageChats(ctx context.Context, query string, variables map[string]string) ([]*dgraphStruct.DgraphChat, error) {
-	chats, err := dgraphModels.GetDgraphDmsInfoByGrpId(ctx, query, variables)
-	if err == nil {
-		messageDomain.KeepChatRepliers(ctx, chats)
-	}
-	return chats, err
-}
+// memberCount is the gate every page and thread read asks of a DM or a
+// group, in its own query: how many of its participants are $userId (0 or
+// 1). The one definition of "is a participant" the page reads use.
+const memberCount = `dm_is_member: count(dm_participants @filter(uid($userId)))`
 
-func GetDgraphOldChatFromDgraph(ctx context.Context, groupingId string, lastChatTime time.Time) (dgraphChats []*dgraphStruct.DgraphChat, err error) {
-
-	variables := make(map[string]string)
-	variables["$time"] = lastChatTime.Format(time.RFC3339Nano)
-	variables["$grpId"] = groupingId
-	variables["$first"] = strconv.Itoa(CHAT_COUNT + 1)
-	query := `query DmInfo($grpId: string, $time: string, $first: int){
-				dmInfo(func: eq(dm_grouping_id, $grpId)) {
-					dm_chats @filter(lt(chat_created_at, $time) AND not gt(chat_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderdesc: chat_created_at) {
+// chatPageFields is what each page of a DM's or a group's messages selects
+// for every message on it, whichever way the page runs.
+var chatPageFields = `{
 						chat_uuid
 						chat_body_text
 						chat_created_at
@@ -505,105 +521,59 @@ func GetDgraphOldChatFromDgraph(ctx context.Context, groupingId string, lastChat
 								is_bot
 							}
 						}
-					}
-				}
-			}`
+					}`
 
-	dgraphChats, err = pageChats(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphOldChatFromDgraph Failed to get chats from dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
+// DmPage is one page of a DM's or a group's messages: whether the
+// conversation is there and, when it was read for someone, whether they are
+// in it.
+type DmPage struct {
+	Found    bool
+	IsMember bool
+	Chats    []*dgraphStruct.DgraphChat
 }
 
-func GetDgraphNewChatFromDgraph(ctx context.Context, groupingId string, lastChatTime time.Time) (dgraphChats []*dgraphStruct.DgraphChat, err error) {
+// dmPageRead is ChatPage's answer as the graph sends it.
+type dmPageRead struct {
+	DmInfo []dgraphStruct.DgraphDm `json:"dmInfo"`
+}
 
-	variables := make(map[string]string)
-	variables["$time"] = lastChatTime.Format(time.RFC3339Nano)
-	variables["$grpId"] = groupingId
-	variables["$first"] = strconv.Itoa(CHAT_COUNT + 1)
-	query := `
-			query DmInfo($grpId: string, $time: string, $first: int){
+// ChatPage reads one page of the conversation grouping's messages, the
+// first CHAT_COUNT+1 of them in dir from at (Latest has no edge, and at is
+// unused). With member (a person's graph uid) the same read says whether
+// they are in it, so a page and its gate are one store call; "" asks
+// nothing, for a caller that isn't answering a person.
+func ChatPage(ctx context.Context, grouping string, dir messageDomain.Direction, at time.Time, member string) (DmPage, error) {
+	vars := map[string]string{"$grpId": grouping, "$first": strconv.Itoa(CHAT_COUNT + 1)}
+	if dir != messageDomain.Latest {
+		vars["$time"] = at.Format(time.RFC3339Nano)
+	}
+	params, gate := "$grpId: string, $time: string, $first: int", ""
+	if member != "" {
+		vars["$userId"] = member
+		params, gate = params+", $userId: string", memberCount
+	}
+	query := `query DmPage(` + params + `){
 				dmInfo(func: eq(dm_grouping_id, $grpId)) {
-					dm_chats @filter(gt(chat_created_at, $time) AND not gt(chat_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderasc: chat_created_at) {
-						chat_uuid
-						chat_body_text
-						chat_created_at
-						chat_kind
-						chat_system
-						chat_copy_of
-						chat_from {
-							user_uuid
-							user_name
-							user_full_name
-							user_profile_object_key
-							is_bot
-							user_deleted_at
-						}
-						chat_reactions {
-							uid
-							reaction_emoji_id
-							reaction_added_by {
-								user_uuid
-								user_name
-							}
-						}
-						chat_comment_count : count(chat_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						` + messageDomain.RepliersSelection("chat_comments") + `
-						chat_to {
-							user_uuid
-							user_name
-							user_profile_object_key
-							is_bot
-							user_deleted_at
-						}
-						chat_attachments {
-							attachment_uuid
-							attachment_file_name
-							attachment_obj_key
-							attachment_width
-							attachment_height
-							attachment_size
-							attachment_raw_type
-							attachment_type
-							attachment_duration
-							attachment_created_at
-						}
-						chat_fwd_msg_post ` + dgraphStruct.ForwardedPostFields + `
-						chat_fwd_msg_chat ` + dgraphStruct.ForwardedChatFields + `
-						chat_reply_to @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z")) {
-							chat_uuid
-							chat_body_text
-							chat_created_at
-							chat_from {
-								user_uuid
-								user_name
-								user_full_name
-								user_profile_object_key
-								is_bot
-							}
-						}
-					}
+					uid
+					` + gate + `
+					dm_chats ` + dir.Block("chat_created_at", "chat_deleted_at") + chatPageFields + `
 				}
 			}`
-
-	dgraphChats, err = pageChats(ctx, query, variables)
-
+	got, err := dgexec.Read[dmPageRead](ctx, query, vars)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphNewPostFromDgraph Failed to get chats in dgraph err: %+v",
-			err,
-		)
-		return
+		helpers.LogErrorWithContext(ctx, "domain/ChatPage Failed to read a page of %s err: %+v", grouping, err)
+		return DmPage{}, err
 	}
-
-	return
+	if len(got.DmInfo) == 0 {
+		return DmPage{}, nil
+	}
+	dm := got.DmInfo[0]
+	// A forwarded original deleted since shows as deleted, never its text.
+	for _, c := range dm.Chats {
+		c.HideDeletedForwards()
+	}
+	messageDomain.KeepChatRepliers(ctx, dm.Chats)
+	return DmPage{Found: true, IsMember: dm.ParticipantIsMember > 0, Chats: dm.Chats}, nil
 }
 
 func GetDMRecordingTranscript(ctx context.Context, groupingId string, userId string, egressId string, pageIndex int, pageSize int) (dgraphDm *dgraphStruct.DgraphDm, err error) {
@@ -618,9 +588,14 @@ func GetDMRecordingTranscript(ctx context.Context, groupingId string, userId str
 
 	transcriptParams := fmt.Sprintf("(orderasc: transcript_timestamp, first: %v, offset: %v)", firstVal, offsetVal)
 
+	// recUID is bound only under the conversation when the asker is in it, so
+	// anyone else's read takes no recording and no line before the route's
+	// 403 (V-1126 FIX): one round trip either way.
 	query := fmt.Sprintf(`query DmInfo($grpId: string, $egressId: string, $userId: string){
-			var(func: eq(recording_egress_id, $egressId)) {
-				recUID as uid
+			var(func: eq(dm_grouping_id, $grpId)) @filter(uid_in(dm_participants, $userId)) {
+				dm_recording @filter(eq(recording_egress_id, $egressId)) {
+					recUID as uid
+				}
 			}
 			dmInfo(func: eq(dm_grouping_id, $grpId)) {
 				uid
@@ -633,11 +608,17 @@ func GetDMRecordingTranscript(ctx context.Context, groupingId string, userId str
 					recording_obj_key
 					recording_transcript_count: count(recording_transcript)
 					recording_transcript %s {
+						uid
 						transcript_text
 						transcript_timestamp
 						transcript_offset_ms
+						transcript_original_text
+						transcript_corrected_at
+						transcript_translations
+						transcript_corrected_by { user_uuid user_full_name }
 						transcript_from {
 							user_name
+							user_full_name
 							user_uuid
 							user_profile_object_key
 							is_bot
@@ -791,179 +772,21 @@ func GetDmCallOthers(ctx context.Context, groupingId string, callerUUID string) 
 	return others, nil
 }
 
-func GetDgraphNewChatIncludingChatFromDgraph(ctx context.Context, groupingId string, lastChatTime time.Time) (dgraphChats []*dgraphStruct.DgraphChat, err error) {
-
-	variables := make(map[string]string)
-	variables["$time"] = lastChatTime.Format(time.RFC3339Nano)
-	variables["$grpId"] = groupingId
-	variables["$first"] = strconv.Itoa(CHAT_COUNT + 1)
-	query := `
-			query DmInfo($grpId: string, $time: string, $first: int){
-				dmInfo(func: eq(dm_grouping_id, $grpId)) {
-					dm_chats @filter(ge(chat_created_at, $time) AND not gt(chat_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderasc: chat_created_at) {
-						chat_uuid
-						chat_body_text
-						chat_created_at
-						chat_kind
-						chat_system
-						chat_copy_of
-						chat_from {
-							user_uuid
-							user_name
-							user_full_name
-							user_profile_object_key
-							is_bot
-							user_deleted_at
-						}
-						chat_reactions {
-							uid
-							reaction_emoji_id
-							reaction_added_by {
-								user_uuid
-								user_name
-							}
-						}
-						chat_comment_count : count(chat_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						` + messageDomain.RepliersSelection("chat_comments") + `
-						chat_to {
-							user_uuid
-							user_name
-							user_profile_object_key
-							is_bot
-							user_deleted_at
-						}
-						chat_attachments {
-							attachment_uuid
-							attachment_file_name
-							attachment_obj_key
-							attachment_width
-							attachment_height
-							attachment_size
-							attachment_raw_type
-							attachment_type
-							attachment_duration
-							attachment_created_at
-						}
-						chat_fwd_msg_post ` + dgraphStruct.ForwardedPostFields + `
-						chat_fwd_msg_chat ` + dgraphStruct.ForwardedChatFields + `
-						chat_reply_to @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z")) {
-							chat_uuid
-							chat_body_text
-							chat_created_at
-							chat_from {
-								user_uuid
-								user_name
-								user_full_name
-								user_profile_object_key
-								is_bot
-							}
-						}
-					}
-				}
-			}`
-
-	dgraphChats, err = pageChats(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphNewChatIncludingChatFromDgraph Failed to get chats in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
-func GetDgraphLatestChatFromDgraph(ctx context.Context, groupingId string) (dgraphChats []*dgraphStruct.DgraphChat, err error) {
-
-	variables := make(map[string]string)
-	variables["$grpId"] = groupingId
-	variables["$first"] = strconv.Itoa(CHAT_COUNT + 1)
-	query := `query DmInfo($grpId: string, $time: string, $first: int){
-				dmInfo(func: eq(dm_grouping_id, $grpId)) {
-					dm_chats @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z") ) (orderdesc: chat_created_at, first: $first) {
-						chat_uuid
-						chat_body_text
-						chat_created_at
-						chat_kind
-						chat_system
-						chat_copy_of
-						chat_from {
-							user_uuid
-							user_name
-							user_full_name
-							user_profile_object_key
-							is_bot
-							user_deleted_at
-						}
-						chat_comment_count : count(chat_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						` + messageDomain.RepliersSelection("chat_comments") + `
-						chat_to {
-							user_uuid
-							user_name
-							user_profile_object_key
-							is_bot
-							user_deleted_at
-						}
-						chat_reactions {
-							uid
-							reaction_emoji_id
-							reaction_added_by {
-								user_uuid
-								user_name
-							}
-						}
-						chat_attachments {
-							attachment_uuid
-							attachment_file_name
-							attachment_obj_key
-							attachment_width
-							attachment_height
-							attachment_size
-							attachment_raw_type
-							attachment_type
-							attachment_duration
-							attachment_created_at
-						}
-						chat_fwd_msg_post ` + dgraphStruct.ForwardedPostFields + `
-						chat_fwd_msg_chat ` + dgraphStruct.ForwardedChatFields + `
-						chat_reply_to @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z")) {
-							chat_uuid
-							chat_body_text
-							chat_created_at
-							chat_from {
-								user_uuid
-								user_name
-								user_full_name
-								user_profile_object_key
-								is_bot
-							}
-						}
-					}
-				}
-			}`
-
-	dgraphChats, err = pageChats(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphLatestPostFromDgraph Failed to get chats in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
-func GetDgraphChatByUUIDWithAllComments(ctx context.Context, chatUUID string) (dgraphChat *dgraphStruct.DgraphChat, err error) {
-
+// GetDgraphChatByUUIDWithAllComments reads a message with its thread. With
+// member (a person's graph uid) the same read says, under chat_dm, whether
+// they are in the message's conversation (memberCount); "" asks nothing.
+func GetDgraphChatByUUIDWithAllComments(ctx context.Context, chatUUID string, member string) (dgraphChat *dgraphStruct.DgraphChat, err error) {
 	variables := make(map[string]string)
 	variables["$id"] = chatUUID
-	query := `query ChatInfo($id: string){
+	params, gate := "$id: string", ""
+	if member != "" {
+		variables["$userId"] = member
+		params, gate = params+", $userId: string", "chat_dm { dm_grouping_id "+memberCount+" }"
+	}
+	query := `query ChatInfo(` + params + `){
 				chatInfo(func: eq(chat_uuid, $id)) {
 					uid
+					` + gate + `
 					chat_uuid
 					chat_body_text
 					chat_created_at

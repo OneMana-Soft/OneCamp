@@ -61,6 +61,13 @@ const (
 	reminderPlanLimit = 400
 )
 
+// reminderStale is whether a reminder planned for at and found at now is
+// skipped: more than reminderLate past at, or no sooner than until (an
+// event's end for its people, a booking's start for its guest).
+func reminderStale(at, until, now time.Time) bool {
+	return now.Sub(at) > reminderLate || !now.Before(until)
+}
+
 // The defaults (D-CAL-4): 10 minutes before a timed event, 09:00 the day
 // before an all-day one.
 var (
@@ -488,7 +495,7 @@ func (s *service) sendReminder(ctx context.Context, person uuid.UUID, e *models.
 		return nil
 	}
 	_, end := spanOf(inst.Event)
-	if now.Sub(at) > reminderLate || !now.Before(end) {
+	if reminderStale(at, end, now) {
 		helpers.LogInfoWithContext(ctx, "business/Calendar: a reminder for %s came %s late and wasn't sent", inst.ref, now.Sub(at).Round(time.Minute))
 		return nil
 	}

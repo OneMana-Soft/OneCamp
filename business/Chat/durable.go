@@ -14,7 +14,7 @@ package business
 //     cancels the events. When the message made its conversation, what a new
 //     conversation sets up beside it (startDM, startGroup) follows, as today.
 //  3. The events are released, the live one saying whom a new conversation
-//     is for, and delivered at once (business/Outbox Deliver).
+//     is for, and delivered at once (business/Outbox DeliverMany).
 //
 // A writer that dies between 1 and 3 leaves the events held; the outbox asks
 // ChatWritten (the message topic's resolver, for DMs and groups) whether the
@@ -79,8 +79,8 @@ func chatEvents(kind, conversation string, chat uuid.UUID, actor string, importe
 // they share with today's writers are chatBusiness.go's).
 var (
 	writeChatRows  = writeChatRowsOnce
-	releaseEvent   = outboxBusiness.ReleaseWith
-	deliverEvent   = outboxBusiness.Deliver
+	releaseEvents  = outboxBusiness.ReleaseManyWith
+	deliverEvents  = outboxBusiness.DeliverMany
 	takeBackChatFn = takeBackChat
 	chatAnswered   = chatSentBefore
 )
@@ -184,21 +184,20 @@ func takeBackUnwritten(ctx context.Context, chatUUID uuid.UUID, events []int64, 
 	return nodeErr
 }
 
-// releaseChatEvents releases a written message's events and delivers each at
-// once; the live one (the first) says whom a new conversation is for.
+// releaseChatEvents releases a written message's events together and
+// delivers them at once; the live one (the first) says whom a new
+// conversation is for.
 func releaseChatEvents(ctx context.Context, chatUUID uuid.UUID, events []int64, opened []string) {
-	for i, id := range events {
-		var more map[string]string
-		if i == 0 && len(events) > 1 && len(opened) > 0 {
-			more = map[string]string{"opened": strings.Join(opened, ",")}
-		}
-		if err := releaseEvent(ctx, id, more); err != nil {
-			// Held, it is the resolver's: the node is written, so it releases it.
-			helpers.LogErrorWithContext(ctx, "business/Chat durable: event %d of message %s wasn't released, so the drain will: %+v", id, chatUUID, err)
-			continue
-		}
-		deliverEvent(id)
+	var more map[int64]map[string]string
+	if len(events) > 1 && len(opened) > 0 {
+		more = map[int64]map[string]string{events[0]: {"opened": strings.Join(opened, ",")}}
 	}
+	if err := releaseEvents(ctx, events, more); err != nil {
+		// Held, they are the resolver's: the node is written, so it releases them.
+		helpers.LogErrorWithContext(ctx, "business/Chat durable: the events of message %s weren't released, so the drain will: %+v", chatUUID, err)
+		return
+	}
+	deliverEvents(events)
 }
 
 // errChatSentAlready is a send whose client id has a message already.
@@ -268,16 +267,8 @@ func writeChatRowsIn(ctx context.Context, kind, conversation string, chatUUID, a
 	if err != nil {
 		return nil, err
 	}
-	var events []int64
 	// A message's events are two at most (live, and the rest), as a post's.
-	for _, e := range chatEvents(kind, conversation, chatUUID, actor, helpers.IsBulkImport(ctx), helpers.MessageKind(ctx)) {
-		id, err := outboxBusiness.Add(ctx, tx, e)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, id)
-	}
-	return events, nil
+	return outboxBusiness.AddMany(ctx, tx, chatEvents(kind, conversation, chatUUID, actor, helpers.IsBulkImport(ctx), helpers.MessageKind(ctx)))
 }
 
 // chatClientIDFormat is the client ids a send is made once by: up to 64

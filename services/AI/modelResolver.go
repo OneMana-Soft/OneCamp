@@ -148,6 +148,22 @@ func (s *AIService) ResolveUserModel(ctx context.Context, userUUID string) (LLMP
 // wrong; the alternative is a second lookup at the call site that can disagree with
 // the first, silently, on exactly the paths that already degraded once.
 func (s *AIService) ResolveUserModelWithLimits(ctx context.Context, userUUID string) (LLMProvider, *CircuitBreaker, ModelLimits) {
+	return s.resolveUserModel(ctx, userUUID, nil)
+}
+
+// ResolveUserModelDescribed is ResolveUserModel with what DescribeModel says
+// of the model it resolved, from the same one read of the member's pick: a
+// caller that names the model it runs on never reads the pick twice.
+func (s *AIService) ResolveUserModelDescribed(ctx context.Context, userUUID string) (LLMProvider, *CircuitBreaker, DocModel) {
+	var desc DocModel
+	llm, cb, _ := s.resolveUserModel(ctx, userUUID, &desc)
+	return llm, cb, desc
+}
+
+// resolveUserModel is ResolveUserModelWithLimits; with desc, it also fills in
+// the description of the model it answers (the workspace default's on every
+// fallback, the pick's when it answers the pick).
+func (s *AIService) resolveUserModel(ctx context.Context, userUUID string, desc *DocModel) (LLMProvider, *CircuitBreaker, ModelLimits) {
 	if s == nil || !s.IsEnabled() {
 		if s != nil && s.Resiliency != nil {
 			return s.LLM, s.Resiliency.CB, WorkspaceLimits()
@@ -156,11 +172,18 @@ func (s *AIService) ResolveUserModelWithLimits(ctx context.Context, userUUID str
 	}
 
 	defLLM, defCB, defLimits := s.LLM, s.Resiliency.CB, WorkspaceLimits()
-	if userUUID == "" || s.models == nil {
+	if desc != nil && s.Config != nil {
+		*desc = describeEndpoint(s.Config, s.Config.Chat)
+	}
+	// On the public demo every AI run uses the workspace default the owner
+	// configured (it may be a hosted model), never a member's pick: the pick
+	// is never read or built, so what a visitor types or says (a translation,
+	// an ask) goes only where that default goes.
+	if userUUID == "" || s.models == nil || helpers.DemoMode() {
 		return defLLM, defCB, defLimits
 	}
 
-	pref, err := aiModels.GetUserModelPreference(ctx, userUUID)
+	pref, err := userPick(ctx, userUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "AI: user model preference lookup failed for %s, using default: %v", userUUID, err)
 		return defLLM, defCB, defLimits
@@ -170,7 +193,7 @@ func (s *AIService) ResolveUserModelWithLimits(ctx context.Context, userUUID str
 	}
 
 	providerID := pref.ProviderID
-	ep, err := endpointFromProvider(ctx, &providerID, pref.Model, 0, s.Config)
+	ep, err := pickEndpoint(ctx, &providerID, pref.Model, 0, s.Config)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "AI: cannot resolve picked model %s/%s, using default: %v", pref.ProviderName, pref.Model, err)
 		return defLLM, defCB, defLimits
@@ -204,6 +227,9 @@ func (s *AIService) ResolveUserModelWithLimits(ctx context.Context, userUUID str
 		}
 		helpers.LogInfoWithContext(ctx, "AI: local-only mode ignored cloud model pick %s/%s for user %s; using local default", pref.ProviderName, pref.Model, userUUID)
 		return defLLM, defCB, defLimits
+	}
+	if desc != nil {
+		*desc = describePick(s.Config, ep, pref.Label, pref.Model)
 	}
 	return rm.llm, rm.cb, rm.limits
 }

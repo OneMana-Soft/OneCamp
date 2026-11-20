@@ -12,11 +12,7 @@ import (
 func TestAnImportsProgressCarriesNoURLQuery(t *testing.T) {
 	failed := `Get "https://api.trello.com/1/members/me/boards?key=0123abcd&token=ATTA9876": dial tcp: lookup api.trello.com: no such host`
 	p := &mqttStruct.MqttSlackImportProgress{JobId: "j1", Status: "failed", ErrorMessage: failed}
-	payload, err := importProgressPayload(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sent := string(payload)
+	sent := importProgressSent(p).ErrorMessage
 	if strings.Contains(sent, "key=") || strings.Contains(sent, "ATTA9876") || !strings.Contains(sent, "api.trello.com/1/members/me/boards") {
 		t.Errorf("broadcast: %s", sent)
 	}

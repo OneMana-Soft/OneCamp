@@ -87,6 +87,13 @@ type SyncStatus struct {
 	Skipped      []contentIOBusiness.Skipped `json:"skipped,omitempty"`
 	Error        string                      `json:"error,omitempty"`
 	LastSyncedAt *time.Time                  `json:"last_synced_at,omitempty"`
+	// StaleSince is when a synced link last kept in step, once that is
+	// longer ago than syncStaleAfter: the calendar has stopped following
+	// the provider since then. Null while it follows, or before it has.
+	StaleSince *time.Time `json:"stale_since"`
+	// ReadError is why the provider couldn't be read on the link's last
+	// pass, as a class (syncReadError), never the provider's own words.
+	ReadError string `json:"read_error,omitempty"`
 	// Available is whether the admin has set the provider up, so people
 	// can connect it.
 	Available bool `json:"available"`
@@ -102,18 +109,31 @@ type syncLedger interface {
 	keepRefs(ctx context.Context, refs []models.SyncRef) error
 	// What two-way sync reads and writes (syncGoogle.go).
 	syncedLinks(ctx context.Context, provider string, limit int) ([]*models.SyncLink, error)
-	markSynced(ctx context.Context, id uuid.UUID) error
+	// syncedLinksOf is person's links syncedLinks would give, of every provider.
+	syncedLinksOf(ctx context.Context, person uuid.UUID) ([]*models.SyncLink, error)
+	// markSynced ends a pass: readErr is why a calendar couldn't be read
+	// (a class), or "" when everything was, which stamps the link in step.
+	markSynced(ctx context.Context, id uuid.UUID, readErr string) error
 	breakLink(ctx context.Context, id uuid.UUID, why string) error
+	// An admin's ledger (syncLedger.go): a page of the workspace's links
+	// with their counts, and an admin's break of one (nil: no such link).
+	ledgerPage(ctx context.Context, f models.SyncLedgerFilter) ([]models.SyncLedgerRow, error)
+	breakByAdmin(ctx context.Context, id uuid.UUID, why string) (*models.SyncLink, bool, error)
 	calendarsOf(ctx context.Context, link uuid.UUID) ([]models.SyncCalendar, error)
 	// calendarsInto are the links' calendars that come into any of
 	// calendars, with their links' providers (origin.go).
 	calendarsInto(ctx context.Context, calendars []uuid.UUID) ([]models.SyncCalendar, error)
 	markReadOnly(ctx context.Context, link uuid.UUID, remote string) error
 	refsOf(ctx context.Context, link uuid.UUID) (map[uuid.UUID]models.SyncRef, error)
+	// refsAmong is refsOf for these events only.
+	refsAmong(ctx context.Context, link uuid.UUID, events []uuid.UUID) (map[uuid.UUID]models.SyncRef, error)
 	dropRefs(ctx context.Context, link uuid.UUID, events []uuid.UUID) error
 	changedSince(ctx context.Context, link, person uuid.UUID, calendars []uuid.UUID, now time.Time, limit int) ([]*models.Event, error)
+	// changedAmong is changedSince narrowed to these events.
+	changedAmong(ctx context.Context, link, person uuid.UUID, calendars, events []uuid.UUID, now time.Time) ([]*models.Event, error)
 	refusalsOf(ctx context.Context, link uuid.UUID, events []uuid.UUID) (map[uuid.UUID]models.SyncRefusal, error)
-	keepRefusal(ctx context.Context, r models.SyncRefusal, now time.Time) error
+	// keepRefusal says whether it made the event's refusal (none was kept).
+	keepRefusal(ctx context.Context, r models.SyncRefusal, now time.Time) (bool, error)
 	// Calendars read from an address (subscriptions.go).
 	ensureLink(ctx context.Context, person uuid.UUID, provider string) (*models.SyncLink, error)
 	addSubscription(ctx context.Context, s models.Subscription) (bool, error)
@@ -125,6 +145,14 @@ type syncLedger interface {
 }
 
 type postgresLedger struct{}
+
+func (postgresLedger) ledgerPage(ctx context.Context, f models.SyncLedgerFilter) ([]models.SyncLedgerRow, error) {
+	return models.SyncLedger(ctx, f)
+}
+
+func (postgresLedger) breakByAdmin(ctx context.Context, id uuid.UUID, why string) (*models.SyncLink, bool, error) {
+	return models.BreakSyncLinkByAdmin(ctx, id, why)
+}
 
 func (postgresLedger) linkOf(ctx context.Context, person uuid.UUID, provider string) (*models.SyncLink, error) {
 	return models.SyncLinkOf(ctx, person, provider)
@@ -155,8 +183,8 @@ func (postgresLedger) syncedLinks(ctx context.Context, provider string, limit in
 	return models.SyncedLinks(ctx, provider, limit)
 }
 
-func (postgresLedger) markSynced(ctx context.Context, id uuid.UUID) error {
-	return models.MarkSynced(ctx, id)
+func (postgresLedger) markSynced(ctx context.Context, id uuid.UUID, readErr string) error {
+	return models.MarkSynced(ctx, id, readErr)
 }
 
 func (postgresLedger) breakLink(ctx context.Context, id uuid.UUID, why string) error {
@@ -179,6 +207,18 @@ func (postgresLedger) refsOf(ctx context.Context, link uuid.UUID) (map[uuid.UUID
 	return models.SyncRefsOf(ctx, link)
 }
 
+func (postgresLedger) refsAmong(ctx context.Context, link uuid.UUID, events []uuid.UUID) (map[uuid.UUID]models.SyncRef, error) {
+	return models.SyncRefsAmong(ctx, link, events)
+}
+
+func (postgresLedger) syncedLinksOf(ctx context.Context, person uuid.UUID) ([]*models.SyncLink, error) {
+	return models.SyncedLinksOf(ctx, person)
+}
+
+func (postgresLedger) changedAmong(ctx context.Context, link, person uuid.UUID, calendars, events []uuid.UUID, now time.Time) ([]*models.Event, error) {
+	return models.ChangedAmong(ctx, models.Pool(), link, person, calendars, events, now)
+}
+
 func (postgresLedger) dropRefs(ctx context.Context, link uuid.UUID, events []uuid.UUID) error {
 	return models.DropSyncRefs(ctx, link, events)
 }
@@ -191,7 +231,7 @@ func (postgresLedger) refusalsOf(ctx context.Context, link uuid.UUID, events []u
 	return models.SyncRefusalsOf(ctx, link, events)
 }
 
-func (postgresLedger) keepRefusal(ctx context.Context, r models.SyncRefusal, now time.Time) error {
+func (postgresLedger) keepRefusal(ctx context.Context, r models.SyncRefusal, now time.Time) (bool, error) {
 	return models.KeepSyncRefusal(ctx, r, now)
 }
 
@@ -246,13 +286,24 @@ var microsoftAccountOf = func(ctx context.Context, who *model.UserInfo) (string,
 	return connectorBusiness.LinkedAccount(ctx, personOf(who), connectorBusiness.ProviderOutlookCalendar)
 }
 
-// statusOf is a ledger row as the person sees it. Pure.
-func statusOf(provider string, l *models.SyncLink) *SyncStatus {
+// statusOf is a ledger row as the person sees it at now. A link's error is
+// the person's to read in words while its move failed or it is broken; on a
+// synced link it is why its last pass couldn't read the provider, a class
+// (ReadError). Only a synced link follows the provider, so only it can stop:
+// it is stale once its last pass in step is longer ago than syncStaleAfter.
+// Pure.
+func statusOf(provider string, l *models.SyncLink, now time.Time) *SyncStatus {
 	if l == nil {
 		return &SyncStatus{Provider: provider, State: "none"}
 	}
 	st := &SyncStatus{Provider: l.Provider, Account: l.Account, State: l.State, Progress: l.Progress, Moved: l.Moved,
 		Unchanged: l.Unchanged, Error: l.Error, LastSyncedAt: l.LastSyncedAt}
+	if l.State == models.SyncSynced {
+		st.Error, st.ReadError = "", l.Error
+		if l.LastSyncedAt != nil && now.Sub(*l.LastSyncedAt) > syncStaleAfter {
+			st.StaleSince = l.LastSyncedAt
+		}
+	}
 	_ = json.Unmarshal(l.Skipped, &st.Skipped)
 	return st
 }
@@ -275,7 +326,7 @@ func (s *service) SyncStatus(ctx context.Context, who *model.UserInfo, provider 
 
 // statusFor is statusOf with whether the provider is set up.
 func (s *service) statusFor(provider string, l *models.SyncLink) *SyncStatus {
-	st := statusOf(provider, l)
+	st := statusOf(provider, l, s.now())
 	st.Available = connectorConfigured(syncWithOf(provider).connector)
 	return st
 }
@@ -372,7 +423,7 @@ func (s *service) runMove(ctx context.Context, who *model.UserInfo, link *models
 			}
 			_ = s.ledger.setProgress(ctx, link.ID, min(99, (i*100+done*100/total)/max(1, len(remotes))))
 		}
-		made, err := s.importCalendars(ctx, who, []ICS.Calendar{cal}, share)
+		made, err := s.importPulled(ctx, who, []ICS.Calendar{cal}, share)
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/Calendar: a move from %s couldn't write %q: %v", name, r.ID, err)
 			skipped = append(skipped, contentIOBusiness.Skipped{What: r.Name, Why: "It couldn't be saved."})
@@ -387,6 +438,9 @@ func (s *service) runMove(ctx context.Context, who *model.UserInfo, link *models
 		_ = s.ledger.keepCalendar(ctx, models.SyncCalendar{LinkID: link.ID, RemoteID: r.ID, Name: r.Name, Primary: r.Primary, CalendarID: local, Cursor: cursor, ReadOnly: r.ReadOnly})
 	}
 	_ = s.ledger.finish(ctx, link.ID, models.SyncSynced, moved, unchanged, skipped, "")
+	if slices.Contains(calendarSyncBusiness.Adapters.TwoWay(), link.Provider) {
+		markLinked(link.PersonID, true)
+	}
 }
 
 // keepRefsOf records where each event a move made is at the provider,

@@ -271,9 +271,13 @@ func TestLiveSessionsOfAGuestEndWhenTheirLinkStops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The board is the owner's: a board link is turned off only by who
+	// manages its board (miro-33 M-4, CanManage), so its maker is its owner
+	// here; a maker who no longer manages it is refused
+	// (TestM4_ALinksMakerWhoNoLongerManagesTheBoardCannotTurnItOff).
 	board := uuid.NewString()
 	dg.Mutate(t, []map[string]any{{"uid": "_:b", "dgraph.type": "Board", "board_uuid": board, "board_title": "Launch retro",
-		"board_private": false, "board_deleted_at": "0001-01-01T00:00:00Z"}})
+		"board_private": false, "board_deleted_at": "0001-01-01T00:00:00Z", "board_created_by": map[string]any{"uid": uids["owner"]}}})
 
 	// link is a live link someone made to a doc ("comment": a doc's view link
 	// is a page, never live) or a board, and a guest's collab token for it.
@@ -454,7 +458,7 @@ func TestLiveSessionsOnABoardFollowItsSharing(t *testing.T) {
 
 	t.Run("an editor taken off it", func(t *testing.T) {
 		if err := boardBusiness.UpdateBoardPermissions(ctx, boardAdapter.InputUpdateBoardPermissions{
-			BoardId: board, RemoveEditors: []string{people["ed"].String()}}, uids["owner"]); err != nil {
+			BoardId: board, RemoveEditors: []string{people["ed"].String()}}, uids["owner"], people["owner"].String()); err != nil {
 			t.Fatal(err)
 		}
 		if !live.boardAskedAgain(board, people["ed"].String()) {
@@ -467,7 +471,7 @@ func TestLiveSessionsOnABoardFollowItsSharing(t *testing.T) {
 
 	t.Run("an editor made a viewer", func(t *testing.T) {
 		if err := boardBusiness.UpdateBoardPermissions(ctx, boardAdapter.InputUpdateBoardPermissions{
-			BoardId: board, AddViewers: []string{people["vi"].String()}}, uids["owner"]); err != nil {
+			BoardId: board, AddViewers: []string{people["vi"].String()}}, uids["owner"], people["owner"].String()); err != nil {
 			t.Fatal(err)
 		}
 		if !live.boardAskedAgain(board, people["vi"].String()) {

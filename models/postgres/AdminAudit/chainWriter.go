@@ -47,6 +47,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -213,7 +214,7 @@ func writeBatch(batch []queuedEntry) (bad int, err error) {
 	defer func() { _ = tx.Rollback() }()
 
 	// One linear chain across every process on this database.
-	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, auditChainLockKey); err != nil {
+	if err = pgexec.LockXact(pgexec.WithTx(ctx, tx), AuditChainLockKey); err != nil {
 		return -1, fmt.Errorf("audit: lock: %w", err)
 	}
 	var head sql.NullString

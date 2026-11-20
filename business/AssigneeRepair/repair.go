@@ -247,9 +247,12 @@ func (r *run) page(ctx context.Context, page []taskDomain.AssignedTask) (int, er
 		if err := r.principal(ctx); err != nil {
 			return 0, err
 		}
+		// The page's take-offs go onto their AI entries in one write.
+		hctx, writeHandOvers := taskBusiness.HandOvers(ctx)
 		for _, task := range off {
-			failed += r.takeOff(ctx, task)
+			failed += r.takeOff(hctx, task)
 		}
+		writeHandOvers(ctx)
 	}
 	return failed, saveProgress(r.p)
 }

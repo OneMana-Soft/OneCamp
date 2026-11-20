@@ -114,10 +114,6 @@ var docAIPingEvery = 10 * time.Second
 // maxDocAIInputRunes bounds what the client may send as text, context or doc.
 const maxDocAIInputRunes = 200_000
 
-// aiSwitchedOffMsg is the one answer every AI route gives while AI is off
-// in the workspace, whether at the gate or after it.
-const aiSwitchedOffMsg = "AI is switched off in this workspace."
-
 // preparedDocAI is a validated action, ready to run.
 type preparedDocAI struct {
 	action business.DocAction
@@ -214,7 +210,7 @@ func prepareDocAI(ctx context.Context, userInfo *userModels.UserInfo, req DocAIR
 	userUUID := userInfo.UserDgraphInfo.Uuid
 	llm, cb, limits, model := docAIRun.Resolve(ctx, userUUID)
 	if llm == nil || cb == nil {
-		return ctx, nil, &docAIError{status: http.StatusServiceUnavailable, msg: aiSwitchedOffMsg}
+		return ctx, nil, &docAIError{status: http.StatusServiceUnavailable, msg: ai.AIOffWords}
 	}
 	ctx = ai.WithModelLimits(ctx, limits)
 	ctx = ai.WithContextNoticeSink(ctx)
@@ -317,7 +313,7 @@ func gateDocAI(w http.ResponseWriter, r *http.Request, ctx context.Context) (Doc
 func gateAI(w http.ResponseWriter, r *http.Request, ctx context.Context, into any) (*userModels.UserInfo, bool) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !docAIRun.Enabled() {
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": aiSwitchedOffMsg})
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": ai.AIOffWords})
 		return nil, false
 	}
 	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
@@ -325,7 +321,9 @@ func gateAI(w http.ResponseWriter, r *http.Request, ctx context.Context, into an
 		return nil, false
 	}
 	if err := docAIRun.CheckRateLimit(ctx, userInfo.UserDgraphInfo.Uuid); err != nil {
-		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": "You've asked AI a lot in the last minute. Try again in a moment."})
+		const words = "You've asked AI a lot in the last minute. Try again in a moment."
+		ai.SetRetryAfter(w.Header(), err, words)
+		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": words})
 		return nil, false
 	}
 	return &userInfo, true
@@ -334,11 +332,14 @@ func gateAI(w http.ResponseWriter, r *http.Request, ctx context.Context, into an
 func writeDocAIError(w http.ResponseWriter, ctx context.Context, err error) {
 	var de *docAIError
 	if errors.As(err, &de) {
+		ai.SetRetryAfter(w.Header(), nil, de.msg)
 		helpers.WriteJSON(w, de.status, helpers.Envolope{"msg": de.msg})
 		return
 	}
 	helpers.LogErrorWithContext(ctx, "controllers/DocAI prepare failed: %v", err)
-	helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Doc AI couldn't start. Try again in a moment."})
+	const words = "Ask AI couldn't start. Try again in a moment."
+	ai.SetRetryAfter(w.Header(), nil, words)
+	helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": words})
 }
 
 // breakerRefusal answers a closed circuit or a full queue for the model.
@@ -347,7 +348,9 @@ func breakerRefusal(w http.ResponseWriter, err error) {
 	if !errors.Is(err, ai.ErrCircuitOpen) {
 		status = http.StatusTooManyRequests
 	}
-	helpers.WriteJSON(w, status, helpers.Envolope{"msg": ai.FriendlyProviderError(err)})
+	words := ai.FriendlyProviderError(err)
+	ai.SetRetryAfter(w.Header(), err, words)
+	helpers.WriteJSON(w, status, helpers.Envolope{"msg": words})
 }
 
 // DocAIModel handles GET /doc/ai/model: the model the person's doc AI runs on,
@@ -383,7 +386,7 @@ func DocAIComplete(w http.ResponseWriter, r *http.Request) {
 		partials, err := business.SummariseDocParts(ctx, p.llm, p.in.DocTitle, p.parts, p.limits, p.budget, nil)
 		if err != nil {
 			p.cb.RecordResult(err)
-			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": ai.FriendlyProviderError(err)})
+			answerDocModelFailure(w, err)
 			return
 		}
 		p.in.DocMarkdown, p.in.Parts = p.limits.TruncateForPrompt(ctx, partials, p.budget), true
@@ -392,13 +395,15 @@ func DocAIComplete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		p.cb.RecordResult(err)
 		helpers.LogErrorWithContext(ctx, "controllers/DocAIComplete AI completion failed: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": ai.FriendlyProviderError(err)})
+		answerDocModelFailure(w, err)
 		return
 	}
 	p.cb.RecordSuccess()
 	clean := business.CleanDocAnswer(result, p.source)
 	if clean == "" {
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The model sent back nothing. Try again, or pick another model."})
+		const words = "The model sent back nothing. Try again, or pick another model."
+		ai.SetRetryAfter(w.Header(), nil, words)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": words})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
@@ -605,4 +610,12 @@ func DocAICompleteStream(w http.ResponseWriter, r *http.Request) {
 	}
 	p.cb.RecordSuccess()
 	finish()
+}
+
+// answerDocModelFailure answers a model that failed on /ai/doc/complete in our words, with Retry-After when they say
+// try again.
+func answerDocModelFailure(w http.ResponseWriter, err error) {
+	words := ai.FriendlyProviderError(err)
+	ai.SetRetryAfter(w.Header(), err, words)
+	helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": words})
 }

@@ -298,6 +298,28 @@ func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
 				}
 			}
 		}`,
+		"transcripts": `{
+			"settings": { "index": { "number_of_shards": 1, "number_of_replicas": 0 } },
+			"mappings": {
+				"properties": {
+					"transcript_id": { "type": "keyword", "index": true },
+					"transcript_text": { "type": "text", "index": true },
+					"transcript_offset_ms": { "type": "long", "index": false },
+					"transcript_recording_id": { "type": "keyword", "index": true },
+					"transcript_has_media": { "type": "boolean", "index": false },
+					"transcript_session_key": { "type": "keyword", "index": true },
+					"transcript_room": { "type": "keyword", "index": true },
+					"transcript_conv_id": { "type": "keyword", "index": true },
+					"transcript_conv_kind": { "type": "keyword", "index": true },
+					"transcript_by_user_id": { "type": "keyword", "index": true },
+					"transcript_by_user_full_name": { "type": "text", "index": true },
+					"transcript_call_started_at": { "type": "date", "format": "epoch_second", "index": false },
+					"created_date": { "type": "date", "format": "epoch_second", "index": true },
+					"deleted_date": { "type": "date", "format": "epoch_second", "index": true },
+					"deleted_by": { "type": "keyword", "index": true }
+				}
+			}
+		}`,
 		"tasks": `{
 			"settings": { "index": { "number_of_shards": 1, "number_of_replicas": 0 } },
 			"mappings": {

@@ -14,7 +14,7 @@ import (
 const (
 	// A handler asserting the request's user: ctx.Value(UserInfoContextKey).(m.UserInfo)
 	// panics when there is none. httpx.MustUser answers 401 (428 at the audit).
-	bareUserAssertionBaseline = 347
+	bareUserAssertionBaseline = 345 // 347 until H5B folded the nine chat page handlers into pages.go
 	// A page index parsed by hand; PageParam reads it (12 before F5).
 	handPageIndexBaseline = 3
 	// http.Error writes a text/plain body the web app can't read (13).

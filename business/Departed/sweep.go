@@ -64,9 +64,9 @@ func TellAdmins(ctx context.Context) error {
 			ResourceTitle: p.Name,
 			// "work" is the summary in words, so the Inbox says it without
 			// a formatter of its own on its first load.
-			Data:     map[string]string{"docs": strconv.Itoa(p.Docs), "links": strconv.Itoa(p.Links), "work": Summary(p.Docs, p.Links)},
+			Data:     map[string]string{"docs": strconv.Itoa(p.Docs), "boards": strconv.Itoa(p.Boards), "links": strconv.Itoa(p.Links), "work": Work(p.Docs, p.Boards, p.Links)},
 			DedupKey: "departed:" + strings.ToLower(p.UserUUID),
-			Title:    p.Name + " left with " + Summary(p.Docs, p.Links) + " under their name",
+			Title:    p.Name + " left with " + Work(p.Docs, p.Boards, p.Links) + " under their name",
 			Body:     "Hand them on in Settings, under Docs.",
 			Path:     "/app/admin?tab=docs",
 		}, recipients)

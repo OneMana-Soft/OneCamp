@@ -151,43 +151,6 @@ func GetDgraphBasicDmsInfoByGrpId(ctx context.Context, query string, variables m
 	return
 }
 
-func GetDgraphDmsInfoByGrpId(ctx context.Context, query string, variables map[string]string) (dgraphChats []*dgraphStruct.DgraphChat, err error) {
-	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
-	defer func() { _ = txn.Discard(ctx) }()
-
-	resp, err := txn.QueryWithVars(ctx, query, variables)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphDmsInfoByGrpId failed to get chat err: %+v",
-			err)
-		return
-	}
-
-	type Dms struct {
-		DmInfo []dgraphStruct.DgraphDm `json:"dmInfo"`
-	}
-
-	var dmsInfo Dms
-	err = json.Unmarshal(resp.Json, &dmsInfo)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphDmsInfoByGrpId failed to unmarshal response json err: %+v",
-			err)
-		return
-	}
-
-	if len(dmsInfo.DmInfo) == 0 {
-		return
-	}
-	dgraphChats = dmsInfo.DmInfo[0].Chats
-	// A forwarded original deleted since shows as deleted, never its text.
-	for _, c := range dgraphChats {
-		c.HideDeletedForwards()
-	}
-
-	return
-}
-
 // BulkSoftDeleteDgraphChats sets chat_deleted_at on multiple chats in a single Dgraph mutation.
 func BulkSoftDeleteDgraphChats(ctx context.Context, chats []*dgraphStruct.DgraphChat, query string) error {
 	pb, err := json.Marshal(chats)

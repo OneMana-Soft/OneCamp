@@ -307,7 +307,9 @@ func TestABookingNeverTakesTimeTheCalendarCouldntCheck(t *testing.T) {
 	owner := uuid.New()
 	withPage(t, owner, nil)
 	unread := true
-	busyFor = func(context.Context, string, time.Time, time.Time) (Busy, error) {
+	oldRead := readBusy
+	t.Cleanup(func() { readBusy = oldRead })
+	readBusy = func(context.Context, string, time.Time, time.Time, BusyOptions) (Busy, error) {
 		return Busy{GoogleUnread: unread}, nil
 	}
 	l, err := loadLive(context.Background(), "intro-call")
@@ -316,13 +318,80 @@ func TestABookingNeverTakesTimeTheCalendarCouldntCheck(t *testing.T) {
 	}
 	now := time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC)
 	from := time.Date(2026, 10, 14, 4, 0, 0, 0, time.UTC) // Wednesday, 09:30 in Kolkata
-	slots, err := l.slots(context.Background(), from, from.Add(2*time.Hour), now)
-	if !errors.Is(err, ErrCalendarUnread) || slots != nil {
-		t.Fatalf("with Google unread: slots %v, err %v; want none and ErrCalendarUnread", slots, err)
+	start, end, err := l.slotTimes(from, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.slotFree(context.Background(), start, end, now, nil); !errors.Is(err, ErrCalendarUnread) {
+		t.Fatalf("with Google unread: %v; want ErrCalendarUnread", err)
 	}
 	unread = false
-	slots, err = l.slots(context.Background(), from, from.Add(2*time.Hour), now)
-	if err != nil || len(slots) == 0 || !slots[0].Start.Equal(from) {
-		t.Fatalf("read whole: slots %v, err %v; want the slot at %s", slots, err, from)
+	if err := l.slotFree(context.Background(), start, end, now, nil); err != nil {
+		t.Fatalf("read whole: %v; want the slot at %s free", err, from)
+	}
+}
+
+// gcal-7 H4: a team page's answer is cut from its owner's and every accepted
+// host's calendars, so a change to any of them shows at once: an accepted
+// host's event clears the answer as the owner's does, and a read under way
+// when a host's event lands is not kept.
+func TestAHostsChangeClearsTheTeamPagesAnswer(t *testing.T) {
+	owner := uuid.New()
+	ana, ben, cy, busy := threeHosts()
+	withPage(t, owner, nil)
+	loadLive = func(context.Context, string) (*livePage, error) { return teamPage(t, owner, ana, ben, cy), nil }
+	var mu sync.Mutex
+	reads := map[string]int{}
+	busyFor = func(_ context.Context, who string, _, _ time.Time) (Busy, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		reads[who]++
+		return Busy{Intervals: busy[who]}, nil
+	}
+	now := time.Date(2026, 11, 18, 6, 0, 0, 0, time.UTC)
+	offers := func(h int) bool {
+		t.Helper()
+		p, err := GetPublicPage(context.Background(), "team-call", teamDay, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range p.Slots {
+			if s.Start.Equal(teamAt(h)) {
+				return true
+			}
+		}
+		return false
+	}
+	anaID := ana.UserId.String()
+	first, second := offers(14), offers(14) // the second look is the kept answer
+	if !first || !second || reads[anaID] != 1 {
+		t.Fatalf("14:00 not offered, or Ana read %d times; want offered from one read", reads[anaID])
+	}
+	// Ana takes 14:00 on her own calendar: the event's change forgets her.
+	mu.Lock()
+	busy[anaID] = append(busy[anaID], Interval{Start: teamAt(14), End: teamAt(14).Add(30 * time.Minute)})
+	mu.Unlock()
+	pageCache.forgetBusy(anaID)
+	if offers(14) {
+		t.Fatal("after Ana's event: 14:00 still offered from the kept answer")
+	}
+
+	// Ana's 15:00 lands while her calendar is being read: that read is stale.
+	inner := busyFor
+	busyFor = func(ctx context.Context, who string, from, to time.Time) (Busy, error) {
+		b, err := inner(ctx, who, from, to)
+		if who == anaID {
+			mu.Lock()
+			busy[anaID] = append(busy[anaID], Interval{Start: teamAt(15), End: teamAt(15).Add(30 * time.Minute)})
+			mu.Unlock()
+			pageCache.forgetBusy(anaID)
+		}
+		return b, err
+	}
+	pageCache.forgetBusy(owner.String(), anaID) // so both are read again
+	offers(15)                                  // read under way when 15:00 was taken
+	busyFor = inner
+	if offers(15) {
+		t.Fatal("a read under way when Ana's 15:00 landed was kept")
 	}
 }

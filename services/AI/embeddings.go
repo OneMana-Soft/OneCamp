@@ -75,6 +75,11 @@ type EmbeddingDoc struct {
 	// --- Common metadata ---
 	AuthorUUID string `json:"author_uuid,omitempty"`
 	AuthorName string `json:"author_name,omitempty"`
+
+	// assigneeAsItIs is set by a task's writer (EmbedTaskContent): the entry
+	// names the task's assignee read just before it is written
+	// (storeEmbeddingDirect). Never stored.
+	assigneeAsItIs bool
 }
 
 // embeddingDocWithVector is the stored form including the vector.
@@ -162,6 +167,19 @@ func storeEmbeddingDirect(ctx context.Context, doc EmbeddingDoc) error {
 		return fmt.Errorf("embedding returned empty vector")
 	}
 	vector := vectors[0]
+
+	// A task's entry names the assignee it has as the entry is written: a
+	// hand-over made while the vector was computed (seconds) wrote nothing,
+	// as there was no entry yet for its update-by-query to find. That is one
+	// graph read per task entry written, in the background beside its
+	// embedding and its index write, never on a request: a bulk create of N
+	// tasks (business/Task CreateTasks: the bulk route, a template's apply)
+	// makes N. They aren't skipped there: those tasks are made unassigned,
+	// and the read is for a hand-over after the create, which no bulk path
+	// knows of.
+	if doc.ContentType == "task" && doc.assigneeAsItIs {
+		doc.TaskAssigneeUUID = taskAssigneeAsItIs(ctx, doc.ContentUUID, doc.TaskAssigneeUUID)
+	}
 
 	// Build document with vector
 	stored := embeddingDocWithVector{
@@ -541,7 +559,7 @@ func SearchSimilar(ctx context.Context, query string, userUUID string, channelUU
 
 	// Decided before the query is embedded, so a search that may not run (an
 	// agent acting for someone whose reach cannot be resolved) spends nothing.
-	permissionFilter, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	permissionFilter, readers, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -610,7 +628,7 @@ func SearchSimilar(ctx context.Context, query string, userUUID string, channelUU
 		results = append(results, result)
 	}
 
-	return KeepLive(ctx, dropHidden(seen, results)), nil
+	return KeepLive(ctx, keepAssigned(ctx, readers, dropHidden(seen, results), similarTask)), nil
 }
 
 // SearchRecent fetches the most recent content from OpenSearch based on a filter
@@ -651,7 +669,7 @@ func SearchRecentIn(ctx context.Context, userUUID string, channelUUIDs []string,
 	}
 
 	// Build unified permission filter
-	permissionFilter, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	permissionFilter, readers, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -705,7 +723,7 @@ func SearchRecentIn(ctx context.Context, userUUID string, channelUUIDs []string,
 		results = append(results, result)
 	}
 
-	return KeepLive(ctx, dropHidden(seen, results)), nil
+	return KeepLive(ctx, keepAssigned(ctx, readers, dropHidden(seen, results), similarTask)), nil
 }
 
 // SearchRecentGlobal fetches the most recent content across ALL accessible resources. Used when the user asks for broad updates (e.g. "what are the recent updates?")
@@ -721,7 +739,7 @@ func SearchRecentGlobal(ctx context.Context, userUUID string, channelUUIDs []str
 	}
 
 	// Build unified permission filter (same as SearchSimilar)
-	permissionFilter, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	permissionFilter, readers, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -786,7 +804,7 @@ func SearchRecentGlobal(ctx context.Context, userUUID string, channelUUIDs []str
 		results = append(results, result)
 	}
 
-	return KeepLive(ctx, dropHidden(seen, results)), nil
+	return KeepLive(ctx, keepAssigned(ctx, readers, dropHidden(seen, results), similarTask)), nil
 }
 
 // DeleteEmbedding removes an embedding from the index (e.g. when content is deleted).
@@ -890,6 +908,7 @@ func EmbedTaskContent(taskName string, taskDesc string, taskUUID string, project
 		AuthorUUID:        createdByUUID,
 		AuthorName:        createdByName,
 		CreatedDate:       time.Now().Unix(),
+		assigneeAsItIs:    true,
 	})
 }
 
@@ -1006,11 +1025,14 @@ type ScopedContent struct {
 
 	// What the item is, for a check against its source before it is used:
 	// set by FetchUnreadAcrossScopes, which reaches docs and comments on docs
-	// and boards (business/AI docHits.go).
+	// and boards (business/AI docHits.go), and tasks and comments on them
+	// (keepAssigned).
 	ContentType string
 	ContentUUID string
 	DocUUID     string
 	BoardUUID   string
+	TaskUUID    string
+	ProjectUUID string
 }
 
 // memoryScopeFields enumerates the embedding-doc fields that can anchor a
@@ -1129,7 +1151,7 @@ func FetchUnreadAcrossScopes(ctx context.Context, userUUID string, channelUUIDs,
 		limit = 300
 	}
 
-	permissionFilter, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	permissionFilter, readers, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1151,7 +1173,7 @@ func FetchUnreadAcrossScopes(ctx context.Context, userUUID string, channelUUIDs,
 			}
 		},
 		"sort": [{"created_date": {"order": "desc"}}],
-		"_source": ["content_text", "author_name", "created_date", "content_type", "content_uuid", "doc_uuid", "board_uuid"]
+		"_source": ["content_text", "author_name", "created_date", "content_type", "content_uuid", "doc_uuid", "board_uuid", "task_uuid", "project_uuid"]
 	}`, limit, permissionFilter, sinceUnix)
 
 	type osHit struct {
@@ -1188,6 +1210,8 @@ func FetchUnreadAcrossScopes(ctx context.Context, userUUID string, channelUUIDs,
 			ContentUUID string `json:"content_uuid"`
 			DocUUID     string `json:"doc_uuid"`
 			BoardUUID   string `json:"board_uuid"`
+			TaskUUID    string `json:"task_uuid"`
+			ProjectUUID string `json:"project_uuid"`
 		}
 		if err := json.Unmarshal(h.Source, &row); err != nil {
 			continue
@@ -1203,8 +1227,11 @@ func FetchUnreadAcrossScopes(ctx context.Context, userUUID string, channelUUIDs,
 			ContentUUID: row.ContentUUID,
 			DocUUID:     row.DocUUID,
 			BoardUUID:   row.BoardUUID,
+			TaskUUID:    row.TaskUUID,
+			ProjectUUID: row.ProjectUUID,
 		})
 	}
+	out = keepAssigned(ctx, readers, out, scopedTask)
 	// Re-sort ascending (chronological) for a natural recap reading order.
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedDate < out[j].CreatedDate })
 	return out, nil
@@ -1306,12 +1333,28 @@ func DiscoverActiveScopes(ctx context.Context, sinceUnix int64, maxPerDimension 
 	return out, nil
 }
 
+// seenBy is the restricted-task filters of everyone a search reads for: its
+// reader, and the person an agent's run is for (RunRequester). A task any of
+// them may not see is hidden.
+type seenBy []taskread.Filter
+
+func (s seenBy) hides(taskUUID string) bool {
+	for _, tr := range s {
+		if tr.Hides(taskUUID) {
+			return true
+		}
+	}
+	return false
+}
+
 // seenOnly keeps the restricted tasks the reader (userUUID; ctx's reader when
 // "") may not see, and their comments, out of an embeddings search: out of
-// its query, so pages and counts leave them out (models/taskread). The
-// filter comes back for dropHidden, which checks what the query can't (an
-// index whose task_uuid was mapped by OpenSearch itself).
-func seenOnly(ctx context.Context, userUUID, body string) (string, taskread.Filter, error) {
+// its query, so pages and counts leave them out (models/taskread). In an
+// agent's run for someone other than its sponsor, the tasks that person may
+// not see are kept out too, as runPermissionFilter narrows the rest of the
+// search to them. The filters come back for dropHidden, which checks what the
+// query can't (an index whose task_uuid was mapped by OpenSearch itself).
+func seenOnly(ctx context.Context, userUUID, body string) (string, seenBy, error) {
 	var tr taskread.Filter
 	var err error
 	if strings.TrimSpace(userUUID) == "" {
@@ -1320,20 +1363,42 @@ func seenOnly(ctx context.Context, userUUID, body string) (string, taskread.Filt
 		tr, err = taskread.ForReader(ctx, userUUID)
 	}
 	if err != nil {
-		return "", tr, err
+		return "", nil, err
 	}
-	body, err = tr.SearchWithout(body, "content_uuid", "task_uuid.keyword")
-	return body, tr, err
+	seen := seenBy{tr}
+	if requester, _, ok := RunRequester(ctx); ok {
+		requester = strings.TrimSpace(requester)
+		if requester == "" {
+			return "", nil, errUnidentifiedRequester
+		}
+		if !strings.EqualFold(requester, strings.TrimSpace(userUUID)) {
+			theirs, err := taskread.ForReader(ctx, requester)
+			if err != nil {
+				return "", nil, err
+			}
+			seen = append(seen, theirs)
+		}
+	}
+	for _, f := range seen {
+		if body, err = f.SearchWithout(body, "content_uuid", "task_uuid.keyword"); err != nil {
+			return "", nil, err
+		}
+	}
+	return body, seen, nil
 }
 
 // dropHidden leaves out results that are a hidden task or a comment on one.
-func dropHidden(tr taskread.Filter, results []SimilarResult) []SimilarResult {
-	if tr.Empty() {
+func dropHidden(seen seenBy, results []SimilarResult) []SimilarResult {
+	empty := true
+	for _, tr := range seen {
+		empty = empty && tr.Empty()
+	}
+	if empty {
 		return results
 	}
 	out := results[:0]
 	for _, r := range results {
-		if tr.Hides(r.ContentUUID) || tr.Hides(r.TaskUUID) {
+		if seen.hides(r.ContentUUID) || seen.hides(r.TaskUUID) {
 			continue
 		}
 		out = append(out, r)

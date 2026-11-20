@@ -53,7 +53,7 @@ const maxDocTranscriptLines = 3000
 func buildMeetingNotesHTML(recap, gapNote string, lines []transcriptDomain.TranscriptLine, nameByUID map[string]string) string {
 	var sb strings.Builder
 
-	sb.WriteString(modelTextToHTML(recap))
+	sb.WriteString(modelTextToHTML(recapForChat(recap)))
 
 	sb.WriteString("<h2>Transcript</h2>")
 	// Said here as well as on the message, because the document is the thing

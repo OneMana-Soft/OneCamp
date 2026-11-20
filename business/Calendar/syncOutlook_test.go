@@ -165,7 +165,7 @@ func syncWithProviders(t *testing.T, h *harness, adapters map[string]calendarSyn
 		a, ok := adapters[p]
 		return a, ok
 	}
-	googleAccountOf = func(context.Context, *model.UserInfo) (string, bool, error) { return "sam@outlook.com", true, nil }
+	googleAccountOf = func(context.Context, *model.UserInfo) (string, bool, error) { return "sam@example.com", true, nil }
 	microsoftAccountOf = func(context.Context, *model.UserInfo) (string, bool, error) { return "sam@contoso.com", true, nil }
 	t.Cleanup(func() { syncProvider, googleAccountOf, microsoftAccountOf = prevProvider, prevGoogle, prevMicrosoft })
 	return func() {

@@ -354,9 +354,13 @@ func (s *service) awayDecliners(ctx context.Context, reader uuid.UUID, rows []in
 	if len(found) == 0 {
 		return nil
 	}
-	sees := false
+	sees := map[string]bool{}
 	if others {
-		ok, err := s.seesWhenOthersAreBusy(ctx, reader)
+		people := make([]string, 0, len(found))
+		for _, m := range found {
+			people = append(people, m.person.String())
+		}
+		ok, err := s.busySeenOf(ctx, reader, people)
 		if err != nil {
 			return nil
 		}
@@ -364,7 +368,7 @@ func (s *service) awayDecliners(ctx context.Context, reader uuid.UUID, rows []in
 	}
 	marks := map[string]map[string]bool{}
 	for _, m := range found {
-		if m.person != reader && !sees {
+		if m.person != reader && !sees[m.person.String()] {
 			continue
 		}
 		if marks[m.ref] == nil {

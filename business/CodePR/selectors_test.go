@@ -34,6 +34,22 @@ func TestParseSelectors_SingleObjectWrapped(t *testing.T) {
 	}
 }
 
+func TestParseSelectors_BracketInProseBeforeTheArray(t *testing.T) {
+	got := ParseSelectors(`Here [see below]: [{"kind":"symbol","query":"X"}]`)
+	if len(got) != 1 || got[0].Query != "X" {
+		t.Fatalf("a bracket in prose before the array hid the array: %+v", got)
+	}
+}
+
+func TestParseSelectors_ObjectWithAListValueIsTheSelector(t *testing.T) {
+	// The only array in the reply is a value inside the object: it isn't a
+	// selector list, so the object is read as the one selector.
+	got := ParseSelectors(`{"kind":"rg","query":"TODO","paths":["a"]}`)
+	if len(got) != 1 || got[0].Kind != SelectorLexical || got[0].Query != "TODO" {
+		t.Fatalf("an object with a list value should wrap to one lexical selector: %+v", got)
+	}
+}
+
 func TestParseSelectors_UnparseableIsNil(t *testing.T) {
 	for _, raw := range []string{"", "   ", "not json", "```\nnope\n```"} {
 		if got := ParseSelectors(raw); got != nil {

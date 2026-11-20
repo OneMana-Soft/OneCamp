@@ -152,7 +152,7 @@ func TellReply(bot *userBusiness.BotIdentity, name string, post *dgraphStruct.Dg
 	}
 	reply := commentBusiness.ThreadReply{By: bot.Principal(name), Post: post, CommentUUID: commentUUID,
 		HTML: htmlText, PlainText: plainText, At: at}
-	helpers.GoSafeNamed("commentBusiness.NotifyThreadReply", func() { commentBusiness.NotifyThreadReply(reply) })
+	helpers.GoSafeNamed("commentBusiness.NotifyThreadReply", func() { commentBusiness.NotifyThreadReply(context.Background(), reply) })
 }
 
 func postCommentAsBot(ctx context.Context, postUUID uuid.UUID, text string, bot *userBusiness.BotIdentity, tell bool) (*Result, error) {

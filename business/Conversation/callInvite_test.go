@@ -48,7 +48,7 @@ func TestACallsInviteeRepliesInItsThreadAndNowhereElse(t *testing.T) {
 	// the same conversation stays not found.
 	reads := withCallInvites(t, map[uuid.UUID]string{callPost: "channel-1"}, map[string]bool{"channel-1": true})
 	out := map[string]accessBusiness.Decision{}
-	if err := callInvites(ctx, jonas, out, []string{callPost.String(), otherThread.String()}); err != nil {
+	if err := callInvites(ctx, jonas, out, []string{callPost.String(), otherThread.String()}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if d := out[callPost.String()]; d.Level != LevelReply || len(d.Reasons) != 1 || d.Reasons[0] != ReasonCallInvite {
@@ -73,7 +73,7 @@ func TestACallsInviteeRepliesInItsThreadAndNowhereElse(t *testing.T) {
 	} {
 		withCallInvites(t, c.posts, c.rooms)
 		out := map[string]accessBusiness.Decision{}
-		if err := callInvites(ctx, jonas, out, []string{callPost.String()}); err != nil || len(out) != 0 {
+		if err := callInvites(ctx, jonas, out, []string{callPost.String()}, nil); err != nil || len(out) != 0 {
 			t.Errorf("%s: %+v, %v", name, out, err)
 		}
 	}
@@ -81,8 +81,35 @@ func TestACallsInviteeRepliesInItsThreadAndNowhereElse(t *testing.T) {
 	// Someone a rule already decided keeps that decision, and no read is made.
 	reads = withCallInvites(t, map[uuid.UUID]string{callPost: "channel-1"}, map[string]bool{"channel-1": true})
 	member := map[string]accessBusiness.Decision{callPost.String(): {Level: LevelModerate, Was: LevelModerate, Reasons: []string{reasonModerator}}}
-	if err := callInvites(ctx, jonas, member, []string{callPost.String()}); err != nil || member[callPost.String()].Level != LevelModerate || *reads != 0 {
+	if err := callInvites(ctx, jonas, member, []string{callPost.String()}, nil); err != nil || member[callPost.String()].Level != LevelModerate || *reads != 0 {
 		t.Errorf("a moderator: %+v, %v (%d reads)", member, err, *reads)
+	}
+
+	// Someone a channel's rule lets read only as one of its readers (a public
+	// channel's, or a manager's who isn't in it) still replies once let in;
+	// without the invite they read. A member's own decision, even a read one
+	// (an archived channel's), stays as it was (CR-372 F1).
+	reader := accessBusiness.Decision{Level: LevelRead, Was: LevelRead, Reasons: []string{reasonPublic}}
+	held := accessBusiness.Decision{Level: LevelRead, Was: LevelReply, Reasons: []string{reasonMember}, Archived: true}
+	for name, c := range map[string]struct {
+		before accessBusiness.Decision
+		rooms  map[string]bool
+		want   accessBusiness.Level
+		reason string
+	}{
+		"a reader, let in":             {reader, map[string]bool{"channel-1": true}, LevelReply, ReasonCallInvite},
+		"a reader, not let in":         {reader, map[string]bool{}, LevelRead, reasonPublic},
+		"a member":                     {accessBusiness.Decision{Level: LevelReply, Was: LevelReply, Reasons: []string{reasonMember}}, map[string]bool{"channel-1": true}, LevelReply, reasonMember},
+		"an archived channel's member": {held, map[string]bool{"channel-1": true}, LevelRead, reasonMember},
+	} {
+		withCallInvites(t, map[uuid.UUID]string{callPost: "channel-1"}, c.rooms)
+		out := map[string]accessBusiness.Decision{callPost.String(): c.before}
+		if err := callInvites(ctx, jonas, out, []string{callPost.String()}, nil); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if d := out[callPost.String()]; d.Level != c.want || len(d.Reasons) != 1 || d.Reasons[0] != c.reason {
+			t.Errorf("%s: %+v, want %v for %s", name, d, c.want, c.reason)
+		}
 	}
 }
 
@@ -124,7 +151,7 @@ func TestAnInviteLetsNoAgentIn(t *testing.T) {
 	} {
 		reads := withCallInvites(t, posts, rooms)
 		thread, call := map[string]accessBusiness.Decision{}, map[string]accessBusiness.Decision{}
-		if err := callInvites(ctx, who, thread, []string{callPost.String()}); err != nil || len(thread) != 0 {
+		if err := callInvites(ctx, who, thread, []string{callPost.String()}, nil); err != nil || len(thread) != 0 {
 			t.Errorf("%s, the call's thread: %+v, %v", name, thread, err)
 		}
 		if err := callRoomInvites(ctx, who, call, []string{"channel-1"}); err != nil || len(call) != 0 {
@@ -139,7 +166,7 @@ func TestAnInviteLetsNoAgentIn(t *testing.T) {
 	withCallInvites(t, posts, rooms)
 	thread, call := map[string]accessBusiness.Decision{}, map[string]accessBusiness.Decision{}
 	me := accessBusiness.Subject{UserUUID: jonas}
-	if err := callInvites(ctx, me, thread, []string{callPost.String()}); err != nil || thread[callPost.String()].Level != LevelReply {
+	if err := callInvites(ctx, me, thread, []string{callPost.String()}, nil); err != nil || thread[callPost.String()].Level != LevelReply {
 		t.Errorf("Jonas, the call's thread: %+v, %v", thread, err)
 	}
 	if err := callRoomInvites(ctx, me, call, []string{"channel-1"}); err != nil || call["channel-1"].Level != LevelPost {
@@ -212,10 +239,48 @@ func TestAnInviteOpensTheThreadOnlyToTheCallsSurface(t *testing.T) {
 	callPost := uuid.New()
 	reads := withCallInvites(t, map[uuid.UUID]string{callPost: "channel-1"}, map[string]bool{"channel-1": true})
 	out := map[string]accessBusiness.Decision{}
-	if err := callInvites(context.Background(), jonas, out, []string{callPost.String()}); err != nil || len(out) != 0 || *reads != 0 {
+	if err := callInvites(context.Background(), jonas, out, []string{callPost.String()}, nil); err != nil || len(out) != 0 || *reads != 0 {
 		t.Errorf("unmarked: %+v, %v (%d reads)", out, err, *reads)
 	}
-	if err := callInvites(ForCallThread(context.Background()), jonas, out, []string{callPost.String()}); err != nil || out[callPost.String()].Level != LevelReply {
+	if err := callInvites(ForCallThread(context.Background()), jonas, out, []string{callPost.String()}, nil); err != nil || out[callPost.String()].Level != LevelReply {
 		t.Errorf("the call's surface: %+v, %v", out, err)
+	}
+}
+
+// An invite opens no more than the thread's holds allow (V-1138): let in, a
+// reader whose read is an archived channel's or a deleted root's, and someone
+// a private channel's or a DM's thread is nothing to, stays at read, told
+// why; a live thread in a live channel still opens at reply.
+func TestAnInviteOpensNoMoreThanTheThreadsHolds(t *testing.T) {
+	ctx := ForCallThread(context.Background())
+	jonas := accessBusiness.Subject{UserUUID: uuid.NewString()}
+	callPost := uuid.New()
+	for name, s := range map[string]threadStanding{
+		"a reader of an archived channel's thread":  {channel: true, public: true, archived: true},
+		"a reader of a deleted root's thread":       {channel: true, public: true, rootDeleted: true},
+		"an archived private channel's thread":      {channel: true, archived: true},
+		"a private channel's deleted root's thread": {channel: true, rootDeleted: true},
+		"a DM's deleted root's thread":              {rootDeleted: true},
+		"a live public channel's live thread":       {channel: true, public: true},
+		"a live private channel's live thread":      {channel: true},
+	} {
+		withCallInvites(t, map[uuid.UUID]string{callPost: "channel-1"}, map[string]bool{"channel-1": true})
+		// As the thread's rule leaves it for someone not in the conversation.
+		out := map[string]accessBusiness.Decision{}
+		if before := decideThread(s); before.Level != accessBusiness.LevelNone {
+			out[callPost.String()] = before
+		}
+		if err := callInvites(ctx, jonas, out, []string{callPost.String()}, map[uuid.UUID]threadStanding{callPost: s}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		want := LevelReply
+		if s.archived || s.rootDeleted {
+			want = LevelRead
+		}
+		d := out[callPost.String()]
+		if d.Level != want || d.Was != LevelReply || d.Archived != s.archived || d.Deleted != s.rootDeleted ||
+			len(d.Reasons) != 1 || d.Reasons[0] != ReasonCallInvite {
+			t.Errorf("%s: %+v, want %v", name, d, want)
+		}
 	}
 }

@@ -391,6 +391,17 @@ func WithTx(ctx context.Context, tx *sql.Tx) context.Context {
 	return context.WithValue(ctx, txKey{}, tx)
 }
 
+// Detached is ctx for work that outlives the request it came with, such as a
+// pass a door queues for later: the request's values (trace, log) stay, its
+// cancel and deadline go, and so does any transaction InTx or WithTx put in
+// it, which the request has committed or rolled back by the time the work
+// runs. Every reader of the transaction (db, inTx, ranWithoutWorkers) takes
+// the nil it leaves for none: a statement made with it runs on the pool, an
+// InTx in it opens its own transaction and AfterCommit runs its fn at once.
+func Detached(ctx context.Context) context.Context {
+	return context.WithValue(context.WithoutCancel(ctx), txKey{}, (*sql.Tx)(nil))
+}
+
 // The WAL's page headers on a 64-bit server (MAXALIGN 8): a segment's first
 // page carries the long one.
 const (

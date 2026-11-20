@@ -81,28 +81,41 @@ func SetMemberRole(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[changeRole], "data": map[string]string{"user_uuid": target.Uuid, "role": string(to)}})
 }
 
+// projectPolicyKeys are the policies a project can set for itself, in the
+// order its settings show them.
+var projectPolicyKeys = []string{policyBusiness.ProjectsEditWho.Key, policyBusiness.ProjectsTriage.Key, policyBusiness.ProjectsTriagePriority.Key}
+
 // ProjectPolicies is the policies a project can set for itself, as they stand
-// for it: today "Who can change tasks". GET /project/{project_uuid}/policies.
+// for it: "Who can change tasks" and triage. GET /project/{project_uuid}/policies.
 // For the people in the project.
 func ProjectPolicies(w http.ResponseWriter, r *http.Request) {
 	id, _, _, ok := projectaccess.RequireStanding(w, r, workAccess.NeedView, "")
 	if !ok {
 		return
 	}
-	in, err := policyBusiness.Admin.InfoIn(r.Context(), policyBusiness.ProjectsEditWho.Key, projectScope(id))
-	if err != nil {
-		helpers.LogErrorWithContext(r.Context(), "controllers/ProjectPolicies err: %+v", err)
-		helpers.WriteRetryLater(w, "Couldn't load the project's settings.")
-		return
+	out := make([]policyBusiness.Info, 0, len(projectPolicyKeys))
+	for _, key := range projectPolicyKeys {
+		in, err := policyBusiness.Admin.InfoIn(r.Context(), key, projectScope(id))
+		if err != nil {
+			helpers.LogErrorWithContext(r.Context(), "controllers/ProjectPolicies err: %+v", err)
+			helpers.WriteRetryLater(w, "Couldn't load the project's settings.")
+			return
+		}
+		out = append(out, in)
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": []policyBusiness.Info{in}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": out})
 }
 
 // SetProjectPolicy sets one of the project's own policies, or with a null
 // value gives it back to the workspace's. PUT /project/{project_uuid}/policies/{key}
 // {value}. For the project's admins; recorded in the audit log.
 func SetProjectPolicy(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, "Only the project's admins choose who can change its tasks.")
+	key := chi.URLParam(r, "key")
+	refusal := "Only the project's admins choose who can change its tasks."
+	if key == policyBusiness.ProjectsTriage.Key || key == policyBusiness.ProjectsTriagePriority.Key {
+		refusal = "Only the project's admins choose how its triage works."
+	}
+	id, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, refusal)
 	if !ok {
 		return
 	}
@@ -115,7 +128,7 @@ func SetProjectPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	me, _ := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	by := policyBusiness.Changer{UserID: me.UserPostgresInfo.Id, Email: me.UserPostgresInfo.EmailID}
-	key, scope := chi.URLParam(r, "key"), projectScope(id)
+	scope := projectScope(id)
 	var info policyBusiness.Info
 	var err error
 	if len(in.Value) == 0 || strings.TrimSpace(string(in.Value)) == "null" {
@@ -128,6 +141,8 @@ func SetProjectPolicy(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": info})
 	case errors.Is(err, policyBusiness.ErrUnknownPolicy), errors.Is(err, policyBusiness.ErrNotScoped):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "A project can't set that."})
+	case errors.Is(err, policyBusiness.ErrBadValue) && (key == policyBusiness.ProjectsTriage.Key || key == policyBusiness.ProjectsTriagePriority.Key):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Turn it on or off."})
 	case errors.Is(err, policyBusiness.ErrBadValue):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Choose members, members on the tasks assigned to them, or admins only."})
 	case errors.Is(err, policyBusiness.ErrNotRecorded):

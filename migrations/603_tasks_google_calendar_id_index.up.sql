@@ -1,0 +1,11 @@
+-- no-transaction
+-- FIX head E-5: every calendar listing asks which of the Google events it
+-- fetched are a live task's copy (domain/Task TaskCopiesAmong:
+-- task_google_calendar_id = ANY($1)), so the hot tasks table is read by this
+-- column on each listing. Most tasks are never synced (the column is NULL or
+-- ''), so the index keeps only live tasks that are; the query repeats this
+-- predicate word for word so the planner can use it under a generic plan.
+-- CONCURRENTLY: built without blocking writes; one statement per file,
+-- outside a transaction (sqlx reads the first line). A build that fails
+-- leaves an INVALID index: drop it and run the migration again.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_tasks_google_calendar_id ON tasks (task_google_calendar_id) WHERE task_google_calendar_id IS NOT NULL AND task_google_calendar_id <> '' AND deleted_at IS NULL;

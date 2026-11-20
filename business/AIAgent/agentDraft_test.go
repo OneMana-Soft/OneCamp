@@ -93,3 +93,18 @@ func TestDraftFallbackIsApproval(t *testing.T) {
 		}
 	}
 }
+
+// A model that writes its draft and then a second example object, or prose
+// with braces after the draft, still gets its draft read: the first complete
+// object is the draft.
+func TestParseAgentDraftTakesTheFirstObject(t *testing.T) {
+	for name, raw := range map[string]string{
+		"a second object after it": `{"name":"Standup bot","autonomy":"approval"} For example: {"name":"Other"}`,
+		"braces in prose after it": "```json\n{\"name\":\"Standup bot\",\"autonomy\":\"approval\"}\n```\nCall it with {name}.",
+	} {
+		d, err := parseAgentDraft(raw)
+		if err != nil || d == nil || d.Name != "Standup bot" {
+			t.Errorf("%s: got %+v, %v; want the draft named Standup bot", name, d, err)
+		}
+	}
+}

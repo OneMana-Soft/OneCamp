@@ -19,6 +19,7 @@ import (
 	business "github.com/akashc777/OneCamp/business/AI"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	ai "github.com/akashc777/OneCamp/services/AI"
 )
 
 // ListDocAgentEdits handles GET /doc/ai/agent-edits.
@@ -71,7 +72,9 @@ func RevertDocAgentEdits(w http.ResponseWriter, r *http.Request) {
 			helpers.WriteJSON(w, http.StatusUnprocessableEntity, helpers.Envolope{"msg": cant.Msg, "reverted": n})
 		default:
 			helpers.LogErrorWithContext(ctx, "controllers/RevertDocAgentEdits: %v", err)
-			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The revert couldn't be made just now. Try again in a moment.", "reverted": n})
+			const words = "The revert couldn't be made just now. Try again in a moment."
+			ai.SetRetryAfter(w.Header(), nil, words)
+			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": words, "reverted": n})
 		}
 		return
 	}

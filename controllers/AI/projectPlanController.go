@@ -31,6 +31,7 @@ func StartProjectPlan(w http.ResponseWriter, r *http.Request) {
 	may, err := templateBusiness.MayCreateProjects(ctx, user)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/AI/StartProjectPlan teams err: %+v", err)
+		ai.SetRetryAfter(w.Header(), err, planTryAgain)
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": planTryAgain})
 		return
 	}
@@ -52,11 +53,14 @@ func StartProjectPlan(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, business.ErrPlanTooShort):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Say a little more: what the project is for, and by when."})
 	case errors.Is(err, ai.ErrRateLimited):
-		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": "That's a lot of AI requests in a short time. Try again in a minute."})
+		const words = "That's a lot of AI requests in a short time. Try again in a minute."
+		ai.SetRetryAfter(w.Header(), err, words)
+		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": words})
 	case errors.Is(err, ai.ErrAIDisabled):
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The AI isn't on in this workspace. Pick a template instead."})
 	default:
 		helpers.LogErrorWithContext(ctx, "controllers/AI/StartProjectPlan err: %+v", err)
+		ai.SetRetryAfter(w.Header(), err, planTryAgain)
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": planTryAgain})
 	}
 }
@@ -78,6 +82,7 @@ func ProjectPlan(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That draft isn't there any more. Describe the project again."})
 	default:
 		helpers.LogErrorWithContext(ctx, "controllers/AI/ProjectPlan err: %+v", err)
+		ai.SetRetryAfter(w.Header(), err, planTryAgain)
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": planTryAgain})
 	}
 }

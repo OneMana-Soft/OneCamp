@@ -19,12 +19,13 @@ import (
 
 // hitIndex is the index each checked type is stored in, for forgetting it.
 var hitIndex = map[string]string{
-	openSearchStruct.CHAT_TYPE:    openSearchStruct.CHAT_INDEX,
-	openSearchStruct.POST_TYPE:    openSearchStruct.POST_INDEX,
-	openSearchStruct.COMMENT_TYPE: openSearchStruct.COMMENT_INDEX,
-	openSearchStruct.TASK_TYPE:    openSearchStruct.TASK_INDEX,
-	openSearchStruct.DOC_TYPE:     openSearchStruct.DOC_INDEX,
-	openSearchStruct.PROJECT_TYPE: openSearchStruct.PROJECT_INDEX,
+	openSearchStruct.CHAT_TYPE:       openSearchStruct.CHAT_INDEX,
+	openSearchStruct.POST_TYPE:       openSearchStruct.POST_INDEX,
+	openSearchStruct.COMMENT_TYPE:    openSearchStruct.COMMENT_INDEX,
+	openSearchStruct.TASK_TYPE:       openSearchStruct.TASK_INDEX,
+	openSearchStruct.DOC_TYPE:        openSearchStruct.DOC_INDEX,
+	openSearchStruct.PROJECT_TYPE:    openSearchStruct.PROJECT_INDEX,
+	openSearchStruct.TRANSCRIPT_TYPE: openSearchStruct.TRANSCRIPT_INDEX,
 }
 
 // hitKey is a hit's type and the id of what it points at.
@@ -45,6 +46,8 @@ func hitKey(h *openSearchStruct.GlobalSearchOpenSearchResp) (string, string) {
 		return h.Type, h.Doc.Uuid
 	case h.Project != nil:
 		return h.Type, h.Project.Uuid
+	case h.Transcript != nil:
+		return h.Type, h.Transcript.Uuid
 	}
 	return h.Type, ""
 }

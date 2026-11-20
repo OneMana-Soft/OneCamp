@@ -142,22 +142,6 @@ func GetChannelByUUID(query *string, channelUUID uuid.UUID) (channelInfo *Channe
 	return &channelData, nil
 }
 
-// SetChannelPostPolicy updates the channel posting policy. Returns
-// sql.ErrNoRows-equivalent via affected-rows == 0 (handled by the caller).
-func SetChannelPostPolicy(channelUUID uuid.UUID, policy string) (affected int64, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
-		`UPDATE channels SET post_policy = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL`,
-		policy, channelUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/SetChannelPostPolicy failed: %+v", err)
-		return 0, err
-	}
-	affected, _ = res.RowsAffected()
-	return affected, nil
-}
-
 func UpdateChannelInfo(query string, channelName string, channelPrivate bool, currentTime time.Time, channelUUID uuid.UUID) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()

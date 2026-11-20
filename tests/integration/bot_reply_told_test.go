@@ -310,15 +310,19 @@ func TestABotsThreadReplyIsToldAsAPersonsIs(t *testing.T) {
 		t.Setenv("DEMO_MODE", "true")
 		t.Setenv("DEMO_USER_EMAIL", "bo@acme.test")
 		post := posts["demo"].String()
-		before := emailed("bo")
+		before, beforeZed := emailed("bo"), emailed("zed")
 		if _, err := botpost.PostCommentToPostAsBot(ctx, posts["demo"], "The numbers are in the sheet.", bot); err != nil {
 			t.Fatal(err)
 		}
 		waitFor(t, "the visitor's live Activity item", func() bool { return told("bo", mqttStruct.MESSAGE_ACTIVITY_COMMENT, post) > 0 })
-		waitFor(t, "zed's email, who replied before", func() bool { return emailed("zed") > 0 })
 		settle()
 		if n := emailed("bo") - before; n != 0 {
 			t.Errorf("the demo's shared visitor was emailed %d times for an AI reply; want 0 (one per reply would spend the free 100 a day)", n)
+		}
+		// zed, who replied before, has a real address: the demo emails no one
+		// (emailService.NotificationEmailEnabled).
+		if n := emailed("zed") - beforeZed; n != 0 {
+			t.Errorf("zed, a real address on the demo, was emailed %d times for an AI reply; want 0", n)
 		}
 		if n := pushed("bo", post); n != 1 {
 			t.Errorf("the visitor was pushed %d times; want 1", n)

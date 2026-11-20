@@ -149,9 +149,10 @@ func TestBoardSharingNamesPeopleByTheirUUIDs(t *testing.T) {
 		if code := share(owner, board, map[string]any{"add_editors": []string{ed.String()}}); code != http.StatusOK {
 			t.Fatalf("the owner making Ed an editor answered %d, want 200", code)
 		}
-		// The route's refusal today: the business's owner check, answered 400.
-		if code := share(ed, board, map[string]any{"add_viewers": []string{vi}}); code != http.StatusBadRequest {
-			t.Errorf("Ed, an editor, sharing the board answered %d, want 400", code)
+		// An editor shares only while the board's switch is on (miro-32), and
+		// a role taken away is the owner's or a co-owner's: refused 403.
+		if code := share(ed, board, map[string]any{"remove_editors": []string{ed.String()}, "add_viewers": []string{vi}}); code != http.StatusForbidden {
+			t.Errorf("Ed, an editor, changing the board's roles answered %d, want 403", code)
 		}
 		if got := countOf(t, dg, uid, "board_reading_users"); got != 0 {
 			t.Errorf("the board has %d viewers after an editor tried to share it, want none", got)
@@ -161,7 +162,7 @@ func TestBoardSharingNamesPeopleByTheirUUIDs(t *testing.T) {
 	t.Run("the change itself refuses an id that isn't a uuid", func(t *testing.T) {
 		board, uid := newBoard(t)
 		err := boardBusiness.UpdateBoardPermissions(ctx, boardAdapter.InputUpdateBoardPermissions{
-			BoardId: board, AddViewers: []string{ed.String(), "not-a-uuid"}}, people["owner"])
+			BoardId: board, AddViewers: []string{ed.String(), "not-a-uuid"}}, people["owner"], owner.String())
 		if err == nil {
 			t.Error("a viewer named by something that isn't a uuid was taken")
 		}

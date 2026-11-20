@@ -35,6 +35,16 @@ func init() {
 // told it's closed instead of pulling the task back. An ask about
 // the task itself isn't about its status, so only a delete closes one.
 func wentOn(ctx context.Context, taskID uuid.UUID, deleted bool) {
+	// The gate read the task's requests on this move's way in, with the rules
+	// that let it through, and found none open: there is none to close.
+	// The race this leaves (H4W, LEAD-16 18 Nov): a request someone else
+	// opens between that read and the move's end stays open, where the close
+	// that ran here on every move ended it too. It was a race before as well,
+	// only narrower (a request opened just after the close stayed open
+	// then); the gate itself decides every move as it did.
+	if !deleted && taskBusiness.NoOpenRequest(ctx, taskID) {
+		return
+	}
 	if err := closeOpenFor(ctx, taskID, model.MovedOn, deleted); err != nil {
 		helpers.LogErrorWithContext(ctx, "Approvals: closing the open request of %s, which went on without it: %v", taskID, err)
 	}
@@ -78,6 +88,7 @@ func approvedMove(ctx context.Context) bool {
 // Seams for tests.
 var (
 	rulesFor     = model.RulesFor
+	rulesAndOpen = model.RulesAndOpen
 	request      = model.Request
 	closeOpenFor = model.CloseOpenFor
 	// The mover's standing in the task's project, read as they read the task.
@@ -88,12 +99,15 @@ var (
 	afterRequest = tellApprovers
 )
 
-// ruleFor is the rule a move into next meets (pick), read for it alone.
-func ruleFor(ctx context.Context, projectID uuid.UUID, next taskStatusBusiness.Resolved) (*model.StatusRule, error) {
-	rules, err := rulesFor(ctx, projectID, ruleKeys(next))
+// ruleFor is the rule a move of task into next meets (pick), read for it
+// alone, with whether the task has an open request, which it notes for the
+// move's WentOn (taskBusiness.NoteOpenRequest): one round trip.
+func ruleFor(ctx context.Context, projectID, taskID uuid.UUID, next taskStatusBusiness.Resolved) (*model.StatusRule, error) {
+	rules, open, err := rulesAndOpen(ctx, projectID, taskID, ruleKeys(next))
 	if err != nil {
 		return nil, err
 	}
+	taskBusiness.NoteOpenRequest(ctx, taskID, open)
 	return pick(rules, next), nil
 }
 
@@ -240,7 +254,7 @@ func gate(ctx context.Context, task *dgraphStruct.DgraphTask, prev, next taskSta
 		helpers.LogErrorWithContext(ctx, "Approvals: a move to %s came without its task's project, its id or who made it, so it was held", next.Value())
 		return &taskBusiness.StatusRefusal{Why: cantCheck}
 	}
-	rule, err := ruleFor(ctx, projectID, next)
+	rule, err := ruleFor(ctx, projectID, taskID, next)
 	if err != nil {
 		return &taskBusiness.StatusRefusal{Why: cantCheck}
 	}

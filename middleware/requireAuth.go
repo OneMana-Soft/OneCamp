@@ -33,45 +33,31 @@ func VerifyAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		emptyUUID := uuid.UUID{}
-		userDBInfo, err := domain.GetActiveUserWithAdminFlagByUserUUID(ctx, userUUID)
-		if err == nil && (userDBInfo == nil || userDBInfo.Id == emptyUUID) {
+		ctx, userInfo, ok := memberSession(ctx, userUUID)
+		if !ok {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"middleware/VerifyAuth Error getting user from postgres err: %+v",
-				err)
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		// Members only: a token naming an external person or a bot
-		// (models.User.IsMember) is no session, however it was minted.
-		if !userDBInfo.IsMember() {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-
-		dgraphUserInfo, err := domain.GetActiveDgraphUserInfoByUUID(ctx, userUUID.String())
-
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"middleware/VerifyAuth Error getting user from dgraph err: %+v",
-				err)
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		dgraphUserInfo.IsAdmin = userDBInfo.IsAdmin
-
-		userInfo := models.UserInfo{
-			UserPostgresInfo: *userDBInfo,
-			UserDgraphInfo:   *dgraphUserInfo,
-		}
-		ctx = context.WithValue(ctx, helpers.UserInfoContextKey, userInfo)
 		ctx = context.WithValue(ctx, helpers.DeviceIdContextKey, deviceId)
 		r = r.WithContext(ctx)
 
 		helpers.ServeHidingEmails(next, w, r, userInfo.UserPostgresInfo.EmailID)
 	})
+}
+
+// memberSession is who the session's member is, and ctx carrying it
+// (helpers.UserInfoContextKey) and the task-read generation: both profiles
+// are read with the generation in one round trip (domain.MemberSession).
+// false, for a 401, when userUUID names no live member or a read failed.
+func memberSession(ctx context.Context, userUUID uuid.UUID) (context.Context, models.UserInfo, bool) {
+	ctx, user, dgraphUser, err := domain.MemberSession(ctx, userUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "middleware: reading the session's profiles err: %+v", err)
+	}
+	if err != nil || user == nil {
+		return ctx, models.UserInfo{}, false
+	}
+	dgraphUser.IsAdmin = user.IsAdmin
+	info := models.UserInfo{UserPostgresInfo: *user, UserDgraphInfo: *dgraphUser}
+	return context.WithValue(ctx, helpers.UserInfoContextKey, info), info, true
 }

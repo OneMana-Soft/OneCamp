@@ -9,19 +9,18 @@ import (
 	"net/http"
 	"time"
 
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	recordingBusiness "github.com/akashc777/OneCamp/business/Recording"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
-// WriteRecordingRefusal answers a recording that may not be played.
+// WriteRecordingRefusal answers a recording that may not be played, with code
+// and the words a missing one gets whatever the reason: whoever can't see a
+// recording is answered as if there were none (V-1126).
 func WriteRecordingRefusal(w http.ResponseWriter, code int) {
-	msg := "Recording not found"
-	if code == http.StatusForbidden {
-		msg = "Not authorised"
-	}
-	helpers.WriteJSON(w, code, helpers.Envolope{"msg": msg})
+	helpers.WriteJSON(w, code, helpers.Envolope{"msg": "Recording not found"})
 }
 
 // RecordingUnavailable is what people see when a recording can't be read.
@@ -31,12 +30,31 @@ const RecordingUnavailable = "The recording couldn't be opened just now."
 // read.
 const TranscriptUnavailable = "The transcript couldn't be opened just now."
 
-// WriteRecordingURL answers a recording's playback link, or why there is
+// recordingOpenTo is the one read rule a call's recordings follow while the
+// call goes on (a seam for tests).
+var recordingOpenTo = liveKitBusiness.TranscriptOpenTo
+
+// WriteRecordingURL answers identity, whom the recording's place already
+// admits (the route's own check, made first), the recording asked for by key
+// in room's conversation, by the one read rule its transcript follows
+// (liveKitBusiness.TranscriptOpenTo): while a call goes on in room, a
+// recording that call made is for the people connected to it, and anyone else
+// is answered as if there were no recording; one begun before it, or with no
+// call going on, as writeRecordingLink answers it.
+func WriteRecordingURL(w http.ResponseWriter, r *http.Request, rec *dgraphStruct.DgraphRecording, room, identity, key string) {
+	if !recordingOpenTo(r.Context(), room, identity, key, rec.StartedAt) {
+		WriteRecordingRefusal(w, http.StatusNotFound)
+		return
+	}
+	writeRecordingLink(w, r, rec)
+}
+
+// writeRecordingLink answers a recording's playback link, or why there is
 // none to play: still being saved, failed, empty (it captured nothing), or a
 // call's transcript with no recording. The link lives for the recording's length and
 // half an hour (userBusiness.RecordingURLTTL), and expires_at says when, so the
 // player fetches a new one before or after it runs out, keeping its place.
-func WriteRecordingURL(w http.ResponseWriter, r *http.Request, rec *dgraphStruct.DgraphRecording) {
+func writeRecordingLink(w http.ResponseWriter, r *http.Request, rec *dgraphStruct.DgraphRecording) {
 	switch {
 	case rec.TranscriptOnly:
 		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "transcript_only"})
@@ -52,7 +70,7 @@ func WriteRecordingURL(w http.ResponseWriter, r *http.Request, rec *dgraphStruct
 	ttl := userBusiness.RecordingURLTTL(rec.Duration)
 	url, err := userBusiness.GetRecordingURLByObjectName(r.Context(), rec.ObjectKey, ttl)
 	if err != nil {
-		helpers.LogErrorWithContext(r.Context(), "controllers/WriteRecordingURL Failed to get url err: %+v", err)
+		helpers.LogErrorWithContext(r.Context(), "controllers/writeRecordingLink Failed to get url err: %+v", err)
 		helpers.WriteRetryLater(w, RecordingUnavailable)
 		return
 	}

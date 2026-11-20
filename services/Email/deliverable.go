@@ -7,6 +7,7 @@ import (
 	"net/mail"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,26 @@ var ErrUndeliverable = &SendError{Message: "the recipient's email domain cannot 
 // Names that never receive mail (RFC 2606, RFC 6761, and mDNS's .local).
 var reservedTLDs = []string{".test", ".example", ".invalid", ".localhost", ".local"}
 var reservedDomains = map[string]bool{"example.com": true, "example.net": true, "example.org": true, "localhost": true}
+
+// OnReservedDomain reports whether addr is an address on a name reserved for
+// examples and tests, which no mail can reach. Something that isn't an
+// address is on none. Asks no DNS, so it holds offline and in tests: what
+// seeds invite by email (the public demo's guests) keeps to these names.
+func OnReservedDomain(addr string) bool {
+	domain := addressDomain(addr)
+	return domain != "" && reserved(domain)
+}
+
+// addressDomain is addr's domain, lower-cased and without a final dot, or ""
+// when addr isn't an address. Pure.
+func addressDomain(addr string) string {
+	parsed, err := mail.ParseAddress(addr)
+	if err != nil {
+		return ""
+	}
+	at := strings.LastIndex(parsed.Address, "@")
+	return strings.ToLower(strings.TrimSuffix(parsed.Address[at+1:], "."))
+}
 
 func reserved(domain string) bool {
 	if reservedDomains[domain] {
@@ -46,6 +67,10 @@ var (
 	lookupMX   = net.DefaultResolver.LookupMX
 	lookupHost = net.DefaultResolver.LookupHost
 )
+
+// reservedReachTestTransport is never set in a shipped build: only the
+// integration build's LetReservedNamesThroughForTest sets it, for one test.
+var reservedReachTestTransport atomic.Bool
 
 const domainCheckTTL = time.Hour
 
@@ -93,14 +118,12 @@ func domainReceivesMail(ctx context.Context, domain string) bool {
 // Deliverable reports whether mail to addr can arrive at all: its domain is
 // not reserved and exists in the DNS. Answers are remembered for an hour.
 func Deliverable(ctx context.Context, addr string) bool {
-	parsed, err := mail.ParseAddress(addr)
-	if err != nil {
+	domain := addressDomain(addr)
+	if domain == "" {
 		return false
 	}
-	at := strings.LastIndex(parsed.Address, "@")
-	domain := strings.ToLower(strings.TrimSuffix(parsed.Address[at+1:], "."))
-	if domain == "" || reserved(domain) {
-		return false
+	if reserved(domain) {
+		return reservedReachTestTransport.Load()
 	}
 	now := time.Now()
 	domainChecks.Lock()

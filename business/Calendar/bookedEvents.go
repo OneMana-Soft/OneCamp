@@ -28,7 +28,6 @@ import (
 	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
 	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
-	emailService "github.com/akashc777/OneCamp/services/Email"
 	"github.com/google/uuid"
 )
 
@@ -77,10 +76,10 @@ func guestZone(b *bookingModel.Booking, p *bookingModel.Page) string {
 func pageLive(p *bookingModel.Page) bool { return p.Active && p.DeletedAt == nil }
 
 // tellGuest emails a booking's guest about a change their host made, without
-// holding up the host: their calendar shows it already. Whether email is on is
-// decided now, at the change.
+// holding up the host: their calendar shows it already. Whether the guest is
+// mailed (outsidersMailed, as in mailGuest) is decided now, at the change.
 func tellGuest(ctx context.Context, m guestMail) {
-	if !emailService.NotificationEmailEnabled() {
+	if !outsidersMailed() {
 		return
 	}
 	helpers.GoSafeNamed("business/Calendar/tellGuest", func() {
@@ -91,7 +90,8 @@ func tellGuest(ctx context.Context, m guestMail) {
 }
 
 // bookingEventDeleted is DeleteEvent's last step: the event's people are free
-// again, and a booking it was cancels, by its host, telling the guest.
+// again, and a booking it was cancels, by its host, with its reminders,
+// telling the guest.
 func bookingEventDeleted(ctx context.Context, ev *dgraphStruct.DgraphEvent) {
 	if ev == nil {
 		return
@@ -115,6 +115,7 @@ func bookingEventDeleted(ctx context.Context, ev *dgraphStruct.DgraphEvent) {
 		return
 	}
 	pageCache.forgetOwner(p.UserId.String())
+	cancelGuestReminders(ctx, p.UserId, b.Id)
 	host := hostName(ev)
 	tellGuest(ctx, guestMail{
 		to: b.GuestEmail, name: b.GuestName,
@@ -148,12 +149,19 @@ func bookingEventUpdated(ctx context.Context, ev *dgraphStruct.DgraphEvent, star
 	if b == nil {
 		return
 	}
-	p, err := bookingModel.PageById(b.PageId)
-	if err != nil || p == nil {
-		helpers.LogErrorWithContext(ctx, "business/Calendar/bookingEventUpdated page %s err: %+v", b.PageId, err)
-		return
+	// A guest's move read its page already; any other change reads it.
+	p := guestMoveOf(ctx, b)
+	guestMoved := p != nil
+	if !guestMoved {
+		if p, err = bookingModel.PageById(b.PageId); err != nil || p == nil {
+			helpers.LogErrorWithContext(ctx, "business/Calendar/bookingEventUpdated page %s err: %+v", b.PageId, err)
+			return
+		}
 	}
 	pageCache.forgetOwner(p.UserId.String())
+	// Its guest's reminders follow it: the old start's are cancelled, and a
+	// time gone by plans none.
+	planGuestReminders(ctx, b, p, true, time.Now())
 	if !b.EndsAt.After(time.Now()) {
 		return // moved into the past: the record keeps it, nobody is told
 	}
@@ -165,14 +173,20 @@ func bookingEventUpdated(ctx context.Context, ev *dgraphStruct.DgraphEvent, star
 	if raw := helpers.OpenLinkSecret(b.CancelSealed, b.CancelHash); raw != "" {
 		link, cancelBy = cancelURL(raw), "the button above"
 	}
+	// The guest's own move by their link reads as theirs (gcal-7 H2): the
+	// same mail and invite, in their words.
+	title, footer := host+" moved your meeting", "If the new time doesn't suit you, cancel it with "+cancelBy+"."
+	if guestMoved {
+		title, footer = "You moved your meeting", "You moved it with your booking's link, which still moves or cancels it."
+	}
 	tellGuest(ctx, guestMail{
 		to: b.GuestEmail, name: b.GuestName,
 		subject:  fmt.Sprintf("Moved: %s with %s", p.Title, host),
-		title:    host + " moved your meeting",
+		title:    title,
 		subtitle: p.Title,
 		body:     "Now " + FormatWhen(b.StartsAt, b.EndsAt, zone) + ". It was " + FormatWhen(wasStart, wasEnd, zone) + ".",
 		ctaText:  "Cancel this booking", ctaURL: link,
-		footer: "If the new time doesn't suit you, cancel it with " + cancelBy + ". If it's in your calendar, the update attached moves it.",
+		footer: footer + " If it's in your calendar, the update attached moves it.",
 		invite: bookingInvite(inviteRequest, b, p.Title, host, false, time.Now()),
 	})
 }
@@ -232,7 +246,7 @@ func bookingsFor(ctx context.Context, reader *model.UserInfo, mine int) map[stri
 	if len(booked) == 0 {
 		return out
 	}
-	told := emailService.NotificationEmailEnabled()
+	told := outsidersMailed() // what tellGuest decides at a change
 	for _, b := range booked {
 		out[b.EventUUID.String()] = &dgraphStruct.EventBooking{GuestName: b.GuestName, PageTitle: b.PageTitle, GuestTold: told}
 	}

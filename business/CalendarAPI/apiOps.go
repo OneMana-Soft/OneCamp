@@ -12,7 +12,15 @@
 // same JSON) and the Availability Engine's suggestions (/event/suggestTimes).
 // Reads need calendar:read and follow the calendar's sharing levels and
 // visibility: someone who sees a calendar only as busy is answered Busy
-// blocks, and a private event is not found by anyone not on it. Writes need
+// blocks, and a private event is not found by anyone not on it. A project's
+// and a channel's calendars also show their tasks and milestones (gcal-14
+// head A's derived entries): a token is answered a task only when it also
+// holds tasks:read, and a milestone only with projects:read, the scopes that
+// read them on every other route, and then only those its member may read;
+// calendar:read alone answers neither (business/Calendar derivedKinds, the
+// one rule, so an MCP agent on the token is answered the same). A team's
+// calendar shows its members' time off under calendar:read, by the one
+// free/busy rule its member is held to in the app. Writes need
 // calendar:write and are made only where the member may (the calendar's
 // write rule, the event's own change rule); a delete goes to the trash, and
 // restore_event brings it back. An event's read says where a member joins its
@@ -271,7 +279,16 @@ func apiError(ctx context.Context, err error) error {
 	var refused *calendarBusiness.EventRefusal
 	var readOnly *calendarBusiness.CalendarReadOnlyError
 	var refusal *availabilityBusiness.Refusal
+	var taken *calendarBusiness.RoomTakenError
 	switch {
+	case errors.As(err, &taken):
+		// The other event is named only to a member who may see it.
+		_ = calendarBusiness.NameRoomClash(ctx, member(ctx), taken)
+		return v1api.Errorf(http.StatusConflict, "room_taken", "pick another room or time", "%s", taken.Error())
+	case errors.Is(err, calendarBusiness.ErrRoomsTooMany):
+		return v1api.Errorf(http.StatusConflict, "rooms_too_many", "book a shorter stretch, or fewer repeats", "%s", err.Error())
+	case errors.Is(err, calendarBusiness.ErrNoRoom):
+		return v1api.Errorf(http.StatusNotFound, "not_found", "", "that room isn't available")
 	case errors.As(err, &stale):
 		return v1api.Errorf(http.StatusConflict, "conflict", "read it again and send its new sequence", "%s", stale.Error())
 	case errors.As(err, &readOnly):

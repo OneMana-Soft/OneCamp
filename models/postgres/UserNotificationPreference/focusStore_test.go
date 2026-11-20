@@ -36,7 +36,7 @@ func flipCalendarMoved(t *testing.T) {
 func TestAFocusTimeQueryReadsOneStore(t *testing.T) {
 	flipCalendarMoved(t)
 	for i := 0; i < 4; i++ {
-		if q := allColumns(); !namesOneStore(q) {
+		if q := AllColumns(); !namesOneStore(q) {
 			t.Fatalf("read %d mixes the stores:\n%s", i, q)
 		}
 	}

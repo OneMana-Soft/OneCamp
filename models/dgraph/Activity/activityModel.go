@@ -367,6 +367,14 @@ type UnifiedActivityItem struct {
 	// unreadInInbox), set as the feed is read: the Inbox draws its dot from
 	// it, so the dots are the items the badge counted.
 	Unread bool `json:"unread"`
+	// Key is the server's one name for the item (business/Activity
+	// itemKey), which the app posts to take it out of Priority or put it
+	// back (POST /activity/dismiss); none on an item that is never Priority.
+	Key string `json:"key,omitempty"`
+	// Dismissed is that the person took it out of their Priority
+	// themselves: it scored high, is under a week old, and reads normal;
+	// putting it back makes it Priority again.
+	Dismissed bool `json:"dismissed"`
 }
 
 // NoticeItem is an inbox item from business/Follow's notices: what happened to

@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"fmt"
+	queueDomain "github.com/akashc777/OneCamp/domain/NotificationEmailQueue"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -36,35 +37,40 @@ type LogRow struct {
 // Insert records a terminal email outcome. Best-effort: log failures should
 // not fail the parent send.
 func Insert(row LogRow) error {
+	return InsertMany([]LogRow{row})
+}
+
+// InsertMany writes rows to the log in one INSERT (queueDomain.Log); nothing
+// for no rows.
+func InsertMany(rows []LogRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	var userArg any
-	if row.UserID != nil {
-		userArg = *row.UserID
+	args := make([]any, 0, len(rows)*queueDomain.LogParams)
+	for _, row := range rows {
+		var userArg, providerArg, errArg, queueArg any
+		if row.UserID != nil {
+			userArg = *row.UserID
+		}
+		if row.ProviderMessageID != nil {
+			providerArg = *row.ProviderMessageID
+		}
+		if row.ErrorMessage != nil {
+			errArg = *row.ErrorMessage
+		}
+		if row.QueueID != nil {
+			queueArg = *row.QueueID
+		}
+		args = append(args, userArg, row.ToEmail, row.EventType, row.Subject, row.Status,
+			providerArg, errArg, queueArg, row.Attempts)
 	}
-	var providerArg any
-	if row.ProviderMessageID != nil {
-		providerArg = *row.ProviderMessageID
-	}
-	var errArg any
-	if row.ErrorMessage != nil {
-		errArg = *row.ErrorMessage
-	}
-	var queueArg any
-	if row.QueueID != nil {
-		queueArg = *row.QueueID
-	}
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `
-		INSERT INTO notification_email_log
-			(user_id, to_email, event_type, subject, status, provider_message_id, error_message, queue_id, attempts)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-	`, userArg, row.ToEmail, row.EventType, row.Subject, row.Status,
-		providerArg, errArg, queueArg, row.Attempts)
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, queueDomain.Log(len(rows)), args...)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"models/NotificationEmailLog/Insert failed err: %+v", err)
+			"models/NotificationEmailLog/InsertMany failed err: %+v", err)
 	}
 	return err
 }

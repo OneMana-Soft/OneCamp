@@ -16,6 +16,7 @@ import (
 	"errors"
 	"time"
 
+	callStateDomain "github.com/akashc777/OneCamp/domain/CallState"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
@@ -187,11 +188,9 @@ func db() (*sql.DB, error) {
 	return postgresInit.DBConn.SqlDB, nil
 }
 
-const sessionColumns = `id, room, COALESCE(room_sid, ''), kind, resource_kind, resource_id, post_uuid,
-	COALESCE(topic, ''), started_by, started_at, ended_at, COALESCE(ended_reason, ''), locked_at,
-	COALESCE(locked_by, ''), COALESCE(spotlight, ''), mute_on_entry, held, qa_open, qa_shown, qa_anonymous,
-	board_uuid, COALESCE(board_by, ''), board_draw, board_guests_draw, COALESCE(board_slide, ''),
-	parent_session_id, breakouts_open_at, breakouts_choose, breakouts_ends_at, breakouts_closing_at`
+// sessionColumns is a call's record as domain/CallState lists it for its
+// statements; scanSession reads it in that order.
+const sessionColumns = callStateDomain.SessionColumns
 
 type scanner interface{ Scan(dest ...any) error }
 

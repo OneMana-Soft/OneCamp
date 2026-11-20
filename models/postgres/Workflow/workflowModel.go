@@ -46,6 +46,9 @@ const (
 	// TriggerApprovalDecided fires when a task's approval request is answered
 	// for good (trigger_config outcome: approved, changes, rejected or any).
 	TriggerApprovalDecided = "approval_decided"
+	// TriggerTaskArrived fires when work comes to wait in a project's triage
+	// (business/Triage task.arrived), with the door it came in by (source).
+	TriggerTaskArrived = "task_arrived"
 )
 
 // ValidTriggerType reports whether t is a supported trigger kind (mirrors the
@@ -55,7 +58,7 @@ func ValidTriggerType(t string) bool {
 	case TriggerMessagePosted, TriggerReactionAdded, TriggerUserJoinedChannel,
 		TriggerTaskCreated, TriggerTaskStatusChanged, TriggerMeetingEnded,
 		TriggerTaskAssigned, TriggerTaskFieldChanged,
-		TriggerSchedule, TriggerTaskDueSoon, TriggerTaskOverdue, TriggerFormSubmitted, TriggerApprovalDecided:
+		TriggerSchedule, TriggerTaskDueSoon, TriggerTaskOverdue, TriggerFormSubmitted, TriggerApprovalDecided, TriggerTaskArrived:
 		return true
 	default:
 		return false

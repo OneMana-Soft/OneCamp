@@ -8,12 +8,14 @@ import (
 	"testing"
 	"time"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	outboxBusiness "github.com/akashc777/OneCamp/business/Outbox"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	workGraph "github.com/akashc777/OneCamp/domain/WorkGraph"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
 	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
+	milestoneModel "github.com/akashc777/OneCamp/models/postgres/Milestone"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -100,6 +102,8 @@ type harness struct {
 	// to write the entries of (searchEntries.go).
 	graphTold  []string
 	searchTold []string
+	// syncTold, the events whose sync entry was asked for (syncOutbox.go).
+	syncTold []string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -110,6 +114,19 @@ func newHarness(t *testing.T) *harness {
 	wasLinks := guestLinksOn
 	guestLinksOn = func() bool { return false }
 	t.Cleanup(func() { guestLinksOn = wasLinks })
+	// A container's calendar fills itself from nothing (derived.go): the tests
+	// of its sources say what each reads.
+	wasTasks, wasLinked, wasMarks := projectTasksIn, channelTasksIn, milestonesIn
+	none := func(context.Context, []string, string) (map[string][]*dgraphStruct.DgraphTask, error) {
+		return nil, nil
+	}
+	projectTasksIn, channelTasksIn = none, none
+	milestonesIn = func(context.Context, []uuid.UUID) (map[uuid.UUID][]milestoneModel.Milestone, error) { return nil, nil }
+	t.Cleanup(func() { projectTasksIn, channelTasksIn, milestonesIn = wasTasks, wasLinked, wasMarks })
+	// A feed names its person by uuid; no graph here to read their uid from.
+	wasUID := uidOf
+	uidOf = func(_ context.Context, who accessBusiness.Subject) (string, error) { return who.UserUID, nil }
+	t.Cleanup(func() { uidOf = wasUID })
 	h := &harness{t: t, store: newMemStore(), effects: &recordedEffects{}, tells: &recordedTells{},
 		clock:  time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC),
 		people: map[string]*dgraphStruct.DgraphUser{}, active: map[string]bool{}}
@@ -161,6 +178,10 @@ func newHarness(t *testing.T) *harness {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		for _, e := range es {
+			if e.Topic == syncTopic {
+				h.syncTold = append(h.syncTold, e.Entities["event"])
+				continue
+			}
 			h.searchTold = append(h.searchTold, strings.Split(e.Entities["ids"], ",")...)
 		}
 		return nil

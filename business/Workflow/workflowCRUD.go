@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
@@ -66,6 +67,13 @@ func (v *validatedWorkflow) fields(in *WorkflowInput) workflowModel.Fields {
 		BotName: v.botName, ChannelId: v.channelID, KeywordsJSON: v.keywordsJSON, MatchType: in.MatchType,
 		ActionsJSON: v.actionsJSON, ProjectId: v.projectID, ConditionsJSON: v.conditionsJSON, ElseActionsJSON: v.elseActionsJSON,
 	}
+}
+
+// workflowRefused is a check that refused, in the person's words: theirs to
+// change, not ours to retry, so an install answers it 400 as the builder
+// does, not 500 (CR-444 D1).
+func workflowRefused(msg string) error {
+	return &helpers.Refusal{Status: http.StatusBadRequest, Msg: msg}
 }
 
 // validate normalizes and checks an input, returning the persist-ready form.
@@ -162,6 +170,8 @@ func validate(in *WorkflowInput) (*validatedWorkflow, error) {
 		return nil, fmt.Errorf("a form's rules are a project's rules")
 	} else if out.triggerType == workflowModel.TriggerApprovalDecided {
 		return nil, fmt.Errorf("an approval's rules are a project's rules")
+	} else if out.triggerType == workflowModel.TriggerTaskArrived {
+		return nil, fmt.Errorf("rules on arriving work are a project's rules")
 	}
 
 	mode := modeOf(out.triggerType, in.TriggerConfig)
@@ -175,6 +185,11 @@ func validate(in *WorkflowInput) (*validatedWorkflow, error) {
 		return nil, fmt.Errorf("a schedule for each task has no otherwise: its conditions choose the tasks")
 	}
 	if err := in.Conditions.validate(); err != nil {
+		return nil, err
+	}
+	// Every door: deciding, and testing the door, are for arriving work only
+	// (after the conditions are trimmed, so a padded field is the field).
+	if err := arrivalOnly(out.triggerType, in.Conditions, in.Actions, in.ElseActions); err != nil {
 		return nil, err
 	}
 	if len(in.Actions) == 0 {
@@ -357,7 +372,8 @@ func CreateWorkflow(ctx context.Context, in WorkflowInput, createdBy uuid.UUID) 
 	}
 	v, err := validate(&in)
 	if err != nil {
-		return nil, err
+		// validate reads nothing: what it refuses is the input's.
+		return nil, workflowRefused(err.Error())
 	}
 	if err := access.checkScope(ctx, createdBy.String(), v.channelID, v.triggerType, in.TriggerConfig); err != nil {
 		return nil, err

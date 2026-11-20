@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 )
 
@@ -26,6 +27,13 @@ func NewLinkSecret() (raw string, hash []byte, err error) {
 func LinkSecretHash(raw string) []byte {
 	sum := sha256.Sum256([]byte(raw))
 	return sum[:]
+}
+
+// LinkSecretMatches is whether raw is the secret a link kept as hash was made
+// with, compared in constant time, so how long the answer takes says nothing
+// of how much of it matched. Pure.
+func LinkSecretMatches(raw string, hash []byte) bool {
+	return len(hash) == sha256.Size && subtle.ConstantTimeCompare(LinkSecretHash(raw), hash) == 1
 }
 
 // NewSealedLinkSecret is a fresh link secret for a link its holder may be

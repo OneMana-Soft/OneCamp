@@ -62,7 +62,7 @@ func CallArtefacts(ctx context.Context, calls []CallWindow) (map[string][]CallAr
 	if err != nil {
 		return nil, err
 	}
-	return parseCallArtefacts(raw, calls)
+	return parseCallArtefacts(ctx, raw, calls)
 }
 
 // callArtefactsQuery is CallArtefacts' one query and its variables: for each
@@ -93,8 +93,11 @@ func callArtefactsQuery(calls []CallWindow) (string, map[string]string) {
 	return "query CallArtefacts(" + strings.Join(params, ", ") + ") {" + b.String() + "\n\t}", vars
 }
 
-// parseCallArtefacts reads CallArtefacts' answer, by each call's key. Pure.
-func parseCallArtefacts(raw []byte, calls []CallWindow) (map[string][]CallArtefact, error) {
+// parseCallArtefacts reads CallArtefacts' answer, by each call's key, an
+// action item's task only while the task is live (liveNotedTasks, the event
+// read's own; CallArtefacts' query asks for no action items, so it asks the
+// graph nothing more).
+func parseCallArtefacts(ctx context.Context, raw []byte, calls []CallWindow) (map[string][]CallArtefact, error) {
 	var blocks map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return nil, err
@@ -103,8 +106,8 @@ func parseCallArtefacts(raw []byte, calls []CallWindow) (map[string][]CallArtefa
 		Ch []rawArtefact `json:"ch_recording"`
 		DM []rawArtefact `json:"dm_recording"`
 	}
-	out := map[string][]CallArtefact{}
-	for i, c := range calls {
+	kept := make([][]rawArtefact, len(calls))
+	for i := range calls {
 		var session []rawArtefact
 		var rooms []held
 		if s := blocks[fmt.Sprintf("s%d", i)]; len(s) > 0 {
@@ -133,7 +136,17 @@ func parseCallArtefacts(raw []byte, calls []CallWindow) (map[string][]CallArtefa
 				continue
 			}
 			seen[a.Key] = true
-			out[c.Key] = append(out[c.Key], a.artefact())
+			kept[i] = append(kept[i], a)
+		}
+	}
+	live, err := liveNotedTasks(ctx, slices.Concat(kept...))
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]CallArtefact{}
+	for i, c := range calls {
+		for _, a := range kept[i] {
+			out[c.Key] = append(out[c.Key], a.artefact(live))
 		}
 	}
 	return out, nil

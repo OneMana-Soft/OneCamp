@@ -147,3 +147,42 @@ func runSinkOf(t *testing.T, name string, ev outboxBusiness.Event) error {
 	}()
 	return s.Run(context.Background(), ev)
 }
+
+// A stranger's submission carries the door it came through to the sink; an
+// event written before doors were named ("1") is a form's.
+func TestAnEventCarriesTheDoorAStrangersWordsCameThrough(t *testing.T) {
+	cs, seqs := []Change{change("t1", KindUpdated)}, []int64{7}
+	for _, c := range []struct {
+		ctx       context.Context
+		value     string
+		entity    string
+		wantDoor  string
+		wantEvent bool
+	}{
+		{helpers.WithSubmissionDoor(context.Background(), "mail"), "mail", "", "mail", true},
+		{helpers.WithPublicSubmission(context.Background()), "form", "", "form", true},
+		{context.Background(), "", "1", "form", false},
+	} {
+		freshSinks(t)
+		RegisterSink(Sink{Name: "hooks", Kinds: []string{KindUpdated}, Run: nothing})
+		got := eventsFor(c.ctx, cs, seqs)
+		if len(got) != 1 || got[0].Entities["public_submission"] != c.value {
+			t.Fatalf("event %+v, want public_submission %q", got, c.value)
+		}
+		entities := got[0].Entities
+		if !c.wantEvent {
+			entities["public_submission"] = c.entity
+		}
+		door := ""
+		freshSinks(t)
+		RegisterSink(Sink{Name: "hooks", Kinds: []string{KindUpdated}, Run: func(ctx context.Context, _ string, _ Entry) error {
+			door = helpers.SubmissionDoor(ctx)
+			return nil
+		}})
+		swapIn(t, &fakeLog{next: 7})
+		Record(context.Background(), change("t1", KindUpdated))
+		if err := runSinkOf(t, "hooks", outboxBusiness.Event{EventID: "e7", Entities: entities}); err != nil || door != c.wantDoor {
+			t.Errorf("the sink ran with door %q (err %v), want %q", door, err, c.wantDoor)
+		}
+	}
+}

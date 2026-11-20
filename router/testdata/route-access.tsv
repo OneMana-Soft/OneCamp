@@ -4,6 +4,7 @@ GET	/.well-known/oauth-authorization-server	public	none	public	public	-	OAuth se
 GET	/.well-known/oauth-protected-resource	public	none	public	public	-	OAuth discovery for /v1/mcp (RFC 9728) — OAuth 2.1 for the MCP endpoint (business/MCPServer/oauth). Called by an MCP client's own servers before anyone is signed in; discovery and registration hold nothing secret, authorize only parks a request for a signed-in person to approve, and token/revoke are authenticated by the code, PKCE verifier or refresh token they are sent.
 GET	/.well-known/oauth-protected-resource/v1/mcp	public	none	public	public	-	OAuth discovery for /v1/mcp (RFC 9728)
 GET	/activity/comments	session	none	member	TODO(activity)	-	
+POST	/activity/dismiss	session	none	member	self	TestNobodyChangesAnothersPriority	takes items out of the caller's own Priority or puts them back (inbox_marks rows of their own, user from the session, never the body); keys are opaque and only match inside their own feed, so the answer is 204 whatever they name
 GET	/activity/mentions	session	none	member	TODO(activity)	-	
 GET	/activity/reactions	session	none	member	TODO(activity)	-	
 POST	/activity/seen	session	none	member	self	TestInboxBadgeIsTheInboxsUnreadItems	moves the caller's own last look and tells their own topic alone (read.moved inbox); answers their own badge
@@ -104,6 +105,13 @@ GET	/admin/audit-log/verify	admin	none	refused	gate	gate
 POST	/admin/auth/2fa/reset	admin	none	refused	gate	gate	
 GET	/admin/auth/oauth-config	admin	none	refused	gate	gate	
 POST	/admin/auth/oauth-config	admin	none	refused	gate	gate	
+GET	/admin/calendar/feeds	admin	none	refused	gate	gate	every live calendar link (basecamp-05): whose, of what, made when; never its address, token or hash; a calendar's name only when the admin may see it
+DELETE	/admin/calendar/feeds/{feedId}	admin	none	refused	gate	gate	stops any live calendar link by its id: audited (calendar.feed.stopped by=admin, naming its person), and its person is shown who stopped it
+POST	/admin/calendar/rooms	admin	none	refused	gate	gate	add a room (audited)
+PATCH	/admin/calendar/rooms/{roomId}	admin	none	refused	gate	gate	change a room (audited)
+POST	/admin/calendar/rooms/{roomId}/retire	admin	none	refused	gate	gate	retire a room: it keeps its bookings (audited)
+GET	/admin/calendar/sync	admin	none	refused	gate	gate	every Google and Outlook sync link (gcal-8 H1, TestCalendarSyncLedgerAdmin): whose, which address, its state, when last in step, stale since, its error as a class, refusals and dead sends; never a token, an event or a provider's own words
+POST	/admin/calendar/sync/break	admin	none	refused	gate	gate	breaks a person's sync link (TestCalendarSyncLedgerAdmin): its tokens cleared, audited (calendar.sync.link.broken by=admin, naming its person), and its person is told an admin disconnected it; never connects or acts as them
 GET	/admin/capabilities	admin	none	refused	gate	gate	
 POST	/admin/capabilities	admin	none	refused	gate	gate	
 GET	/admin/config/email	admin	none	refused	gate	gate	
@@ -423,8 +431,9 @@ POST	/board/aiGenerateUI	session	none	member	TODO(board)	-
 POST	/board/aiPlan	session	none	member	TODO(board)	-	
 POST	/board/aiRefineDiagram	session	none	member	TODO(board)	-	
 POST	/board/aiRefineUI	session	none	member	TODO(board)	-	
-POST	/board/commentDelete	session	none	member	TODO(board)	-	
-POST	/board/commentMention	session	none	member	TODO(board)	-	
+POST	/board/comment	session	none	member	object:board	TestABoardsCommentersCommentOnTheServer	A comment written by the server (miro-32 Can comment): the board's owners, co-owners, editors and commenters add a pin, reply and delete their own messages (business/Board CanComment; 403 with words for a viewer, and for deleting another's message; 404 for a board the caller cannot read); the author is always the caller
+POST	/board/commentDelete	session	none	member	object:board	TestABoardsCommentersCommentOnTheServer	The web's mirror of a comment deleted on the live canvas: the board's edit right only (CanEdit; 403 with words), as only editors write the canvas; a commenter's deletion is mirrored by POST /board/comment
+POST	/board/commentMention	session	none	member	object:board	TestABoardsCommentersCommentOnTheServer	The web's mirror of a comment written on the live canvas: the board's edit right only (CanEdit; 403 with words), as only editors write the canvas; a commenter's comment is mirrored by POST /board/comment
 POST	/board/createBoard	session	none	member	TODO(board)	-	
 POST	/board/deleteBoard	session	none	member	TODO(board)	-	
 GET	/board/getBoardAttachment/{board_uuid}/{obj_uuid}	session	none	member	TODO(board)	-	
@@ -455,11 +464,12 @@ POST	/boardColab/updateBoard	internal	none	n/a	gate	gate
 GET	/calendar/calendars	session	none	member	self	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own calendars, those shared with them and their projects'
 GET	/calendar/calendars/events	session	none	member	object:calendar	TestAPersonsCalendarIsBusyUntilTheyShareIt	per calendar: details only when shared, else busy (or nothing with the workspace's free/busy off)
 PATCH	/calendar/calendars/{calendarId}	session	none	member	object:calendar	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its manager (manageable), or the person of a subscribed calendar
-DELETE	/calendar/calendars/{calendarId}/feed	session	none	member	self	gate	stops only the caller's own feed of it
-GET	/calendar/calendars/{calendarId}/feed	session	none	member	object:calendar	TestAProjectsCalendarHasAFeedForEachMember	the caller's own feed of a calendar they may see (feedCalendar, as MakeFeed)
-PUT	/calendar/calendars/{calendarId}/feed	session	none	member	object:calendar	TestAProjectsCalendarHasAFeedForEachMember	a calendar they may see, at most at the level they see it
+DELETE	/calendar/calendars/{calendarId}/feed	session	none	member	self	gate	stops only the caller's own feed of it ("workspace": their link to everything)
+GET	/calendar/calendars/{calendarId}/feed	session	none	member	object:calendar	TestAProjectsCalendarHasAFeedForEachMember	the caller's own feed of a calendar they may see (feedCalendar, as MakeFeed); calendarId "workspace" is the caller's own link to everything they may see (members now only)
+PUT	/calendar/calendars/{calendarId}/feed	session	none	member	object:calendar	TestAProjectsCalendarHasAFeedForEachMember	a calendar they may see, at most at the level they see it; calendarId "workspace": everything they may see, each calendar masked as its own link, re-checked at every read (members now only)
 GET	/calendar/calendars/{calendarId}/shares	session	none	member	object:calendar	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its manager only (manageable)
 PUT	/calendar/calendars/{calendarId}/shares/{userId}	session	none	member	object:calendar	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its manager only, with a member
+POST	/calendar/channels/{channelId}/calendar	session	none	member	object:channel	TestChannelAndTeamCalendarsAreAsTheirContainerIs	a channel the caller may read (a public channel's reader sees its calendar, a private channel's non-member gets 404)
 GET	/calendar/events	session	none	member	self	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the events the caller is on
 POST	/calendar/events	session	none	member	object:calendar	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own event; a calendar_id must be one they may edit (writableCalendar)
 GET	/calendar/events/export	session	none	member	self	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own events
@@ -472,10 +482,12 @@ DELETE	/calendar/events/{eventId}/call	session	none	member	object:event	TestAnEv
 POST	/calendar/events/{eventId}/call	session	none	member	object:event	TestAnEventsOwnCallIsItsOrganisersToGiveAndItsGuestsToJoin	whoever may change it
 GET	/calendar/events/{eventId}/call/artefacts	session	none	member	object:event	TestAnEventsCallKeepsItsTranscriptOnTheEvent	whoever may read it
 DELETE	/calendar/events/{eventId}/call/artefacts/{key}	session	none	member	object:event	TestOnlyWhoMayChangeAnEventDeletesItsCallsRecordings	whoever may change it (soft: Undo restores it); a recording filed under another event is not found
+POST	/calendar/events/{eventId}/call/artefacts/{key}/action-items/{index}/task	session	none	member	object:event	TestAnEventsCallRecapOnTheEventAndItsTasks	whoever may change it, into a project they may add tasks to; an item of another event's call is not found
 GET	/calendar/events/{eventId}/call/artefacts/{key}/recording	session	none	member	object:event	TestOnlyWhoMayReadAnEventPlaysItsCallsRecordings	whoever may read it; a recording filed under another event is not found
 POST	/calendar/events/{eventId}/call/artefacts/{key}/restore	session	none	member	object:event	TestOnlyWhoMayChangeAnEventDeletesItsCallsRecordings	whoever may change it, as its delete
 GET	/calendar/events/{eventId}/call/artefacts/{key}/transcript	session	none	member	object:event	TestOnlyWhoMayReadAnEventReadsItsCallsTranscript	whoever may read it; a transcript filed under another event is not found
 POST	/calendar/events/{eventId}/call/lobby	session	none	member	object:event	TestOnlyWhoMayChangeAnEventMakesItsInviteesKnock	whoever may change it
+POST	/calendar/events/{eventId}/call/recap-to-guests	session	none	member	object:event	TestOnlyTheOrganiserSendsTheRecapToGuests	its organiser alone
 POST	/calendar/events/{eventId}/files	session	none	member	object:event	TestAnEventsFilesOverHTTP	whoever may change it (mayChange: its organiser, or a guest it lets change it), and only a doc or board they may open (entityLinkBusiness.CanReadRef); at most 25
 DELETE	/calendar/events/{eventId}/files/{kind}/{uuid}	session	none	member	object:event	TestAnEventsFilesOverHTTP	whoever may change it; soft: adding it again brings its row back
 POST	/calendar/events/{eventId}/guest-link	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	its organiser
@@ -487,22 +499,31 @@ POST	/calendar/events/{eventId}/restore	session	none	member	object:event	TestSom
 GET	/calendar/events/{eventId}/room	session	none	member	object:event	TestEveryEventHasACallRoomOverHTTP	whoever may read its details (the calendar's event decision); nothing made, no token
 POST	/calendar/events/{eventId}/room/join	session	none	member	object:event	TestEveryEventHasACallRoomOverHTTP	whoever may read its details (the calendar's event decision); busy-only and not-on-it 404
 POST	/calendar/events/{eventId}/snooze	session	none	member	object:event	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own reminder on an event they are on
+GET	/calendar/freebusy	session	none	member	self	TestOnlyAPersonSetsTheirOwnFreeBusyChoice	the caller's own choice to keep when they're busy to themselves, and whether the workspace shows anyone's
+PUT	/calendar/freebusy	session	none	member	self	TestOnlyAPersonSetsTheirOwnFreeBusyChoice	sets the caller's own choice alone (the Policy Registry's person scope, their own id); it narrows the workspace's, never widens it
 GET	/calendar/insights	session	none	member	self	TestYourWeekIsOnlyTheAskersOwn	the caller's own week: takes no person, reads only events they are on
 GET	/calendar/people/{userId}/calendar	session	none	member	member	gate	any member may name a member's calendar; its events read busy-only until shared (TestAPersonsCalendarIsBusyUntilTheyShareIt)
 POST	/calendar/projects/{projectId}/calendar	session	none	member	object:project	TestAProjectsCalendarIsAsTheProjectIs	a project the caller may read
 GET	/calendar/repeats	session	none	member	self	TestCalendarRepeatsAreTheAskersOwn	the caller's own: check-ins of the channels in their session, their own open tasks that repeat on a schedule
+GET	/calendar/rooms	session	none	member	member	TestRoomsAreKeptByAdminsAndBookedByMembers	the live rooms, to a workspace member (guests and bots 403)
+GET	/calendar/rooms/free	session	none	member	member	TestRoomsAreKeptByAdminsAndBookedByMembers	rooms free for a slot, to a workspace member
+GET	/calendar/rooms/{roomId}/bookings	session	none	member	member	TestRoomsAreKeptByAdminsAndBookedByMembers	a room's bookings, busy only unless the caller may see the event
 GET	/calendar/subscriptions	session	none	member	self	TestASubscribedCalendarIsReadOnlyAndItsPersonsAlone	the caller's own subscriptions
 POST	/calendar/subscriptions	session	none	member	self	TestASubscribedCalendarIsReadOnlyAndItsPersonsAlone	a subscription of the caller's own, read by the server's outbound guard
 DELETE	/calendar/subscriptions/{calendarId}	session	none	member	self	TestUnsubscribingRemovesTheCalendarAndEverythingOnIt	the caller's own subscription
 POST	/calendar/subscriptions/{calendarId}/refresh	session	none	member	self	TestSomeoneElsesEventOrCalendarIsRefusedEveryCall	the caller's own subscription
 GET	/calendar/sync/{provider}	session	none	member	self	gate	the caller's own Google or Outlook link
 POST	/calendar/sync/{provider}/move	session	none	member	self	gate	the caller's own Google or Outlook events
+POST	/calendar/teams/{teamId}/calendar	session	none	member	object:team	TestChannelAndTeamCalendarsAreAsTheirContainerIs	a team the caller is in or runs (CanReadTeam); anyone else, a workspace admin too, gets 404
 GET	/calls/current	session	none	member	TODO(calls)	-	
 POST	/calls/door	session	none	member	TODO(calls)	-	
 POST	/calls/invite	session	none	member	TODO(calls)	-	
+GET	/calls/linkable	session	none	member	object:call	TestLinkableCallsAreTheReadersOwnNewestFirst	the calls of the conversations the caller is in, newest first, each kept by the call read rule (MayReadAll; an invitee's and an instant meeting's left out); never through a token or by a bot
 POST	/calls/meetings/{meeting_id}/lobby	session	none	member	TODO(calls)	-	
 POST	/calls/meetings/{meeting_id}/recording	session	none	member	object:call	TestOnlyWhoRunsAMeetingRecordsIt	whoever runs the meeting by rule (its owner; an event's organiser), as its lobby is changed; never through a token
 GET	/calls/quality/days	session	none	member	admin	TestTheInstallsCallDaysAreAnAdminsAlone	an admin acting themselves, never through a token
+GET	/calls/recordings/{key}/transcript	session	none	member	object:call	TestACallsTranscriptIsExportedAndCorrectedByTheRule	whoever can read the call's transcript (in its channel or chat), on every plan; anyone else, and a deleted recording, gets 404
+PATCH	/calls/recordings/{key}/transcript/lines/{line_uid}	session	none	member	object:call	TestACallsTranscriptIsExportedAndCorrectedByTheRule	the line's speaker, and whoever may delete the recording (its delete rule); other readers 403, non-readers 404; audited
 DELETE	/calls/room	session	none	member	TODO(calls)	-	
 GET	/calls/room	session	none	member	TODO(calls)	-	
 PATCH	/calls/room	session	none	member	TODO(calls)	-	
@@ -513,6 +534,7 @@ GET	/calls/{session_id}/activities	session	none	member	object:call	TestCallPolls
 POST	/calls/{session_id}/activities	session	none	member	object:call	TestCallPollsAndQuestionsInACall	someone here in the live call, never through a token; polls and Q&A are run only by whoever runs the call (TestOnlyWhoRunsTheCallRunsItsActivities)
 POST	/calls/{session_id}/breakout-token	session	none	member	object:call	TestCallBreakoutRoomTokensAreForTheRoomYouMayBeIn	someone in the call or one of its open breakout rooms now, never through a token; answers a LiveKit token for an open room of that call only: their own room, any while the call lets people choose, any for whoever runs the call (MayTakeRoom)
 POST	/calls/{session_id}/companion-token	session	none	member	object:call	TestCallACompanionGoesWithItsPerson	a signed-in member who may be in the live call (its conversation's member, its meeting's host or invitee), not put out of it and not new to it while it is locked, never through a token, while someone is in its own room (meet-04); answers a LiveKit token for another device of theirs in the call's own room, on an identity the server draws, that may publish only a screen under the call's holds (never a microphone or a camera, never room admin); the companion goes when its person may not stay, is put out, or goes into a breakout room
+POST	/calls/{session_id}/consent	session	none	member	object:call	TestCallConsentRecordsWhoAgreed	someone in the live call writes their own OK or Leave on what its room has on, never through a token; a stranger is not in it
 POST	/calls/{session_id}/decline	session	none	member	object:call	TestADeclineStopsTheRingAndTellsTheStarter	a member of the call's DM or group who is not in the call declines its ring for themselves, never through a token; a stranger, a channel's call or a closed one answers 404, someone in the call 409 (CallState Decline, memberCall); kept for good
 GET	/calls/{session_id}/quality	session	none	member	object:call	TestWhoReadsWhyACallStuttered	whoever runs the call, or an admin; never through a token
 POST	/calls/{session_id}/quality	session	none	member	object:call	TestOnlySomeoneInTheCallSendsItsSamples	someone in the live call sends their own samples, never through a token; a stranger or someone who left is not in it
@@ -536,7 +558,7 @@ POST	/ch/checkins/{checkin_id}/delete	session	none	member	TODO(ch)	-
 POST	/ch/checkins/{checkin_id}/edit	session	none	member	TODO(ch)	-	
 POST	/ch/checkins/{checkin_id}/pause	session	none	member	TODO(ch)	-	
 POST	/ch/create	session	none	member	TODO(ch)	-	
-POST	/ch/deleteRecording/{egressId}	session	none	member	object:channel	TestOnlyAChannelsModeratorsDeleteItsRecordingsAndBringThemBack	its moderators and workspace admins (soft: its Undo is restoreRecording; purged only by the retention setting)
+POST	/ch/deleteRecording/{egressId}	session	none	member	object:channel	TestOnlyAChannelsModeratorsDeleteItsRecordingsAndBringThemBack	its moderators and a workspace admin in the channel (soft: its Undo is restoreRecording; purged only by the retention setting)
 GET	/ch/discover	session	none	member	TODO(ch)	-	
 POST	/ch/getCallToken	session	none	member	TODO(ch)	-	
 GET	/ch/getFile/{channel_uuid}/{obj_uuid}	session	none	member	TODO(ch)	-	
@@ -550,7 +572,7 @@ POST	/ch/publishChannelTyping	session	none	member	TODO(ch)	-
 POST	/ch/removeMember	session	none	member	TODO(ch)	-	
 POST	/ch/removeModerator	session	none	member	TODO(ch)	-	
 POST	/ch/restore	session	none	member	TODO(ch)	-	
-POST	/ch/restoreRecording/{egressId}	session	none	member	object:channel	TestOnlyAChannelsModeratorsDeleteItsRecordingsAndBringThemBack	its moderators and workspace admins, as its delete
+POST	/ch/restoreRecording/{egressId}	session	none	member	object:channel	TestOnlyAChannelsModeratorsDeleteItsRecordingsAndBringThemBack	its moderators and a workspace admin in the channel, as its delete
 POST	/ch/startCallRecording	session	none	member	TODO(ch)	-	
 POST	/ch/stopCallRecording	session	none	member	TODO(ch)	-	
 GET	/ch/suggested	session	none	member	TODO(ch)	-	
@@ -740,6 +762,9 @@ POST	/entities	session	none	member	TODO(entities)	-
 GET	/event/bookingPages	session	none	member	self	gate	the caller's own booking pages
 POST	/event/bookingPages	session	none	member	self	TestBookingPages	a page of the caller's own: an id must be theirs (SavePage: id and user_id), and an address someone else's page holds, live or deleted, is a clash
 POST	/event/bookingPages/delete	session	none	member	self	TestBookingPages	a page of the caller's own (DeletePage: id and user_id)
+GET	/event/bookingPages/hosting	session	none	member	self	TestBookingTeamPages	the pages the caller hosts or is invited to host: their own host rows alone (Hosting: user_id)
+POST	/event/bookingPages/hosting/accept	session	none	member	self	TestBookingTeamPages	the caller's own host row (AcceptHost: page_id and user_id); anyone else's answers like a missing page
+POST	/event/bookingPages/hosting/leave	session	none	member	self	TestBookingTeamPages	the caller's own host row (LeaveHost: page_id and user_id); anyone else's answers like a missing page
 POST	/event/createEvent	session	none	member	member	gate	the caller's own event; inviting members is by design
 DELETE	/event/deleteEvent/{eventId}	session	none	member	object:event	TestOnlyThePeopleOnAnEventSeeItAndOnlyItsMakerChangesIt	its maker
 POST	/event/endFocus	session	none	member	self	gate	the caller's own focus time
@@ -793,12 +818,14 @@ POST	/groupChat/startCallRecording	session	none	member	TODO(groupchat)	-
 POST	/groupChat/stopCallRecording	session	none	member	TODO(groupchat)	-	
 POST	/groupChat/updateChat	session	none	member	TODO(groupchat)	-	
 GET	/guest/board-attachment/{token}/{obj_uuid}	public	none	public	link:guest	-	share-link grant scopes the attachment
+POST	/guest/board-comment	public	none	public	link:guest	TestM5_AGuestCommentIsAuthoredByItsGrant	a board link's live token (comment or edit role); author from the token
 GET	/guest/board-polls/{token}	public	none	public	link:guest	-	share-link token (or a call's board token, the board on its stage): the board's polls' questions and tallies, never whose a vote is; read only, a guest never votes
 POST	/guest/calls/act	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, the call in its room); only their own hand and feedback; rate-limited
 GET	/guest/calls/activities	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room); reads the call's polls and questions as a guest sees them (no counts held back for whoever runs the call, no anonymous asker or voter); votes, asks and upvotes only, each limited per call identity; reads and writes rate-limited per address
 POST	/guest/calls/activities	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room); reads the call's polls and questions as a guest sees them (no counts held back for whoever runs the call, no anonymous asker or voter); votes, asks and upvotes only, each limited per call identity; reads and writes rate-limited per address
 POST	/guest/calls/board-token	public	none	public	link:guest	TestCallBoardTokenIsOnlyAGuestsInACall	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room now); answers a 30-minute collab token for the board on that call's stage only, which the collaboration service re-checks on every connect (still in the call, the board still on its stage; drawing only under "Guests can draw"); rate-limited
 POST	/guest/calls/breakout-token	public	none	public	link:guest	TestCallBreakoutRoomTokensForGuests	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room or one of its breakout rooms now); answers a LiveKit token for one of that call's open breakout rooms only, the guest's own room (or any while the call lets people choose), with the name and holds they have in the call; a token for a room they may not be in is put out when it connects; rate-limited
+POST	/guest/calls/consent	public	none	public	link:guest	TestCallConsentRecordsWhoAgreed	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room); only their own OK or Leave on what the room has on; rate-limited
 POST	/guest/calls/quality	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, the call in its room); only their own connection's numbers, in range; rate-limited
 GET	/guest/calls/thread	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room); reads only the call's thread over the call's span, as plain text, nothing of the conversation; writes a plain-text reply as the guest bot, in a channel's call only; reads and writes rate-limited per address
 POST	/guest/calls/thread	public	none	public	link:guest	-	a guest's own call token (LiveKit-signed, a guest's identity, in the live call of its room); reads only the call's thread over the call's span, as plain text, nothing of the conversation; writes a plain-text reply as the guest bot, in a channel's call only; reads and writes rate-limited per address
@@ -813,6 +840,7 @@ POST	/guest/doc-review/{token}	public	none	public	link:guest	-	share-link token 
 GET	/guest/links	session	none	member	object:guest-link	TestOnlyWhoMayShareSomethingManagesItsGuestLinks	the links to a doc, board, table, channel or project the caller may share (mayShare); someone who may not share a doc sees only their own links to it
 POST	/guest/links	session	none	member	object:guest-link	TestOnlyWhoMayShareSomethingManagesItsGuestLinks	who may share the thing (mayShare): a doc's owner, a board's creator or editors, a table's managers, a channel's or project's admins or a workspace admin
 POST	/guest/links/copy	session	none	member	member	TestACopyIsThePersonsOwn	any member may copy a page its publisher lets be copied, once it's unlocked, as a person and never an agent; the copy is their own
+PATCH	/guest/links/{id}	session	none	member	object:guest-link	TestM4_OnlyManagersMintChangeOrRevokeBoardLinks	a board link's role, password and end: the board's owner and co-owners only (mayShare -> CanManage, miro-33)
 DELETE	/guest/links/{id}/publish	session	none	member	object:guest-link	TestOnlyWhoMayShareSomethingManagesItsGuestLinks	someone who may share the doc the live link opens (publishable, mayShare)
 PUT	/guest/links/{id}/publish	session	none	member	object:guest-link	TestOnlyWhoMayShareSomethingManagesItsGuestLinks	someone who may share the doc the live link opens (publishable, mayShare)
 POST	/guest/links/{id}/revoke	session	none	member	object:guest-link	TestOnlyWhoMayShareSomethingManagesItsGuestLinks	the link's maker, or someone who may share what it opens (mayShare); never a meeting's link
@@ -995,6 +1023,7 @@ POST	/project/{project_uuid}/cycles	session	none	member	object:project	TestB3Bac
 GET	/project/{project_uuid}/cycles/feed	session	none	member	object:project	TestLinear12DACycleFeedFollowsItsPersonsAccess	the caller's own link to the cycles of a project they may view (NeedView); never its address
 POST	/project/{project_uuid}/cycles/feed	session	none	member	object:project	TestLinear12DACycleFeedFollowsItsPersonsAccess	a project they may view (NeedView); the link's address shown once, only its hash kept; calendar.feeds.allowed
 POST	/project/{project_uuid}/cycles/feed/stop	session	none	member	self	gate	stops only the caller's own link
+POST	/project/{project_uuid}/cycles/parallel	session	none	member	object:project	TestJ04CParallelCyclesRunSideBySideForTheProjectsAdmins	the project's admins (NeedManage), never in an archived project; refused while two open cycles share days (off) or a schedule runs them (on); members read the setting with the cycles (GET /cycles, NeedView)
 POST	/project/{project_uuid}/cycles/schedule	session	none	member	object:project	TestB3bTheSchedulerRunsAProjectsCycles	the project's admins (NeedManage)
 POST	/project/{project_uuid}/cycles/schedule/stop	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's admins (NeedManage)
 GET	/project/{project_uuid}/cycles/{cycle_id}/burndown	session	none	member	object:project	TestB3BacklogIsTheOpenCyclesThenEverythingInNone	the project's people (NeedView); a cycle of that project only (cycleIn)
@@ -1066,6 +1095,11 @@ POST	/project/{project_uuid}/rules/{rule_id}	session	none	member	object:project	
 POST	/project/{project_uuid}/rules/{rule_id}/active	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
 POST	/project/{project_uuid}/rules/{rule_id}/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
 POST	/project/{project_uuid}/save-as-template	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404); the snapshot reads tasks as nobody, so no restricted task
+GET	/project/{project_uuid}/sla	session	none	member	object:project	TestProjectSLAsAreReadByMembersAndSetByAdmins	the project's people (NeedView), but no guest (business/SLA Settings: the settings are SLA state; a guest with a member's place is refused, 403): its rules, work week and whether its timers run; someone outside it finds nothing (404)
+PUT	/project/{project_uuid}/sla/hours	session	none	member	object:project	TestProjectSLAsAreReadByMembersAndSetByAdmins	the route checks the project's people (NeedView); business/SLA checks its admins (NeedManage, manages()), live project, audited or not made: a member is refused (403); someone outside it finds nothing (404)
+POST	/project/{project_uuid}/sla/rules	session	none	member	object:project	TestProjectSLAsAreReadByMembersAndSetByAdmins	the route checks the project's people (NeedView); business/SLA checks its admins (NeedManage, manages()), live project, audited or not made: a member is refused (403); someone outside it finds nothing (404)
+DELETE	/project/{project_uuid}/sla/rules/{rule_id}	session	none	member	object:project	TestProjectSLAsAreReadByMembersAndSetByAdmins	the route checks the project's people (NeedView); business/SLA checks its admins (NeedManage, manages()), live project, audited or not made: a member is refused (403); someone outside it finds nothing (404); soft (the shared soft delete, kind sla_rule): kept as removed, back by POST /restore/sla_rule/{id}
+PATCH	/project/{project_uuid}/sla/rules/{rule_id}	session	none	member	object:project	TestProjectSLAsAreReadByMembersAndSetByAdmins	the route checks the project's people (NeedView); business/SLA checks its admins (NeedManage, manages()), live project, audited or not made: a member is refused (403); someone outside it finds nothing (404)
 GET	/project/{project_uuid}/statusRules	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
 POST	/project/{project_uuid}/statusRules	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
 POST	/project/{project_uuid}/statusRules/delete	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
@@ -1085,6 +1119,13 @@ POST	/project/{project_uuid}/task-templates/{template_id}/make	session	none	memb
 POST	/project/{project_uuid}/task-templates/{template_id}/restore	session	none	member	object:project	TestTaskTemplatesOverHTTP	the project's admins (Work Access NeedManage, MayManage; never archived): a member is refused (403); someone outside it finds nothing (404); another project's template isn't there (404)
 GET	/project/{project_uuid}/time	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404); rates only for its admins (ratesFor)
 GET	/project/{project_uuid}/timeline	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
+GET	/project/{project_uuid}/triage	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView), each waiting task as they may read it; someone outside it finds nothing (404)
+DELETE	/project/{project_uuid}/triage/mailbox	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	linear-21 mail door: the project's admins (Work Access NeedManage) disconnect the triage mailbox, in the app only (an API token is refused); a member is refused (403); people outside the project are refused (400); recorded in the audit log
+GET	/project/{project_uuid}/triage/mailbox	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	linear-21 mail door: the project's admins (Work Access NeedManage) read the mailbox's settings, never its secret, in the app only (an API token is refused); a member is refused (403); people outside the project are refused (400)
+PUT	/project/{project_uuid}/triage/mailbox	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	linear-21 mail door: the project's admins (Work Access NeedManage) connect or change the triage mailbox, in the app only (an API token is refused); a member is refused (403); people outside the project are refused (400); recorded in the audit log
+POST	/project/{project_uuid}/triage/mailbox/test	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	linear-21 mail door: the project's admins (Work Access NeedManage) test a mailbox's settings (one dial, nothing saved), at most 5 a member in 15 minutes (UserRateLimit, 429), in the app only (an API token is refused); a member is refused (403); people outside the project are refused (400)
+GET	/project/{project_uuid}/triage/rota	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	linear-21 H2: whoever the triage queue admits (Work Access NeedView) reads who is on triage duty, in turns; someone outside the project finds nothing (404)
+PUT	/project/{project_uuid}/triage/rota	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	linear-21 H2: the project's admins (Work Access NeedManage) set the triage rota, in the app only (an API token is refused); a member is refused (403); people outside the project are refused (400); recorded in the audit log
 GET	/project/{project_uuid}/types	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	anyone in the project (Work Access NeedView); someone outside it finds nothing (404)
 POST	/project/{project_uuid}/types	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
 DELETE	/project/{project_uuid}/types/{type_id}	session	none	member	object:project	TestEveryProjectRouteRefusesWhoItIsntFor	the project's admins (Work Access NeedManage): a member is refused (403); someone outside it finds nothing (404)
@@ -1105,6 +1146,7 @@ GET	/public/book/{slug}	public	none	public	link:booking	-	booking page: outsider
 POST	/public/book/{slug}	public	none	public	link:booking	-	booking page: outsiders see free slots and book; rate-limited
 GET	/public/booking/{token}	public	none	public	link:booking	-	a guest's booking, by its cancel-link token
 POST	/public/booking/{token}/cancel	public	none	public	link:booking	-	a guest cancels through their cancel-link token
+POST	/public/booking/{token}/reschedule	public	none	public	link:booking	TestBookingReschedule	NOTE: public, the token is the bearer (kept hashed): a guest moves only their own booking to a free slot of its page, as the page owner's own edit; a closed page, cancelled or ended booking answers as a missing one; limited per IP with booking
 GET	/public/calendar/{file}	public	none	public	link:calendar-feed	-	a calendar's secret link, read by another calendar app; only its hash is kept, every read checks access; rate-limited per link and per address
 POST	/public/csp-report	public	none	public	public	-	browser-posted CSP violation reports; uncredentialed by spec — Public assets rendered in contexts with no session (emails, login page). The browser posts CSP violation reports without credentials, and a violation on the sign-in page happens before anybody is authenticated, so this cannot require a session. It accepts nothing and returns nothing: the body is capped, a batch is capped, every response is 204, and it is rate limited under its own key. The worst an unauthenticated caller achieves is a bounded number of WARN lines.
 GET	/public/cycles/{file}	public	none	public	link:cycle-feed	-	a project's cycles by a person's secret link, read by another calendar app; only its hash is kept, every read checks the person may still view the project; rate-limited per link and per address
@@ -1134,7 +1176,7 @@ POST	/query/parse	session	none	member	TODO(query)	-
 POST	/query/search	session	none	member	member	TestAnOutsidersCountNeverMoves	any member; every hit and count is read as the asker
 GET	/recording-stage/{ticket}	public	none	public	link:recording-stage	-	the recorder's ticket IS the credential — LiveKit's recorder entering the web's layout page for one recording: a sealed ticket bound to its room, five minutes, once, revoked when the recording ends or the room records again; a good one is a 302 with a two-minute hidden, subscribe-only recorder token in the fragment, anything else a bare 404; rate-limited per address.
 GET	/refreshToken	refresh	none	n/a	gate	gate	
-POST	/restore/{kind}/{id}	session	none	member	object:project	TestEveryDeletedProjectPartComesBackWhole	V-78: brings back a soft-deleted row, each kind checked as its delete: a project's field, status, cycle, milestone, form or draft invoice by its project's admins (Work Access NeedManage; a member is refused 403, someone outside it finds nothing); a table's form by the table's managers; a time entry by its own person (anyone else: 404)
+POST	/restore/{kind}/{id}	session	none	member	object:project	TestEveryDeletedProjectPartComesBackWhole	V-78: brings back a soft-deleted row, each kind checked as its delete: a project's field, status, cycle, milestone, form, draft invoice or SLA rule by its project's admins (Work Access NeedManage; a member is refused 403, someone outside it finds nothing); a table's form by the table's managers; a time entry by its own person (anyone else: 404)
 POST	/saml/acs	public	none	public	signed:saml	-	SAML assertion consumer; assertion is signature-verified
 GET	/saml/login	public	none	public	public	-	starts a SAML redirect
 GET	/saml/metadata	public	none	public	public	-	SAML SP metadata, public by spec
@@ -1150,6 +1192,7 @@ GET	/search/unifiedSearch/{search_text}	session	none	member	TODO(search)	-
 POST	/slack/events	public	none	public	signed:slack	-	Slack signing-secret HMAC verified in the handler; before connection it only echoes Slack's URL challenge
 GET	/tables/	session	none	member	TODO(tables)	-	
 POST	/tables/	session	none	member	TODO(tables)	-	
+POST	/tables/export	session	none	member	object:table	TestAnExportOfEveryTableHoldsOnlyTheTablesTheReaderCanOpen	every table the reader can open as one workbook, a sheet each: the list read for them (ListTables), each table on it asked again (loadViewable) before its sheet is made, so one they can't open has no sheet, not even its name; its rows as the reader reads them; none to open, or past 100 tables or 1,000,000 rows, refused in words (422); one row in the admin audit log (tables.exported: the reader, the exported tables' ids)
 POST	/tables/generate	session	none	member	TODO(tables)	-	
 GET	/tables/trash	session	none	member	TODO(tables)	-	
 GET	/tables/{id}	session	none	member	TODO(tables)	-	
@@ -1158,7 +1201,7 @@ GET	/tables/{id}/ai-fills	session	none	member	object:table	TestATablesFillsAreRe
 POST	/tables/{id}/delete	session	none	member	TODO(tables)	-	
 GET	/tables/{id}/editing	session	none	member	object:table	TestTableEditAccess	who edits the table's rows (its general level and the people chosen), for a manager of the table (its maker or an admin); a member is refused 403, a table they can't open is 404
 POST	/tables/{id}/editing	session	none	member	object:table	TestTableEditAccess	changes who edits the table's rows, by a manager of the table, in one transaction with its audit entry (table.editing.changed); a member is refused 403, a private table or a non-member chosen is refused in words (400)
-POST	/tables/{id}/export	session	none	member	object:table	TestAnExportOfATableTheReaderCantOpenIsNotFound	a table the reader can open (loadViewable; else not found), its rows as the reader reads them
+POST	/tables/{id}/export	session	none	member	object:table	TestAnExportOfATableTheReaderCantOpenIsNotFound	a table the reader can open (loadViewable; else not found), its rows as the reader reads them; one row in the admin audit log (table.exported: the reader, the table's id)
 GET	/tables/{id}/fields	session	none	member	TODO(tables)	-	
 POST	/tables/{id}/fields	session	none	member	TODO(tables)	-	
 POST	/tables/{id}/fields/{fieldId}/ai-fill	session	none	member	TODO(tables)	-	
@@ -1254,6 +1297,7 @@ POST	/task/time/stop	session	none	member	TODO(task)	-
 GET	/task/time/{task_uuid}	session	none	member	TODO(task)	-	
 POST	/task/time/{task_uuid}	session	none	member	TODO(task)	-	
 POST	/task/time/{task_uuid}/start	session	none	member	TODO(task)	-	
+POST	/task/triage/{task_uuid}/decide	session	none	member	object:task	TestADecisionThatCantBeMadeChangesNothing	someone who may change the task (NeedEditTask, after projects.edit.who) in a project with triage on; an accept waits for a priority where the project asks for one
 POST	/task/type	session	none	member	TODO(task)	-	
 POST	/task/undeleteTask	session	none	member	TODO(task)	-	
 POST	/task/updateComment	session	none	member	TODO(task)	-	
@@ -1346,6 +1390,8 @@ GET	/user/usersListWhoDontBelongToTheProjectButBelongToTheTeam/{project_uuid}	se
 GET	/user/usersListWhoDontBelongToTheTeam/{team_uuid}	session	none	member	TODO(user)	-	
 GET	/v1/attention	token	as-member	n/a	self	TestATokenActsAsAMemberAcrossTheAPI	
 GET	/v1/calendars	token	as-member	n/a	self	TestCAL53G15CalendarAPI	the calendars the token's member may see (calendar:read), as the calendar lists them; an app's token is refused
+GET	/v1/calls/recordings/{key}/transcript	token	as-member	n/a	object:call	TestACallsTranscriptIsExportedAndCorrectedByTheRule	messages:read; the token's member's read, as in the app; an app's token is refused
+PATCH	/v1/calls/recordings/{key}/transcript/lines/{line_uid}	token	as-member	n/a	object:call	TestACallsTranscriptIsExportedAndCorrectedByTheRule	messages:write; as the app's rule, a workspace admin only a member; BoundAgent on every call; an app's token is refused
 GET	/v1/docs	token	as-member	n/a	object:doc	TestATokenActsAsAMemberAcrossTheAPI	
 POST	/v1/docs	token	as-member	n/a	object:doc	TestATokenActsAsAMemberAcrossTheAPI	
 GET	/v1/docs/{id}	token	as-member	n/a	object:doc	TestATokenActsAsAMemberAcrossTheAPI	

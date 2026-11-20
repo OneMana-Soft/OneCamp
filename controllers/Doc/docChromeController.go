@@ -72,7 +72,7 @@ func GetDocPage(w http.ResponseWriter, r *http.Request) {
 	// The counts the app reads are the resolver's decision, with a grant whose
 	// end has passed gone before the minute sweep takes it away (the A5×A6
 	// join), so opening a doc agrees with its lists, sockets and notices.
-	now, err := accessNow(ctx, doc, viewer)
+	now, err := accessNow(business.OpeningDoc(ctx), doc, viewer)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetDocPage %s: the grants that end couldn't be read: %+v", id, err)
 		helpers.WriteRetryLater(w, "Couldn't open the doc just now.")

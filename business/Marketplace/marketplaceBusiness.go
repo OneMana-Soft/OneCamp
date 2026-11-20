@@ -13,12 +13,15 @@ package business
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	agentBusiness "github.com/akashc777/OneCamp/business/AIAgent"
 	authz "github.com/akashc777/OneCamp/business/Authz"
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
+	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	workflowBusiness "github.com/akashc777/OneCamp/business/Workflow"
 	marketplaceDomain "github.com/akashc777/OneCamp/domain/Marketplace"
 	capabilityModels "github.com/akashc777/OneCamp/models/postgres/Capability"
@@ -39,9 +42,13 @@ var (
 	errNotFound  = fmt.Errorf("template not found")
 )
 
-// IsForbidden / IsNotFound let controllers map to HTTP codes.
+// IsForbidden / IsNotFound let controllers map to HTTP codes. A doc template
+// that isn't there (docBusiness.ErrNoTemplate, wrapped or not) is not found
+// too, not a failure to try again (CR-444 D1).
 func IsForbidden(err error) bool { return err == errForbidden }
-func IsNotFound(err error) bool  { return err == errNotFound }
+func IsNotFound(err error) bool {
+	return errors.Is(err, errNotFound) || errors.Is(err, docBusiness.ErrNoTemplate)
+}
 
 // PublishInput is the payload for publishing a template.
 type PublishInput struct {
@@ -57,6 +64,12 @@ type InstallResult struct {
 	Kind     string `json:"kind"`
 	EntityID string `json:"entity_id"`
 	Name     string `json:"name"`
+	// The project and channel made around a table template's tables, when
+	// asked (InstallOptions.ProjectTeam; around.go).
+	ProjectID   string `json:"project_id,omitempty"`
+	ProjectName string `json:"project_name,omitempty"`
+	ChannelID   string `json:"channel_id,omitempty"`
+	ChannelName string `json:"channel_name,omitempty"`
 }
 
 func optStr(s string) *string {
@@ -150,6 +163,9 @@ func List(ctx context.Context, kind string) ([]*model.Template, error) {
 	if kind == "" || kind == KindDoc {
 		out = builtinsListed()
 	}
+	if kind == "" || kind == model.KindTable {
+		out = append(out, tableBuiltinsListed()...)
+	}
 	return append(out, items...), nil
 }
 
@@ -182,6 +198,9 @@ func Get(ctx context.Context, id uuid.UUID) (*model.Template, error) {
 	if b, ok := builtinByID(id); ok {
 		return builtinTemplate(b, true), nil
 	}
+	if b, ok := builtinTableByID(id); ok {
+		return builtinTableTemplate(b), nil
+	}
 	t, err := model.GetTemplate(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load template")
@@ -198,9 +217,10 @@ func Get(ctx context.Context, id uuid.UUID) (*model.Template, error) {
 }
 
 // Unpublish unlists a template the user owns (admins may unlist any).
-// OneCamp's own doc templates are never removed.
+// OneCamp's own templates are never removed.
 func Unpublish(ctx context.Context, id uuid.UUID, userInfo *userModels.UserInfo) error {
-	if _, ok := builtinByID(id); ok {
+	_, doc := builtinByID(id)
+	if _, table := builtinTableByID(id); doc || table {
 		return errBuiltinTemplate
 	}
 	if err := model.SoftDeleteTemplate(ctx, id, userInfo.UserPostgresInfo.Id, userInfo.UserPostgresInfo.IsAdmin); err != nil {
@@ -211,9 +231,20 @@ func Unpublish(ctx context.Context, id uuid.UUID, userInfo *userModels.UserInfo)
 
 // Install instantiates a template in the installer's workspace and returns a
 // reference to the new entity. Capability-gated kinds re-check the capability.
-func Install(ctx context.Context, id uuid.UUID, userInfo *userModels.UserInfo) (*InstallResult, error) {
+// A table template also makes the project and channel around its tables when
+// opts asks (around.go); any other kind asked for them is refused.
+func Install(ctx context.Context, id uuid.UUID, userInfo *userModels.UserInfo, opts InstallOptions) (*InstallResult, error) {
+	aroundAsked := strings.TrimSpace(opts.ProjectTeam) != ""
 	if _, ok := builtinByID(id); ok {
+		if aroundAsked {
+			return nil, errAroundNotTable
+		}
 		return installDoc(ctx, id, userInfo)
+	}
+	if b, ok := builtinTableByID(id); ok {
+		return withAround(ctx, userInfo, opts, b.Name, func() (*InstallResult, []madeTable, error) {
+			return installBuiltinTable(ctx, b, userInfo)
+		})
 	}
 	t, err := model.GetTemplate(ctx, id)
 	if err != nil {
@@ -221,6 +252,9 @@ func Install(ctx context.Context, id uuid.UUID, userInfo *userModels.UserInfo) (
 	}
 	if t == nil {
 		return nil, errNotFound
+	}
+	if aroundAsked && t.Kind != model.KindTable {
+		return nil, errAroundNotTable
 	}
 
 	userID := userInfo.UserPostgresInfo.Id
@@ -238,13 +272,15 @@ func Install(ctx context.Context, id uuid.UUID, userInfo *userModels.UserInfo) (
 		}
 		res, err = installWorkflow(ctx, t.Payload, userID)
 	case model.KindTable:
-		res, err = installTable(ctx, t.Payload, userInfo)
+		return withAround(ctx, userInfo, opts, t.Name, func() (*InstallResult, []madeTable, error) {
+			return installTable(ctx, t.Payload, userInfo)
+		})
 	case KindDoc:
 		res, err = installDoc(ctx, t.Id, userInfo)
 	case KindBoard:
 		res, err = installBoard(ctx, t.Payload, t.Name, userInfo)
 	default:
-		return nil, fmt.Errorf("unsupported template kind")
+		return nil, &Refusal{http.StatusBadRequest, "unsupported template kind"}
 	}
 	if err != nil {
 		return nil, err
@@ -280,7 +316,7 @@ func decodeForKind(kind string, payload json.RawMessage) (interface{}, error) {
 func installAgent(ctx context.Context, payload string, userID uuid.UUID) (*InstallResult, error) {
 	var in agentBusiness.AgentInput
 	if err := json.Unmarshal([]byte(payload), &in); err != nil {
-		return nil, fmt.Errorf("invalid agent template")
+		return nil, &Refusal{http.StatusBadRequest, "invalid agent template"}
 	}
 	// A freshly installed agent starts inactive so the installer can review it
 	// before it runs.
@@ -311,7 +347,7 @@ type workflowPayload struct {
 func installWorkflow(ctx context.Context, payload string, userID uuid.UUID) (*InstallResult, error) {
 	var p workflowPayload
 	if err := json.Unmarshal([]byte(payload), &p); err != nil {
-		return nil, fmt.Errorf("invalid workflow template")
+		return nil, &Refusal{http.StatusBadRequest, "invalid workflow template"}
 	}
 	in := workflowBusiness.WorkflowInput{
 		Name:          p.Name,
@@ -340,18 +376,18 @@ type tablePayload struct {
 	Views  []dataTableBusiness.ViewInput  `json:"views"`
 }
 
-func installTable(ctx context.Context, payload string, userInfo *userModels.UserInfo) (*InstallResult, error) {
+func installTable(ctx context.Context, payload string, userInfo *userModels.UserInfo) (*InstallResult, []madeTable, error) {
 	var p tablePayload
 	if err := json.Unmarshal([]byte(payload), &p); err != nil {
-		return nil, fmt.Errorf("invalid table template")
+		return nil, nil, &Refusal{http.StatusBadRequest, "invalid table template"}
 	}
 	actor := dataTableBusiness.Actor{UserID: userInfo.UserPostgresInfo.Id, IsAdmin: userInfo.UserPostgresInfo.IsAdmin}
 	if strings.TrimSpace(p.Table.Name) == "" {
-		return nil, fmt.Errorf("table template is missing a name")
+		return nil, nil, &Refusal{http.StatusBadRequest, "table template is missing a name"}
 	}
 	tbl, err := dataTableBusiness.CreateTableFromTemplate(ctx, p.Table, p.Fields, p.Views, actor)
 	if err != nil {
-		return nil, fmt.Errorf("failed to install table: %w", err)
+		return nil, nil, fmt.Errorf("failed to install table: %w", err)
 	}
-	return &InstallResult{Kind: model.KindTable, EntityID: tbl.Id.String(), Name: tbl.Name}, nil
+	return &InstallResult{Kind: model.KindTable, EntityID: tbl.Id.String(), Name: tbl.Name}, []madeTable{{ID: tbl.Id, Name: tbl.Name}}, nil
 }

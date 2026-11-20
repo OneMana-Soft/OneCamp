@@ -30,6 +30,7 @@ type fakeInputs struct {
 	keywords  []string
 	vips      map[string]bool
 	held      map[string]notificationBusiness.HeldStatus
+	waits     map[string]Wait
 
 	reads map[string]int
 	asked map[string][]string
@@ -43,9 +44,17 @@ func (f *fakeInputs) read(name string, ids ...string) {
 	f.asked[name] = append(f.asked[name], ids...)
 }
 
-func (f *fakeInputs) Members(_ context.Context, _ Place) ([]string, error) {
+// Members answers the place's people with the levels they have, as the live
+// read does; one with none (a fixture's) is left for Levels to ask about.
+func (f *fakeInputs) Members(_ context.Context, _ Place) ([]string, map[string]string, error) {
 	f.read("members")
-	return f.members, nil
+	levels := map[string]string{}
+	for _, id := range f.members {
+		if l, ok := f.levels[key(id)]; ok {
+			levels[key(id)] = l
+		}
+	}
+	return f.members, levels, nil
 }
 
 func (f *fakeInputs) Levels(_ context.Context, _ Place, ids []string) (map[string]string, error) {
@@ -94,6 +103,17 @@ func (f *fakeInputs) Held(_ context.Context, ids []string, _ time.Time) (map[str
 	for _, id := range ids {
 		if st, ok := f.held[key(id)]; ok {
 			out[key(id)] = st
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeInputs) Waits(_ context.Context, ids []string) (map[string]Wait, error) {
+	f.read("waits", ids...)
+	out := map[string]Wait{}
+	for _, id := range ids {
+		if w, ok := f.waits[key(id)]; ok {
+			out[key(id)] = w
 		}
 	}
 	return out, nil
@@ -239,6 +259,29 @@ func TestOnlyThoseInThePlaceHear(t *testing.T) {
 	}
 }
 
+// The place's people come with their levels, so access asks nobody again of
+// what that read holds (CR-398 F3): a channel's post is one statement, and a
+// group's message with no audience two store calls (its people, and who of
+// them is in it now) with no second look at who is in it. Only someone it
+// names who isn't one of its people is asked about.
+func TestThePlacesPeopleAreReadOnceWithTheirLevels(t *testing.T) {
+	ch := &fakeInputs{levels: all("ann", "bo"), members: []string{"ann", "bo"}}
+	if got := planned(t, ch, Event{Cause: CauseMessage, Actor: "me", Place: channel}); len(got) != 2 {
+		t.Errorf("a channel's post planned %+v, want Ann and Bo", got)
+	}
+	if ch.reads["members"] != 1 || ch.reads["levels"] != 0 {
+		t.Errorf("a channel's post read %v, want its people once and no levels read", ch.reads)
+	}
+	grp := &fakeInputs{levels: all("ann", "bo"), members: []string{"ann", "bo"}}
+	got := planned(t, grp, Event{Cause: CauseMessage, Actor: "me", Place: Place{Kind: PlaceGroup, ID: "g"}, Mentions: []string{"ann", "dan"}})
+	if len(got) != 3 || got["dan"].Note != NotInPlace || got["ann"].Cause != CauseDM || got["bo"].Cause != CauseDM {
+		t.Errorf("a group's message planned %+v, want Ann and Bo told it, Dan not in it", got)
+	}
+	if grp.reads["members"] != 1 || grp.reads["levels"] != 1 || !reflect.DeepEqual(grp.asked["levels"], []string{"dan"}) {
+		t.Errorf("a group's message read %v asking levels of %v, want its people once and Dan's level alone", grp.reads, grp.asked["levels"])
+	}
+}
+
 // Preference: the place's level, mute ("Nothing"), the thread's follow
 // choice; reactions never push or badge; broadcasts never come from threads.
 func TestEachPreferenceRule(t *testing.T) {
@@ -264,9 +307,6 @@ func TestEachPreferenceRule(t *testing.T) {
 		{"a thread turned off still tells a mention", &fakeInputs{levels: all("ann"), follows: notificationBusiness.Follows{Off: []string{"ann"}}},
 			Event{Cause: CauseMessage, Actor: "me", Place: inThread, Author: "me", Repliers: []string{"ann"}, Mentions: []string{"ann"}},
 			map[string]Decision{"ann": {UserID: "ann", Cause: CauseMention, To: named}}},
-		{"muted hears a reply to their own message in its thread", &fakeInputs{levels: map[string]string{"ann": "block"}},
-			Event{Cause: CauseMessage, Actor: "me", Place: inThread, Author: "ann"},
-			map[string]Decision{"ann": {UserID: "ann", Cause: CauseReplyToYou, To: named}}},
 		{"muted hears no reply in a thread they answered once", &fakeInputs{levels: map[string]string{"ann": "block"}},
 			Event{Cause: CauseMessage, Actor: "me", Place: inThread, Author: "me", Repliers: []string{"ann"}}, map[string]Decision{}},
 		{"a broadcast never comes from a thread", &fakeInputs{levels: all("ann"), broadcast: []string{"ann"}},
@@ -278,6 +318,69 @@ func TestEachPreferenceRule(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if got := planned(t, c.in, c.ev); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("plan %+v, want %+v", got, c.want)
+			}
+		})
+	}
+}
+
+// A place's people are its candidates whatever their level, and the one rule
+// (NotifyLevel Lets) picks each one's strongest cause their level lets them
+// hear (NOTIF M1 R3): in a group, someone on "Mentions" hears the message
+// that names them or answers theirs, as what names them, though the group's
+// message is the stronger cause; "Nothing" hears not even that; "Everything"
+// hears the group's message. In a channel, "Mentions" hears no plain post.
+func TestEachHearsTheStrongestCauseTheirLevelLets(t *testing.T) {
+	group := Place{Kind: PlaceGroup, ID: "g"}
+	levels := map[string]string{"ann": "mention", "bo": "mention", "cy": "block", "dee": "all", "eve": "mention"}
+	in := &fakeInputs{levels: levels, members: []string{"ann", "bo", "cy", "dee", "eve"}}
+	got := planned(t, in, Event{Cause: CauseMessage, Actor: "me", Place: group, Author: "bo", Mentions: []string{"ann", "cy"}})
+	want := map[string]Decision{
+		"ann": {UserID: "ann", Cause: CauseMention, To: deliveriesOf(CauseMention)},
+		"bo":  {UserID: "bo", Cause: CauseReplyToYou, To: deliveriesOf(CauseReplyToYou)},
+		"dee": {UserID: "dee", Cause: CauseDM, To: deliveriesOf(CauseDM)},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a group's message naming Ann and Cy, answering Bo: plan %+v, want %+v", got, want)
+	}
+	in = &fakeInputs{levels: levels, members: []string{"ann", "dee", "eve"}}
+	got = planned(t, in, Event{Cause: CauseMessage, Actor: "me", Place: channel, Mentions: []string{"ann"}})
+	want = map[string]Decision{
+		"ann": {UserID: "ann", Cause: CauseMention, To: named},
+		"dee": {UserID: "dee", Cause: CauseAllPosts, To: []Delivery{ToPush, ToDesktop, ToSound}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a channel's post naming Ann: plan %+v, want %+v", got, want)
+	}
+}
+
+// "Nothing" (block) is nothing in a thread too, as at the top of the channel
+// (NOTIF M1 a): no push, desktop, sound, email, Inbox item or badge for a
+// reply to their own message, a reply that names them, or a reply in a
+// thread they answered; "Mentions" hears each.
+func TestNothingMeansNothingInAThread(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		level string
+		ev    Event
+		want  map[string]Decision
+	}{
+		{"muted hears no reply to their own message", "block",
+			Event{Cause: CauseMessage, Actor: "me", Place: inThread, Author: "ann"}, map[string]Decision{}},
+		{"muted hears no reply that names them", "block",
+			Event{Cause: CauseMessage, Actor: "me", Place: inThread, Author: "me", Mentions: []string{"ann"}}, map[string]Decision{}},
+		{"muted hears no reply in a thread they answered", "block",
+			Event{Cause: CauseMessage, Actor: "me", Place: inThread, Author: "me", Repliers: []string{"ann"}}, map[string]Decision{}},
+		{"mentions hears a reply to their own message", "mention",
+			Event{Cause: CauseMessage, Actor: "me", Place: inThread, Author: "ann"},
+			map[string]Decision{"ann": {UserID: "ann", Cause: CauseReplyToYou, To: named}}},
+		{"mentions hears a reply that names them", "mention",
+			Event{Cause: CauseMessage, Actor: "me", Place: inThread, Author: "me", Mentions: []string{"ann"}},
+			map[string]Decision{"ann": {UserID: "ann", Cause: CauseMention, To: named}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			in := &fakeInputs{levels: map[string]string{"ann": c.level}}
+			if got := planned(t, in, c.ev); !reflect.DeepEqual(got, c.want) {
 				t.Errorf("plan %+v, want %+v", got, c.want)
 			}
 		})

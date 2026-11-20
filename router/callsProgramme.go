@@ -29,10 +29,12 @@ func newCallsRouters(root chi.Router) callsRouters {
 // mountCallsProgramme mounts every merged package of the calls programme: one
 // line per package, in merge order, and nothing else.
 func mountCallsProgramme(rt callsRouters) {
-	mountCallSessions(rt) // CALLS-1: Call State's reads and Call Control's actions
-	mountCallsLobby(rt)   // CALLS-2: a meeting's lobby choice
-	mountCallRooms(rt)    // CALLS-2: a member's personal meeting room
-	mountCallInvites(rt)  // HU13: a call's invite, and members at a link as themselves
-	mountCallThread(rt)   // CALLS-3b: the call's thread for people outside its conversation
-	mountCallQuality(rt)  // A5: Call Quality Telemetry
+	mountCallSessions(rt)    // CALLS-1: Call State's reads and Call Control's actions
+	mountCallsLobby(rt)      // CALLS-2: a meeting's lobby choice
+	mountCallRooms(rt)       // CALLS-2: a member's personal meeting room
+	mountCallInvites(rt)     // HU13: a call's invite, and members at a link as themselves
+	mountCallThread(rt)      // CALLS-3b: the call's thread for people outside its conversation
+	mountCallQuality(rt)     // A5: Call Quality Telemetry
+	mountCallConsent(rt)     // zoom-09 C1: a person's OK or Leave on a recorded call, in the audit log
+	mountCallTranscripts(rt) // zoom-05 A: a transcript exported and a line corrected
 }

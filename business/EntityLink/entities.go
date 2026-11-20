@@ -96,6 +96,10 @@ func RegisterKind(kind string, read Reader) {
 // the reader may open, read and decided as its chip is.
 func titlesOf(read Reader) accessBusiness.TitleReader {
 	return func(ctx context.Context, ids []string, who accessBusiness.Subject) (map[string]string, error) {
+		who, err := namedByUID(ctx, who)
+		if err != nil {
+			return nil, err
+		}
 		got, err := read(ctx, who, ids)
 		if err != nil {
 			return nil, err
@@ -108,6 +112,23 @@ func titlesOf(read Reader) accessBusiness.TitleReader {
 		}
 		return out, nil
 	}
+}
+
+// namedByUID is who with their graph uid, which the graph's kinds (a task, a
+// project, a team) read membership by: as given, else read once by their
+// uuid (accessBusiness.UIDOf), for a caller that names its person by uuid
+// alone, with no request to name them (a calendar link another app reads, a
+// reminder, a notice).
+func namedByUID(ctx context.Context, who accessBusiness.Subject) (accessBusiness.Subject, error) {
+	if who.UserUID != "" || who.UserUUID == "" {
+		return who, nil
+	}
+	uid, err := accessBusiness.UIDOf(ctx, who)
+	if err != nil {
+		return who, err
+	}
+	who.UserUID = uid
+	return who, nil
 }
 
 // ErrTooMany is a read of more than MaxRefs things.
@@ -126,6 +147,10 @@ func ReadEntities(ctx context.Context, who accessBusiness.Subject, refs []Ref) (
 // bounds its own reads (the work graph's few hundred nodes): each kind is
 // still read once, however many of it are asked.
 func ReadMany(ctx context.Context, who accessBusiness.Subject, refs []Ref) ([]Entity, error) {
+	who, err := namedByUID(ctx, who)
+	if err != nil {
+		return nil, err
+	}
 	byKind := map[string][]string{}
 	for _, r := range refs {
 		byKind[r.Kind] = append(byKind[r.Kind], r.ID)

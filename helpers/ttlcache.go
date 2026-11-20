@@ -37,6 +37,11 @@ type TTLCache[V any] struct {
 	defaultTTL time.Duration
 	// sweepAt is the size past which the next Set sweeps.
 	sweepAt int
+	// maxEntries bounds the cache (NewBoundedTTLCache); 0 is unbounded.
+	maxEntries int
+	// now is the clock entries age by: time.Now unless NewTTLCacheClocked
+	// was given one.
+	now func() time.Time
 }
 
 // minSweepAt keeps small caches from sweeping every few inserts.
@@ -61,6 +66,21 @@ func NewTTLCache[V any](defaultTTL time.Duration) *TTLCache[V] {
 	}
 }
 
+// NewTTLCacheClocked is NewTTLCache with entries aged by now instead of
+// time.Now: for a cache whose package holds its clock still in a test.
+func NewTTLCacheClocked[V any](defaultTTL time.Duration, now func() time.Time) *TTLCache[V] {
+	c := NewTTLCache[V](defaultTTL)
+	c.now = now
+	return c
+}
+
+func (c *TTLCache[V]) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
 // Get returns the cached value and true when an unexpired entry exists.
 // Expired entries are deleted opportunistically on access so a slow-
 // burn miss does not accumulate dead memory.
@@ -75,7 +95,7 @@ func (c *TTLCache[V]) Get(key string) (V, bool) {
 	if !ok {
 		return zero, false
 	}
-	if !entry.expiresAt.IsZero() && time.Now().After(entry.expiresAt) {
+	if !entry.expiresAt.IsZero() && c.clock().After(entry.expiresAt) {
 		c.mu.Lock()
 		// Re-check under the write lock so a concurrent Set isn't
 		// clobbered.
@@ -89,6 +109,17 @@ func (c *TTLCache[V]) Get(key string) (V, bool) {
 }
 
 // Set stores the value under key with the cache's default TTL.
+// NewBoundedTTLCache is NewTTLCache holding at most maxEntries, for a cache
+// whose keys come from requests. A Set of a new key at the bound sweeps the
+// expired entries and, while fewer than an eighth of the bound are free,
+// drops arbitrary ones: a cache full of live entries pays one scan per
+// maxEntries/8 inserts, never one per insert.
+func NewBoundedTTLCache[V any](defaultTTL time.Duration, maxEntries int) *TTLCache[V] {
+	c := NewTTLCache[V](defaultTTL)
+	c.maxEntries = maxEntries
+	return c
+}
+
 func (c *TTLCache[V]) Set(key string, value V) {
 	if c == nil {
 		return
@@ -106,14 +137,30 @@ func (c *TTLCache[V]) SetWithTTL(key string, value V, ttl time.Duration) {
 	}
 	var expiresAt time.Time
 	if ttl > 0 {
-		expiresAt = time.Now().Add(ttl)
+		expiresAt = c.clock().Add(ttl)
 	}
 	c.mu.Lock()
+	if _, held := c.items[key]; !held && c.maxEntries > 0 && len(c.items) >= c.maxEntries {
+		c.makeRoomLocked()
+	}
 	c.items[key] = ttlEntry[V]{value: value, expiresAt: expiresAt}
 	if len(c.items) > c.sweepAt {
 		c.sweepLocked()
 	}
 	c.mu.Unlock()
+}
+
+// makeRoomLocked frees at least an eighth of a bounded cache: the expired
+// entries, then arbitrary ones. Must be called with the write lock held.
+func (c *TTLCache[V]) makeRoomLocked() {
+	c.sweepLocked()
+	keep := c.maxEntries - max(1, c.maxEntries/8)
+	for k := range c.items {
+		if len(c.items) <= keep {
+			break
+		}
+		delete(c.items, k)
+	}
 }
 
 // Delete drops a single key. Safe to call on missing keys.
@@ -129,7 +176,7 @@ func (c *TTLCache[V]) Delete(key string) {
 // sweepLocked removes expired entries and sets the next sweep for when
 // the map has doubled. Must be called with the write lock held.
 func (c *TTLCache[V]) sweepLocked() {
-	now := time.Now()
+	now := c.clock()
 	for k, v := range c.items {
 		if !v.expiresAt.IsZero() && now.After(v.expiresAt) {
 			delete(c.items, k)

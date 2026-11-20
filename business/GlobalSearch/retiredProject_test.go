@@ -15,7 +15,7 @@ import (
 // gone is dropped and its entry forgotten.
 func TestSearchDropsAnArchivedProject(t *testing.T) {
 	const live, archived, gone = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"
-	if _, ok := liveness.Checkers[openSearchStruct.PROJECT_TYPE]; !ok {
+	if _, ok := liveness.Tables[openSearchStruct.PROJECT_TYPE]; !ok {
 		t.Fatal("search does not check whether a project is archived")
 	}
 	forgotten := withChecks(t, map[string]liveness.Checker{

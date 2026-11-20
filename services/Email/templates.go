@@ -19,7 +19,8 @@ type TemplateData struct {
 	Title         string // headline above the message body
 	Subtitle      string // contextual line below the headline (e.g. "in #design")
 	// Body is the message as people wrote it, plain text: the template shows
-	// it as text (it escapes it, once) and the plain-text part as written.
+	// it as text (it escapes it, once, and keeps its lines: TextHTML) and the
+	// plain-text part as written.
 	// Never escape it before Render.
 	Body string
 	// BodyHTML is a body the server built as HTML (an invitation's lines,
@@ -80,7 +81,7 @@ const baseTemplateHTML = `<!doctype html>
                     {{end}}
                     <td valign="top">
                       <div style="font-size:13px; font-weight:600; color:#0f172a; margin-bottom:2px;">{{.ActorName | html}}</div>
-                      <div style="font-size:14px; color:#0f172a; line-height:1.55; word-break:break-word;">{{.Body}}{{.BodyHTML}}</div>
+                      <div style="font-size:14px; color:#0f172a; line-height:1.55; word-break:break-word;">{{block "body" .}}{{lines .Body}}{{.BodyHTML}}{{end}}</div>
                     </td>
                   </tr>
                 </table>
@@ -127,23 +128,41 @@ var baseTpl = template.Must(template.New("email").Funcs(template.FuncMap{
 	"html": func(s string) template.HTML {
 		return template.HTML(template.HTMLEscapeString(s))
 	},
+	// lines: text as people wrote it, escaped, its line breaks kept.
+	"lines": TextHTML,
 }).Parse(baseTemplateHTML))
+
+// textLines makes an escaped text's line breaks (each "\r\n", "\r" and
+// "\n") <br>, and its "+" the "&#43;" the template's own escaping writes.
+var textLines = strings.NewReplacer("\r\n", "<br>", "\r", "<br>", "\n", "<br>", "+", "&#43;")
+
+// TextHTML is text as people wrote it, for an email's HTML part: every
+// character escaped, so it shows as plain text, and each line a line.
+func TextHTML(s string) template.HTML {
+	return template.HTML(textLines.Replace(template.HTMLEscapeString(s)))
+}
 
 // Render returns the (HTML, plaintext) pair for a TemplateData. The plain-text
 // part is required by every modern mailbox provider for deliverability.
 func Render(data TemplateData) (string, string, error) {
-	if data.BrandName == "" {
-		data.BrandName = "OneCamp"
-	}
-	if data.CTAText == "" && data.CTAURL != "" {
-		data.CTAText = "Open in " + data.BrandName
-	}
-
+	data = data.withDefaults()
 	var buf bytes.Buffer
 	if err := baseTpl.Execute(&buf, data); err != nil {
 		return "", "", fmt.Errorf("render html: %w", err)
 	}
 	return buf.String(), renderPlainText(data), nil
+}
+
+// withDefaults is d with the brand and the button's words every email has
+// when its caller gives none. Pure.
+func (d TemplateData) withDefaults() TemplateData {
+	if d.BrandName == "" {
+		d.BrandName = "OneCamp"
+	}
+	if d.CTAText == "" && d.CTAURL != "" {
+		d.CTAText = "Open in " + d.BrandName
+	}
+	return d
 }
 
 // renderPlainText hand-builds a no-frills text/plain alternative. We don't

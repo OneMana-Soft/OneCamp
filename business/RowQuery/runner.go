@@ -50,6 +50,28 @@ func counting(ctx context.Context) bool {
 	return b
 }
 
+type heldKey struct{}
+
+// Held is what Run read of a table that its caller would read again for the
+// same window: the table's live fields, in order (business/DataTable
+// QueryRows works the window's rows out with them). Read says Run read them.
+type Held struct {
+	Read   bool
+	Fields []*model.Field
+}
+
+// WithHeld has Run keep what it read in the Held it gives.
+func WithHeld(ctx context.Context) (context.Context, *Held) {
+	h := &Held{}
+	return context.WithValue(ctx, heldKey{}, h), h
+}
+
+func hold(ctx context.Context, fields []*model.Field) {
+	if h, _ := ctx.Value(heldKey{}).(*Held); h != nil {
+		h.Read, h.Fields = true, fields
+	}
+}
+
 // MaxComputedScan is the most rows a spec reading a formula or a rollup is
 // answered over, until A4 stores their values.
 const MaxComputedScan = 10000
@@ -181,16 +203,15 @@ func (Runner) Run(ctx context.Context, who accessBusiness.Subject, spec query.Sp
 	if err != nil || !d.View {
 		return query.Result{}, ErrNotFound
 	}
-	all, err := model.ListFields(ctx, table)
+	// The table's fields, its index's state and whether a row waits for its
+	// place key, in one round trip; the fields are held for the caller,
+	// which works out the window's rows with them (WithHeld).
+	st, err := model.ReadQueryState(ctx, table)
 	if err != nil {
 		return query.Result{}, err
 	}
-	var fields []*model.Field
-	for _, f := range all {
-		if f.DeletedAt == nil {
-			fields = append(fields, f)
-		}
-	}
+	fields := st.Fields
+	hold(ctx, fields)
 	cols := columns(fields)
 	tw := whoOf(who)
 	asked := asker{user: tw.User, admin: tw.Admin, agent: tw.Agent, now: time.Now(), zone: zoneOf(ctx)}
@@ -209,10 +230,7 @@ func (Runner) Run(ctx context.Context, who accessBusiness.Subject, spec query.Sp
 	// A formula or a rollup the Computed Store keeps answers along the index
 	// too, but only a reader its gate serves (keptCols): every other reader
 	// is answered by their own read, worked out as them.
-	whole, version, err := model.CellIndexState(ctx, table)
-	if err != nil {
-		return query.Result{}, err
-	}
+	whole, version := st.Whole, st.Version
 	served := cols
 	if read := computedRead(spec, cols); whole && len(read) > 0 {
 		if kept := keptCols(ctx, tw, table, read, cols); kept != nil {
@@ -222,7 +240,7 @@ func (Runner) Run(ctx context.Context, who accessBusiness.Subject, spec query.Sp
 	if !whole || readsComputed(spec, served) || (version < sortKeysSince && sortsByKey(spec, served)) {
 		return runWorked(ctx, table, fields, cols, spec, page.After, page.At, size, asked)
 	}
-	return runSQL(ctx, table, fields, served, spec, page.After, page.At, size, asked)
+	return runSQL(ctx, table, fields, served, spec, page.After, page.At, size, asked, st.Unkeyed)
 }
 
 // sortsByKey is whether a spec sorts or groups by a text or a choice: by the
@@ -339,7 +357,7 @@ func readCursor(c query.Cursor, kind string, n int) ([]interface{}, error) {
 
 // runSQL answers a window in SQL: after a cursor, or at a place (at, a
 // jump), which reads the one query from there and never counts.
-func runSQL(ctx context.Context, table uuid.UUID, fields []*model.Field, cols map[string]*column, spec query.Spec, after query.Cursor, at int, size int, who asker) (query.Result, error) {
+func runSQL(ctx context.Context, table uuid.UUID, fields []*model.Field, cols map[string]*column, spec query.Spec, after query.Cursor, at int, size int, who asker, unkeyed bool) (query.Result, error) {
 	a := &sqlArgs{base: 1}
 	where, err := whereOf(spec.Filter, cols, who, a)
 	if err != nil {
@@ -370,10 +388,6 @@ func runSQL(ctx context.Context, table uuid.UUID, fields []*model.Field, cols ma
 		if some {
 			walks = nil
 		}
-	}
-	unkeyed, err := model.HasUnkeyedRows(ctx, table)
-	if err != nil {
-		return query.Result{}, err
 	}
 	// The set's summaries and its groups, for a first window that counts,
 	// beside it as the count is (a reader asks for them in a request of its

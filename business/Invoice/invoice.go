@@ -302,7 +302,12 @@ func notDraft(ctx context.Context, project, id uuid.UUID) error {
 }
 
 // SetStatus moves an invoice to a state: sent, paid, back to draft or sent,
-// or void. A void invoice stays void.
+// or void. Void only from sent (ADMIN-17, Stripe's rule): a paid invoice is
+// marked unpaid first, so money that arrived is never voided in one step, and
+// a draft is deleted instead. A void invoice stays void. The model's one
+// UPDATE holds the rule, so an invoice paid meanwhile can't slip through; a
+// refusal says why, from the state the invoice is in. It binds everyone who
+// may change invoices, a project's admins included.
 func SetStatus(ctx context.Context, project, id uuid.UUID, status string) (*model.Invoice, error) {
 	switch status {
 	case model.StatusDraft, model.StatusSent, model.StatusPaid, model.StatusVoid:
@@ -311,11 +316,30 @@ func SetStatus(ctx context.Context, project, id uuid.UUID, status string) (*mode
 	}
 	out, err := model.SetStatus(ctx, project, id, status)
 	if errors.Is(err, model.ErrNotFound) {
-		if inv, getErr := model.Get(ctx, project, id); getErr == nil && inv.Status == model.StatusVoid {
-			return nil, invalid("A void invoice stays void. Make a new one instead.")
+		if inv, getErr := model.Get(ctx, project, id); getErr == nil {
+			if why := refusal(inv, status); why != "" {
+				return nil, invalid("%s", why)
+			}
 		}
 	}
 	return out, err
+}
+
+// refusal is why an invoice in its state can't move to status, or "" when
+// the state allows it (then it wasn't there to move). Pure.
+func refusal(inv *model.Invoice, status string) string {
+	switch {
+	case inv.Status == model.StatusVoid:
+		return "A void invoice stays void. Make a new one instead."
+	case status != model.StatusVoid || inv.Status == model.StatusSent:
+		return ""
+	case inv.Status == model.StatusPaid:
+		return "A paid invoice is marked unpaid before it is voided."
+	case inv.FirstSentAt != nil:
+		return "This draft was sent before, so it keeps its number. Mark it sent, then void it."
+	default:
+		return "A draft is deleted rather than voided."
+	}
 }
 
 // Delete deletes a draft softly, by whom (V-78): its restore brings it back

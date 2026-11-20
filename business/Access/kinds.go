@@ -43,6 +43,36 @@ func RegisterKind(kind string, r KindRules) {
 	kinds[kind] = r
 }
 
+// HandOn makes toUserUUID the owner of a resource of a kind other than a doc,
+// the owner before keeping full access, and answers that owner's uuid (""
+// for none). A kind registers its own once (RegisterHandOn), so Recover hands
+// it on as it hands on a doc (docs C6-2; a board: business/Board, miro-32).
+type HandOn func(ctx context.Context, resUUID, toUserUUID string) (string, error)
+
+var handOns = map[string]HandOn{}
+
+// RegisterHandOn adds a kind's hand-on. A second one for a kind, or one for
+// docs, panics where it happened, as RegisterKind does.
+func RegisterHandOn(kind string, h HandOn) {
+	if kind == "" || kind == KindDoc || h == nil {
+		panic(fmt.Sprintf("access: no hand-on can be registered for the kind %q", kind))
+	}
+	kindsMu.Lock()
+	defer kindsMu.Unlock()
+	if _, taken := handOns[kind]; taken {
+		panic(fmt.Sprintf("access: the kind %q has two hand-ons", kind))
+	}
+	handOns[kind] = h
+}
+
+// handOnFor is a registered kind's hand-on.
+func handOnFor(kind string) (HandOn, bool) {
+	kindsMu.RLock()
+	defer kindsMu.RUnlock()
+	h, ok := handOns[kind]
+	return h, ok
+}
+
 // rulesFor is a registered kind's rule.
 func rulesFor(kind string) (KindRules, bool) {
 	kindsMu.RLock()

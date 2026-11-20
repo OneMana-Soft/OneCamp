@@ -9,6 +9,7 @@ import (
 	"time"
 
 	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
 )
 
@@ -53,6 +54,33 @@ func TestTaskUpdatedNamesEveryFieldThatChanged(t *testing.T) {
 	e.Actor = ""
 	if _, ok := taskUpdatedEvent(e)["updated_by_uuid"]; ok {
 		t.Error("a change nobody signed names someone")
+	}
+}
+
+// linear-24: a task's type change (business/WorkTaxonomy SetTaskType) is
+// logged as the task answer's own field, task_work_type, so a webhook is sent
+// it as any other field: the type as the answer shows it, null when the task
+// is a plain Task again. The payload keeps its shape.
+func TestATypeChangeGoesOutAsTheTaskAnswersField(t *testing.T) {
+	bug := &dgraphStruct.TaskWorkType{ID: "b-bug", Builtin: "bug", Name: "Bug", Icon: "bug"}
+	for _, c := range []struct {
+		shown *dgraphStruct.TaskWorkType
+		want  interface{}
+	}{
+		{bug, map[string]interface{}{"id": "b-bug", "builtin": "bug", "name": "Bug", "icon": "bug"}},
+		{nil, nil},
+	} {
+		diff := workFeed.TaskDiff(&dgraphStruct.DgraphTask{Uuid: "t1", WorkType: c.shown}, "task_work_type")
+		got := taskUpdatedEvent(updatedEntry(string(diff)))
+		if !reflect.DeepEqual(got["fields"], []string{"task_work_type"}) ||
+			!reflect.DeepEqual(got["changes"], map[string]interface{}{"task_work_type": c.want}) {
+			t.Errorf("a type change %s went out as fields %v, changes %v", diff, got["fields"], got["changes"])
+		}
+		for _, k := range []string{"task_id", "project_id", "sequence", "source", "changed_at", "updated_by_uuid"} {
+			if _, ok := got[k]; !ok {
+				t.Errorf("a type change's event has no %s: %v", k, got)
+			}
+		}
 	}
 }
 

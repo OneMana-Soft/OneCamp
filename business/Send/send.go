@@ -21,6 +21,7 @@ import (
 	postBusiness "github.com/akashc777/OneCamp/business/Post"
 	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
@@ -152,11 +153,16 @@ func MayPostIn(channel *dgraphStruct.DgraphChannel) *Rejection {
 // Channel is the channel the post goes to, for naming it to the person.
 func (p *ChannelPost) Channel() *dgraphStruct.DgraphChannel { return p.channel }
 
-// Commit writes the post and marks the channel read up to it for the sender.
+// Commit writes the post and marks the channel read up to it for the sender,
+// in one statement (CreatePostReadBySender); a mark that statement couldn't
+// write is written alone, as before.
 func (p *ChannelPost) Commit(ctx context.Context) (*postAdapter.OutputCreatePostForPost, error) {
-	created, err := postBusiness.CreatePost(ctx, p.in, p.user, p.mentions, p.channel)
+	created, marked, err := postBusiness.CreatePostReadBySender(ctx, p.in, p.user, p.mentions, p.channel)
 	if err != nil {
 		return nil, err
+	}
+	if marked {
+		return created, nil
 	}
 	if lerr := lastseenBusiness.CreateOrUpdateLastSeenChannel(ctx, p.user.UserPostgresInfo.Id, p.in.ChannelUUID); lerr != nil {
 		helpers.LogErrorWithContext(ctx, "Send/ChannelPost.Commit last seen err: %+v", lerr)
@@ -226,7 +232,7 @@ func PrepareDirectMessage(ctx context.Context, user *userModels.UserInfo, in *ch
 	if err != nil {
 		return nil, reject(http.StatusBadRequest, "Failed to parse toUUID in req", err)
 	}
-	to, err := userBusiness.GetDgraphUserInfoByUUID(ctx, in.ToUuid)
+	to, err := userDomain.GetDgraphRecipientByUUID(ctx, in.ToUuid)
 	if err != nil || to == nil {
 		return nil, reject(http.StatusBadRequest, "Failed to info of  toUUID in req", err)
 	}

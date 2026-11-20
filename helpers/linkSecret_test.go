@@ -3,6 +3,9 @@ package helpers
 import (
 	"bytes"
 	"encoding/base64"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 )
@@ -54,4 +57,71 @@ func TestASealedLinkSecretOpensOnlyAsTheSecretItsHashFinds(t *testing.T) {
 	if got := OpenLinkSecret(sealed, hash); got != "" {
 		t.Errorf("a seal opened under another key: %q", got)
 	}
+}
+
+// A link's secret matches only the hash it was kept as, and is compared in
+// constant time: LinkSecretMatches goes through crypto/subtle, never a plain
+// comparison, so how long a wrong guess takes says nothing of how close it
+// was.
+func TestALinkSecretMatchesOnlyItsHashInConstantTime(t *testing.T) {
+	raw, hash, err := NewLinkSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _, _ := NewLinkSecret()
+	if !LinkSecretMatches(raw, hash) || LinkSecretMatches(other, hash) || LinkSecretMatches(raw, hash[:16]) || LinkSecretMatches(raw, nil) || LinkSecretMatches("", hash) {
+		t.Fatal("a link secret matched another's hash, or not its own")
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), "linkSecret.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	constantTime, plain := false, false
+	for _, d := range file.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "LinkSecretMatches" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				if id, ok := x.X.(*ast.Ident); ok && id.Name == "subtle" && x.Sel.Name == "ConstantTimeCompare" {
+					constantTime = true
+				}
+				if id, ok := x.X.(*ast.Ident); ok && id.Name == "bytes" {
+					plain = true
+				}
+			case *ast.BinaryExpr:
+				// Two computed values compared with == or != (len aside), or
+				// a string conversion's.
+				if (x.Op == token.EQL || x.Op == token.NEQ) && (comparedCall(x.X) && comparedCall(x.Y) || conversion(x.X) || conversion(x.Y)) {
+					plain = true
+				}
+			}
+			return true
+		})
+	}
+	if !constantTime || plain {
+		t.Fatalf("LinkSecretMatches compares without crypto/subtle (constant time %v, plain comparison %v)", constantTime, plain)
+	}
+}
+
+// comparedCall is whether e is a call other than len's.
+func comparedCall(e ast.Expr) bool {
+	c, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := c.Fun.(*ast.Ident)
+	return !ok || id.Name != "len"
+}
+
+// conversion is whether e is string(...).
+func conversion(e ast.Expr) bool {
+	c, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := c.Fun.(*ast.Ident)
+	return ok && id.Name == "string"
 }

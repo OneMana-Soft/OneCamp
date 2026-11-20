@@ -8,6 +8,7 @@
 package projectaccess
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -122,13 +123,36 @@ func RequireTask(w http.ResponseWriter, r *http.Request, raw string, need workAc
 // counts theirs, with its assignee and maker) and writes the refusal when
 // they may not do need with it.
 func AllowTask(w http.ResponseWriter, r *http.Request, t *dgraphStruct.DgraphTask, need workAccess.Need) bool {
+	_, ok := allowTask(w, r, t, need)
+	return ok
+}
+
+// AllowTaskOpen is AllowTask, and the request's ctx marked with the task as
+// restricted to no one when the facts the check read say so
+// (helpers.WithOpenTasks): what the request then logs and publishes about
+// the task doesn't read its restriction again. A view (NeedView) reads no
+// facts, so marks nothing.
+func AllowTaskOpen(w http.ResponseWriter, r *http.Request, t *dgraphStruct.DgraphTask, need workAccess.Need) (context.Context, bool) {
+	f, ok := allowTask(w, r, t, need)
+	ctx := r.Context()
+	if !ok || f == nil || f.Restricted {
+		return ctx, ok
+	}
+	if id, err := uuid.Parse(t.Uuid); err == nil {
+		ctx = helpers.WithOpenTasks(ctx, id)
+	}
+	return ctx, true
+}
+
+// allowTask is AllowTask, with the facts it decided on (nil for a view).
+func allowTask(w http.ResponseWriter, r *http.Request, t *dgraphStruct.DgraphTask, need workAccess.Need) (*workAccess.TaskFacts, bool) {
 	caller := callerOf(r)
 	if t == nil || t.Uuid == "" || !taskBusiness.CanViewTask(t, caller.UserDgraphInfo.Uid) {
 		WriteTaskRefusal(w, r, taskBusiness.ErrTaskNotVisible)
-		return false
+		return nil, false
 	}
 	if need == workAccess.NeedView {
-		return true
+		return nil, true
 	}
 	s, f, err := workAccess.OfTask(r.Context(), caller.UserDgraphInfo.Uuid, caller.UserDgraphInfo.Uid, t)
 	if err == nil {
@@ -136,9 +160,9 @@ func AllowTask(w http.ResponseWriter, r *http.Request, t *dgraphStruct.DgraphTas
 	}
 	if err != nil {
 		WriteTaskRefusal(w, r, err)
-		return false
+		return nil, false
 	}
-	return true
+	return &f, true
 }
 
 // WriteTaskRefusal answers a task check that said no: a task they may not

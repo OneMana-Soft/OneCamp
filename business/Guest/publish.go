@@ -46,6 +46,11 @@ var (
 	// ErrNotPublishable is a link that can't be a web page: not a doc's, or
 	// not view-only (a published page is read-only).
 	ErrNotPublishable = errors.New("guest: only a doc's view-only link can be published")
+	// ErrNotOnTheWeb is a link with no page to take off the web (miro-33 F5):
+	// never published, or a kind that never is (a board's link). Taking it
+	// "off" would drop its password outside the link's own change. A gone
+	// link is not on the web either, so it is an ErrInvalidGrant too.
+	ErrNotOnTheWeb = fmt.Errorf("guest: that link isn't on the web: %w", ErrInvalidGrant)
 	// ErrPublishOff is a workspace that doesn't let pages be published.
 	ErrPublishOff = errors.New("guest: publishing pages is off for this workspace")
 	// ErrRoomsOff is a workspace that doesn't let its members have personal
@@ -281,15 +286,11 @@ func PublishLink(ctx context.Context, by uuid.UUID, grantID uuid.UUID, in Publis
 	case *in.Password == "":
 		p.NewUnlock = p.NewUnlock || g.PasswordHash != nil
 	default:
-		if why := SecretProblem("password", *in.Password); why != "" {
-			return nil, &PublishInvalid{why}
-		}
-		hash, err := bcrypt.GenerateFromPassword([]byte(*in.Password), bcrypt.DefaultCost)
+		hash, err := hashSecret("password", *in.Password)
 		if err != nil {
 			return nil, err
 		}
-		h := string(hash)
-		p.PasswordHash, p.NewUnlock = &h, true
+		p.PasswordHash, p.NewUnlock = hash, true
 	}
 	saved, err := publishGrant(ctx, g.Id, p)
 	if errors.Is(err, guestModel.ErrSlugTaken) {
@@ -305,14 +306,16 @@ func PublishLink(ctx context.Context, by uuid.UUID, grantID uuid.UUID, in Publis
 }
 
 // UnpublishLink takes a link's page off the web, at once: its address stops
-// answering, and its token keeps working until the link is revoked.
+// answering, and its token keeps working until the link is revoked. A link
+// that isn't on the web (no address: a board's link, say) is left as it is,
+// its password with it (ErrNotOnTheWeb).
 func UnpublishLink(ctx context.Context, grantID uuid.UUID) (*guestModel.GuestGrant, error) {
 	g, err := unpublishGrant(ctx, grantID)
 	if err != nil {
 		return nil, err
 	}
 	if g == nil {
-		return nil, ErrInvalidGrant
+		return nil, ErrNotOnTheWeb
 	}
 	return g, nil
 }

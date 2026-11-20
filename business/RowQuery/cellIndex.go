@@ -198,15 +198,43 @@ func listOf(cols map[string]*column, only []string) []*column {
 	return out
 }
 
+type fieldsReadKey struct{}
+
+// fieldsReadBy is a write's table and its live fields as the write read them.
+type fieldsReadBy struct {
+	table  uuid.UUID
+	fields []*model.Field
+}
+
+// WithFieldsRead has the cell index take a write's table's live fields as the
+// write read them, earlier in the same request, to validate the cells it
+// writes (indexChanges): the index keeps each cell as it was written. A
+// change to the fields themselves reads them again in its transaction, where
+// a type may have changed.
+func WithFieldsRead(ctx context.Context, table uuid.UUID, fields []*model.Field) context.Context {
+	return context.WithValue(ctx, fieldsReadKey{}, fieldsReadBy{table: table, fields: fields})
+}
+
+func fieldsRead(ctx context.Context, table uuid.UUID) ([]*model.Field, bool) {
+	r, ok := ctx.Value(fieldsReadKey{}).(fieldsReadBy)
+	if !ok || r.table != table {
+		return nil, false
+	}
+	return r.fields, true
+}
+
 // indexChanges keeps the index in a write's transaction: a cell from its new
 // value, a row made or brought back from what's stored, and every row's cell
 // of a field whose type or options changed. Every statement below runs in tx,
 // which ctx carries from here on.
 func indexChanges(ctx context.Context, tx *sql.Tx, cs *rowLedger.ChangeSet) error {
 	ctx = pgexec.WithTx(ctx, tx)
-	fields, err := model.LiveFields(ctx, cs.Table)
-	if err != nil {
-		return err
+	fields, ok := fieldsRead(ctx, cs.Table)
+	if !ok || cs.Kind == rowLedger.ChangeField {
+		var err error
+		if fields, err = model.LiveFields(ctx, cs.Table); err != nil {
+			return err
+		}
 	}
 	cols := indexedColumns(fields)
 	if err := keptChanges(ctx, cs); err != nil {

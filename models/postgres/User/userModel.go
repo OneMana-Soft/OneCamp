@@ -256,6 +256,13 @@ func GetUserWithAdminFlagByUserUUID(query string, userUUID uuid.UUID) (user *Use
 	return &userInfo, nil
 }
 
+// ErrNotFound is GetUserByUUID's answer when no row matches: no one has that
+// uuid (or, for a query of active people, no one active does). It matches
+// helpers.ErrNotFound.
+var ErrNotFound = helpers.NotFound("user not found")
+
+// GetUserByUUID is the person query selects by uuid, or ErrNotFound for no
+// row (never a zero person: every caller's nil or error check then holds).
 func GetUserByUUID(query string, uuid uuid.UUID) (user *User, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -276,7 +283,10 @@ func GetUserByUUID(query string, uuid uuid.UUID) (user *User, err error) {
 		&userInfo.IsBot,
 	)
 
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/GetUserByUUID Failed to get user err: %+v",
 			err)

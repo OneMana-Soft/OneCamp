@@ -7,6 +7,7 @@ package business
 
 import (
 	"fmt"
+	triageBusiness "github.com/akashc777/OneCamp/business/Triage"
 	"slices"
 	"strconv"
 	"strings"
@@ -45,6 +46,7 @@ type taskFacts struct {
 	Creator  string
 	Name     string
 	Tags     []string
+	Source   string // the door arriving work came in by (task_arrived), "" otherwise
 	Due      *time.Time
 }
 
@@ -80,6 +82,7 @@ var fieldOps = map[string][]string{
 	"name":     {"contains", "not_contains"},
 	"due":      {"is_empty", "is_set", "within_days", "overdue"},
 	"creator":  {"is", "is_not"},
+	"source":   {"is", "is_not"},
 }
 
 // valueless ops take no value.
@@ -125,6 +128,15 @@ func (c *Conditions) validate() error {
 			if !taskPriority.Is(it.Value) {
 				return fmt.Errorf("a priority is urgent, high, medium or low")
 			}
+		case "source":
+			// An import runs as bulk work, which the rules never hear
+			// (Webhook dispatch drops bulk events): a rule on it would never run.
+			if triageBusiness.Source(it.Value) == triageBusiness.FromImport {
+				return fmt.Errorf("rules don't run on imported work: choose a form, the API, an agent, GitHub or a chat")
+			}
+			if !slices.Contains(triageBusiness.Sources, triageBusiness.Source(it.Value)) {
+				return fmt.Errorf("work arrives by a form, the API, an agent, GitHub or a chat")
+			}
 		case "assignee", "creator":
 			if _, err := uuid.Parse(it.Value); err != nil {
 				return fmt.Errorf("pick a person for the %s condition", it.Field)
@@ -166,6 +178,8 @@ func (c Conditions) hold(t taskFacts, now time.Time, loc *time.Location) bool {
 // group says, and "within N days" from today to N days on.
 func (c Condition) holds(t taskFacts, now time.Time, loc *time.Location) bool {
 	switch c.Field {
+	case "source":
+		return is(c.Op, t.Source == c.Value)
 	case "priority":
 		return is(c.Op, t.Priority == c.Value)
 	case "status":

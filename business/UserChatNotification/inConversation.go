@@ -9,7 +9,7 @@ package business
 // in the threads of what they wrote there and the reactions to it: by push,
 // desktop notice, email and Activity.
 //
-// So each read of who hears (MembersOnAll, GetLevelsInConversation, which
+// So each read of who hears (Members, GetLevelsInConversation, which
 // business/Notify plans with) keeps only those in the conversation when they are
 // told (InConversationNow), whatever settings are kept. Leave takes the
 // leaver's setting away, and the start-up repair takes away the settings of
@@ -18,10 +18,10 @@ package business
 import (
 	"context"
 	"errors"
-	"strings"
 
 	conversationDomain "github.com/akashc777/OneCamp/domain/Conversation"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
 // groupPeople is a group's people as the graph has them: a seam for tests.
@@ -38,30 +38,16 @@ func InConversationNow(ctx context.Context, grpID string, ids []string) ([]strin
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	in := map[string]bool{}
-	if helpers.IsDMGroupingID(grpID) {
-		for _, p := range strings.Fields(grpID) {
-			in[strings.ToLower(p)] = true
-		}
-	} else {
-		people, err := groupPeople(ctx, grpID)
+	var people []*dgraphStruct.DgraphUser
+	if !helpers.IsDMGroupingID(grpID) {
+		var err error
+		people, err = groupPeople(ctx, grpID)
 		if errors.Is(err, conversationDomain.ErrNoConversation) {
 			return nil, nil
 		}
 		if err != nil {
 			return nil, err
 		}
-		for _, p := range people {
-			if p != nil && p.Uuid != "" && !helpers.IsSoftDeleted(p.DeletedAt) {
-				in[strings.ToLower(p.Uuid)] = true
-			}
-		}
 	}
-	var kept []string
-	for _, id := range ids {
-		if in[strings.ToLower(id)] {
-			kept = append(kept, id)
-		}
-	}
-	return kept, nil
+	return conversationDomain.InNow(grpID, people, ids), nil
 }

@@ -109,7 +109,7 @@ func normalizeSuggestedType(t string) string {
 // is treated as "needs clarification" (Ready=false); when there are steps it is
 // approved-ready and questions are dropped.
 func parseSidekickPlan(raw string) (*BoardSidekickPlan, error) {
-	js := extractJSONObject(raw)
+	js := helpers.ExtractJSON(raw, '{')
 	if js == "" {
 		return nil, fmt.Errorf("no JSON object found")
 	}

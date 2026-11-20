@@ -57,6 +57,9 @@ func tagState(ctx context.Context, project uuid.UUID, t Tag) (Shipped, bool, err
 	return Shipped{Release: r, Since: since, Again: again}, found, nil
 }
 
+// ProjectLockKey is the project's releases lock.
+func ProjectLockKey(project uuid.UUID) string { return "releases:" + project.String() }
+
 // ShipTag makes or ships project's release for tag, under the project's
 // releases lock so two deliveries of one tag can't make two: the live
 // release already shipped as the tag, else the live one named it that no
@@ -66,7 +69,7 @@ func tagState(ctx context.Context, project uuid.UUID, t Tag) (Shipped, bool, err
 func ShipTag(ctx context.Context, project uuid.UUID, t Tag, by uuid.UUID) (Shipped, error) {
 	var out Shipped
 	err := pgexec.InTx(ctx, func(ctx context.Context) error {
-		if _, err := pgexec.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "releases:"+project.String()); err != nil {
+		if err := pgexec.LockXact(ctx, ProjectLockKey(project)); err != nil {
 			return err
 		}
 		s, found, err := tagState(ctx, project, t)

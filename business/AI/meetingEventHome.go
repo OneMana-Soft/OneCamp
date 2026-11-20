@@ -120,6 +120,22 @@ func (h recapHome) recapChat(delivered bool) string {
 	return h.conv.ID
 }
 
+// inChat is who had the recap in the event's conversation (recapChat names
+// it, "" for none): the members that DM or group is of, whom the calendar
+// then tells nothing more; none for a recap that went nowhere.
+func (h recapHome) inChat(recapChat string) []uuid.UUID {
+	if recapChat == "" {
+		return nil
+	}
+	ids := make([]uuid.UUID, 0, len(h.members))
+	for _, u := range h.members {
+		if id, err := uuid.Parse(u.Uuid); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // recordCallArtefacts notes on the call's transcript node what else it made
 // (a seam for tests).
 var recordCallArtefacts = recordingDomain.RecordCallArtefacts

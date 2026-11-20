@@ -4,8 +4,10 @@
 // resolution target in a project's business hours, and a claimed sweep moves
 // each task's timer between on track, at risk, breached and met.
 //
-// DAY 0. No rule exists, so every task is on no timer: StateOf answers None.
-// Nothing calls Timers yet.
+// linear-24 H1: a project's admins turn timers on (projects.sla) and set its
+// rules and work week (settings.go); the Work Change Log's sink keeps each
+// task's timer (sink.go, timer.go); task reads carry where it stands for the
+// project's members (lay.go). Alerts and the sweep that sends them are H2.
 package business
 
 import (
@@ -33,10 +35,21 @@ type Timers interface {
 }
 
 // SLAs is the timers everything asks.
-var SLAs Timers = noTimers{}
+var SLAs Timers = kept{}
 
-type noTimers struct{}
+type kept struct{}
 
-func (noTimers) StateOf(context.Context, uuid.UUID) (State, *time.Time, error) {
-	return None, nil, nil
+// StateOf is where the task's kept timer stands now, None while its
+// project's SLAs are off. It answers the project, not a reader: a caller
+// showing it to someone checks they are one of the project's members.
+func (kept) StateOf(ctx context.Context, taskID uuid.UUID) (State, *time.Time, error) {
+	t, found, err := timerOf(ctx, taskID)
+	if err != nil || !found || !slaOn(ctx, t.ProjectID) {
+		return None, nil, err
+	}
+	s := StateAt(t, clock())
+	if s == None {
+		return None, nil, nil
+	}
+	return s, t.DueAt, nil
 }

@@ -27,6 +27,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/AI"
 	codeagent "github.com/akashc777/OneCamp/business/CodeAgent"
 	codepr "github.com/akashc777/OneCamp/business/CodePR"
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	"github.com/akashc777/OneCamp/helpers"
 	aiModels "github.com/akashc777/OneCamp/models/postgres/AI"
 	"github.com/akashc777/OneCamp/models/redis/registry"
@@ -69,7 +70,11 @@ var ErrProviderKeyUnreadable = aiModels.ErrProviderKeyUnreadable
 // minute after the fix would read as the fix not having worked.
 func reloadAI(ctx context.Context) error {
 	ForgetProviderProbe()
-	return ai.ReloadAIService(ctx)
+	err := ai.ReloadAIService(ctx)
+	// AI, or its model, may have come or gone: every call going on is told
+	// again whether its summary is made (V-951).
+	liveKitBusiness.RefreshSummaries(ctx)
+	return err
 }
 
 func buildProviderClient(p *aiModels.AIProvider) (*providerClient, error) {
@@ -988,9 +993,14 @@ func SetPIICustomPatterns(ctx context.Context, patterns string) error {
 }
 
 // SetMeetingRecapEnabled toggles the post-call recap ambient agent. No
-// service reload needed — the agent reads the setting live on each call.
+// service reload needed — the agent reads the setting live on each call. Every
+// call going on is told whether its summary is made now (V-951).
 func SetMeetingRecapEnabled(ctx context.Context, enabled bool) error {
-	return aiModels.SetMeetingRecapEnabled(ctx, enabled)
+	if err := aiModels.SetMeetingRecapEnabled(ctx, enabled); err != nil {
+		return err
+	}
+	liveKitBusiness.RefreshSummaries(ctx)
+	return nil
 }
 
 // SetMeetingNotesDocEnabled toggles writing the recap and transcript into a

@@ -208,7 +208,14 @@ func RemoveParticipantFromDgraphEvent(ctx context.Context, eventUid, participant
 	return nil
 }
 
+// eventRead is told of each GetDgraphEventInfoByUUID: nil but in the
+// integration build's count of a guest's move's reads.
+var eventRead func()
+
 func GetDgraphEventInfoByUUID(ctx context.Context, eventUuid string) (*dgraphStruct.DgraphEvent, error) {
+	if eventRead != nil {
+		eventRead()
+	}
 	variables := make(map[string]string)
 	variables["$id"] = eventUuid
 	query := `query EventInfo($id: string){

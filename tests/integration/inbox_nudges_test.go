@@ -201,7 +201,7 @@ func TestTheInboxBadgeCountsUrgentNudgesByTheOneRule(t *testing.T) {
 	// came back after every pass.
 	t.Run("an engine pass over the same overdue item raises nothing", func(t *testing.T) {
 		before := raisedAt(t, fresh)
-		if _, err := nudgeModels.UpsertMany(ctx, owner, []nudgeModels.UpsertInput{{
+		if _, err := nudgeModels.UpsertMany(ctx, []nudgeModels.UpsertInput{{
 			UserID: owner, Kind: nudgeModels.KindOverdueCommitment, Title: "Overdue commitment",
 			Body: "You committed to: memory:fresh (was due Jun 11).", SourceType: "memory", Priority: 1, DedupKey: "memory:fresh",
 		}}); err != nil {
@@ -220,7 +220,7 @@ func TestTheInboxBadgeCountsUrgentNudgesByTheOneRule(t *testing.T) {
 			t.Fatal(err)
 		}
 		time.Sleep(5 * time.Millisecond)
-		up, err := nudgeModels.UpsertMany(ctx, owner, []nudgeModels.UpsertInput{{
+		up, err := nudgeModels.UpsertMany(ctx, []nudgeModels.UpsertInput{{
 			UserID: owner, Kind: nudgeModels.KindOverdueCommitment, Title: "Overdue commitment",
 			Body: "You committed to: memory:old.", SourceType: "memory", Priority: 1, DedupKey: "memory:old",
 		}})

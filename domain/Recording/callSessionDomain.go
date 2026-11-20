@@ -192,11 +192,12 @@ func FindCallSessionNode(ctx context.Context, key string) (uid string, linked bo
 }
 
 // AttachTranscriptLine adds a line to the recording or call session with this
-// key, if and only if it exists, and answers whether it did. It never makes a
+// key, if and only if it exists, and answers the line's uid ("" when there
+// is no such home: nothing was added). It never makes a
 // node: a line for a key with none used to make one, holding only the key and
 // the line, linked to no conversation, which nobody could see or delete and
 // retention never reached.
-func AttachTranscriptLine(ctx context.Context, key string, line *dgraphStruct.DgraphTranscript) (bool, error) {
+func AttachTranscriptLine(ctx context.Context, key string, line *dgraphStruct.DgraphTranscript) (string, error) {
 	query := `query Recording($key: string) {
 		recording as var(func: eq(recording_egress_id, $key)) @filter(has(recording_stared_at))
 	}`

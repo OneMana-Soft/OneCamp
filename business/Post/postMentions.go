@@ -6,6 +6,7 @@ import (
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	notifyBusiness "github.com/akashc777/OneCamp/business/Notify"
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
@@ -31,24 +32,34 @@ func tellPostMentionsAdded(ctx context.Context, actor *dgraphStruct.DgraphUser, 
 		if names, err := channelDomain.GetChannelNamesByUUIDs(ctx, []string{channelID}); err == nil && names[channelID] != "" {
 			where = "#" + names[channelID]
 		}
-		data := map[string]string{"post_id": postUUID}
-		push := &notificationBusiness.Push{Type: firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHANNEL, ID: channelID, Thread: postUUID}
-		if commentUUID != "" {
-			data["comment_uuid"] = commentUUID
-			push.Type = firebaseInit.FIREBASE_PUSH_DATA_TYPE_POST_COMMENT
-		}
-		notifyBusiness.TellAddedMentions(ctx, notifyBusiness.Place{Kind: notifyBusiness.PlaceChannel, ID: channelID}, notificationBusiness.Notice{
-			Kind:          notificationBusiness.MessageMentioned,
-			ResourceKind:  channelBusiness.NoticeKind,
-			ResourceUUID:  channelID,
-			ResourceTitle: where,
-			Actor:         actor,
-			Data:          data,
-			Title:         actor.DisplayName() + " mentioned you in " + where,
-			Body:          helpers.HTMLToPlainText(html),
-			Path:          "/app/channel/" + channelID + "/" + postUUID,
-			Email:         notificationBusiness.EventChannelMention,
-			Push:          push,
-		}, s)
+		notifyBusiness.TellAddedMentions(ctx, notifyBusiness.Place{Kind: notifyBusiness.PlaceChannel, ID: channelID}, postMentionNotice(actor, channelID, where, postUUID, commentUUID, html), s)
 	})
+}
+
+// postMentionNotice is how a mention an edit adds to a channel's message (or
+// to a reply in its thread, commentUUID) reads, where being the channel's
+// name as told ("#launch", or "a channel"). Pure.
+func postMentionNotice(actor *dgraphStruct.DgraphUser, channelID, where, postUUID, commentUUID, html string) notificationBusiness.Notice {
+	data := map[string]string{"post_id": postUUID}
+	push := &notificationBusiness.Push{Type: firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHANNEL, ID: channelID, Thread: postUUID}
+	if commentUUID != "" {
+		data["comment_uuid"] = commentUUID
+		push.Type = firebaseInit.FIREBASE_PUSH_DATA_TYPE_POST_COMMENT
+	}
+	return notificationBusiness.Notice{
+		Kind:          notificationBusiness.MessageMentioned,
+		ResourceKind:  channelBusiness.NoticeKind,
+		ResourceUUID:  channelID,
+		ResourceTitle: where,
+		Actor:         actor,
+		Data:          data,
+		Title:         actor.DisplayName() + " mentioned you in " + where,
+		Body:          helpers.HTMLToPlainText(html),
+		Path:          "/app/channel/" + channelID + "/" + postUUID,
+		Email:         notificationBusiness.EventChannelMention,
+		Push:          push,
+		// Its email is asked again at the send: the post in its channel, and
+		// the reply when there is one, as someone it names.
+		About: &notificationBusiness.About{Kind: notificationBusiness.AboutChannel, Item: postUUID, Place: channelID, Reply: commentUUID, Heard: notifylevel.Named},
+	}
 }

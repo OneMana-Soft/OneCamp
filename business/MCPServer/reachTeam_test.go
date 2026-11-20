@@ -74,10 +74,12 @@ func TestDeletedTeamIsRefusedOnBothCreatePaths(t *testing.T) {
 
 // Making a project in a team is the workspace's "Who can make projects"
 // (workAccess.CanMakeProjects): the team's admins, or everyone in it, and a token
-// as one of its members. It is the rule the app's CreateProject and the agent's
-// executeCreateProject ask, so MCP asks it too, or the three drift about who may
-// create work in a team (MCP once refused every token and asked everyone else to
-// be an admin where the team's members may). Seeing a team decides no write.
+// as one of its members. The app's CreateProject, the agent's
+// executeCreateProject and a table template's install ask it through
+// projectBusiness.MayMakeProjectIn (the install through its seam), so MCP asks it
+// too, or they drift about who may create work in a team (MCP once refused every
+// token and asked everyone else to be an admin where the team's members may).
+// Seeing a team decides no write.
 func TestMakingAProjectInATeamAsksTheOneRule(t *testing.T) {
 	branch := teamBranch(t)
 
@@ -92,14 +94,24 @@ func TestMakingAProjectInATeamAsksTheOneRule(t *testing.T) {
 		t.Error("the write branch does not ask workAccess.CanMakeProjects, so MCP decides who " +
 			"makes projects in a team its own way")
 	}
-	for _, path := range []string{"../../business/AI/projectAgent.go", "../../controllers/Project/projectController.go"} {
-		raw, err := os.ReadFile(path)
+	for _, c := range []struct {
+		path  string
+		wants []string
+	}{
+		{"../../controllers/Project/projectController.go", []string{"MayMakeProjectIn("}},
+		{"../../business/AI/projectAgent.go", []string{"MayMakeProjectIn("}},
+		{"../../business/Marketplace/around.go", []string{"= projectBusiness.MayMakeProjectIn", "mayMakeProjectIn("}},
+		{"../../business/Project/mayMakeIn.go", []string{"workAccess.CanMakeProjects("}},
+	} {
+		raw, err := os.ReadFile(c.path)
 		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
+			t.Fatalf("read %s: %v", c.path, err)
 		}
 		code := regexp.MustCompile(`//[^\n]*`).ReplaceAllString(string(raw), " ")
-		if !strings.Contains(code, "workAccess.CanMakeProjects(") {
-			t.Errorf("%s no longer asks workAccess.CanMakeProjects: its rule and MCP's would drift", path)
+		for _, want := range c.wants {
+			if !strings.Contains(code, want) {
+				t.Errorf("%s no longer has %q: who makes projects there and MCP's rule would drift", c.path, want)
+			}
 		}
 	}
 }

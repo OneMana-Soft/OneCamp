@@ -17,6 +17,7 @@ func everyEmail() *prefModels.UserNotificationPreference {
 		EmailEnabled: true, EmailMentions: true, EmailDMs: true, EmailTaskAssigned: true,
 		EmailTaskStatus: true, EmailComments: true, EmailCalls: true, EmailChannelInvites: true,
 		EmailCalendarInvites: true, EmailCalendarChanges: true, EmailCalendarAnswers: true,
+		EmailCalendarRecaps: true,
 	}
 }
 
@@ -30,6 +31,8 @@ func TestEachCalendarEmailHasItsOwnSwitch(t *testing.T) {
 		{EventCalendarUpdated, func(p *prefModels.UserNotificationPreference) *bool { return &p.EmailCalendarChanges }},
 		{EventCalendarCancelled, func(p *prefModels.UserNotificationPreference) *bool { return &p.EmailCalendarChanges }},
 		{EventCalendarAnswered, func(p *prefModels.UserNotificationPreference) *bool { return &p.EmailCalendarAnswers }},
+		// The recap of an event's call (gcal-new-event-notes, 594).
+		{EventCalendarRecap, func(p *prefModels.UserNotificationPreference) *bool { return &p.EmailCalendarRecaps }},
 	}
 	for _, c := range cases {
 		// Off, it isn't sent though every other email is on.

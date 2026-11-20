@@ -420,14 +420,17 @@ func TestA1WorkAccessThroughTheHandlers(t *testing.T) {
 		// A workspace that keeps tasks with its admins has nothing to tell.
 		wes := w.account("wes")
 		by := policyBusiness.Changer{UserID: wes.UserPostgresInfo.Id, Email: wes.UserPostgresInfo.EmailID}
+		// The switch is the workspace's: put back when this ends, failed or not.
+		t.Cleanup(func() {
+			if _, err := policyBusiness.Admin.Set(ctx, policyBusiness.ProjectsEditWho.Key, json.RawMessage(`"members"`), by); err != nil {
+				t.Errorf("put the workspace's switch back: %v", err)
+			}
+		})
 		if _, err := policyBusiness.Admin.Set(ctx, policyBusiness.ProjectsEditWho.Key, json.RawMessage(`"admins"`), by); err != nil {
 			t.Fatal(err)
 		}
 		if got := notices("fay"); strings.Contains(got, key) {
 			t.Errorf("admins only across the workspace, still: %s", got)
-		}
-		if _, err := policyBusiness.Admin.Set(ctx, policyBusiness.ProjectsEditWho.Key, json.RawMessage(`"members"`), by); err != nil {
-			t.Fatal(err)
 		}
 	})
 

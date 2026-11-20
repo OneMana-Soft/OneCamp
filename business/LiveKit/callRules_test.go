@@ -76,6 +76,22 @@ func TestParseRoomMeta(t *testing.T) {
 	}
 }
 
+// What a room has on, as a consent record says it: the recording with its
+// egress only while one runs (a stopped one's leftover keys say nothing), and
+// the captions switch as the room has it.
+func TestOnNowOf(t *testing.T) {
+	on := onNowOf(`{"isRecording":true,"recordingStartedBy":"Sam","egressID":"EG_1","transcription":{"on":true,"by":"Maya","since":5,"where":"server","kept":true}}`)
+	if !on.Recording.On || on.Recording.By != "Sam" || on.Egress != "EG_1" || !on.Transcription.On || on.Transcription.Since != 5 || !on.Transcription.Kept {
+		t.Errorf("read %+v", on)
+	}
+	if off := onNowOf(`{"isRecording":false,"recordingStartedBy":"Sam","egressID":"EG_1"}`); off.Recording.On || off.Recording.By != "" || off.Egress != "" || off.Transcription.On {
+		t.Errorf("a stopped recording read as on: %+v", off)
+	}
+	if none := onNowOf("not json"); none.Recording.On || none.Transcription.On {
+		t.Errorf("unreadable metadata switched something on: %+v", none)
+	}
+}
+
 // CALL-BUG-3. The boot repair ends a linked transcript whose call is long over
 // (so it is listed, deletable and under retention), reports one linked to
 // nothing once its call is long over (and never deletes it), and leaves
@@ -234,6 +250,27 @@ func TestTheSwitchNeedsTheWorkspaceAndThePerson(t *testing.T) {
 	}
 	if _, err := SetTranscription(context.Background(), "no-such-room", "0x1", "Maya", true); !errors.Is(err, ErrNotInCall) {
 		t.Errorf("no call: got %v", err)
+	}
+}
+
+// zoom-09 C2: server mode with no transcriber running turns nothing on, and
+// says why, rather than a switch that shows on while nothing hears the call
+// (and nothing falls through to a browser or a cloud). Turning it off is
+// never refused for it.
+func TestTheSwitchStaysOffWithoutTheTranscriber(t *testing.T) {
+	const room = "4f0c2a1e-3b7d-4c55-9a51-0d8b1f6a2c33"
+	fakeLiveKit(t, room, "RM_one", "0x1")
+	t.Setenv("TRANSCRIPTION_MODE", "backend")
+	t.Setenv("STT_PROVIDER", "local")
+	if _, err := SetTranscription(context.Background(), room, "0x1", "Maya", true); !errors.Is(err, ErrTranscriberDown) {
+		t.Errorf("server mode, no transcriber: got %v, want ErrTranscriberDown", err)
+	}
+	if _, err := SetTranscription(context.Background(), room, "0x1", "Maya", false); errors.Is(err, ErrTranscriberDown) {
+		t.Errorf("turning it off was refused: %v", err)
+	}
+	t.Setenv("TRANSCRIPTION_MODE", "frontend")
+	if _, err := SetTranscription(context.Background(), room, "0x1", "Maya", true); errors.Is(err, ErrTranscriberDown) {
+		t.Errorf("the browser mode needs no server transcriber: %v", err)
 	}
 }
 

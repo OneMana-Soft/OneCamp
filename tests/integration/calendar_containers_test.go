@@ -147,7 +147,7 @@ func TestCalendarContainers(t *testing.T) {
 	if c := byID[samPersonal]; c.Kind != "personal" || c.OwnerID == nil || *c.OwnerID != sam || c.ContainerKind != "" {
 		t.Fatalf("sam's own: %+v", c)
 	}
-	projects, err := models.ContainerCalendars(ctx, "project", 100)
+	projects, err := models.ContainerCalendars(ctx, []string{"project"}, 100)
 	must(err)
 	seen := map[uuid.UUID]bool{}
 	for _, c := range projects {

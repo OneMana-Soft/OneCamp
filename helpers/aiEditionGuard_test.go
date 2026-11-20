@@ -70,6 +70,7 @@ var aiEditionBoundary = map[string]bool{
 	"business/Channel":      true,
 	"business/Chat":         true,
 	"business/Command":      true,
+	"business/GlobalSearch": true, // zoom-13: an agent run's id (AgentBudgetID) bounds transcript search
 	"business/Comment":      true,
 	"business/Conversation": true, // copies are embedded as their originals are; aistrip carves the calls
 	"business/DataTable":    true,

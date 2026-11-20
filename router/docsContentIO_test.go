@@ -25,7 +25,17 @@ type exportOff struct{}
 
 func (exportOff) Bool(_ context.Context, p policyBusiness.BoolPolicy) bool { return false }
 func (exportOff) Int(_ context.Context, p policyBusiness.IntPolicy) int    { return p.Default }
-func (exportOff) PrimeScopes(context.Context, string, []string)            {}
+func (exportOff) ObjectIn(context.Context, policyBusiness.ObjectPolicy, policyBusiness.Scope, any) (bool, error) {
+	return false, nil
+}
+func (exportOff) PrimeScopes(context.Context, string, []string) {}
+func (e exportOff) BoolsIn(ctx context.Context, p policyBusiness.BoolPolicy, _ string, ids []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, id := range ids {
+		out[id] = e.Bool(ctx, p)
+	}
+	return out, nil
+}
 func (exportOff) List(_ context.Context, p policyBusiness.ListPolicy) []string {
 	return p.Default
 }

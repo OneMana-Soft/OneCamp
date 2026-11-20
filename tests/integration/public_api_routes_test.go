@@ -169,6 +169,8 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	// One case per route, in an order where each has what it needs.
 	var taskID, docID, rowID, spareID, fieldID, viewID, threadID, commentID, madeID, eventID string
 	var eventSequence any // the made event's sequence, which a change names
+	// A call recording's key there isn't (calls_recording_oracle_test.go's).
+	noRecording := "EG_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12] + "_none"
 	type step struct {
 		route string // "METHOD /pattern" as the router has it
 		run   func() (int, map[string]any)
@@ -353,6 +355,16 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 			return call("POST", "/v1/docs/"+docID+"/append", map[string]any{"markdown": "Shipped at 9."})
 		}},
 		{"GET /v1/docs", func() (int, map[string]any) { return call("GET", "/v1/docs?scope=mine", nil) }},
+		// A recording's transcript is read and corrected only by someone in
+		// its call (zoom-05 Head A, V-1126). The token's member is in none:
+		// both answer as for a recording there isn't (missingRecording).
+		{"GET /v1/calls/recordings/{key}/transcript", func() (int, map[string]any) {
+			return call("GET", "/v1/calls/recordings/"+noRecording+"/transcript?format=txt", nil)
+		}},
+		{"PATCH /v1/calls/recordings/{key}/transcript/lines/{line_uid}", func() (int, map[string]any) {
+			return call("PATCH", "/v1/calls/recordings/"+noRecording+"/transcript/lines/0x1",
+				map[string]any{"text": "other words", "was": "words"})
+		}},
 		{"POST /v1/mcp", func() (int, map[string]any) {
 			return call("POST", "/v1/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize",
 				"params": map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "ci", "version": "1"}}})
@@ -377,6 +389,13 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	// 501 and says why. It is the one route that may; the six that did by
 	// accident are the bug this test is for.
 	aiBuilt := helpers.FeatureRegistered(helpers.FeatureNameAI)
+	// The recording routes' answer to a member in none of its call's places:
+	// the 404 of a recording there isn't, the same as an outsider's to a real
+	// one, so a key can't be probed.
+	missingRecording := map[string]string{
+		"GET /v1/calls/recordings/{key}/transcript":                    "There's no transcript here.",
+		"PATCH /v1/calls/recordings/{key}/transcript/lines/{line_uid}": "That line isn't in this transcript.",
+	}
 	covered := map[string]bool{}
 	for _, s := range steps {
 		covered[s.route] = true
@@ -387,6 +406,12 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 		if !aiBuilt && s.route == "POST /v1/mcp" {
 			if code != http.StatusNotImplemented {
 				t.Errorf("%s answered %d on a build without AI, want its 501: %v", s.route, code, out)
+			}
+			continue
+		}
+		if want, ok := missingRecording[s.route]; ok {
+			if code != http.StatusNotFound || out["msg"] != want {
+				t.Errorf("%s answered %d %v to a member in no call, want the missing recording's 404 %q", s.route, code, out, want)
 			}
 			continue
 		}

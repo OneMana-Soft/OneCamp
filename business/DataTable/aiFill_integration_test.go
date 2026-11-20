@@ -194,7 +194,11 @@ func (s *fillScene) autofillRow(i int) {
 	if err != nil || row == nil {
 		s.t.Fatal(err)
 	}
-	AutofillRowOnWrite(s.w.ctx, s.tb, row, map[string]bool{s.notes.Id.String(): true}, s.w.me)
+	fields, err := model.ListFields(s.w.ctx, s.tb.Id)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	AutofillRowOnWrite(s.w.ctx, s.tb, fields, row, map[string]bool{s.notes.Id.String(): true}, s.w.me)
 }
 
 // turn runs the first turn queued, as the outbox's sink does.

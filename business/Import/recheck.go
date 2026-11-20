@@ -729,6 +729,9 @@ func (r *recheck) page(ctx context.Context, u *recheckUnit, page []importModels.
 	if err != nil {
 		return err
 	}
+	// The page's hand-overs go onto their AI entries in one write.
+	ctx, writeHandOvers := taskBusiness.HandOvers(ctx)
+	defer writeHandOvers(ctx)
 	for _, t := range page {
 		if err := r.task(ctx, u, t, got[t.SourceID], matched, restrictions[t.TaskID], comments[t.SourceID]); err != nil {
 			helpers.LogErrorWithContext(ctx, "Re-check of import %s: task %s: %v", r.job.Id, t.TaskID, err)
@@ -1278,6 +1281,9 @@ func undoRecheck(ctx context.Context, importID, by uuid.UUID) (done RecheckUndon
 			err = rerr
 		}
 	}()
+	// What is put back goes onto the tasks' AI entries in one write.
+	ctx, writeHandOvers := taskBusiness.HandOvers(ctx)
+	defer writeHandOvers(ctx)
 	for i := range changes {
 		ch := &changes[i]
 		if now.Sub(ch.CreatedAt) > UndoWindow {

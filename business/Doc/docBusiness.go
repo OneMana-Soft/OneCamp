@@ -22,6 +22,7 @@ import (
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 
+	"github.com/akashc777/OneCamp/business/Access/level"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	"github.com/akashc777/OneCamp/helpers"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
@@ -350,37 +351,9 @@ func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermi
 	sharedBefore, beforeErr := domain.GetDocPermissions(ctx, input.DocId)
 	asked := input
 
-	// 2. Enforce Single Role Policy (Auto-remove from other roles)
-	// Helpers to manage lists
-	ensureUnique := func(slice []string) []string {
-		keys := make(map[string]bool)
-		list := []string{}
-		for _, entry := range slice {
-			if _, value := keys[entry]; !value {
-				keys[entry] = true
-				list = append(list, entry)
-			}
-		}
-		return list
-	}
-
-	if len(input.AddEditors) > 0 {
-		input.RemoveViewers = append(input.RemoveViewers, input.AddEditors...)
-		input.RemoveCommenters = append(input.RemoveCommenters, input.AddEditors...)
-	}
-	if len(input.AddViewers) > 0 {
-		input.RemoveEditors = append(input.RemoveEditors, input.AddViewers...)
-		input.RemoveCommenters = append(input.RemoveCommenters, input.AddViewers...)
-	}
-	if len(input.AddCommenters) > 0 {
-		input.RemoveEditors = append(input.RemoveEditors, input.AddCommenters...)
-		input.RemoveViewers = append(input.RemoveViewers, input.AddCommenters...)
-	}
-
-	// Clean up duplicates (optional but good for Dgraph cleanliness)
-	input.RemoveEditors = ensureUnique(input.RemoveEditors)
-	input.RemoveViewers = ensureUnique(input.RemoveViewers)
-	input.RemoveCommenters = ensureUnique(input.RemoveCommenters)
+	// 2. One role each: whoever is added to a role is taken off the others.
+	input.RemoveEditors, input.RemoveCommenters, input.RemoveViewers = level.OneRoleEach(input.AddEditors, input.AddCommenters, input.AddViewers,
+		input.RemoveEditors, input.RemoveCommenters, input.RemoveViewers)
 
 	// A change taking anyone's role away, or lowering it, is made only once its
 	// audit row is written (no record, no action), so it needs who held which

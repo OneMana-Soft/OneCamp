@@ -54,15 +54,31 @@ func Schedules(ctx context.Context) ([]Schedule, error) {
 }
 
 // SetSchedule writes a project's schedule, replacing the one it had.
+// It is ErrParallel for a project whose cycles run side by side, checked
+// under the project's cycles lock, as SetParallel checks the other way.
 func SetSchedule(ctx context.Context, s Schedule) (*Schedule, error) {
-	got, _, err := pgexec.QueryOne(ctx, `
+	var got Schedule
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		if err := lockProject(ctx, s.ProjectUUID); err != nil {
+			return err
+		}
+		parallel, err := Parallel(ctx, s.ProjectUUID)
+		if err != nil {
+			return err
+		}
+		if parallel {
+			return ErrParallel
+		}
+		got, _, err = pgexec.QueryOne(ctx, `
 		INSERT INTO cycle_schedules (project_uuid, weeks, cooldown_weeks, upcoming, roll_over, add_started, anchor, set_by)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (project_uuid) DO UPDATE SET weeks = EXCLUDED.weeks, cooldown_weeks = EXCLUDED.cooldown_weeks,
 			upcoming = EXCLUDED.upcoming, roll_over = EXCLUDED.roll_over, add_started = EXCLUDED.add_started,
 			anchor = EXCLUDED.anchor, set_by = EXCLUDED.set_by, updated_at = NOW()
 		RETURNING project_uuid, weeks, cooldown_weeks, upcoming, roll_over, add_started, anchor, set_by, updated_at`,
-		scanSchedule, s.ProjectUUID, s.Weeks, s.CooldownWeeks, s.Upcoming, s.RollOver, s.AddStarted, s.Anchor, s.SetBy)
+			scanSchedule, s.ProjectUUID, s.Weeks, s.CooldownWeeks, s.Upcoming, s.RollOver, s.AddStarted, s.Anchor, s.SetBy)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -94,10 +110,14 @@ func ListMany(ctx context.Context, projects []uuid.UUID) (map[uuid.UUID][]Cycle,
 }
 
 // overlapsAny is whether any of the windows shares days with a cycle the project has.
+// Only CreateMany reaches it, and its callers (the scheduler and imports into
+// new projects) never meet a project whose cycles run side by side (a schedule
+// and parallel cycles refuse each other), so its oneAtATime never lets an
+// overlap through today; it stays so every overlap check reads one rule.
 func overlapsAny(ctx context.Context, project uuid.UUID, starts, ends []time.Time) (bool, error) {
 	return pgexec.Scalar[bool](ctx, `SELECT EXISTS (
 		SELECT 1 FROM project_cycles c, unnest($2::timestamptz[], $3::timestamptz[]) AS w(s, e)
-		WHERE c.project_uuid = $1 AND c.starts_at < w.e AND c.ends_at > w.s AND `+softDelete.Live("c")+`)`, project, pq.Array(starts), pq.Array(ends))
+		WHERE c.project_uuid = $1 AND c.starts_at < w.e AND c.ends_at > w.s AND `+softDelete.Live("c")+` AND `+oneAtATime("c")+`)`, project, pq.Array(starts), pq.Array(ends))
 }
 
 // Window is a cycle to make: when it starts and ends. One from an import

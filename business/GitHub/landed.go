@@ -60,7 +60,7 @@ func RecordLanded(ctx context.Context, task, project uuid.UUID, l Landed) error 
 	}
 	base := "https://github.com/" + l.Repo
 	prURL, commitURL := fmt.Sprintf("%s/pull/%d", base, l.Number), base+"/commit/"+l.SHA
-	const review = "APPROVED" // as a review delivery says it, upper-cased
+	const review = githubPRReviewDomain.Approved // as a review delivery says it, upper-cased
 
 	var errs []error
 	if err := taskDomain.SetGitHubPRFieldsOnTask(ctx, task, l.Number, prURL, l.Branch); err != nil {
@@ -69,7 +69,7 @@ func RecordLanded(ctx context.Context, task, project uuid.UUID, l Landed) error 
 	if err := taskDomain.UpdateTaskPRState(ctx, task, "merged", l.Checks, "", boolPtr(false)); err != nil {
 		errs = append(errs, fmt.Errorf("the pull request's state: %w", err))
 	}
-	if err := githubPRReviewDomain.UpsertGitHubPRReview(ctx, task, l.Reviewer, "", "", review, time.Now()); err != nil {
+	if err := githubPRReviewDomain.RecordGitHubPRReview(ctx, task, prURL, githubPRReviewDomain.Review{Login: l.Reviewer, State: review, SubmittedAt: time.Now()}); err != nil {
 		errs = append(errs, fmt.Errorf("the review: %w", err))
 	}
 	updateTaskReviewState(ctx, task)

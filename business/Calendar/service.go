@@ -179,9 +179,16 @@ func onlyInvites(cur, next *models.Event, curGuests []models.Attendee, wanted *[
 	return true
 }
 
+// eventLoaded is told of each load: nil but in the integration build's count
+// of a guest's move's reads.
+var eventLoaded func()
+
 // load is a live event and its guests; ErrEventNotFound for one in the trash
 // or not there.
 func (s *service) load(ctx context.Context, id uuid.UUID) (*models.Event, []models.Attendee, error) {
+	if eventLoaded != nil {
+		eventLoaded()
+	}
 	e, err := s.store.get(ctx, id)
 	if err != nil {
 		return nil, nil, err
@@ -294,6 +301,12 @@ func (s *service) namesOf(ctx context.Context, rows []instance, guests map[uuid.
 			}
 		}
 	}
+	return s.namesByID(ctx, ids)
+}
+
+// namesByID names these people (uuids) in one read. A failed read names
+// nobody.
+func (s *service) namesByID(ctx context.Context, ids []string) map[string]*dgraphStruct.DgraphUser {
 	out := map[string]*dgraphStruct.DgraphUser{}
 	if len(ids) == 0 {
 		return out
@@ -337,6 +350,11 @@ func (s *service) views(ctx context.Context, reader *model.UserInfo, rows []inst
 	booked := bookingsOf(ctx, reader, plain)
 	tasks := s.tasksOf(ctx, subjectOf(reader), plain)
 	files := s.filesOf(ctx, reader, rows)
+	owners := make([]uuid.UUID, 0, len(rows))
+	for _, i := range rows {
+		owners = append(owners, i.owner().ID)
+	}
+	rooms := s.roomsOf(ctx, owners)
 	guestLinks := guestLinksOn()
 	out := make([]Event, 0, len(rows))
 	for _, inst := range rows {
@@ -348,7 +366,7 @@ func (s *service) views(ctx context.Context, reader *model.UserInfo, rows []inst
 		}
 		v := Event{
 			ID: inst.ref, CalendarID: e.CalendarID.String(), ReadOnly: e.Source == sourceSubscribed, Kind: EventKind(e.Kind),
-			Title: titleOf(e, task), Task: task, Notes: e.Notes, NotesFormat: e.NotesFormat, Files: helpers.NonNil(files[inst.owner().ID]),
+			Title: titleOf(e, task), Task: task, Notes: e.Notes, NotesFormat: e.NotesFormat, Files: helpers.NonNil(files[inst.owner().ID]), Rooms: helpers.NonNil(rooms[inst.owner().ID]),
 			Location: e.Location, CallRoom: e.CallRoom,
 			Start: start, End: end, AllDay: e.AllDay(),
 			Transparency: e.Transparency, Visibility: e.Visibility, Hue: e.Hue, Status: e.Status,
@@ -382,6 +400,7 @@ func (s *service) views(ctx context.Context, reader *model.UserInfo, rows []inst
 		organiser := inst.owner().CreatedBy == me
 		if organiser {
 			v.EmailOnAnswers = inst.owner().EmailOnAnswers
+			v.RecapToGuests = inst.owner().RecapToGuests
 		}
 		mayChangeIt := mayChange(roleOf(inst.owner(), occ[inst.ref], me), inst.owner()) == nil
 		for _, a := range guestsShown(inst.owner(), occ[inst.ref], me) {
@@ -882,6 +901,13 @@ func (s *service) Range(ctx context.Context, who *model.UserInfo, from, to time.
 }
 
 func (s *service) Create(ctx context.Context, who *model.UserInfo, in EventInput) (*Event, error) {
+	if in.Rooms != nil {
+		rctx, err := s.askRooms(ctx, who, in.Rooms)
+		if err != nil {
+			return nil, err
+		}
+		ctx = rctx
+	}
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
@@ -1046,6 +1072,13 @@ func patched(base *models.Event, p EventPatch) (*models.Event, error) {
 }
 
 func (s *service) Update(ctx context.Context, who *model.UserInfo, id string, p EventPatch) (*Event, error) {
+	if p.Rooms != nil {
+		rctx, err := s.askRooms(ctx, who, *p.Rooms)
+		if err != nil {
+			return nil, err
+		}
+		ctx = rctx
+	}
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
@@ -1273,6 +1306,8 @@ func (s *service) Restore(ctx context.Context, who *model.UserInfo, id string) (
 		if err != nil {
 			return nil, err
 		}
+		// One occurrence never lets its series go of a room: a room booked
+		// meanwhile refuses it (holdBatchRooms), so nothing is let go here.
 		back, err := s.restoreThis(ctx, who, e, guests[e.ID], *rid)
 		if err != nil {
 			return nil, err
@@ -1298,6 +1333,7 @@ func (s *service) Restore(ctx context.Context, who *model.UserInfo, id string) (
 	if e.DeletedAt == nil || e.SeriesID != nil {
 		return nil, ErrEventNotFound
 	}
+	had := s.roomsHeld(ctx, e.ID)
 	if _, err := s.store.setDeleted(ctx, e.ID, nil, nil, s.now(), nil); err != nil {
 		return nil, err
 	}
@@ -1310,7 +1346,7 @@ func (s *service) Restore(ctx context.Context, who *model.UserInfo, id string) (
 		return nil, err
 	}
 	s.announce(ctx, who, resourceEventBusiness.CalendarEventRestored, restored, guestIDs(guests), nil)
-	return s.view(ctx, who, single(restored), guests), nil
+	return s.roomsLetGo(ctx, e.ID, had, s.view(ctx, who, single(restored), guests)), nil
 }
 
 // trashPage is how many events one look at the trash gives.

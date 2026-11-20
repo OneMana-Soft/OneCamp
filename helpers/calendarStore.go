@@ -55,3 +55,16 @@ func CalendarReadsFromStore() bool {
 	}
 	return true
 }
+
+// CalendarSyncThroughOutbox reports whether a change to a calendar event here
+// is sent to the owner's linked Google or Microsoft calendar through the
+// Durable Outbox at once (gcal-18 #48: a "calendar.sync" entry beside its
+// search entries), the default. CALENDAR_SYNC_OUTBOX=off leaves it to the
+// minute's sweep alone, as before; the sweep runs either way, for what an
+// entry missed.
+func CalendarSyncThroughOutbox() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv(CalendarSyncOutboxEnv)), "off")
+}
+
+// CalendarSyncOutboxEnv is CalendarSyncThroughOutbox's switch.
+const CalendarSyncOutboxEnv = "CALENDAR_SYNC_OUTBOX"

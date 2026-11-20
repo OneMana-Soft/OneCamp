@@ -81,8 +81,7 @@ func CatchUp(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/CatchUp Failed err: %+v", err)
 		// Our words: a provider's text, logged above, names its account and hosts (V-157).
-		statusCode, words := ai.ClientError(ctx, err)
-		helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": "Failed to build catch-up", "err": words})
+		answerAIFailure(w, ctx, err)
 		return
 	}
 
@@ -141,12 +140,7 @@ func SummarizeChannel(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		// Our words: a provider's text, logged above, names its account and hosts (V-157).
-		statusCode, words := ai.ClientError(ctx, err)
-
-		helpers.WriteJSON(w, statusCode, helpers.Envolope{
-			"msg": "Failed to summarize channel",
-			"err": words,
-		})
+		answerAIFailure(w, ctx, err)
 		return
 	}
 
@@ -195,8 +189,7 @@ func SummarizeDM(w http.ResponseWriter, r *http.Request) {
 	summary, err := business.SummarizeDM(ctx, &userInfo, req.ToUserUUID, req.MessageCount, localization)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/SummarizeDM Failed err: %+v", err)
-		statusCode, words := ai.ClientError(ctx, err)
-		helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": "Failed to summarize DM", "err": words})
+		answerAIFailure(w, ctx, err)
 		return
 	}
 
@@ -245,8 +238,7 @@ func SummarizeGroup(w http.ResponseWriter, r *http.Request) {
 	summary, err := business.SummarizeGroupChat(ctx, &userInfo, req.ChatGrpID, req.MessageCount, localization)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/SummarizeGroup Failed err: %+v", err)
-		statusCode, words := ai.ClientError(ctx, err)
-		helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": "Failed to summarize group chat", "err": words})
+		answerAIFailure(w, ctx, err)
 		return
 	}
 
@@ -441,34 +433,61 @@ func AnalyzeDocument(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Translate handles POST /ai/translate. Translates the supplied text into the
-// requested target language (name or BCP-47 code; blank = English) using the
-// member's model. Self-scoped; the business layer enforces limits and hardens
-// against prompt injection.
+// maxTranslateBody caps POST /ai/translate's body: business.MaxTranslateBytes
+// of text, JSON-escaped, with room for its keys.
+const maxTranslateBody = 64 << 10
+
+// translateLines and translateText are the business calls Translate makes: seams for tests.
+var (
+	translateLines = business.TranslateLines
+	translateText  = business.TranslateText
+)
+
+// Translate handles POST /ai/translate: text (or texts, at most
+// business.MaxTranslateTexts and business.MaxTranslateBytes in all) into the
+// target language (name or BCP-47 code; blank = English) by the member's
+// model, in one model call. It answers the translation (or translations, in
+// order) and the model's name, which a client shows as "Translated by". A bad
+// or oversized body is 400 before any model call; a model that answers the
+// wrong number of lines twice is 503, try again. Self-scoped; the business
+// layer runs it as the member and keeps the text to the prompt's data part.
 func Translate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	var req struct {
-		Text           string `json:"text"`
-		TargetLanguage string `json:"target_language"`
+		Text           string   `json:"text"`
+		Texts          []string `json:"texts"`
+		TargetLanguage string   `json:"target_language"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxTranslateBody)).Decode(&req); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse body"})
 		return
 	}
 
-	translated, err := business.TranslateText(ctx, &userInfo, req.Text, req.TargetLanguage)
+	data := map[string]any{}
+	var err error
+	if req.Texts != nil {
+		var out []string
+		var model string
+		out, model, err = translateLines(ctx, &userInfo, req.Texts, strings.TrimSpace(req.TargetLanguage))
+		data["translations"], data["model"] = out, model
+	} else {
+		var out, model string
+		out, model, err = translateText(ctx, &userInfo, req.Text, req.TargetLanguage)
+		data["translation"], data["model"] = out, model
+	}
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/TranslateText failed: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
+		helpers.LogErrorWithContext(ctx, "controllers/Translate failed: %+v", err)
+		status := http.StatusBadRequest
+		if errors.Is(err, business.ErrTranslateTryAgain) {
+			status = http.StatusServiceUnavailable
+		}
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
 		return
 	}
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"status": "success",
-		"data":   map[string]string{"translation": translated},
-	})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": data})
 }
 
 // maxDictationAudioBytes caps a dictation clip. Voice input is short (seconds),
@@ -590,9 +609,7 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 	// Check resiliency before streaming
 	svc := ai.GetService()
 	if svc == nil || !svc.IsEnabled() {
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{
-			"msg": "AI service is not enabled",
-		})
+		answerAIOff(w)
 		return
 	}
 
@@ -610,11 +627,15 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 	// have mattered to this question and left out when it would not.
 	ai.NoteQuestion(ctx, req.Question)
 	if err := cb.Allow(); err != nil {
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
+		words := ai.ClientWords(ctx, err)
+		ai.SetRetryAfter(w.Header(), err, words)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": words})
 		return
 	}
 	if err := svc.Resiliency.CheckRateLimit(ctx, userInfo.UserDgraphInfo.Uuid); err != nil {
-		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": ai.ClientWords(ctx, err)})
+		words := ai.ClientWords(ctx, err)
+		ai.SetRetryAfter(w.Header(), err, words)
+		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": words})
 		return
 	}
 
@@ -626,9 +647,7 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-			"msg": "Streaming not supported",
-		})
+		answerNoStream(w)
 		return
 	}
 
@@ -1235,7 +1254,7 @@ func AnalyzeCodeIssue(w http.ResponseWriter, r *http.Request) {
 
 	svc := ai.GetService()
 	if svc == nil || !svc.IsEnabled() {
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "AI service is not enabled"})
+		answerAIOff(w)
 		return
 	}
 	// Rate-limit per user (the analysis itself gates on the provider breaker).
@@ -1336,4 +1355,25 @@ func DraftSocialPosts(w http.ResponseWriter, r *http.Request) {
 		out = append(out, adapter.SocialPostView{Platform: p.Platform, Label: p.Label, Content: p.Content})
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": out})
+}
+
+// answerAIFailure answers a failed catch-up or summary: ClientError's status and words in msg (the err key keeps them
+// too, as before), with Retry-After when the words say try again.
+func answerAIFailure(w http.ResponseWriter, ctx context.Context, err error) {
+	statusCode, words := ai.ClientError(ctx, err)
+	ai.SetRetryAfter(w.Header(), err, words)
+	helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": words, "err": words})
+}
+
+// answerAIOff is every AI route's answer while AI is off: what happened and who can change it. No Retry-After: asking
+// again won't help until an admin turns it on.
+func answerAIOff(w http.ResponseWriter) {
+	helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": ai.AIOffWords})
+}
+
+// answerNoStream answers a stream that couldn't start, before its first byte.
+func answerNoStream(w http.ResponseWriter) {
+	const words = "OneCamp AI couldn't start the answer. Try again."
+	ai.SetRetryAfter(w.Header(), nil, words)
+	helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": words})
 }

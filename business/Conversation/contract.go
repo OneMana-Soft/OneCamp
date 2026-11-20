@@ -15,6 +15,7 @@ package business
 import (
 	"context"
 	"errors"
+	messageDomain "github.com/akashc777/OneCamp/domain/Message"
 	"strings"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
@@ -84,15 +85,23 @@ func Resolve(ctx context.Context, who *userModels.UserInfo, ref Ref) (accessBusi
 // they can read, by ref. One that isn't there, or that who can't read, is
 // left out, as Resolve answers it ErrNotFound.
 func ResolveAll(ctx context.Context, who *userModels.UserInfo, refs []Ref) (map[Ref]accessBusiness.Decision, error) {
+	return ResolveAllFor(ctx, accessBusiness.SubjectOf(who), refs)
+}
+
+// ResolveAllFor is ResolveAll for a subject rather than an account, so an
+// agent acting for who (who.AgentUUID) reaches the rules as that agent: the
+// call rule never lets an agent in by its person's invite. No one (no uid and
+// no uuid) reads nothing.
+func ResolveAllFor(ctx context.Context, who accessBusiness.Subject, refs []Ref) (map[Ref]accessBusiness.Decision, error) {
 	out := make(map[Ref]accessBusiness.Decision, len(refs))
-	if who == nil || len(refs) == 0 {
+	if (who.UserUID == "" && who.UserUUID == "") || len(refs) == 0 {
 		return out, nil
 	}
 	res := make([]accessBusiness.Resource, 0, len(refs))
 	for _, r := range refs {
 		res = append(res, r.Resource())
 	}
-	got, err := accessBusiness.ResolveAll(ctx, accessBusiness.SubjectOf(who), res)
+	got, err := accessBusiness.ResolveAll(ctx, who, res)
 	if err != nil {
 		return nil, err
 	}
@@ -198,25 +207,34 @@ func (todaysPages) Page(ctx context.Context, who *userModels.UserInfo, ref Ref, 
 		var c chatBusiness.ChatPagination
 		switch them := ref.Other(me); {
 		case before != nil:
-			c, err = chatBusiness.GetDgraphOldChatFromDgraph(ctx, *before, me, them)
+			c, err = chatBusiness.DMPage(ctx, me, them, messageDomain.Older, *before)
 		default:
 			var id uuid.UUID
 			if id, err = uuid.Parse(me); err == nil {
-				c, err = chatBusiness.GetDgraphLatestChatFromDgraph(ctx, id, them)
+				c, err = chatBusiness.OpenDM(ctx, id, them)
 			}
 		}
-		return Page{Chats: c.Chats, HasMore: c.HasMore}, err
+		return Page{Chats: c.Chats, HasMore: c.HasMore}, refused(err)
 	case KindGroup:
 		var c chatBusiness.ChatPagination
 		if before != nil {
-			c, err = chatBusiness.GetDgraphOldGroupChatFromDgraph(ctx, *before, ref.ID)
+			c, err = chatBusiness.GroupPage(ctx, who.UserDgraphInfo.Uid, ref.ID, messageDomain.Older, *before)
 		} else {
 			var id uuid.UUID
 			if id, err = uuid.Parse(me); err == nil {
-				c, err = chatBusiness.GetDgraphLatestGroupChatFromDgraph(ctx, id, ref.ID)
+				c, err = chatBusiness.OpenGroup(ctx, id, who.UserDgraphInfo.Uid, ref.ID)
 			}
 		}
-		return Page{Chats: c.Chats, HasMore: c.HasMore}, err
+		return Page{Chats: c.Chats, HasMore: c.HasMore}, refused(err)
 	}
 	return Page{}, ErrNotFound
+}
+
+// refused is a DM's or a group's page refusal as this contract answers one:
+// a conversation who isn't in, or that isn't there, is ErrNotFound.
+func refused(err error) error {
+	if errors.Is(err, chatBusiness.ErrNotInConversation) || errors.Is(err, chatBusiness.ErrNoConversation) || errors.Is(err, chatBusiness.ErrNoSuchPerson) {
+		return ErrNotFound
+	}
+	return err
 }

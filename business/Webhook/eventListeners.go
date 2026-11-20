@@ -20,6 +20,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -103,7 +104,10 @@ func notifyEventListeners(ctx context.Context, eventType string, data map[string
 	if len(listeners) == 0 {
 		return
 	}
-	detached := context.WithoutCancel(ctx)
+	// The listeners are the work the event sets off, never the read that
+	// dispatched it: a GET's event (a first sign-in joining the default
+	// channels) decides who may see a task from the rows (taskread.Detached).
+	detached := taskread.Detached(ctx)
 	restricted := restrictedTaskEvent(detached, data)
 	for i, l := range listeners {
 		if restricted && (i >= len(seesRestricted) || !seesRestricted[i]) {

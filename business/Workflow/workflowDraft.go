@@ -84,7 +84,7 @@ func DraftWorkflow(ctx context.Context, userUUID, prompt string) (*WorkflowDraft
 // normalizes it into a safe draft: only known trigger/action types survive, and
 // any ids the model may have invented are stripped (the user fills them in).
 func parseWorkflowDraft(raw string) (*WorkflowDraft, error) {
-	js := extractJSONObject(raw)
+	js := helpers.ExtractJSON(raw, '{')
 	if js == "" {
 		return nil, fmt.Errorf("no JSON object found")
 	}
@@ -196,46 +196,4 @@ func draftSystemPrompt() string {
 		"3. delete_message and flag_to_channel are only valid with trigger_type \"message_posted\".",
 		"4. Output a single valid JSON object and nothing else.",
 	}, "\n")
-}
-
-// extractJSONObject returns the first top-level JSON object substring, tolerant
-// of ```json fences and surrounding prose.
-func extractJSONObject(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	start := strings.IndexByte(s, '{')
-	if start < 0 {
-		return ""
-	}
-	depth := 0
-	inString := false
-	escaped := false
-	for i := start; i < len(s); i++ {
-		c := s[i]
-		if inString {
-			switch {
-			case escaped:
-				escaped = false
-			case c == '\\':
-				escaped = true
-			case c == '"':
-				inString = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inString = true
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return s[start : i+1]
-			}
-		}
-	}
-	return ""
 }

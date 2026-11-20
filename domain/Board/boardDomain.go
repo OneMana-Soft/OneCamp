@@ -50,6 +50,8 @@ func GetDgraphBoardByUUID(ctx context.Context, boardUUID string, userUID string)
 					board_read_access: count(board_reading_users @filter(uid($userId)))
 					board_edit_access: count(board_editing_users @filter(uid($userId)))
 					board_comment_access: count(board_commenting_users @filter(uid($userId)))
+					board_owner_access: count(board_owning_users @filter(uid($userId)))
+					board_editors_share
 					board_private
 					board_deleted_at
 					board_created_at
@@ -83,6 +85,8 @@ func GetBasicDgraphBoardByUUID(ctx context.Context, boardUUID string, userUID st
 					board_read_access: count(board_reading_users @filter(uid($userId)))
 					board_edit_access: count(board_editing_users @filter(uid($userId)))
 					board_comment_access: count(board_commenting_users @filter(uid($userId)))
+					board_owner_access: count(board_owning_users @filter(uid($userId)))
+					board_editors_share
 					board_private
 					board_title
 					board_deleted_at
@@ -226,6 +230,13 @@ const boardSharingBlock = `uid
 						user_name
 						user_profile_object_key
 					}
+					board_owning_users {
+						uid
+						user_uuid
+						user_name
+						user_profile_object_key
+					}
+					board_editors_share
 					board_created_by {
 						uid
 						user_uuid
@@ -234,7 +245,8 @@ const boardSharingBlock = `uid
 					}`
 
 // GetBoardPermissions returns the board with its editing/reading/commenting
-// users and owner, for the sharing UI.
+// users, its co-owners, its editors-may-share switch and its owner, for the
+// sharing UI.
 func GetBoardPermissions(ctx context.Context, boardUUID string) (dgraphBoard *dgraphStruct.DgraphBoard, err error) {
 	variables := make(map[string]string)
 	variables["$id"] = boardUUID

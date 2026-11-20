@@ -184,3 +184,35 @@ type closeCounter struct {
 }
 
 func (c *closeCounter) Close() error { c.closed++; return nil }
+
+func TestSamePullNamesOnePullRequestHoweverItsSpelled(t *testing.T) {
+	canonical := "https://github.com/acme/web/pull/21"
+	for _, other := range []string{
+		canonical,
+		"http://github.com/acme/web/pull/21",
+		"https://www.github.com/acme/web/pull/21",
+		"HTTPS://GITHUB.COM/ACME/Web/pull/21",
+		"https://github.com/acme/web/pull/21/",
+		"https://github.com/acme/web/pull/21/files",
+		"https://github.com/acme/web.git/pull/21",
+	} {
+		if !samePull(canonical, other) || !samePull(other, canonical) {
+			t.Errorf("samePull(%q, %q) = false, want true", canonical, other)
+		}
+	}
+	for _, other := range []string{
+		"https://github.com/acme/web/pull/20",
+		"https://github.com/acme/api/pull/21",
+		"https://github.com/acmf/web/pull/21",
+		"https://gitlab.com/acme/web/pull/21",
+		"https://github.com/acme/web",
+		"",
+	} {
+		if samePull(canonical, other) || samePull(other, canonical) {
+			t.Errorf("samePull(%q, %q) = true, want false", canonical, other)
+		}
+	}
+	if samePull("", "") || samePull("not an address", "not an address") {
+		t.Error("two addresses naming no pull request name the same one")
+	}
+}

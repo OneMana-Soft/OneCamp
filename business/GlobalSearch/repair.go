@@ -5,6 +5,7 @@ import (
 
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
+	transcriptSearch "github.com/akashc777/OneCamp/business/TranscriptSearch"
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/helpers"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
@@ -30,8 +31,9 @@ const (
 
 var (
 	// repairEntry writes one doc's (with its comments' and files') or one
-	// board's (with its comments') entries again from the graph, or one
-	// event's from the calendar's store. A seam for tests.
+	// board's (with its comments') entries again from the graph, one
+	// event's from the calendar's store, or one recording's transcript
+	// lines from the graph. A seam for tests.
 	repairEntry = func(kind, id string) {
 		switch kind {
 		case repairDoc:
@@ -40,6 +42,10 @@ var (
 			boardBusiness.SyncBoardSearch(context.Background(), id)
 		case repairEvent:
 			calendarBusiness.SearchEntriesChanged(context.Background(), []string{id})
+		case repairTranscript:
+			if err := transcriptSearch.SyncRecording(context.Background(), id); err != nil {
+				helpers.LogErrorWithContext(context.Background(), "search: could not mark the transcript of %s again", id)
+			}
 		}
 	}
 	// goRepairs runs the repairs of one page in the background. A seam for
@@ -47,11 +53,18 @@ var (
 	goRepairs = func(repair func()) { helpers.GoSafeNamed("search.entry-repair", repair) }
 )
 
-// repairDropped has the entries of the hits in before that kept leaves out
-// written again; of names the doc, board or event a hit is about.
-func repairDropped(kind string, before, kept []*openSearchStruct.GlobalSearchOpenSearchResp, of func(*openSearchStruct.GlobalSearchOpenSearchResp) string) {
+// droppedKind is the docs, boards, events or recordings of one kind whose
+// search entries are written again.
+type droppedKind struct {
+	kind string
+	ids  []string
+}
+
+// droppedIDs is what each hit in before that kept leaves out is about, once
+// each; of names the doc, board or event a hit is about.
+func droppedIDs(before, kept []*openSearchStruct.GlobalSearchOpenSearchResp, of func(*openSearchStruct.GlobalSearchOpenSearchResp) string) []string {
 	if len(before) == len(kept) {
-		return
+		return nil
 	}
 	stays := make(map[*openSearchStruct.GlobalSearchOpenSearchResp]bool, len(kept))
 	for _, h := range kept {
@@ -65,13 +78,25 @@ func repairDropped(kind string, before, kept []*openSearchStruct.GlobalSearchOpe
 			ids = append(ids, id)
 		}
 	}
-	if len(ids) == 0 {
+	return ids
+}
+
+// repairDropped has the entries of every dropped id written again, every kind
+// of a page in one background run.
+func repairDropped(drops ...droppedKind) {
+	n := 0
+	for _, d := range drops {
+		n += len(d.ids)
+	}
+	if n == 0 {
 		return
 	}
 	goRepairs(func() {
-		for _, id := range ids {
-			if redisStore.AllowFixedWindowOrLocal(context.Background(), registry.SearchEntryRepair, []string{kind, id}, 1).Allowed {
-				repairEntry(kind, id)
+		for _, d := range drops {
+			for _, id := range d.ids {
+				if redisStore.AllowFixedWindowOrLocal(context.Background(), registry.SearchEntryRepair, []string{d.kind, id}, 1).Allowed {
+					repairEntry(d.kind, id)
+				}
 			}
 		}
 	})

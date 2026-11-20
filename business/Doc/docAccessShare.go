@@ -82,6 +82,25 @@ func ReadSharing(ctx context.Context, docUUID string) (*Sharing, error) {
 	if err != nil {
 		return nil, err
 	}
+	return sharingOf(acl), nil
+}
+
+// ReadSharings reads many docs' whole sharing, deleted or not, in one read,
+// by lower-case doc uuid; a doc that isn't there is left out.
+func ReadSharings(ctx context.Context, docUUIDs []string) (map[string]*Sharing, error) {
+	acls, err := domain.GetDocACLs(ctx, docUUIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]*Sharing, len(acls))
+	for id, acl := range acls {
+		out[id] = sharingOf(acl)
+	}
+	return out, nil
+}
+
+// sharingOf is the sharing a read of a doc's ACL holds. Pure.
+func sharingOf(acl *domain.DocACL) *Sharing {
 	d := acl.Doc
 	s := &Sharing{
 		DocUUID: d.Uuid, Title: d.Title, Maker: d.CreatedBy, Owner: domain.OwnerOf(d),
@@ -140,7 +159,7 @@ func ReadSharing(ctx context.Context, docUUID string) (*Sharing, error) {
 			}
 		}
 	}
-	return s, nil
+	return s
 }
 
 // rowFor is the doc as a read of it for the person would carry it: what

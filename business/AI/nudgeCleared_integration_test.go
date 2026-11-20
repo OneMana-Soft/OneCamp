@@ -96,9 +96,16 @@ func TestEveryNudgeTheEngineClosesIsNamedLive(t *testing.T) {
 	alsoGone := nudge(t, owner, "memory:also-gone")
 	mayas := nudge(t, maya, "memory:mayas")
 
+	// signalFor is whom's live signal behind their open nudge dedupKey.
+	signalFor := func(whom uuid.UUID, dedupKey string) candidateNudge {
+		return candidateNudge{userID: whom, kind: nudgeModels.KindOverdueCommitment,
+			title: "Overdue commitment", body: "You committed to it.", sourceType: "memory", priority: 1, dedupKey: dedupKey}
+	}
+
 	t.Run("a pass names each nudge whose signal no longer holds, in one cleared", func(t *testing.T) {
-		applyUserNudges(ctx, owner, []candidateNudge{{userID: owner, kind: nudgeModels.KindOverdueCommitment,
-			title: "Overdue commitment", body: "You committed to it.", sourceType: "memory", priority: 1, dedupKey: "memory:kept"}})
+		// A pass is everyone's at once: maya's signal still holds.
+		applyNudges(ctx, time.Now(), nudgeSignals{complete: true, candidates: []candidateNudge{
+			signalFor(owner, "memory:kept"), signalFor(maya, "memory:mayas")}})
 		got := clearedFor(t, owner)
 		want := []string{alsoGone, gone}
 		slices.Sort(want)
@@ -114,7 +121,7 @@ func TestEveryNudgeTheEngineClosesIsNamedLive(t *testing.T) {
 	})
 
 	t.Run("a person whose every signal resolved hears each one by name", func(t *testing.T) {
-		reconcileResolvedUsers(ctx, map[uuid.UUID][]candidateNudge{maya: nil})
+		applyNudges(ctx, time.Now(), nudgeSignals{complete: true, candidates: []candidateNudge{signalFor(maya, "memory:mayas")}})
 		if got := ids(t, clearedFor(t, owner)); !slices.Equal(got, []string{kept}) {
 			t.Errorf("the owner was told %v; want their last open nudge, %s", got, kept)
 		}

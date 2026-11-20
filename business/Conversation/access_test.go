@@ -85,7 +85,9 @@ func TestDMsAndGroupsDecideAsTodaysChecks(t *testing.T) {
 	}
 }
 
-// A thread is its channel's members' (public or not), and a deleted root's
+// A thread is replied in by its channel's members, and read by whoever reads
+// the channel (channelBusiness.CanRead): a public channel's other readers and a
+// manager who isn't in it read it, never reply or moderate. A deleted root's
 // thread, or an archived channel's, is read only.
 func TestAThreadDecidesAsTheThreadRoutes(t *testing.T) {
 	post := func(ch dgraphStruct.DgraphChannel, deleted *time.Time) *dgraphStruct.DgraphPost {
@@ -97,30 +99,40 @@ func TestAThreadDecidesAsTheThreadRoutes(t *testing.T) {
 		want          accessBusiness.Level
 		deleted, arch bool
 	}{
-		{"a public channel's thread, not a member", post(dgraphStruct.DgraphChannel{IsPrivate: ptr(false)}, nil), accessBusiness.LevelNone, false, false},
+		{"a public channel's thread, not a member", post(dgraphStruct.DgraphChannel{IsPrivate: ptr(false)}, nil), LevelRead, false, false},
+		{"a private channel's thread, not a member", post(dgraphStruct.DgraphChannel{IsPrivate: ptr(true)}, nil), accessBusiness.LevelNone, false, false},
+		{"a channel whose privacy didn't load, not a member", post(dgraphStruct.DgraphChannel{}, nil), accessBusiness.LevelNone, false, false},
+		{"a private channel's manager who isn't in it", post(dgraphStruct.DgraphChannel{IsPrivate: ptr(true), IsAdmin: 1}, nil), LevelRead, false, false},
+		{"an archived public channel, not a member", post(dgraphStruct.DgraphChannel{IsPrivate: ptr(false), DeletedAt: gone}, nil), LevelRead, false, true},
+		{"a deleted root in a public channel, not a member", post(dgraphStruct.DgraphChannel{IsPrivate: ptr(false)}, gone), LevelRead, true, false},
+		{"a deleted root in a private channel, not a member", post(dgraphStruct.DgraphChannel{IsPrivate: ptr(true)}, gone), accessBusiness.LevelNone, false, false},
 		{"a member", post(dgraphStruct.DgraphChannel{IsMember: 1}, nil), LevelReply, false, false},
 		{"a member of an announcement channel", post(dgraphStruct.DgraphChannel{IsMember: 1, PostPolicy: "admins_only"}, nil), LevelReply, false, false},
 		{"a moderator", post(dgraphStruct.DgraphChannel{IsMember: 1, IsAdmin: 1}, nil), LevelModerate, false, false},
 		{"a deleted root", post(dgraphStruct.DgraphChannel{IsMember: 1}, gone), LevelRead, true, false},
 		{"an archived channel", post(dgraphStruct.DgraphChannel{IsMember: 1, DeletedAt: gone}, nil), LevelRead, false, true},
 	} {
-		d := postThreadDecision(c.p)
+		d := decideThread(postThreadStanding(c.p))
 		if d.Level != c.want || d.Deleted != c.deleted || d.Archived != c.arch {
 			t.Errorf("%s: got %s deleted %v archived %v", c.name, d.Level, d.Deleted, d.Archived)
 		}
 	}
+	// A non-member reads as the channel's rule says, for its reason.
+	if d := decideThread(postThreadStanding(post(dgraphStruct.DgraphChannel{IsPrivate: ptr(false)}, nil))); len(d.Reasons) != 1 || d.Reasons[0] != reasonPublic {
+		t.Errorf("a public channel's non-member reads for %v", d.Reasons)
+	}
 
 	in := &dgraphStruct.DgraphDm{ParticipantIsMember: 1}
-	if d := chatThreadDecision(&dgraphStruct.DgraphChat{DM: in}); d.Level != LevelReply {
+	if d := decideThread(chatThreadStanding(&dgraphStruct.DgraphChat{DM: in})); d.Level != LevelReply {
 		t.Errorf("a participant: %s", d.Level)
 	}
-	if d := chatThreadDecision(&dgraphStruct.DgraphChat{DM: &dgraphStruct.DgraphDm{}}); d.Level != accessBusiness.LevelNone {
+	if d := decideThread(chatThreadStanding(&dgraphStruct.DgraphChat{DM: &dgraphStruct.DgraphDm{}})); d.Level != accessBusiness.LevelNone {
 		t.Errorf("someone outside the conversation: %s", d.Level)
 	}
-	if d := chatThreadDecision(&dgraphStruct.DgraphChat{DM: in, To: &dgraphStruct.DgraphUser{DeletedAt: gone}}); d.Level != LevelRead {
+	if d := decideThread(chatThreadStanding(&dgraphStruct.DgraphChat{DM: in, To: &dgraphStruct.DgraphUser{DeletedAt: gone}})); d.Level != LevelRead {
 		t.Errorf("a message to someone who left: %s", d.Level)
 	}
-	if d := chatThreadDecision(&dgraphStruct.DgraphChat{DM: in, DeletedAt: gone}); d.Level != LevelRead || !d.Deleted || d.Was != LevelReply {
+	if d := decideThread(chatThreadStanding(&dgraphStruct.DgraphChat{DM: in, DeletedAt: gone})); d.Level != LevelRead || !d.Deleted || d.Was != LevelReply {
 		t.Errorf("a deleted root: %+v", d)
 	}
 }

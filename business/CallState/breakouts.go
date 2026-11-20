@@ -132,6 +132,16 @@ func InRoom(ctx context.Context, room string) (*Session, error) {
 	return view(ctx, open)
 }
 
+// LatestInRoom answers a room's latest call, a call's own or one of its
+// breakout rooms, going on or over, or nil.
+func LatestInRoom(ctx context.Context, room string) (*Session, error) {
+	row, err := model.LatestSessionOf(ctx, room)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	return view(ctx, row)
+}
+
 // OpenRoom answers the call of room n of a live call's breakout rooms, making
 // it when there is none: a room's token is minted beside it, so that its
 // answer names the room's call before anyone is in it. A room's call made here

@@ -192,6 +192,9 @@ func (c BulkChange) need() workAccess.Need {
 // unchanged. The error is for a request that can't be made at all (BulkError)
 // or a read that failed.
 func Bulk(ctx context.Context, who *model.UserInfo, ids []uuid.UUID, change BulkChange) (*BulkResult, error) {
+	// One action: what the rule runs its events set going make Urgent is told
+	// with what it makes Urgent itself (urgent.go).
+	ctx = helpers.WithOrigin(ctx, uuid.NewString())
 	if len(ids) > BulkMost {
 		return nil, &BulkError{fmt.Sprintf("Change at most %d tasks at a time.", BulkMost)}
 	}
@@ -298,6 +301,8 @@ func bulkFields(ctx context.Context, tasks []*dgraphStruct.DgraphTask, change Bu
 		from, to string
 	}
 	var tags []tagSync
+	// The tasks it makes Urgent, told as one batch (urgent.go).
+	var urgent []urgentChange
 	for _, t := range tasks {
 		id, err := uuid.Parse(t.Uuid)
 		if err != nil {
@@ -314,6 +319,9 @@ func bulkFields(ctx context.Context, tasks []*dgraphStruct.DgraphTask, change Bu
 			w.Priority, w.DeletedAt = change.Value, &zero
 			act.Type, act.PrevState, act.NextState = dgraphStruct.ACTIVITY_TYPE_PRIORITY, t.Priority, change.Value
 			logged = append(logged, changedTask(t, "task_priority", func(n *dgraphStruct.DgraphTask) { n.Priority = change.Value }))
+			if becameUrgent(t.Priority, change.Value) {
+				urgent = append(urgent, urgentChange{task: t, change: act.Uuid, by: by})
+			}
 		default:
 			from := ""
 			if t.Label != nil {
@@ -357,6 +365,7 @@ func bulkFields(ctx context.Context, tasks []*dgraphStruct.DgraphTask, change Bu
 	// The Work Change Log, once for the batch: one restriction read, one
 	// insert, and over 25 changes one Reread a project (business/WorkFeed).
 	logChange(ctx, by, logged...)
+	noteUrgent(ctx, urgent...)
 	// Search and GitHub follow, as for a single change, off the request.
 	index, githubSync := bulkSeams.index, bulkSeams.githubSync
 	helpers.GoSafeNamed("Task.Bulk:index", func() { index(writes, clear...) })

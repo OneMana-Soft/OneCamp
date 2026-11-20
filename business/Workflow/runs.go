@@ -91,6 +91,10 @@ func limited(ctx context.Context, cw *compiledWorkflow, now time.Time) (string, 
 // runWorkflow runs a matched rule for one event: as its owner, once per
 // event, on the branch its conditions choose, and records the run.
 func runWorkflow(ctx context.Context, cw *compiledWorkflow, ev triggerEvent) {
+	// What the run makes Urgent is told once it is done, each assignee once
+	// (business/Task GatherUrgent); inside a sweep, when the sweep is.
+	ctx, tellUrgent := taskBusiness.GatherUrgent(ctx)
+	defer tellUrgent()
 	allowed := access.allows(ctx, cw.createdBy, ev)
 	if !allowed && ev.taskID == "" && cw.projectID == "" {
 		return // a channel its owner can't read: not theirs to hear
@@ -123,7 +127,9 @@ func runWorkflow(ctx context.Context, cw *compiledWorkflow, ev triggerEvent) {
 		}
 		run.Subject = task.Name
 		rc = &runCtx{owner: owner, task: task}
-		if cw.conditions.hold(factsOf(task), now, cw.loc) {
+		facts := factsOf(task)
+		facts.Source = ev.vars["source"]
+		if cw.conditions.hold(facts, now, cw.loc) {
 			run.Branch = "then"
 		} else {
 			run.Branch, actions = "else", cw.elseActions

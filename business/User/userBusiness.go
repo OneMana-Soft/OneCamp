@@ -1173,7 +1173,9 @@ func GetUserByUUID(ctx context.Context, userUUID uuid.UUID) (userInfo *userModel
 			"business/GetUserByUUID Failed to get user by uuid err: %+v",
 			err,
 		)
-		err = errors.New("failed to get user by uuid")
+		if !errors.Is(err, helpers.ErrNotFound) {
+			err = errors.New("failed to get user by uuid")
+		}
 		return
 	}
 

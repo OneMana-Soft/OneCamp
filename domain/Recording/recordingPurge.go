@@ -14,6 +14,8 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	postDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Post"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Recording"
+	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
+	opensearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
 )
 
 // ArchivedRecording is the little a purge needs to know about a recording:
@@ -72,10 +74,13 @@ var (
 		"recording_egress_id", "recording_stared_at", "recording_ended_at", "recording_duration",
 		"recording_obj_key", "recording_transcript", "recording_started_by", "recording_channel",
 		"recording_dm", "recording_size", "recording_deleted_at", "recording_transcript_only",
-		"recording_status", "recording_event", "recording_notes_doc", "recording_recap_chat", "dgraph.type",
+		"recording_status", "recording_event", "recording_notes_doc", "recording_recap_chat",
+		"recording_recap", "recording_action_items", "recording_action_tasks", "dgraph.type",
 	}
 	transcriptPredicates = []string{
 		"transcript_from", "transcript_text", "transcript_timestamp", "transcript_offset_ms",
+		"transcript_original_text", "transcript_corrected_at", "transcript_corrected_by",
+		"transcript_translations",
 		"dgraph.type",
 	}
 )
@@ -96,7 +101,18 @@ func DeleteRecordingNodes(ctx context.Context, rec ArchivedRecording) error {
 	if err != nil {
 		return err
 	}
-	return postDgraphModels.DeleteNodeOrEdges(ctx, string(raw))
+	if err := postDgraphModels.DeleteNodeOrEdges(ctx, string(raw)); err != nil {
+		return err
+	}
+	// Its lines' entries are forgotten with it; one left behind is dropped
+	// and forgotten by the next search that meets it.
+	if rec.EgressId != "" {
+		if _, err := opensearchModels.ForgetWhere(ctx, []string{openSearchStruct.TRANSCRIPT_INDEX},
+			[]string{openSearchStruct.TRANSCRIPT_RECORDING_FIELD}, []string{rec.EgressId}); err != nil {
+			helpers.LogErrorWithContext(ctx, "domain/DeleteRecordingNodes: the transcript entries of %s are still in search", rec.EgressId)
+		}
+	}
+	return nil
 }
 
 // everything is a delete of every value of each predicate on the node (a

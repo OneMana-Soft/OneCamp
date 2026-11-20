@@ -3,20 +3,20 @@
 // is up (PROGRAM.md §4.2 #48; chat A2 builds it, for the message pipeline
 // first).
 //
-// A change writes its event in its own transaction (Add): what it is (topic,
+// A change writes its event in its own transaction (AddMany): what it is (topic,
 // kind), what it is about (entities: ids by name, never a body: a sink reads
 // what is there when it runs, so a message edited since sends its words now,
 // and one deleted since is skipped), which of the topic's sinks it is for, and
 // the key whose order it keeps (a conversation's messages reach their sinks one
 // at a time, oldest first). The row is held until the change's other stores are
-// written (a message's graph node) and then released (Release); a writer that
+// written (a message's graph node) and then released (ReleaseMany); a writer that
 // dies between the two leaves it held, and its topic's resolver decides it.
 //
 // The drain gives a released row to its topic's sinks, in their order, and
 // remembers which had it: a sink that fails is tried again later (backoff),
 // without the others running again, and after MaxAttempts tries the row is
 // dead, kept for a month and counted by the admins' system check. The writer
-// drains the row it released at once (Deliver), so what's live stays live; the
+// drains the row it released at once (DeliverMany), so what's live stays live; the
 // Sweeper's drain on every worker (outbox.drain, which claims its own rows) is
 // the net under it.
 //
@@ -101,7 +101,7 @@ const (
 	sinkTimeout = 60 * time.Second
 	// drainEvery is the Sweeper's pass.
 	drainEvery = 2 * time.Second
-	// heldFor is how long a writer has between Add and Release before its
+	// heldFor is how long a writer has between AddMany and ReleaseMany before its
 	// topic's resolver is asked.
 	heldFor = 30 * time.Second
 	// batch is how many rows a pass claims at once; parallel how many run together.
@@ -193,7 +193,7 @@ func (t Told) Only(how string, recipients []string) []string {
 type store interface {
 	insert(ctx context.Context, ex models.Execer, rs []models.Row) ([]int64, error)
 	release(ctx context.Context, ids []int64) error
-	releaseWith(ctx context.Context, id int64, more map[string]string) (bool, error)
+	releaseWith(ctx context.Context, ids []int64, more []map[string]string) error
 	cancel(ctx context.Context, ex models.Execer, id int64) error
 	claimDue(ctx context.Context, by string, lease time.Duration, limit int) ([]models.Row, error)
 	claim(ctx context.Context, ids []int64, by string, lease time.Duration) ([]models.Row, error)
@@ -211,8 +211,8 @@ func (pgStore) insert(ctx context.Context, ex models.Execer, rs []models.Row) ([
 	return models.Insert(ctx, ex, rs)
 }
 func (pgStore) release(ctx context.Context, ids []int64) error { return models.Release(ctx, ids) }
-func (pgStore) releaseWith(ctx context.Context, id int64, more map[string]string) (bool, error) {
-	return models.ReleaseWith(ctx, id, more)
+func (pgStore) releaseWith(ctx context.Context, ids []int64, more []map[string]string) error {
+	return models.ReleaseManyWith(ctx, ids, more)
 }
 func (pgStore) cancel(ctx context.Context, ex models.Execer, id int64) error {
 	return models.Cancel(ctx, ex, id)
@@ -326,21 +326,16 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// Add writes e as held, inside ex (the change's own transaction), and answers
-// its id for Release.
-func Add(ctx context.Context, ex models.Execer, e Entry) (int64, error) {
-	ids, err := AddMany(ctx, ex, []Entry{e})
-	if err != nil {
-		return 0, err
-	}
-	return ids[0], nil
-}
-
 // AddMany writes es as held in one statement, inside ex, and answers their
 // ids in es's order for ReleaseMany: what a change that makes many events
 // (CreateTasks' new tasks, a table's rows) writes. Every entry is checked
 // before anything is written; none writes nothing.
 func AddMany(ctx context.Context, ex models.Execer, es []Entry) ([]int64, error) {
+	return addMany(ctx, ex, es, models.StateHeld)
+}
+
+// addMany is AddMany writing es in state: held, or ready (Enqueue's).
+func addMany(ctx context.Context, ex models.Execer, es []Entry, state string) ([]int64, error) {
 	if len(es) == 0 {
 		return nil, nil
 	}
@@ -349,7 +344,7 @@ func AddMany(ctx context.Context, ex models.Execer, es []Entry) ([]int64, error)
 		if e.Topic == "" || e.Kind == "" || e.Key == "" {
 			return nil, errors.New("outbox: an event needs a topic, a kind and a key")
 		}
-		rs[i] = models.Row{EventID: uuid.New(), Topic: e.Topic, Kind: e.Kind, Key: e.Key, Entities: e.Entities, Sinks: e.Sinks}
+		rs[i] = models.Row{EventID: uuid.New(), Topic: e.Topic, Kind: e.Kind, Key: e.Key, Entities: e.Entities, Sinks: e.Sinks, State: state}
 		if e.Actor != "" {
 			if id, err := uuid.Parse(e.Actor); err == nil {
 				rs[i].Actor = &id
@@ -364,33 +359,25 @@ var errNoPostgres = errors.New("outbox: Postgres isn't connected")
 
 // Enqueue writes es ready and delivers them at once: for events no change's
 // transaction holds (a job asked for, or a change already saved). It writes
-// them in one statement and releases them in one, however many there are.
-// Those whose release fails stay held, and the drain releases them once
-// their time is up: so it suits topics with no resolver, as on one with a
-// resolver (Registry.Resolve) an event left held is that resolver's to
-// decide.
+// them in one statement, already ready, however many there are, so none is
+// left held for a release. A writer that dies after the write and before its
+// delivery leaves them ready, and the drain runs them on its next pass, as
+// it ran those a release had made ready.
 func Enqueue(ctx context.Context, es ...Entry) error {
 	if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
 		return errNoPostgres
 	}
-	ids, err := AddMany(ctx, postgresInit.DBConn.SqlDB, es)
+	ids, err := addMany(ctx, postgresInit.DBConn.SqlDB, es, models.StateReady)
 	if err != nil {
 		return err
-	}
-	if err := ReleaseMany(ctx, ids); err != nil {
-		return nil
 	}
 	DeliverMany(ids)
 	return nil
 }
 
-// Release makes a held event ready, once the change's other stores are
-// written. It doesn't run the sinks: Deliver does.
-func Release(ctx context.Context, id int64) error {
-	return ReleaseMany(ctx, []int64{id})
-}
-
-// ReleaseMany is Release for the events of ids, in one statement.
+// ReleaseMany makes the held events of ids ready, in one statement, once the
+// change's other stores are written. It doesn't run the sinks: DeliverMany
+// does.
 func ReleaseMany(ctx context.Context, ids []int64) error {
 	if len(ids) == 0 {
 		return nil
@@ -398,17 +385,25 @@ func ReleaseMany(ctx context.Context, ids []int64) error {
 	return rows.release(ctx, ids)
 }
 
-// ReleaseWith releases a held event as Release does, adding to the ids it is
-// about what its change learnt while it wrote its other stores (a DM's first
-// message: that it made the conversation, and for whom). A writer that dies
-// before releasing leaves the event to its topic's resolver, which releases
-// it as it was written.
-func ReleaseWith(ctx context.Context, id int64, more map[string]string) error {
-	if len(more) == 0 {
-		return Release(ctx, id)
+// ReleaseManyWith releases held events as ReleaseMany does, in one statement,
+// adding to each one's entities what its change learnt for it while it wrote
+// its other stores, more[id] (a DM's first message: that it made the
+// conversation, and for whom). A writer that dies before releasing leaves the
+// events to their topic's resolver, which releases them as they were written.
+func ReleaseManyWith(ctx context.Context, ids []int64, more map[int64]map[string]string) error {
+	if len(ids) == 0 {
+		return nil
 	}
-	_, err := rows.releaseWith(ctx, id, more)
-	return err
+	aligned, carries := make([]map[string]string, len(ids)), false
+	for i, id := range ids {
+		if m := more[id]; len(m) > 0 {
+			aligned[i], carries = m, true
+		}
+	}
+	if !carries {
+		return rows.release(ctx, ids)
+	}
+	return rows.releaseWith(ctx, ids, aligned)
 }
 
 // Cancel drops an event whose change was undone, inside ex.
@@ -416,18 +411,13 @@ func Cancel(ctx context.Context, ex models.Execer, id int64) error {
 	return rows.cancel(ctx, ex, id)
 }
 
-// Deliver gives a released event to its sinks now, on a goroutine of its own,
-// and then the events after it with the same key: what the writer does after
-// Release, so a live change reaches open apps at once. One another drain has
-// already is left to it; one that fails is the Sweeper's to try again.
-func Deliver(id int64) {
-	DeliverMany([]int64{id})
-}
-
-// DeliverMany is Deliver for the events of ids, claimed a batch at a time
-// (one statement each, as the drain claims) and run as the drain runs what it
-// claims. A key's events among them still run one at a time, oldest first: a
-// later one is taken after the earlier.
+// DeliverMany gives released events to their sinks now, on a goroutine of its
+// own, and each one's later events with the same key: what the writer does
+// after ReleaseMany, so a live change reaches open apps at once. The events
+// are claimed a batch at a time (one statement each, as the drain claims) and
+// run as the drain runs what it claims; a key's events among them still run
+// one at a time, oldest first. One another drain has already is left to it;
+// one that fails is the Sweeper's to try again.
 func DeliverMany(ids []int64) {
 	if len(ids) == 0 {
 		return

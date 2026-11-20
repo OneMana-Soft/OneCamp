@@ -23,7 +23,6 @@ package business
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
@@ -195,21 +194,27 @@ func (r sponsorReach) sees(ctx context.Context, sponsorUUID, eventType string, d
 	return err == nil && yes
 }
 
+// What checkReach refuses is the person's to change: refusals in words.
 var (
-	errEventNotBindable = errors.New("an agent can be set off only by one of the events offered")
-	errScopeChannel     = errors.New("choose channels the person this agent works for can read")
-	errScopeProject     = errors.New("choose projects the person this agent works for is in")
+	errEventNotBindable = checkRefused("an agent can be set off only by one of the events offered")
+	errScopeChannel     = checkRefused("choose channels the person this agent works for can read")
+	errScopeProject     = checkRefused("choose projects the person this agent works for is in")
 )
+
+// reachCheck is where helpers.RefusedUnless logs a read checkReach couldn't make.
+const reachCheck = "business/AIAgent checkReach"
 
 // errGitHubEvent is what someone setting an agent up to run on a GitHub event
 // is told (withdrawnEvents).
-var errGitHubEvent = errors.New("GitHub events can't set off an agent: anyone who can write on the repository " +
+var errGitHubEvent = checkRefused("GitHub events can't set off an agent: anyone who can write on the repository " +
 	"writes what they carry, so the agent can't safely use its tools on them. Mention the agent, or run it on a schedule, instead")
 
 // checkReach refuses to save an agent pointed somewhere the person it works
 // for can't go: bound to an event it can't be, scoped to a channel they can't
-// read or a project they aren't in, or watching moves in such a project. It
-// would only ever be refused at run time, and it isn't theirs to name.
+// read or a project they aren't in (or one that isn't there), or watching moves
+// in such a project. It would only ever be refused at run time, and it isn't
+// theirs to name. A read that failed still refuses, but as ours, logged here,
+// not as a refusal (helpers.RefusedUnless).
 func (r sponsorReach) checkReach(ctx context.Context, sponsorUUID, triggerType, triggerConfigJSON, scopeJSON string) error {
 	return r.checkReachKeeping(ctx, sponsorUUID, "", triggerType, triggerConfigJSON, scopeJSON)
 }
@@ -230,8 +235,9 @@ func (r sponsorReach) checkReachKeeping(ctx context.Context, sponsorUUID, keptEv
 			return errEventNotBindable
 		default:
 			if p := strings.TrimSpace(cfg.MoveFilter.ProjectID); p != "" {
-				if ok, err := r.inProject(ctx, sponsorUUID, p); err != nil || !ok {
-					return errScopeProject
+				ok, err := r.inProject(ctx, sponsorUUID, p)
+				if err := helpers.RefusedUnless(ctx, reachCheck, ok, err, errScopeProject); err != nil {
+					return err
 				}
 			}
 		}
@@ -243,13 +249,15 @@ func (r sponsorReach) checkReachKeeping(ctx context.Context, sponsorUUID, keptEv
 		}
 	}
 	for _, id := range scope.ChannelIDs {
-		if ok, err := r.readsChannel(ctx, sponsorUUID, strings.TrimSpace(id)); err != nil || !ok {
-			return errScopeChannel
+		ok, err := r.readsChannel(ctx, sponsorUUID, strings.TrimSpace(id))
+		if err := helpers.RefusedUnless(ctx, reachCheck, ok, err, errScopeChannel); err != nil {
+			return err
 		}
 	}
 	for _, id := range scope.ProjectIDs {
-		if ok, err := r.inProject(ctx, sponsorUUID, strings.TrimSpace(id)); err != nil || !ok {
-			return errScopeProject
+		ok, err := r.inProject(ctx, sponsorUUID, strings.TrimSpace(id))
+		if err := helpers.RefusedUnless(ctx, reachCheck, ok, err, errScopeProject); err != nil {
+			return err
 		}
 	}
 	return nil

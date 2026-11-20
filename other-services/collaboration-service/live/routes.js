@@ -22,6 +22,7 @@ import { setTaskChecks } from './ops/taskChecks.js' // C1
 import { placeSubpage, removeSubpage } from './ops/subpages.js' // C7a
 import { guestsBegin, guestsSnapshot, undoGuests } from './ops/guestStrokes.js' // calls B
 import { protect } from './ops/protect.js' // miro-44
+import { comment } from './ops/comment.js' // miro-32 Can comment
 
 export const LIVE_ROUTES = new Map([
     ['append', append],
@@ -46,6 +47,7 @@ export const BOARD_ROUTES = new Map([
     ['guestsBegin', guestsBegin],
     ['undoGuests', undoGuests],
     ['protect', protect], // miro-44: lock and lift objects (the API's protect route only)
+    ['comment', comment], // miro-32: a commenter's comment, written as them (the API's comment route only)
 ])
 
 // Ops about people rather than one doc or board, at /live/people/<op>: who is

@@ -40,7 +40,8 @@ type CallBackgroundRequest struct {
 // MakeCallBackground handles POST /ai/call-background:
 // {"msg":"ok","data":{"recipe":{...},"model":{...}}}. A model failure or an
 // unreadable answer is a 503 (never a 502, which Cloudflare shows as a
-// network error); "AI is switched off" is a 503 told apart by its words.
+// network error); AI switched off is a 503 whose msg is ai.AIOffWords, the
+// one answer every AI route gives while AI is off.
 func MakeCallBackground(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req CallBackgroundRequest
@@ -62,7 +63,7 @@ func MakeCallBackground(w http.ResponseWriter, r *http.Request) {
 	llm, cb, _, model := docAIRun.Resolve(ctx, userInfo.UserDgraphInfo.Uuid)
 	if llm == nil || cb == nil {
 		// AI was switched off between the gate and here: doc AI's answer.
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": aiSwitchedOffMsg})
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": ai.AIOffWords})
 		return
 	}
 	if err := cb.Allow(); err != nil {

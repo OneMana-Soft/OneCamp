@@ -23,7 +23,7 @@ import (
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
 	preferencesController "github.com/akashc777/OneCamp/controllers/Preferences"
-	prefModels "github.com/akashc777/OneCamp/models/postgres/UserNotificationPreference"
+	prefDomain "github.com/akashc777/OneCamp/domain/UserNotificationPreference"
 	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/lib/pq"
 )
@@ -216,10 +216,14 @@ func TestRemindersByEmailAndDefaultsPerCalendarOverHTTP(t *testing.T) {
 		t.Errorf("Maya's default replanned Sam's design review, which she isn't on: %d", n)
 	}
 
-	// The email itself: asked for, it is queued for Maya though she never
-	// turned email on; told as any other notice, it isn't.
+	// The email itself: asked for, it is queued for Maya though she turned
+	// email off; told as any other notice, it isn't.
 	t.Setenv("RESEND_API_KEY", "re_calendar_reminder_test")
 	t.Setenv("EMAIL_ESSENTIAL_ONLY", "")
+	if _, err := env.PG.Exec(`INSERT INTO users_notification_preferences (user_id, unsubscribe_token, email_enabled) VALUES ($1, $2, false)`,
+		maya.UserPostgresInfo.Id, "unsub-token-maya"); err != nil {
+		t.Fatalf("Maya turns email off: %v", err)
+	}
 	evt := notificationBusiness.Event{Type: notificationBusiness.EventCalendarReminder, Title: "Design review in 1 hour", Body: "at 10:15",
 		CTAURL: notificationBusiness.AppURL("/app/calendar/event/" + e.ID), DedupKeyParts: []string{"reminder-test-" + e.ID},
 		Recipients: []notificationBusiness.Recipient{{UserUUID: maya.UserPostgresInfo.Id}}, SkipOnlineCheck: true}
@@ -239,7 +243,7 @@ func TestRemindersByEmailAndDefaultsPerCalendarOverHTTP(t *testing.T) {
 	// Sam has a preference row, so an unsubscribe token: a reminder he asked
 	// for by email still carries no unsubscribe link, since that unsubscribe
 	// never stops it, and says where to stop it instead.
-	if _, err := prefModels.EnsureForUser(samID, "unsub-token-sam"); err != nil {
+	if _, err := prefDomain.LoadOrCreate(context.Background(), samID); err != nil {
 		t.Fatalf("Sam's preference row: %v", err)
 	}
 	evt.Recipients = []notificationBusiness.Recipient{{UserUUID: samID}}

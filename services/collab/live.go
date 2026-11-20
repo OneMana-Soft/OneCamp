@@ -38,6 +38,11 @@ var (
 	// reachable, not configured, or could not read the doc. Try again later;
 	// never write the body underneath instead.
 	ErrUnavailable = errors.New("live document writes are not available just now")
+	// ErrNotConfigured is a server with no live port to call (INTERNAL_SECRET
+	// unset): nothing to write to and nothing to close. It is an
+	// ErrUnavailable, so every errors.Is(err, ErrUnavailable) still holds;
+	// closeLater alone tells it apart, as the one failure it never retries.
+	ErrNotConfigured = fmt.Errorf("%w: INTERNAL_SECRET is not set on this server", ErrUnavailable)
 	// ErrNoSuchDoc is a doc the service's API lookup does not know.
 	ErrNoSuchDoc = errors.New("live write: no such doc")
 	// ErrNoSuchBlock is a block id the doc does not hold, or for RemoveSubpage
@@ -256,6 +261,12 @@ type wire struct {
 	ElementIDs    []string        `json:"element_ids,omitempty"`
 	Protect       *bool           `json:"protect,omitempty"`
 	Name          string          `json:"name,omitempty"`
+	Action        string          `json:"action,omitempty"`
+	CommentID     string          `json:"comment_id,omitempty"`
+	MessageID     string          `json:"message_id,omitempty"`
+	X             *float64        `json:"x,omitempty"`
+	Y             *float64        `json:"y,omitempty"`
+	Text          string          `json:"text,omitempty"`
 }
 
 type writeAnswer struct {
@@ -283,7 +294,7 @@ func call(ctx context.Context, docUUID, op string, body wire, out any) error {
 func callAt(ctx context.Context, path, op string, body wire, out any) error {
 	secret := strings.TrimSpace(os.Getenv("INTERNAL_SECRET"))
 	if secret == "" {
-		return fmt.Errorf("%w: INTERNAL_SECRET is not set on this server", ErrUnavailable)
+		return ErrNotConfigured
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -448,6 +459,58 @@ var ProtectBoard = func(ctx context.Context, boardUUID string, ids []string, pro
 	return out.Changed, err
 }
 
+// BoardCommentMessage is one message in a board comment's thread, as the
+// board's "comments" map holds it (web components/board/boardComments.tsx).
+type BoardCommentMessage struct {
+	ID         string `json:"id"`
+	AuthorID   string `json:"authorId"`
+	AuthorName string `json:"authorName"`
+	Body       string `json:"body"`
+	CreatedAt  int64  `json:"createdAt"`
+}
+
+// BoardComment is a comment pinned on a board: where it is, who began it and
+// its thread.
+type BoardComment struct {
+	ID         string                `json:"id"`
+	X          float64               `json:"x"`
+	Y          float64               `json:"y"`
+	Resolved   bool                  `json:"resolved"`
+	CreatedAt  int64                 `json:"createdAt"`
+	AuthorID   string                `json:"authorId"`
+	AuthorName string                `json:"authorName"`
+	Messages   []BoardCommentMessage `json:"messages"`
+}
+
+// CommentChange is one change to a board's comments: add a pin at X, Y with
+// Text, reply Text on CommentID, or delete MessageID from CommentID (the
+// whole pin when MessageID is empty).
+type CommentChange struct {
+	Action    string
+	CommentID string
+	MessageID string
+	X, Y      *float64
+	Text      string
+}
+
+// CommentAnswer is the pin as the change left it, or Removed when it went.
+type CommentAnswer struct {
+	Comment *BoardComment `json:"comment"`
+	Removed bool          `json:"removed"`
+}
+
+// CommentBoard makes a change to a board's comments on its live copy as the
+// person by (name is how the board names them): the collaboration service's
+// live/ops/comment.js writes them as its author whatever else it is sent,
+// and refuses deleting anyone else's message (403). Only business/Board's
+// CommentOnBoard calls it, once it has checked who may comment. A test may
+// swap it.
+var CommentBoard = func(ctx context.Context, boardUUID string, c CommentChange, by, name string) (CommentAnswer, error) {
+	var out CommentAnswer
+	err := callAt(ctx, "/live/boards/"+boardUUID+"/comment", "comment", wire{Action: c.Action, CommentID: c.CommentID, MessageID: c.MessageID, X: c.X, Y: c.Y, Text: c.Text, By: &By{UserUUID: by}, Name: name}, &out)
+	return out, err
+}
+
 // ClosePeople closes every live socket the people named have open, on every
 // doc and board: a member's (their uuid) or a guest's (guest-<grant id>), so
 // their tabs reconnect and are authorised afresh. Naming nobody closes
@@ -459,9 +522,9 @@ var ClosePeople = func(ctx context.Context, ids []string) error {
 	return callAt(ctx, "/live/people/close", "close", wire{UserIDs: ids}, nil)
 }
 
-// closeTimeout bounds one close: the change that asked it is made, and a
-// socket the service can't be reached to close is asked again whenever it
-// reconnects anyway.
+// closeTimeout bounds one try of a close: the change that asked it is made,
+// and a close that fails, the service refusing the connection, not answering
+// within this, or answering an error, is tried again (closeLater).
 const closeTimeout = 5 * time.Second
 
 // ClosePeopleLater is ClosePeople in the background, so a change never waits
@@ -480,19 +543,43 @@ func ReauthBoardLater(boardUUID string, userUUIDs []string) {
 	closeLater("collab.board-reauth", func(ctx context.Context) error { return ReauthBoard(ctx, boardUUID, userUUIDs) })
 }
 
-// closeLater runs one close in the background, bounded by closeTimeout. With
-// no live port configured there is nothing to close: a socket is authorised
-// again whenever it reconnects anyway.
+// closeRetries is how a close that failed is tried again (helpers'
+// background retry): after 1 s, then 2, 4 and 8 s, four more tries at most,
+// so a close lands within about 40 s or is given up (logged). A seam for tests.
+var closeRetries = helpers.Retries{First: time.Second, Cap: 8 * time.Second, Tries: 4}
+
+// closeLater runs one close in the background, each try bounded by
+// closeTimeout, and tries a failed one again (closeRetries), whatever failed:
+// a service that can't be reached (ErrUnavailable from the transport) is
+// tried again like one that answered an error. A turned-off link's open
+// sockets learn of it only from this push or the service's own re-check of a
+// guest (reauth.js). Each failure is logged. With no live port configured
+// (ErrNotConfigured) there is nothing to close: a socket is authorised again
+// whenever it reconnects anyway.
 func closeLater(name string, op func(ctx context.Context) error) {
-	helpers.GoSafeNamed(name, func() {
+	r := closeRetries // read once, before the goroutine: a test restoring the seam never races a late try
+	tries := 0
+	try := func(context.Context) error {
+		tries++
 		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 		defer cancel()
 		switch err := op(ctx); {
 		case err == nil:
-		case errors.Is(err, ErrUnavailable):
-			helpers.LogInfoWithContext(ctx, "services/collab %s: live sockets can't be closed (%v)", name, err)
+			return nil
+		case errors.Is(err, ErrNotConfigured):
+			helpers.LogInfoWithContext(ctx, "services/collab %s: no live port configured, nothing to close (%v)", name, err)
+			return nil
+		case tries > r.Tries:
+			helpers.LogErrorWithContext(ctx, "services/collab %s err on try %d, the last (the service's own re-check refuses a guest whose link is off): %+v", name, tries, err)
+			return err
 		default:
-			helpers.LogErrorWithContext(ctx, "services/collab %s err: %+v", name, err)
+			helpers.LogErrorWithContext(ctx, "services/collab %s err on try %d, tried again: %+v", name, tries, err)
+			return err
+		}
+	}
+	helpers.GoSafeNamed(name, func() {
+		if try(context.Background()) != nil {
+			helpers.RetryInBackground(context.Background(), name, r, try)
 		}
 	})
 }

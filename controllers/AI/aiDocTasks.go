@@ -38,7 +38,9 @@ func FindDocActionItems(w http.ResponseWriter, r *http.Request) {
 		}
 		switch {
 		case errors.Is(err, ai.ErrRateLimited):
-			helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": "You've asked AI a lot in the last minute. Try again in a moment."})
+			const words = "You've asked AI a lot in the last minute. Try again in a moment."
+			ai.SetRetryAfter(w.Header(), err, words)
+			helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": words})
 		case errors.Is(err, ai.ErrCircuitOpen):
 			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": ai.FriendlyProviderError(err)})
 		default:

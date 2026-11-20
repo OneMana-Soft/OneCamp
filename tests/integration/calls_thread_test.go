@@ -19,10 +19,12 @@ import (
 
 	"github.com/google/uuid"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	callControlBusiness "github.com/akashc777/OneCamp/business/CallControl"
 	callInviteBusiness "github.com/akashc777/OneCamp/business/CallInvite"
 	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	callThreadBusiness "github.com/akashc777/OneCamp/business/CallThread"
+	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	_ "github.com/akashc777/OneCamp/business/Huddle" // the call's post, linked as the server links it
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
@@ -51,6 +53,9 @@ func TestCallThreadIsWrittenInByEveryoneInTheCall(t *testing.T) {
 	room := uuid.NewString() // a channel's call
 	people := seedChannel(t, pg, dg, room, "maya", "ben", "jonas")
 	maya, jonas := people["maya"], people["jonas"]
+	// The channel is public in the graph too, as its row says, so its threads
+	// read for anyone signed in, Jonas among them (V-1087; CR-372 F1).
+	dg.Mutate(t, map[string]any{"uid": channelUID(t, dg, room), "ch_private": false})
 	info := func(u *dgraphStruct.DgraphUser) *userModels.UserInfo {
 		i := &userModels.UserInfo{UserDgraphInfo: *u}
 		i.UserPostgresInfo.Id = uuid.MustParse(u.Uuid)
@@ -121,6 +126,17 @@ func TestCallThreadIsWrittenInByEveryoneInTheCall(t *testing.T) {
 	})
 	connected(t, ctx, room, gia)
 	giaAuth := "Bearer " + guestToken
+
+	// Through any other route the public channel's thread reads for Jonas and
+	// no more; on the call's surface, his invite lets him reply (CR-372 F1).
+	thread := conversationBusiness.Ref{Kind: conversationBusiness.KindThread, ID: post}
+	if d, err := conversationBusiness.Resolve(ctx, info(jonas), thread); err != nil || d.Level != conversationBusiness.LevelRead {
+		t.Errorf("the call's thread through a member route: %+v, %v", d, err)
+	}
+	if d, err := conversationBusiness.Resolve(conversationBusiness.ForCallThread(ctx), info(jonas), thread); err != nil ||
+		d.Level != conversationBusiness.LevelReply || len(d.Reasons) != 1 || d.Reasons[0] != conversationBusiness.ReasonCallInvite {
+		t.Errorf("the call's thread, on its surface: %+v, %v", d, err)
+	}
 
 	// Jonas writes first, as himself and outside the conversation: the thread
 	// has his reply, and he isn't one of its people.
@@ -223,4 +239,163 @@ func TestCallThreadIsWrittenInByEveryoneInTheCall(t *testing.T) {
 		}
 		return json.Unmarshal([]byte(card.P[0].System), &facts) == nil && facts.Ended != nil
 	})
+}
+
+// inviteCallEnv is a call's world: Postgres, LiveKit, Redis and the graph,
+// with guest access on, as a call's invite is a guest link.
+func inviteCallEnv(t *testing.T) (context.Context, *integration.Env, *integration.LiveKitEnv, *integration.DgraphEnv) {
+	t.Helper()
+	ctx := context.Background()
+	pg := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(ctx, pg.DSN); err != nil {
+		t.Fatal(err)
+	}
+	lk := integration.SetupLiveKit(t)
+	integration.SetupRedis(t)
+	dg := integration.SetupDgraph(t)
+	integration.StubMqttClient(t)
+	if err := settingsBusiness.SetGuestAccessEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = settingsBusiness.SetGuestAccessEnabled(false) })
+	return ctx, pg, lk, dg
+}
+
+// asPerson is u as a request's person.
+func asPerson(u *dgraphStruct.DgraphUser) *userModels.UserInfo {
+	i := &userModels.UserInfo{UserDgraphInfo: *u}
+	i.UserPostgresInfo.Id = uuid.MustParse(u.Uuid)
+	return i
+}
+
+// startCall has host start the call in room, the conversation ref's, and
+// answers its session once the call has its post.
+func startCall(t *testing.T, ctx context.Context, lk *integration.LiveKitEnv, room string, ref callStateBusiness.Ref, host *dgraphStruct.DgraphUser) *callStateBusiness.Session {
+	t.Helper()
+	token, _, err := liveKitBusiness.CreateRoomAndGetToken(ctx, room, host, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joinSettled(t, room, host.Uid, join(t, lk, token))
+	connected(t, ctx, room, host.Uid)
+	var s *callStateBusiness.Session
+	eventually(t, "the call to take its post", func() bool {
+		s, err = callStateBusiness.Current(ctx, ref)
+		return err == nil && s != nil && s.PostUUID != ""
+	})
+	return s
+}
+
+// invitee is someone outside a live call's conversation, as they stand in
+// its thread on the call's surface.
+type invitee struct {
+	t   *testing.T
+	ctx context.Context
+	s   *callStateBusiness.Session
+	who *dgraphStruct.DgraphUser
+}
+
+func (c invitee) onSurface() (accessBusiness.Decision, error) {
+	return conversationBusiness.Resolve(conversationBusiness.ForCallThread(c.ctx), asPerson(c.who),
+		conversationBusiness.Ref{Kind: conversationBusiness.KindThread, ID: c.s.PostUUID})
+}
+
+// letIn has host let c's person into the call in room by its invite.
+func (c invitee) letIn(lk *integration.LiveKitEnv, room string, host *dgraphStruct.DgraphUser) {
+	c.t.Helper()
+	link, err := callInviteBusiness.Invite(c.ctx, room, host)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	entry, err := callInviteBusiness.Enter(c.ctx, callInviteBusiness.Door{Token: link.GuestToken}, c.who, "")
+	if err != nil || entry.Token == "" {
+		c.t.Fatalf("%s at the invite: %+v, %v", c.who.UserName, entry, err)
+	}
+	joinSettled(c.t, room, c.who.Uid, join(c.t, lk, entry.Token))
+	connected(c.t, c.ctx, room, c.who.Uid)
+}
+
+// mayReply checks c's person replies in the call's thread, unheld.
+func (c invitee) mayReply(when string) {
+	c.t.Helper()
+	if d, err := c.onSurface(); err != nil || d.Level != conversationBusiness.LevelReply || d.Archived || d.Deleted {
+		c.t.Errorf("the call's thread, %s: %+v, %v", when, d, err)
+	}
+}
+
+// heldAt checks c's person, in by the invite, reads the call's thread and no
+// more, told why, and their reply is refused.
+func (c invitee) heldAt(when string, archived, deleted bool) {
+	c.t.Helper()
+	d, err := c.onSurface()
+	if err != nil || d.Level != conversationBusiness.LevelRead || d.Archived != archived || d.Deleted != deleted ||
+		len(d.Reasons) != 1 || d.Reasons[0] != conversationBusiness.ReasonCallInvite {
+		c.t.Errorf("the call's thread, %s: %+v, %v", when, d, err)
+	}
+	if err := callThreadBusiness.ReplyAsMember(c.ctx, asPerson(c.who), c.s.ID, "still here"); !errors.Is(err, callThreadBusiness.ErrReadOnly) {
+		c.t.Errorf("%s's reply, %s: %v", c.who.UserName, when, err)
+	}
+}
+
+// An invite opens no more of a call's thread than the thread's holds allow
+// (V-1138): mid-call, an archived channel or a deleted root holds Jonas, let
+// in by the invite, at read, told why, as it holds the channel's own members.
+// Before he's let in, the public channel's thread reads for him on the call's
+// surface and takes no reply (CR-380 N1).
+func TestAnInviteOpensNoMoreOfACallsThreadThanItsHoldsAllow(t *testing.T) {
+	ctx, pg, lk, dg := inviteCallEnv(t)
+	room := uuid.NewString() // a channel's call
+	people := seedChannel(t, pg, dg, room, "maya", "ben", "jonas")
+	maya, jonas := people["maya"], people["jonas"]
+	channel := channelUID(t, dg, room)
+	dg.Mutate(t, map[string]any{"uid": channel, "ch_private": false})
+	s := startCall(t, ctx, lk, room, callStateBusiness.Ref{Kind: "channel", ID: room}, maya)
+	c := invitee{t: t, ctx: ctx, s: s, who: jonas}
+
+	// Not let in, Jonas reads the public channel's call thread on its surface,
+	// as anyone signed in reads it, and his reply is refused (CR-380 N1).
+	if d, err := c.onSurface(); err != nil || d.Level != conversationBusiness.LevelRead {
+		t.Errorf("the call's thread, not let in: %+v, %v", d, err)
+	}
+	if err := callThreadBusiness.ReplyAsMember(ctx, asPerson(jonas), s.ID, "hi"); !errors.Is(err, callThreadBusiness.ErrReadOnly) {
+		t.Errorf("Jonas's reply, not let in: %v", err)
+	}
+
+	// Let in by Maya's invite, he may reply.
+	c.letIn(lk, room, maya)
+	c.mayReply("let in")
+
+	// The channel is archived mid-call (a deletion time, as archiving leaves
+	// it): read only, as for its members; restored, he replies again.
+	const zero = "0001-01-01T00:00:00Z"
+	dg.Mutate(t, map[string]any{"uid": channel, "ch_deleted_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)})
+	c.heldAt("its channel archived", true, false)
+	dg.Mutate(t, map[string]any{"uid": channel, "ch_deleted_at": zero})
+	c.mayReply("its channel restored")
+
+	// The channel turns private, so its thread is nothing to Jonas but for
+	// the invite; then the call's post is deleted (a deletion time, as
+	// deleting one leaves it): read only.
+	dg.Mutate(t, map[string]any{"uid": channel, "ch_private": true})
+	c.mayReply("its channel private")
+	dg.Mutate(t, map[string]any{"uid": graphUID(t, dg, "post_uuid", s.PostUUID), "post_deleted_at": time.Now().UTC().Format(time.RFC3339)})
+	c.heldAt("its post deleted", false, true)
+}
+
+// A DM's call holds its invitee as a channel's does (CR-381 F1): Jonas,
+// outside Maya and Ben's DM, is let into its call by the invite and replies
+// in the call's thread; once the thread's root, the call's message in the
+// DM, is deleted (a deletion time, as deleting one leaves it), he reads it
+// and no more, told why, and his reply is refused.
+func TestAnInviteOpensNoMoreOfADMCallsThreadThanItsDeletedRootAllows(t *testing.T) {
+	ctx, pg, lk, dg := inviteCallEnv(t)
+	dm, people := seedRingConversation(t, pg, dg, false, ringMember{name: "maya"}, ringMember{name: "ben"}, ringMember{name: "jonas", away: true})
+	maya, jonas := people["maya"], people["jonas"]
+	s := startCall(t, ctx, lk, dm, callStateBusiness.Ref{Kind: "dm", ID: dm}, maya)
+	c := invitee{t: t, ctx: ctx, s: s, who: jonas}
+
+	c.letIn(lk, dm, maya)
+	c.mayReply("let in")
+	dg.Mutate(t, map[string]any{"uid": graphUID(t, dg, "chat_uuid", s.PostUUID), "chat_deleted_at": time.Now().UTC().Format(time.RFC3339)})
+	c.heldAt("its message deleted", false, true)
 }

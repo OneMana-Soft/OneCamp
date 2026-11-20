@@ -26,11 +26,13 @@ var ErrNoSuchSpace = errors.New("there's no such project or team")
 func spaceBlocks(match string) string {
 	return `
 		project(func: eq(project_uuid, ` + match + `)) @filter(` + liveProjectFilter + `) {
+			project_uuid
 			project_name
 			project_members { user_uuid }
 			project_admins { user_uuid }
 		}
 		team(func: eq(team_uuid, ` + match + `)) @filter(` + liveTeamFilter + `) {
+			team_uuid
 			team_name
 			team_members { user_uuid }
 			team_admins { user_uuid }
@@ -43,17 +45,28 @@ type spaceRead struct {
 	Team    []*dgraphStruct.DgraphTeam    `json:"team"`
 }
 
-// of is the space of kind ("project" or "team") in the answer: its name and
-// who is in it (PeopleOf). ok is false when there's none.
+// of is the space of kind ("project" or "team") in an answer about one: its
+// name and who is in it (PeopleOf). ok is false when there's none.
 func (r spaceRead) of(kind string) (name string, people []string, ok bool) {
+	return r.in(kind, "")
+}
+
+// in is the space of kind whose uuid is id in an answer about many ("" for
+// the first): its name and who is in it (PeopleOf). ok is false when there's
+// none.
+func (r spaceRead) in(kind, id string) (name string, people []string, ok bool) {
 	switch kind {
 	case "project":
-		if len(r.Project) > 0 && r.Project[0] != nil {
-			return r.Project[0].Name, PeopleOf(r.Project[0].Members, r.Project[0].Admins), true
+		for _, p := range r.Project {
+			if p != nil && (id == "" || strings.EqualFold(p.Uuid, id)) {
+				return p.Name, PeopleOf(p.Members, p.Admins), true
+			}
 		}
 	case "team":
-		if len(r.Team) > 0 && r.Team[0] != nil {
-			return r.Team[0].Name, PeopleOf(r.Team[0].Members, r.Team[0].Admins), true
+		for _, t := range r.Team {
+			if t != nil && (id == "" || strings.EqualFold(t.Uuid, id)) {
+				return t.Name, PeopleOf(t.Members, t.Admins), true
+			}
 		}
 	}
 	return "", nil, false

@@ -1517,7 +1517,10 @@ func UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
+	// The check's facts go down with ctx: what follows doesn't read the
+	// task's restriction again (projectaccess.AllowTaskOpen).
+	ctx, allowed := projectaccess.AllowTaskOpen(w, r, dgraphTaskInfo, workAccess.NeedEditTask)
+	if !allowed {
 		return
 	}
 
@@ -2348,7 +2351,9 @@ func GetGitHubTaskActivity(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"activities": activities})
 }
 
-// GetGitHubPRReviews returns PR reviews for a task.
+// GetGitHubPRReviews returns the reviews of a task's pull request that
+// stand, one per reviewer at most, newest first (a dismissed one stands for
+// nothing).
 func GetGitHubPRReviews(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -2363,7 +2368,7 @@ func GetGitHubPRReviews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"reviews": reviews})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"reviews": githubPRReviewDomain.Standing(reviews)})
 }
 
 // GetGitHubSyncStatus returns the GitHub sync status for a task.

@@ -3,8 +3,8 @@ package business
 // One task list filter for every reader of a project's tasks: the list, the
 // board and its columns, and the report of a view (B9-b1). Each sends the
 // filters the person set, and this turns them into the same graph condition,
-// with the side filters (cycles, releases, custom fields, types) read from
-// Postgres.
+// with the side filters (cycles, releases, custom fields, types, SLAs) read
+// from Postgres.
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 
 	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
 	releaseBusiness "github.com/akashc777/OneCamp/business/Release"
+	slaBusiness "github.com/akashc777/OneCamp/business/SLA"
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	workTaxonomy "github.com/akashc777/OneCamp/business/WorkTaxonomy"
@@ -37,8 +38,11 @@ func ListFilter(ctx context.Context, projectUUID string, params []taskDomain.Tas
 
 // sideFilterClause is the clause for a filter on what Postgres keeps beside a
 // project's tasks: their cycle (business/Cycle), their releases
-// (business/Release) or a custom field's value (business/TaskField). ok is false for any other filter. The error is one
-// the person can fix (a filter on a formula field), in their words.
+// (business/Release), a custom field's value (business/TaskField), their
+// type (business/WorkTaxonomy) or where their SLA timers stand (business/SLA).
+// ok is false for any other filter. The error is one the person can fix (a
+// filter on a formula field), in their words, or a guest's refusal of SLA
+// state (business/SLA Refused: a 403).
 func sideFilterClause(ctx context.Context, projectUUID, id string, values []string) (clause string, ok bool, problem error) {
 	var err error
 	switch {
@@ -59,11 +63,19 @@ func sideFilterClause(ctx context.Context, projectUUID, id string, values []stri
 		if project, err = uuid.Parse(projectUUID); err == nil {
 			clause, err = workTaxonomy.FilterClause(ctx, project, values)
 		}
+	case id == slaBusiness.FilterID:
+		var project uuid.UUID
+		if project, err = uuid.Parse(projectUUID); err == nil {
+			clause, err = slaBusiness.FilterClause(ctx, project, values)
+		}
 	default:
 		return "", false, nil
 	}
 	if ie := (*taskFieldBusiness.InputError)(nil); errors.As(err, &ie) {
 		return "", true, ie
+	}
+	if refused := (*slaBusiness.Refused)(nil); errors.As(err, &refused) {
+		return "", true, refused
 	}
 	// A filter that couldn't be read narrows to nothing: an empty list says
 	// something went wrong, where the whole list would pass for a filtered one.

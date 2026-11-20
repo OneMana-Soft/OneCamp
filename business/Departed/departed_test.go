@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"errors"
+	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func newWorld(t *testing.T) *world {
 		rooms:  map[uuid.UUID]int{dana: 1},
 		broken: map[string]bool{},
 	}
-	prev := []any{departedPeople, departedOne, activeMember, docsOwned, linkCounts, names, recoverDoc, moveLinks, revokeLinks, adminUsers, tell, activeAdmin, docCounts, endSessions}
+	prev := []any{departedPeople, departedOne, activeMember, docsOwned, linkCounts, names, recoverOne, moveLinks, revokeLinks, adminUsers, tell, activeAdmin, docCounts, endSessions}
 	t.Cleanup(func() {
 		departedPeople = prev[0].(func(context.Context, int) ([]departedModel.Person, error))
 		departedOne = prev[1].(func(context.Context, uuid.UUID) (*departedModel.Person, error))
@@ -53,7 +54,7 @@ func newWorld(t *testing.T) *world {
 		docsOwned = prev[3].(func(context.Context, string, int) ([]string, int, error))
 		linkCounts = prev[4].(func(context.Context, []uuid.UUID) (map[uuid.UUID]int, error))
 		names = prev[5].(func(context.Context, []string) (map[string]string, error))
-		recoverDoc = prev[6].(func(context.Context, accessBusiness.Subject, string, string) error)
+		recoverOne = prev[6].(func(context.Context, accessBusiness.Subject, string, string, string) error)
 		moveLinks = prev[7].(func(context.Context, uuid.UUID, uuid.UUID) (int64, int64, error))
 		revokeLinks = prev[8].(func(context.Context, uuid.UUID) ([]uuid.UUID, error))
 		adminUsers = prev[9].(func(context.Context) ([]*userModel.User, error))
@@ -62,6 +63,26 @@ func newWorld(t *testing.T) *world {
 		docCounts = prev[12].(func(context.Context, []uuid.UUID) (map[string]int, error))
 		endSessions = prev[13].(func(...uuid.UUID))
 	})
+	// No doc here is a call's notes unless a test ties some (tieWorld).
+	prevTies := []any{docTies, handoverPeople}
+	t.Cleanup(func() {
+		docTies = prevTies[0].(func(context.Context, []string, string) (map[string]recordingDomain.NotesDocTie, error))
+		handoverPeople = prevTies[1].(func(context.Context, []uuid.UUID, []uuid.UUID) (map[uuid.UUID]bool, map[uuid.UUID][]uuid.UUID, error))
+	})
+	docTies = func(context.Context, []string, string) (map[string]recordingDomain.NotesDocTie, error) {
+		return nil, nil
+	}
+	handoverPeople = func(context.Context, []uuid.UUID, []uuid.UUID) (map[uuid.UUID]bool, map[uuid.UUID][]uuid.UUID, error) {
+		return nil, nil, nil
+	}
+	// Nobody here has boards unless a test gives them some (boardWorld).
+	prevBoards := []any{boardsOwned, boardCounts}
+	t.Cleanup(func() {
+		boardsOwned = prevBoards[0].(func(context.Context, string, int) ([]string, int, error))
+		boardCounts = prevBoards[1].(func(context.Context, []uuid.UUID) (map[string]int, error))
+	})
+	boardsOwned = func(context.Context, string, int) ([]string, int, error) { return nil, 0, nil }
+	boardCounts = func(context.Context, []uuid.UUID) (map[string]int, error) { return map[string]int{}, nil }
 	left := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
 	people := []departedModel.Person{
 		{ID: dana, Email: "dana@acme.test", LeftAt: left},
@@ -109,7 +130,10 @@ func newWorld(t *testing.T) *world {
 	names = func(_ context.Context, ids []string) (map[string]string, error) {
 		return map[string]string{dana.String(): "Dana Ross"}, nil
 	}
-	recoverDoc = func(_ context.Context, _ accessBusiness.Subject, doc, to string) error {
+	recoverOne = func(_ context.Context, _ accessBusiness.Subject, kind, doc, to string) error {
+		if kind != accessBusiness.KindDoc {
+			return nil
+		}
 		if w.broken[doc] {
 			return errors.New("the graph refused")
 		}
@@ -273,7 +297,7 @@ func TestSummary(t *testing.T) {
 		docs, links int
 		want        string
 	}{{3, 2, "3 docs and 2 links"}, {1, 0, "1 doc"}, {0, 1, "1 link"}, {12, 1, "12 docs and 1 link"}} {
-		if got := Summary(c.docs, c.links); got != c.want {
+		if got := Work(c.docs, 0, c.links); got != c.want {
 			t.Errorf("%d, %d: %q", c.docs, c.links, got)
 		}
 	}

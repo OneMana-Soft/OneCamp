@@ -105,8 +105,9 @@ func Get(id uuid.UUID) (*Cycle, error) {
 	return scan(postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `SELECT `+columns+` FROM project_cycles WHERE id = $1 AND `+softDelete.Live(""), id))
 }
 
-// Create numbers the cycle after the project's last and refuses overlaps,
-// under a per-project lock so two cycles made at once can't collide.
+// Create numbers the cycle after the project's last and refuses overlaps
+// (unless the project runs parallel cycles: oneAtATime), under a per-project
+// lock so two cycles made at once can't collide.
 func Create(project uuid.UUID, name string, startsAt, endsAt time.Time, by uuid.UUID) (*Cycle, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
@@ -115,12 +116,12 @@ func Create(project uuid.UUID, name string, startsAt, endsAt time.Time, by uuid.
 		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op after Commit
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "cycles:"+project.String()); err != nil {
+	if err := pgexec.LockXact(pgexec.WithTx(ctx, tx), ProjectLockKey(project)); err != nil {
 		return nil, err
 	}
 	var clash bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM project_cycles
-		WHERE project_uuid = $1 AND starts_at < $3 AND ends_at > $2 AND `+softDelete.Live("")+`)`, project, startsAt, endsAt).Scan(&clash); err != nil {
+		WHERE project_uuid = $1 AND starts_at < $3 AND ends_at > $2 AND `+softDelete.Live("")+` AND `+oneAtATime("")+`)`, project, startsAt, endsAt).Scan(&clash); err != nil {
 		return nil, err
 	}
 	if clash {
@@ -149,7 +150,7 @@ func Start(ctx context.Context, project, id uuid.UUID, startsAt, endsAt time.Tim
 			return err
 		}
 		clash, err := pgexec.Scalar[bool](ctx, `SELECT EXISTS (SELECT 1 FROM project_cycles
-			WHERE project_uuid = $1 AND id <> $4 AND completed_at IS NULL AND starts_at < $3 AND ends_at > $2 AND `+softDelete.Live("")+`)`, project, startsAt, endsAt, id)
+			WHERE project_uuid = $1 AND id <> $4 AND completed_at IS NULL AND starts_at < $3 AND ends_at > $2 AND `+softDelete.Live("")+` AND `+oneAtATime("")+`)`, project, startsAt, endsAt, id)
 		if err != nil {
 			return err
 		}
@@ -157,7 +158,7 @@ func Start(ctx context.Context, project, id uuid.UUID, startsAt, endsAt time.Tim
 			return ErrOverlap
 		}
 		if _, err := pgexec.Exec(ctx, `UPDATE project_cycles SET ends_at = $2
-			WHERE project_uuid = $1 AND completed_at IS NOT NULL AND ends_at > $2 AND starts_at < $2 AND `+softDelete.Live(""), project, startsAt); err != nil {
+			WHERE project_uuid = $1 AND completed_at IS NOT NULL AND ends_at > $2 AND starts_at < $2 AND `+softDelete.Live("")+` AND `+oneAtATime(""), project, startsAt); err != nil {
 			return err
 		}
 		c, _, err := pgexec.QueryOne(ctx, `UPDATE project_cycles SET starts_at = $3, ends_at = $4
@@ -174,9 +175,11 @@ func Start(ctx context.Context, project, id uuid.UUID, startsAt, endsAt time.Tim
 // lockProject holds the project's cycles lock until the transaction ends, so
 // two writes of its cycles at once can't collide.
 func lockProject(ctx context.Context, project uuid.UUID) error {
-	_, err := pgexec.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "cycles:"+project.String())
-	return err
+	return pgexec.LockXact(ctx, ProjectLockKey(project))
 }
+
+// ProjectLockKey is the project's cycles lock.
+func ProjectLockKey(project uuid.UUID) string { return "cycles:" + project.String() }
 
 // Rename changes a cycle's name.
 func Rename(id uuid.UUID, name string) error {
@@ -214,12 +217,12 @@ func Restore(ctx context.Context, id uuid.UUID) (bool, error) {
 		}
 		if _, err := pgexec.Exec(ctx, `UPDATE project_cycles d SET ends_at = COALESCE((SELECT MIN(c.starts_at) FROM project_cycles c
 			WHERE c.project_uuid = d.project_uuid AND c.id <> d.id AND `+softDelete.Live("c")+` AND c.starts_at > d.starts_at AND c.starts_at < d.ends_at), d.ends_at)
-			WHERE d.id = $1 AND d.completed_at IS NOT NULL AND d.deleted_at IS NOT NULL`, id); err != nil {
+			WHERE d.id = $1 AND d.completed_at IS NOT NULL AND d.deleted_at IS NOT NULL AND `+oneAtATime("d"), id); err != nil {
 			return err
 		}
 		// scan answers no row as nil, so QueryOne's found is always true here.
 		in, _, err := pgexec.QueryOne(ctx, `SELECT `+columns+` FROM project_cycles WHERE id = (SELECT c.id FROM project_cycles c JOIN project_cycles d ON d.id = $1
-			WHERE c.project_uuid = d.project_uuid AND c.id <> d.id AND `+softDelete.Live("c")+` AND c.starts_at < d.ends_at AND c.ends_at > d.starts_at
+			WHERE c.project_uuid = d.project_uuid AND c.id <> d.id AND `+softDelete.Live("c")+` AND c.starts_at < d.ends_at AND c.ends_at > d.starts_at AND `+oneAtATime("d")+`
 			ORDER BY c.starts_at LIMIT 1)`, func(r pgexec.Row) (*Cycle, error) { return scan(r) }, id)
 		if err != nil {
 			return err

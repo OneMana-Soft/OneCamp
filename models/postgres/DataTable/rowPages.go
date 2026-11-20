@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 
+	tableDomain "github.com/akashc777/OneCamp/domain/DataTable"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/google/uuid"
@@ -40,15 +41,17 @@ func PagesOfRows(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]uuid.UUID,
 	return out, rows.Err()
 }
 
-// PagesOfTable is every page a table's rows host, deleted rows' too: what is
-// told when who may see the table changes.
-func PagesOfTable(ctx context.Context, table uuid.UUID) ([]uuid.UUID, error) {
+// PagesOfTables is every page the tables' rows host, deleted rows' too, in
+// one read: what is told when who may see the tables changes.
+func PagesOfTables(ctx context.Context, tables []uuid.UUID) ([]uuid.UUID, error) {
+	if len(tables) == 0 {
+		return nil, nil
+	}
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx,
-		`SELECT doc_uuid FROM data_table_rows WHERE table_id = $1 AND doc_uuid IS NOT NULL`, table)
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, tableDomain.PagesOfTables, tables)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/PagesOfTable err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "models/PagesOfTables err: %+v", err)
 		return nil, err
 	}
 	defer rows.Close()

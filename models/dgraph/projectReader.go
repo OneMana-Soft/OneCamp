@@ -11,6 +11,14 @@ func (p *DgraphProject) ReaderIsIn() bool {
 	return p != nil && (p.IsProjectMember > 0 || p.IsProjectAdmin > 0)
 }
 
+// ProjectTriage is a project's triage as one who may read its queue sees it
+// (project_triage): on, and how many wait that no snooze holds back. Never
+// stored; laid on a project read for them, after the read.
+type ProjectTriage struct {
+	On      bool `json:"on"`
+	Waiting int  `json:"waiting"`
+}
+
 // ProjectAccess is what someone may do in a project, as the app shows it
 // (project_access): their role, and each thing the rule lets them do. Never
 // stored; set on a project read for them, after the read.

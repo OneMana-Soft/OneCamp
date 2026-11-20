@@ -7,9 +7,12 @@ import (
 	"errors"
 	"time"
 
+	bookingDomain "github.com/akashc777/OneCamp/domain/Booking"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // Page is a booking page (migrations 177 and 212).
@@ -25,13 +28,24 @@ type Page struct {
 	MinNoticeMinutes int             `json:"min_notice_minutes"`
 	MaxDaysAhead     int             `json:"max_days_ahead"`
 	Active           bool            `json:"active"`
-	UpdatedAt        time.Time       `json:"updated_at"`
+	// Questions are what the page asks whoever books it (migration 607).
+	Questions Questions `json:"questions"`
+	// KeptQuestionIds are the ids of the questions an edit gives back, never
+	// stored: SavePage updates the page only when each is one it asks now.
+	KeptQuestionIds []string  `json:"-"`
+	UpdatedAt       time.Time `json:"updated_at"`
 	// DeletedAt marks a page its owner deleted: it takes no bookings and isn't
 	// listed, its address stays taken, and its bookings keep their links.
 	DeletedAt *time.Time `json:"-"`
 	// UpcomingBookings is how many active bookings are still to start, read
 	// for the owner's list only: deleting the page says what becomes of them.
 	UpcomingBookings int `json:"upcoming_bookings"`
+	// TeamMode is solo, collective or (H4b) round_robin.
+	TeamMode string `json:"team_mode"`
+	// Hosts are the page's hosts as its owner's list shows them.
+	Hosts []Host `json:"hosts,omitempty"`
+	// HostIds are the hosts an edit asks for, checked (CheckPage).
+	HostIds []uuid.UUID `json:"-"`
 }
 
 // Booking is one slot a guest booked.
@@ -56,6 +70,9 @@ type Booking struct {
 	// server's key, so a move can send it again. Neither is ever sent anywhere.
 	CancelHash   []byte `json:"-"`
 	CancelSealed string `json:"-"`
+	// Answers are what the guest answered the page's questions (migration
+	// 607), read by the page's owner and the holder of the guest's link.
+	Answers Answers `json:"answers"`
 }
 
 // Who cancelled a booking: its guest, through their link, or its host, by
@@ -80,12 +97,12 @@ func withTimeout() (context.Context, context.CancelFunc) {
 }
 
 const pageColumns = `id, user_id, slug, title, description, duration_minutes, hours,
-	buffer_minutes, min_notice_minutes, max_days_ahead, active, updated_at, deleted_at`
+	buffer_minutes, min_notice_minutes, max_days_ahead, active, questions, updated_at, deleted_at, team_mode`
 
 func scanPage(row interface{ Scan(...any) error }) (*Page, error) {
 	var p Page
 	err := row.Scan(&p.Id, &p.UserId, &p.Slug, &p.Title, &p.Description, &p.DurationMinutes, &p.Hours,
-		&p.BufferMinutes, &p.MinNoticeMinutes, &p.MaxDaysAhead, &p.Active, &p.UpdatedAt, &p.DeletedAt)
+		&p.BufferMinutes, &p.MinNoticeMinutes, &p.MaxDaysAhead, &p.Active, &p.Questions, &p.UpdatedAt, &p.DeletedAt, &p.TeamMode)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -114,8 +131,8 @@ func ListPages(userID uuid.UUID) ([]Page, error) {
 		// scanPage's columns, then the count.
 		var p Page
 		if err := rows.Scan(&p.Id, &p.UserId, &p.Slug, &p.Title, &p.Description, &p.DurationMinutes, &p.Hours,
-			&p.BufferMinutes, &p.MinNoticeMinutes, &p.MaxDaysAhead, &p.Active, &p.UpdatedAt, &p.DeletedAt,
-			&p.UpcomingBookings); err != nil {
+			&p.BufferMinutes, &p.MinNoticeMinutes, &p.MaxDaysAhead, &p.Active, &p.Questions, &p.UpdatedAt, &p.DeletedAt,
+			&p.TeamMode, &p.UpcomingBookings); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -141,7 +158,8 @@ func PageBySlug(slug string) (*Page, error) {
 }
 
 // SavePage creates a page (Id zero) or updates one of the person's own.
-// Returns nil when the page to update isn't theirs, and ErrSlugTaken when the
+// Returns nil when the page to update isn't theirs, or a question it keeps
+// (KeptQuestionIds) isn't one the page asks now, and ErrSlugTaken when the
 // address is another page's. A page made at the address of one its owner
 // deleted is that page again, with its bookings: the address stays theirs.
 func SavePage(p Page) (*Page, error) {
@@ -151,26 +169,30 @@ func SavePage(p Page) (*Page, error) {
 	if p.Id == uuid.Nil {
 		row = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `
 			INSERT INTO booking_pages (user_id, slug, title, description, duration_minutes, hours,
-			       buffer_minutes, min_notice_minutes, max_days_ahead, active)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			       buffer_minutes, min_notice_minutes, max_days_ahead, active, questions, team_mode)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			ON CONFLICT (slug) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description,
 			       duration_minutes = EXCLUDED.duration_minutes, hours = EXCLUDED.hours,
 			       buffer_minutes = EXCLUDED.buffer_minutes, min_notice_minutes = EXCLUDED.min_notice_minutes,
 			       max_days_ahead = EXCLUDED.max_days_ahead, active = EXCLUDED.active,
-			       deleted_at = NULL, updated_at = NOW()
+			       questions = EXCLUDED.questions, team_mode = EXCLUDED.team_mode, deleted_at = NULL, updated_at = NOW()
 			 WHERE booking_pages.user_id = EXCLUDED.user_id AND booking_pages.deleted_at IS NOT NULL
 			RETURNING `+pageColumns,
 			p.UserId, p.Slug, p.Title, p.Description, p.DurationMinutes, []byte(p.Hours),
-			p.BufferMinutes, p.MinNoticeMinutes, p.MaxDaysAhead, p.Active)
+			p.BufferMinutes, p.MinNoticeMinutes, p.MaxDaysAhead, p.Active, p.Questions, p.TeamMode)
 	} else {
+		kept := p.KeptQuestionIds
+		if kept == nil {
+			kept = []string{} // NULL would match no page
+		}
 		row = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `
 			UPDATE booking_pages SET slug = $3, title = $4, description = $5, duration_minutes = $6,
 			       hours = $7, buffer_minutes = $8, min_notice_minutes = $9, max_days_ahead = $10,
-			       active = $11, updated_at = NOW()
-			 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+			       active = $11, questions = $12, team_mode = $13, updated_at = NOW()
+			 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`+bookingDomain.QuestionsKept+`
 			RETURNING `+pageColumns,
 			p.Id, p.UserId, p.Slug, p.Title, p.Description, p.DurationMinutes, []byte(p.Hours),
-			p.BufferMinutes, p.MinNoticeMinutes, p.MaxDaysAhead, p.Active)
+			p.BufferMinutes, p.MinNoticeMinutes, p.MaxDaysAhead, p.Active, p.Questions, p.TeamMode, pq.Array(kept))
 	}
 	saved, err := scanPage(row)
 	if err != nil && helpers.IsUniqueViolationOn(err, slugConstraint) {
@@ -185,15 +207,16 @@ func SavePage(p Page) (*Page, error) {
 
 // DeletePage deletes one of the person's pages, and says how many of its
 // bookings are still to come: they stay, with their links. False when it
-// wasn't theirs, or is deleted already.
+// wasn't theirs, or is deleted already. Its hosts leave in the same statement.
 func DeletePage(userID, id uuid.UUID) (bool, int, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
 	var upcoming int
 	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `
-		UPDATE booking_pages SET deleted_at = NOW(), updated_at = NOW()
+		WITH gone AS (UPDATE booking_pages SET deleted_at = NOW(), updated_at = NOW()
 		 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-		RETURNING `+upcomingOfPage, id, userID).Scan(&upcoming)
+		RETURNING id, `+upcomingOfPage+` AS upcoming), `+bookingDomain.HostsLeaveGonePage+`
+		SELECT upcoming FROM gone`, id, userID).Scan(&upcoming)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, 0, nil
 	}
@@ -210,25 +233,44 @@ func Reserve(b Booking) (*Booking, error) {
 		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op after Commit
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "booking:"+b.PageId.String()); err != nil {
+	if err := pgexec.LockXact(pgexec.WithTx(ctx, tx), bookingDomain.PageLockKey(b.PageId)); err != nil {
 		return nil, err
 	}
 	var clash bool
-	if err := tx.QueryRowContext(ctx, `
-		SELECT EXISTS (SELECT 1 FROM bookings WHERE page_id = $1 AND cancelled_at IS NULL
-		                 AND starts_at < $3 AND ends_at > $2)`, b.PageId, b.StartsAt, b.EndsAt).Scan(&clash); err != nil {
+	if err := tx.QueryRowContext(ctx, bookingDomain.Clash, b.PageId, b.StartsAt, b.EndsAt, uuid.NullUUID{}).Scan(&clash); err != nil {
 		return nil, err
 	}
 	if clash {
 		return nil, ErrSlotTaken
 	}
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO bookings (page_id, guest_name, guest_email, note, starts_at, ends_at, cancel_token_hash, cancel_token_sealed, guest_tz)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-		b.PageId, b.GuestName, b.GuestEmail, b.Note, b.StartsAt, b.EndsAt, b.CancelHash, b.CancelSealed, b.GuestTZ).Scan(&b.Id); err != nil {
+		INSERT INTO bookings (page_id, guest_name, guest_email, note, starts_at, ends_at, cancel_token_hash, cancel_token_sealed, guest_tz, answers)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+		b.PageId, b.GuestName, b.GuestEmail, b.Note, b.StartsAt, b.EndsAt, b.CancelHash, b.CancelSealed, b.GuestTZ, b.Answers).Scan(&b.Id); err != nil {
 		return nil, err
 	}
 	return &b, tx.Commit()
+}
+
+// HoldPage runs move holding the page's lock, the one Reserve takes, once no
+// active booking of the page but except overlaps start..end (ErrSlotTaken
+// otherwise): a booking's move checks its new time and moves there with no
+// booking taken meanwhile. move gets no transaction: what it writes is its
+// own, and the lock is let go when it returns.
+func HoldPage(ctx context.Context, page, except uuid.UUID, start, end time.Time, move func() error) error {
+	return pgexec.InTx(context.WithoutCancel(ctx), func(tctx context.Context) error {
+		if err := pgexec.LockXact(tctx, bookingDomain.PageLockKey(page)); err != nil {
+			return err
+		}
+		clash, err := pgexec.Scalar[bool](tctx, bookingDomain.Clash, page, start, end, except)
+		if err != nil {
+			return err
+		}
+		if clash {
+			return ErrSlotTaken
+		}
+		return move()
+	})
 }
 
 // SetEvent links a booking to the event it made.
@@ -248,12 +290,12 @@ func Forget(id uuid.UUID) error {
 }
 
 const bookingColumns = `id, page_id, event_uuid, guest_name, guest_email, note, starts_at, ends_at, cancelled_at,
-	cancelled_by, created_at, guest_tz, cancel_token_hash, cancel_token_sealed`
+	cancelled_by, created_at, guest_tz, cancel_token_hash, cancel_token_sealed, answers`
 
 func scanBooking(row interface{ Scan(...any) error }) (*Booking, error) {
 	var b Booking
 	err := row.Scan(&b.Id, &b.PageId, &b.EventUUID, &b.GuestName, &b.GuestEmail, &b.Note, &b.StartsAt, &b.EndsAt,
-		&b.CancelledAt, &b.CancelledBy, &b.CreatedAt, &b.GuestTZ, &b.CancelHash, &b.CancelSealed)
+		&b.CancelledAt, &b.CancelledBy, &b.CreatedAt, &b.GuestTZ, &b.CancelHash, &b.CancelSealed, &b.Answers)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -290,10 +332,10 @@ func MoveByEvent(eventUUID uuid.UUID, start, end time.Time) (*Booking, time.Time
 		UPDATE bookings b SET starts_at = $2, ends_at = $3 FROM was WHERE b.id = was.id
 		RETURNING b.id, b.page_id, b.event_uuid, b.guest_name, b.guest_email, b.note, b.starts_at, b.ends_at,
 		          b.cancelled_at, b.cancelled_by, b.created_at, b.guest_tz, b.cancel_token_hash, b.cancel_token_sealed,
-		          was.starts_at, was.ends_at`,
+		          b.answers, was.starts_at, was.ends_at`,
 		eventUUID, start, end).Scan(&b.Id, &b.PageId, &b.EventUUID, &b.GuestName, &b.GuestEmail, &b.Note, &b.StartsAt, &b.EndsAt,
 		&b.CancelledAt, &b.CancelledBy, &b.CreatedAt, &b.GuestTZ, &b.CancelHash, &b.CancelSealed,
-		&wasStart, &wasEnd)
+		&b.Answers, &wasStart, &wasEnd)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, time.Time{}, time.Time{}, nil
 	}
@@ -343,6 +385,13 @@ func BookingByLink(hash []byte) (*Booking, error) {
 		`SELECT `+bookingColumns+` FROM bookings WHERE cancel_token_hash = $1`, hash))
 }
 
+// BookingByID is a booking by its id, or nil.
+func BookingByID(ctx context.Context, id uuid.UUID) (*Booking, error) {
+	b, _, err := pgexec.QueryOne(ctx, `SELECT `+bookingColumns+` `+bookingDomain.BookingByID,
+		func(r pgexec.Row) (*Booking, error) { return scanBooking(r) }, id)
+	return b, err
+}
+
 // Cancel marks a booking cancelled by its guest; false when it already was.
 func Cancel(id uuid.UUID) (bool, error) {
 	ctx, cancel := withTimeout()
@@ -368,8 +417,15 @@ func CountRecentByEmail(pageID uuid.UUID, email string, since time.Time) (int, e
 	return n, err
 }
 
+// pageRead is told of each PageById: nil but in the integration build's
+// count of a guest's move's reads.
+var pageRead func()
+
 // PageById is a page by id, or nil.
 func PageById(id uuid.UUID) (*Page, error) {
+	if pageRead != nil {
+		pageRead()
+	}
 	ctx, cancel := withTimeout()
 	defer cancel()
 	return scanPage(postgresInit.DBConn.SqlDB.QueryRowContext(ctx,

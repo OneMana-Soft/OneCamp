@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Calendar"
+	connectorBusiness "github.com/akashc777/OneCamp/business/Connector"
 	calendarDomain "github.com/akashc777/OneCamp/domain/Calendar"
 	domain "github.com/akashc777/OneCamp/domain/Integration"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
@@ -17,10 +19,12 @@ import (
 	"github.com/akashc777/OneCamp/initializers/oauth"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	integrationModel "github.com/akashc777/OneCamp/models/postgres/Integration"
+	taskModel "github.com/akashc777/OneCamp/models/postgres/Task"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/calendar/v3"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -132,6 +136,45 @@ func getGoogleCalendarService(ctx context.Context, integration *integrationModel
 // integrationOf reads a person's link to an app; swapped in tests.
 var integrationOf = domain.GetIntegration
 
+// A task's row, its graph entry, the write of its Google copy's id and the
+// calendar a link opens, as the task sync reads them; swapped in tests.
+var (
+	taskRowOf         = taskDomain.GetTaskByUUID
+	taskGraphOf       = taskDomain.GetDgraphBasicTaskInfoByUUID
+	setTaskGoogleID   = taskDomain.UpdateTaskGoogleCalendarId
+	calendarOfLink    = getGoogleCalendarService
+	clearTaskGoogleID = taskDomain.ClearTaskGoogleCalendarIdIf
+)
+
+// taskCopyLine runs the passes on one task's Google copy, hand-overs and
+// syncs, one at a time in the order they were asked for, so each reads the row
+// the one before it wrote. It spans this process only: across server
+// instances the compare-and-set clear (ClearTaskGoogleCalendarIdIf) is what
+// keeps a newer id. googleCallTimeout bounds each Google call a pass makes, so
+// a call that never answers can't hold the line.
+var (
+	taskCopyLine      = &helpers.InOrder{}
+	googleCallTimeout = 8 * time.Second
+)
+
+var errTaskCopyPass = errors.New("the pass on the task's Google copy stopped")
+
+// inTaskCopyLine hands pass to the task's line now and answers once it ran.
+func inTaskCopyLine(taskUUID, name string, pass func() error) <-chan error {
+	done := make(chan error, 1)
+	taskCopyLine.Go(taskUUID, name, func() {
+		err := errTaskCopyPass // what the caller hears if pass panics
+		defer func() { done <- err }()
+		err = pass()
+	})
+	return done
+}
+
+// googleCall bounds one Google call.
+func googleCall(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, googleCallTimeout)
+}
+
 // googleServiceFor is a person's Google Calendar, its calls bound to ctx.
 // (nil, nil) when they haven't linked Google. A link is its refresh token,
 // sealed or plain (storedToken): a link whose access token is empty or sealed
@@ -144,7 +187,7 @@ func googleServiceFor(ctx context.Context, userID uuid.UUID) (*calendar.Service,
 	if integration == nil || storedToken(integration.RefreshToken) == "" {
 		return nil, nil
 	}
-	return getGoogleCalendarService(ctx, integration)
+	return calendarOfLink(ctx, integration)
 }
 
 // errGoogleNotLinked is a change to a Google copy for someone who hasn't
@@ -228,26 +271,209 @@ func UpdateGoogleCalendarSyncTask(ctx context.Context, enabled bool, userInfo *m
 	return nil
 }
 
+// SyncTaskToGoogleCalendar brings the task's copy in its assignee's Google
+// calendar up to date (assigneeUUIDStr is that person's uuid, "" nobody):
+// only for someone linked with task sync on. A hand-over from one person to
+// another goes through MoveTaskGoogleCopy instead. It waits its turn in the
+// task's line behind every pass asked for before it.
 func SyncTaskToGoogleCalendar(ctx context.Context, taskUUID string, assigneeUUIDStr string) error {
+	return <-inTaskCopyLine(taskUUID, "calendar.syncTaskCopy", func() error {
+		return syncTaskCopy(ctx, taskUUID, assigneeUUIDStr)
+	})
+}
+
+// syncTaskCopy is SyncTaskToGoogleCalendar's pass, run in the task's line.
+func syncTaskCopy(ctx context.Context, taskUUID string, assigneeUUIDStr string) error {
 	if assigneeUUIDStr == "" {
-		// Task is unassigned. If it was previously synced, we should delete it.
-		// We'll handle this by fetching the task and checking if it has a GCal ID.
-		ctx = context.Background() // Ensure context is alive for async execution if needed
+		// Unassigned: nobody's link may touch a copy left from before.
 		return syncTaskInternal(ctx, taskUUID, nil)
 	}
+	integration, err := taskSyncLink(ctx, assigneeUUIDStr)
+	if err != nil || integration == nil {
+		return err
+	}
+	return syncTaskInternal(ctx, taskUUID, integration)
+}
 
-	assigneeUUID, err := uuid.Parse(assigneeUUIDStr)
+// taskSyncLink is a person's Google link when it may carry their tasks: a
+// refresh token and task sync on. nil when it may not, or can't be read.
+func taskSyncLink(ctx context.Context, person string) (*integrationModel.Integration, error) {
+	personUUID, err := uuid.Parse(person)
+	if err != nil {
+		return nil, err
+	}
+	integration, err := integrationOf(ctx, "user", personUUID, "google_calendar")
+	if err != nil || integration == nil || integration.RefreshToken == nil || *integration.RefreshToken == "" || !integration.TaskSyncEnabled {
+		return nil, nil
+	}
+	return integration, nil
+}
+
+// MoveTaskGoogleCopy follows a task from one assignee to the next (person
+// uuids, "" nobody). It takes the task's place in taskCopyLine now, in the
+// order the hand-overs were asked for, and runs in the background once every
+// earlier pass on the task is done; the channel gets its answer. ctx is the
+// door's pgexec.Detached(ctx): the request's values, never its cancel or a
+// transaction it holds (googleCopyDoors_test.go). One process never runs two
+// passes on a task at once; a second server instance can, and then only the
+// compare-and-set clear keeps the newer id. The copy in from's calendar comes out
+// first, through from's own link, whether or not from's task sync is on: only
+// the copy we wrote, only with from's token, only by the system. Once that
+// removal has been tried the id is no one's, so to never patches it in their
+// own calendar; to then gets a copy of their own, as SyncTaskToGoogleCalendar
+// gives it. from without a usable link can't be reached: that copy stays
+// where it is (V-1116).
+func MoveTaskGoogleCopy(ctx context.Context, taskUUID, from, to string) <-chan error {
+	return inTaskCopyLine(taskUUID, "Task.assignee.calendar", func() error {
+		return moveTaskGoogleCopy(ctx, taskUUID, from, to)
+	})
+}
+
+// moveTaskGoogleCopy is MoveTaskGoogleCopy's pass, run in the task's line.
+func moveTaskGoogleCopy(ctx context.Context, taskUUID, from, to string) error {
+	if from == to {
+		return syncTaskCopy(ctx, taskUUID, to)
+	}
+	taskID, err := uuid.Parse(taskUUID)
 	if err != nil {
 		return err
 	}
-
-	integration, err := domain.GetIntegration(ctx, "user", assigneeUUID, "google_calendar")
-	if err != nil || integration == nil || integration.RefreshToken == nil || *integration.RefreshToken == "" || !integration.TaskSyncEnabled {
-		// Not linked or sync disabled
+	pgTask, err := taskRowOf(ctx, taskID)
+	if err != nil || pgTask == nil {
+		return err
+	}
+	if from != "" && pgTask.TaskGoogleCalendarId != nil {
+		removeFromCopy(ctx, pgTask, taskUUID, from)
+	}
+	if to == "" {
 		return nil
 	}
+	integration, err := taskSyncLink(ctx, to)
+	if err != nil || integration == nil {
+		return err
+	}
+	return syncLoadedTask(ctx, pgTask, integration, taskUUID)
+}
 
-	return syncTaskInternal(ctx, taskUUID, integration)
+// removeFromCopy takes the task's copy out of the previous assignee's
+// calendar for a hand-over, and forgets its id once that was tried. A copy
+// Google says is gone (404, 410) is simply forgotten; any other failure (401,
+// 403, 5xx, 429, a timeout, the network) leaves it in from's calendar, and
+// that orphan is logged once with its id for V-1116's removal queue.
+func removeFromCopy(ctx context.Context, pgTask *taskModel.Task, taskUUID, from string) {
+	fromUUID, err := uuid.Parse(from)
+	if err != nil {
+		return
+	}
+	srv, err := googleServiceFor(ctx, fromUUID)
+	if err != nil || srv == nil {
+		helpers.MessageLogs.InfoLog.Printf("Task %s: its Google copy stays in the previous assignee's calendar: no usable link", taskUUID)
+		return
+	}
+	eventID := *pgTask.TaskGoogleCalendarId
+	if err := removeTaskCopy(ctx, srv, pgTask, taskUUID); err != nil {
+		if !copyGone(err) {
+			helpers.MessageLogs.InfoLog.Printf("Task %s: its Google copy %s stays in the previous assignee's calendar as an orphan (V-1116): %v", taskUUID, eventID, err)
+		}
+		_ = clearTaskGoogleID(ctx, pgTask.Id, eventID)
+	}
+	pgTask.TaskGoogleCalendarId = nil
+}
+
+// ArchiveTaskGoogleCopy takes an archived task's copy out of its assignee's
+// calendar, through the assignee's own link, whether or not their task sync
+// is on (V-1119): only the copy we wrote (the id the task's row keeps), only
+// with the assignee's own token, only by the system. It takes the task's place
+// in taskCopyLine now, in the order asked, as MoveTaskGoogleCopy does, and runs
+// once every earlier pass on the task is done; the channel gets its answer.
+// ctx is as MoveTaskGoogleCopy's.
+// The assignee is the one the graph names at the pass, so a hand-over asked
+// before it has already moved the copy. A copy Google says is gone (404, 410)
+// is forgotten; any other failure keeps the id, and no later pass on the task
+// tries again (a bulk delete skips an archived task, an unarchive with task
+// sync off makes no DELETE): the archived row's kept id is what V-1116's
+// removal queue takes the copy out by.
+func ArchiveTaskGoogleCopy(ctx context.Context, taskUUID string) <-chan error {
+	return inTaskCopyLine(taskUUID, "Task.archive.calendar", func() error {
+		return archiveTaskCopy(ctx, taskUUID)
+	})
+}
+
+// archiveTaskCopy is ArchiveTaskGoogleCopy's pass, run in the task's line.
+func archiveTaskCopy(ctx context.Context, taskUUID string) error {
+	taskID, err := uuid.Parse(taskUUID)
+	if err != nil {
+		return err
+	}
+	pgTask, err := taskRowOf(ctx, taskID)
+	if err != nil || pgTask == nil || pgTask.TaskGoogleCalendarId == nil || pgTask.DeletedAt.IsZero() {
+		return err // no copy, or the task is live again
+	}
+	dgraphTask, err := taskGraphOf(ctx, taskUUID, "0x1")
+	if err != nil || dgraphTask == nil {
+		return err
+	}
+	eventID := *pgTask.TaskGoogleCalendarId
+	var srv *calendar.Service
+	if dgraphTask.Assignee != nil {
+		if assignee, perr := uuid.Parse(dgraphTask.Assignee.Uuid); perr == nil {
+			if srv, err = googleServiceFor(ctx, assignee); err != nil {
+				return err
+			}
+		}
+	}
+	if srv == nil {
+		helpers.MessageLogs.InfoLog.Printf("Task %s: its Google copy %s stays in the assignee's calendar: no usable link", taskUUID, eventID)
+		return nil
+	}
+	if err := removeTaskCopy(ctx, srv, pgTask, taskUUID); err != nil {
+		if copyGone(err) {
+			return clearTaskGoogleID(ctx, pgTask.Id, eventID)
+		}
+		return err
+	}
+	return nil
+}
+
+// removeTaskCopy takes the task's Google copy out of the calendar srv opens
+// and, once it's out, forgets its id unless another pass wrote a newer one
+// meanwhile. An answer no retry changes (the copy
+// isn't there, 404/410, or the link may no longer touch it, 401/403) is
+// logged once as an orphan; every error goes back to the caller, unretried.
+func removeTaskCopy(ctx context.Context, srv *calendar.Service, pgTask *taskModel.Task, taskUUID string) error {
+	eventID := *pgTask.TaskGoogleCalendarId
+	callCtx, cancel := googleCall(ctx)
+	defer cancel()
+	if err := srv.Events.Delete("primary", eventID).Context(callCtx).Do(); err != nil {
+		if copyOutOfReach(err) {
+			helpers.MessageLogs.InfoLog.Printf("Task %s: its Google copy %s is out of reach, left where it is: %v", taskUUID, eventID, err)
+		} else {
+			helpers.LogErrorWithContext(ctx, "business/removeTaskCopy Failed to delete event %s err: %+v", eventID, err)
+		}
+		return err
+	}
+	_ = clearTaskGoogleID(ctx, pgTask.Id, eventID)
+	helpers.MessageLogs.InfoLog.Printf("Deleted GCal event %s for task %s", eventID, taskUUID)
+	return nil
+}
+
+// copyGone is Google saying the copy isn't there: 404 or 410, by the code.
+func copyGone(err error) bool {
+	var gErr *googleapi.Error
+	return errors.As(err, &gErr) && (gErr.Code == http.StatusNotFound || gErr.Code == http.StatusGone)
+}
+
+// copyOutOfReach is a Google answer no retry changes: the event isn't there
+// (404, 410) or the link may no longer touch it (401, 403).
+func copyOutOfReach(err error) bool {
+	if isGoogleNotFoundError(err) {
+		return true
+	}
+	switch connectorBusiness.ClassifyAPIError(err) {
+	case connectorBusiness.ProblemExpired, connectorBusiness.ProblemPermissions:
+		return true
+	}
+	return false
 }
 
 func syncTaskInternal(ctx context.Context, taskUUIDStr string, integration *integrationModel.Integration) error {
@@ -257,14 +483,18 @@ func syncTaskInternal(ctx context.Context, taskUUIDStr string, integration *inte
 	}
 
 	// Fetch task from Postgres to get GCal ID
-	pgTask, err := taskDomain.GetTaskByUUID(ctx, taskUUID)
+	pgTask, err := taskRowOf(ctx, taskUUID)
 	if err != nil || pgTask == nil {
 		return err
 	}
+	return syncLoadedTask(ctx, pgTask, integration, taskUUIDStr)
+}
 
+// syncLoadedTask is syncTaskInternal for a task row already read.
+func syncLoadedTask(ctx context.Context, pgTask *taskModel.Task, integration *integrationModel.Integration, taskUUIDStr string) error {
 	// Fetch task from Dgraph for metadata (Name, DueDate, Assignee, etc.)
 	// Use "0x1" as userUid to avoid Dgraph "ID can't be empty" in server-side operations.
-	dgraphTask, err := taskDomain.GetDgraphBasicTaskInfoByUUID(ctx, taskUUIDStr, "0x1")
+	dgraphTask, err := taskGraphOf(ctx, taskUUIDStr, "0x1")
 	if err != nil || dgraphTask == nil {
 		return err
 	}
@@ -277,7 +507,7 @@ func syncTaskInternal(ctx context.Context, taskUUIDStr string, integration *inte
 		return nil
 	}
 
-	srv, err := getGoogleCalendarService(ctx, integration)
+	srv, err := calendarOfLink(ctx, integration)
 	if err != nil {
 		return err
 	}
@@ -294,15 +524,7 @@ func syncTaskInternal(ctx context.Context, taskUUIDStr string, integration *inte
 	// If the user lost access, the task is archived, or it lost its due date -> DELETE from their calendar
 	if !isAssignee || isArchived || dgraphTask.DueDate == nil {
 		if pgTask.TaskGoogleCalendarId != nil {
-			err = srv.Events.Delete("primary", *pgTask.TaskGoogleCalendarId).Do()
-			if err != nil {
-				helpers.LogErrorWithContext(ctx, "business/syncTaskInternal Failed to delete event %s err: %+v", *pgTask.TaskGoogleCalendarId, err)
-			} else {
-				// Only clear the Postgres GCal ID if the person deleting it was the one who owned it
-				// (If a new assignee is clearing it, we'd clear it, but here it's safer to clear it if it was successfully deleted)
-				taskDomain.UpdateTaskGoogleCalendarId(ctx, pgTask.Id, nil)
-				helpers.MessageLogs.InfoLog.Printf("Deleted GCal event %s for task %s because assignee removed or task archived/undated", *pgTask.TaskGoogleCalendarId, taskUUIDStr)
-			}
+			_ = removeTaskCopy(ctx, srv, pgTask, taskUUIDStr) // logged there; a failure keeps the id
 		}
 		return nil
 	}
@@ -327,24 +549,28 @@ func syncTaskInternal(ctx context.Context, taskUUIDStr string, integration *inte
 		End:          &calendar.EventDateTime{DateTime: dueTime.Add(time.Hour).Format(time.RFC3339)},
 	}
 
+	callCtx, cancel := googleCall(ctx)
+	defer cancel()
 	if pgTask.TaskGoogleCalendarId != nil {
-		_, err = srv.Events.Patch("primary", *pgTask.TaskGoogleCalendarId, event).Do()
+		_, err = srv.Events.Patch("primary", *pgTask.TaskGoogleCalendarId, event).Context(callCtx).Do()
 		if err != nil && isGoogleNotFoundError(err) {
 			// GCal event was deleted externally — clear stale ID and re-create
 			helpers.MessageLogs.InfoLog.Printf("syncTaskInternal: GCal event %s deleted externally for task %s, re-creating", *pgTask.TaskGoogleCalendarId, taskUUIDStr)
-			taskDomain.UpdateTaskGoogleCalendarId(ctx, pgTask.Id, nil)
-			res, insertErr := srv.Events.Insert("primary", event).Do()
+			_ = clearTaskGoogleID(ctx, pgTask.Id, *pgTask.TaskGoogleCalendarId)
+			insertCtx, cancelInsert := googleCall(ctx)
+			defer cancelInsert()
+			res, insertErr := srv.Events.Insert("primary", event).Context(insertCtx).Do()
 			if insertErr == nil {
-				taskDomain.UpdateTaskGoogleCalendarId(ctx, pgTask.Id, &res.Id)
+				setTaskGoogleID(ctx, pgTask.Id, &res.Id)
 				helpers.MessageLogs.InfoLog.Printf("Re-created GCal event %s for task %s", res.Id, taskUUIDStr)
 			}
 			err = insertErr
 		}
 	} else {
-		res, err := srv.Events.Insert("primary", event).Do()
+		res, err := srv.Events.Insert("primary", event).Context(callCtx).Do()
 		if err == nil {
 			// Save new GCal ID to Postgres
-			err = taskDomain.UpdateTaskGoogleCalendarId(ctx, pgTask.Id, &res.Id)
+			err = setTaskGoogleID(ctx, pgTask.Id, &res.Id)
 			if err != nil {
 				helpers.LogErrorWithContext(ctx, "business/syncTaskInternal Failed to update task gcal id err: %+v", err)
 			}

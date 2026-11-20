@@ -122,6 +122,53 @@ func TestReadersLeaveOutGrantsThatHaveEnded(t *testing.T) {
 	}
 }
 
+// Readers of many docs is Readers for each, in one read of their sharing and
+// one of the grants on them that end: a doc that isn't there, or isn't a
+// uuid, is read by nobody, and a read that fails decides for nobody.
+func TestReadersOfManyIsReadersForEachDoc(t *testing.T) {
+	past := noonR.Add(-time.Second)
+	there, gone := uuid.NewString(), uuid.NewString()
+	oldS, oldE, oldN := readersSharings, readersEndingOn, readersNow
+	t.Cleanup(func() { readersSharings, readersEndingOn, readersNow = oldS, oldE, oldN })
+	reads := 0
+	var failS, failE error
+	readersSharings = func(_ context.Context, docs []string) (map[string]*Sharing, error) {
+		reads++
+		if reads == 1 && len(docs) != 2 {
+			t.Errorf("read the sharing of %v, want the two uuids", docs)
+		}
+		return map[string]*Sharing{there: readersWorld()}, failS
+	}
+	readersEndingOn = func(_ context.Context, docs []uuid.UUID) (map[uuid.UUID][]*accessModels.Expiry, error) {
+		reads++
+		return map[uuid.UUID][]*accessModels.Expiry{uuid.MustParse(there): {ends("user", rDi, past), ends("team", rDesign, noonR)}}, failE
+	}
+	readersNow = func() time.Time { return noonR }
+	asked := []string{rOlu, rDi, rEve, rGus}
+	can, err := ReadersOfMany(context.Background(), map[string][]string{there: asked, gone: asked, "not-a-doc": asked})
+	if err != nil || reads != 2 {
+		t.Fatalf("err %v after %d reads, want none after 2", err, reads)
+	}
+	for id, want := range map[string]bool{rOlu: true, rDi: false, rEve: false, rGus: true} {
+		if can[there][id] != want {
+			t.Errorf("%s may read the doc: %v, want %v", id, can[there][id], want)
+		}
+		if can[gone][id] || can["not-a-doc"][id] {
+			t.Errorf("%s may read a doc that isn't there", id)
+		}
+	}
+	if got, err := ReadersOfMany(context.Background(), nil); err != nil || len(got) != 0 || reads != 2 {
+		t.Errorf("asking of no docs read %d times: %v %v", reads-2, got, err)
+	}
+	for _, fail := range []*error{&failS, &failE} {
+		failS, failE = nil, nil
+		*fail = errNoStore
+		if got, err := ReadersOfMany(context.Background(), map[string][]string{there: asked}); err == nil || got != nil {
+			t.Errorf("a failed read decided %v", got)
+		}
+	}
+}
+
 // Someone taken out of the doc's space, or off a doc in the trash, reads
 // nothing; and when the sharing or the grants that end can't be read, nobody
 // is decided for.

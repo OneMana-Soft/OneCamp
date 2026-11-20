@@ -118,6 +118,10 @@ type graphWrite struct {
 	IsReminderOn               bool                 `json:"isReminderOn"`
 	ReminderMinutesBeforeStart int                  `json:"reminderMinutesBeforeStart,omitempty"`
 	Recurrence                 *patternedRecurrence `json:"recurrence,omitempty"`
+	// TransactionID, on a create, is the same on every try (createKey), so
+	// Graph makes one event however often a create whose answer was lost is
+	// sent again.
+	TransactionID string `json:"transactionId,omitempty"`
 }
 
 // errUnrepeatable is a rule Outlook has no pattern for.

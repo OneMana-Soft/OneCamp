@@ -91,17 +91,28 @@ func inBudget(ctx context.Context, settings []string, budget time.Duration, fn f
 func budgetedTx(ctx context.Context, settings []string, budget time.Duration, fn func(ctx context.Context) error) (stopped bool, err error) {
 	err = postgresInit.InTx(ctx, postgresInit.DBConn.DBTimeout, func(ctx context.Context, tx *sql.Tx) error {
 		ctx = pgexec.WithTx(ctx, tx)
-		if budget > 0 {
-			settings = append(append([]string{}, settings...), fmt.Sprintf("SET LOCAL statement_timeout = %d", max(budget.Milliseconds(), 1)))
-		}
-		for _, s := range settings {
-			if _, err := pgexec.Exec(ctx, s); err != nil {
+		if set := txSettings(settings, budget); set != "" {
+			if _, err := pgexec.Exec(ctx, set); err != nil {
 				return err
 			}
 		}
 		return fn(ctx)
 	})
 	return budget > 0 && helpers.IsQueryCanceled(err), err
+}
+
+// txSettings is a budgeted transaction's settings, and for a budget above
+// zero its statement_timeout, as one statement text: an Exec without
+// arguments goes by the simple protocol, which runs each statement in it in
+// order in one round trip (six trips were one each). Every setting is a
+// constant (walkSettings, pgexec.WithoutWorkers) or a formatted integer,
+// never a request's, a user's or a table's text, so joining them can't
+// change what runs.
+func txSettings(settings []string, budget time.Duration) string {
+	if budget > 0 {
+		settings = append(append([]string{}, settings...), fmt.Sprintf("SET LOCAL statement_timeout = %d", max(budget.Milliseconds(), 1)))
+	}
+	return strings.Join(settings, "; ")
 }
 
 // QueryRowWalk is QueryRowWindow along the order's own index: a walk's query,
@@ -205,28 +216,28 @@ func SummarizeRowsWhere(ctx context.Context, table uuid.UUID, joins, selects, wh
 }
 
 // RowsByIDs is table's live rows among ids, whole, in no particular order.
-func RowsByIDs(ctx context.Context, table uuid.UUID, ids []uuid.UUID) ([]*Row, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	q := `SELECT ` + rowColumns + ` FROM data_table_rows WHERE table_id = $1 AND id = ANY($2) AND deleted_at IS NULL`
-	out, err := pgexec.Query(ctx, q, func(r pgexec.Row) (*Row, error) { return scanRow(r) }, table, ids)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/RowsByIDs err: %+v", err)
-	}
-	return out, err
+func RowsByIDs(ctx context.Context, table uuid.UUID, ids []uuid.UUID) (rows []*Row, err error) {
+	pgexec.Together(ctx, PlanRowsByIDs(ctx, table, ids, func(r []*Row, e error) { rows, err = r, e }))
+	return rows, err
 }
 
-// HasUnkeyedRows is whether table has live rows with no place key yet (rows a
-// server from before the keys made; StartLinkUpkeep keys them). One lookup
-// of the unkeyed index, which is empty almost always.
-func HasUnkeyedRows(ctx context.Context, table uuid.UUID) (bool, error) {
-	has, err := pgexec.Scalar[bool](ctx, `SELECT EXISTS (SELECT 1 FROM data_table_rows
-		WHERE table_id = $1 AND position_key IS NULL AND deleted_at IS NULL)`, table)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/HasUnkeyedRows err: %+v", err)
+// PlanRowsByIDs is RowsByIDs as a read a caller runs beside its own in one
+// round trip (pgexec.Together): done gets what RowsByIDs gives once it has
+// run. No ids, no read.
+func PlanRowsByIDs(ctx context.Context, table uuid.UUID, ids []uuid.UUID, done func([]*Row, error)) pgexec.Planned {
+	if len(ids) == 0 {
+		return pgexec.Planned{Then: func() { done(nil, nil) }}
 	}
-	return has, err
+	var out []*Row
+	read := pgexec.Rows(&out, func(r pgexec.Row) (*Row, error) { return scanRow(r) },
+		`SELECT `+rowColumns+` FROM data_table_rows WHERE table_id = $1 AND id = ANY($2) AND deleted_at IS NULL`, table, ids)
+	return pgexec.Planned{Reads: []*pgexec.Read{read}, Then: func() {
+		if read.Err != nil {
+			helpers.LogErrorWithContext(ctx, "models/RowsByIDs err: %+v", read.Err)
+			out = nil
+		}
+		done(out, read.Err)
+	}}
 }
 
 // FieldHasPlaceAbove is whether a choice field's entries hold an option

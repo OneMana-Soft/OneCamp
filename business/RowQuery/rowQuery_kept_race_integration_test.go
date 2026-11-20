@@ -15,6 +15,7 @@ import (
 	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	rowQuery "github.com/akashc777/OneCamp/business/RowQuery"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/google/uuid"
@@ -583,7 +584,7 @@ func TestAReaderWaitsBrieflyForAHeldKeptLockAndAnswersTheMarks(t *testing.T) {
 		t.Fatalf("after the first sweep %d marks wait, where none do", w)
 	}
 	// holdKept holds the table's kept lock, as a sweep or fill batch does,
-	// for d; the key is model.LockKept's (keptLock).
+	// for d, taken through model.LockKept itself so the key can't drift.
 	holdKept := func(d time.Duration) (held, done chan struct{}) {
 		held, done = make(chan struct{}), make(chan struct{})
 		go func() {
@@ -595,7 +596,7 @@ func TestAReaderWaitsBrieflyForAHeldKeptLockAndAnswersTheMarks(t *testing.T) {
 				return
 			}
 			defer tx.Rollback()
-			if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('onecamp.tables.kept:' || $1::text, 0))`, lines.Id); err != nil {
+			if _, err := model.LockKept(pgexec.WithTx(ctx, tx), lines.Id, false); err != nil {
 				t.Error(err)
 			}
 			close(held)

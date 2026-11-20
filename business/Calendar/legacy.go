@@ -243,13 +243,27 @@ func (s *service) legacyUpdate(ctx context.Context, id uuid.UUID, in adapter.Cre
 // with: to an instance of a series alone (who comes stays the series'), to a
 // series by its own id all of it.
 func (s *service) legacyUpdateAt(ctx context.Context, ref string, in adapter.CreateOrUpdateEventInput, who *model.UserInfo) error {
-	if err := s.ready(ctx); err != nil {
-		return err
-	}
-	inst, guests, err := s.resolve(ctx, who, ref)
+	held, err := s.toChange(ctx, who, ref)
 	if err != nil {
 		return err
 	}
+	return held.change(ctx, in, who)
+}
+
+// toChange is the event ref names, resolved once for who's change of it.
+func (s *service) toChange(ctx context.Context, who *model.UserInfo, ref string) (*changingEvent, error) {
+	if err := s.ready(ctx); err != nil {
+		return nil, err
+	}
+	inst, guests, err := s.resolve(ctx, who, ref)
+	if err != nil {
+		return nil, err
+	}
+	return &changingEvent{ev: legacyOfInstance(inst, nil, nil, personOf(who), webDates), s: s, inst: inst, guests: guests}, nil
+}
+
+// legacyChange is legacyUpdateAt of the instance resolved, with its guests.
+func (s *service) legacyChange(ctx context.Context, inst instance, guests []models.Attendee, in adapter.CreateOrUpdateEventInput, who *model.UserInfo) error {
 	owner := inst.owner()
 	if err := mayChange(roleOf(owner, guests, personOf(who)), owner); err != nil {
 		return err
@@ -304,7 +318,14 @@ func (s *service) legacyUpdateAt(ctx context.Context, ref string, in adapter.Cre
 		}
 		_, _, err = s.updateSeries(ctx, who, inst.Event, next, guests, wanted, nil, nil)
 	default:
-		_, _, err = s.update(ctx, who, inst.Event, next, guests, wanted, nil)
+		// A guest's move read its meeting before the calendars and the
+		// page's lock: it writes only over the meeting as it read it, so an
+		// owner's change meanwhile is a StaleError, never undone.
+		var expect *int
+		if guestMovePage(ctx) != nil {
+			expect = &inst.Sequence
+		}
+		_, _, err = s.update(ctx, who, inst.Event, next, guests, wanted, expect)
 	}
 	return err
 }

@@ -237,7 +237,7 @@ func TestItemLinksAreStoredAsIDs(t *testing.T) {
 		{"a link without an id is refused", anyField, `[{"label":"Salaries","type":"doc"}]`, ""},
 		{"a link without a type to an any field is refused", anyField, fmt.Sprintf(`[{"id":%q}]`, doc), ""},
 		{"a link of a kind the field doesn't link to is refused", docs, fmt.Sprintf(`[{"id":%q,"type":"task"}]`, task), ""},
-		{"a link of no kind there is is refused", anyField, fmt.Sprintf(`[{"id":%q,"type":"channel"}]`, doc), ""},
+		{"a link of no kind there is is refused", anyField, fmt.Sprintf(`[{"id":%q,"type":"meeting"}]`, doc), ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

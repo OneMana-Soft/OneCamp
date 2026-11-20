@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
 	business "github.com/akashc777/OneCamp/business/Activity"
@@ -103,5 +105,64 @@ func TestTheBadgeIsAnsweredOnlyWithACount(t *testing.T) {
 	seenErr = errors.New("postgres is down")
 	if rec := ask(http.MethodPost, "/activity/seen", MarkActivitySeen); rec.Code != http.StatusServiceUnavailable || countIn(rec) != nil {
 		t.Errorf("a seen that couldn't be written answered %d %s; want 503 and no count", rec.Code, rec.Body.String())
+	}
+}
+
+// POST /activity/dismiss takes {keys, dismissed} from the signed-in person:
+// a body that isn't one, or a key that isn't a Priority item's (business
+// Dismiss refuses it before any write), is 400; the write is the session
+// person's, whatever user id the body carries; one that fails is 503.
+func TestDismissRefusesABadKey(t *testing.T) {
+	prev := dismissFromPriority
+	t.Cleanup(func() { dismissFromPriority = prev })
+	me := uuid.New()
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/activity/dismiss", strings.NewReader(body)).
+			WithContext(context.WithValue(context.Background(), helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: userModels.User{Id: me}}))
+		rec := httptest.NewRecorder()
+		DismissFromPriority(rec, req)
+		return rec
+	}
+	many := make([]string, 21)
+	for i := range many {
+		many[i] = `"MENTION|id|0x` + strconv.Itoa(i) + `"`
+	}
+	dismissFromPriority = business.Dismiss // refuses before it writes
+	for _, body := range []string{
+		``,
+		`not json`,
+		`{"keys":["MENTION|id|0x1"]}`,
+		`{"dismissed":true}`,
+		`{"keys":[],"dismissed":true}`,
+		`{"keys":["REACTION|id|0x1"],"dismissed":true}`,
+		`{"keys":[""],"dismissed":false}`,
+		`{"keys":["MENTION|id|0x1","NOTICE"],"dismissed":true}`,
+		`{"keys":[` + strings.Join(many, ",") + `],"dismissed":true}`,
+	} {
+		if rec := post(body); rec.Code != http.StatusBadRequest {
+			t.Errorf("POST /activity/dismiss %s answered %d %s; want 400", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	var wrote struct {
+		user      uuid.UUID
+		keys      []string
+		dismissed bool
+	}
+	var writeErr error
+	dismissFromPriority = func(_ context.Context, user uuid.UUID, keys []string, dismissed bool) error {
+		wrote.user, wrote.keys, wrote.dismissed = user, keys, dismissed
+		return writeErr
+	}
+	someoneElse := uuid.NewString()
+	if rec := post(`{"keys":["MENTION|id|0x1"],"dismissed":true,"user_id":"` + someoneElse + `"}`); rec.Code != http.StatusNoContent {
+		t.Errorf("a dismissal answered %d %s; want 204", rec.Code, rec.Body.String())
+	}
+	if wrote.user != me || len(wrote.keys) != 1 || wrote.keys[0] != "MENTION|id|0x1" || !wrote.dismissed {
+		t.Errorf("wrote %+v; want the session person's dismissal of MENTION|id|0x1", wrote)
+	}
+	writeErr = errors.New("postgres is down")
+	if rec := post(`{"keys":["MENTION|id|0x1"],"dismissed":false}`); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("a write that failed answered %d %s; want 503", rec.Code, rec.Body.String())
 	}
 }

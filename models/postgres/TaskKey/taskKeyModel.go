@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"strconv"
 	"time"
 
@@ -91,26 +92,25 @@ func ProjectKeys(ctx context.Context, projects []uuid.UUID) (map[uuid.UUID]strin
 // FactsFor reads the facts of each of tasks that has a row, in one read.
 // With no database at all (a unit test) nothing has facts.
 func FactsFor(ctx context.Context, tasks []uuid.UUID) (map[uuid.UUID]Facts, error) {
-	out := make(map[uuid.UUID]Facts, len(tasks))
 	if len(tasks) == 0 || !connected() {
-		return out, nil
+		return map[uuid.UUID]Facts{}, nil
 	}
-	c, cancel := timeout(ctx)
-	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
-		SELECT t.id, k.key, t.task_number,
-		       tt.id, tt.builtin, tt.name, tt.icon, tt.position, tt.project_id, tt.archived_at IS NOT NULL
-		FROM tasks t
-		LEFT JOIN project_keys k ON k.project_id = t.project_id
-		LEFT JOIN task_types tt ON tt.id = t.task_type_id
-		WHERE t.id = ANY($1)`, tasks)
-	if err != nil {
-		return nil, err
+	read, facts := FactsRead(tasks)
+	pgexec.Batch(ctx, read)
+	return facts()
+}
+
+// FactsRead is FactsFor as a read a caller pipelines with others
+// (pgexec.Batch); facts is what it read, once the batch has run.
+func FactsRead(tasks []uuid.UUID) (read *pgexec.Read, facts func() (map[uuid.UUID]Facts, error)) {
+	type row struct {
+		id uuid.UUID
+		f  Facts
 	}
-	defer rows.Close()
-	for rows.Next() {
+	var rows []row
+	read = pgexec.Rows(&rows, func(r pgexec.Row) (row, error) {
 		var (
-			id                  uuid.UUID
+			out                 row
 			key                 sql.NullString
 			number              sql.NullInt64
 			typeID              uuid.NullUUID
@@ -119,12 +119,11 @@ func FactsFor(ctx context.Context, tasks []uuid.UUID) (map[uuid.UUID]Facts, erro
 			typeProject         uuid.NullUUID
 			archived            sql.NullBool
 		)
-		if err := rows.Scan(&id, &key, &number, &typeID, &builtin, &name, &icon, &position, &typeProject, &archived); err != nil {
-			return nil, err
+		if err := r.Scan(&out.id, &key, &number, &typeID, &builtin, &name, &icon, &position, &typeProject, &archived); err != nil {
+			return out, err
 		}
-		var f Facts
 		if key.Valid && number.Valid {
-			f.Key = KeyOf(key.String, int(number.Int64))
+			out.f.Key = KeyOf(key.String, int(number.Int64))
 		}
 		if typeID.Valid && builtin.String != "task" {
 			t := &Type{ID: typeID.UUID, Builtin: builtin.String, Name: name.String, Icon: icon.String, Position: int(position.Int64), Archived: archived.Bool}
@@ -132,11 +131,26 @@ func FactsFor(ctx context.Context, tasks []uuid.UUID) (map[uuid.UUID]Facts, erro
 				p := typeProject.UUID
 				t.ProjectID = &p
 			}
-			f.Type = t
+			out.f.Type = t
 		}
-		out[id] = f
+		return out, nil
+	}, `
+		SELECT t.id, k.key, t.task_number,
+		       tt.id, tt.builtin, tt.name, tt.icon, tt.position, tt.project_id, tt.archived_at IS NOT NULL
+		FROM tasks t
+		LEFT JOIN project_keys k ON k.project_id = t.project_id
+		LEFT JOIN task_types tt ON tt.id = t.task_type_id
+		WHERE t.id = ANY($1)`, tasks)
+	return read, func() (map[uuid.UUID]Facts, error) {
+		if read.Err != nil {
+			return nil, read.Err
+		}
+		out := make(map[uuid.UUID]Facts, len(rows))
+		for _, r := range rows {
+			out[r.id] = r.f
+		}
+		return out, nil
 	}
-	return out, rows.Err()
 }
 
 // KeyOf is a task's key from its project's key and its number: "Q4-12".
@@ -844,4 +858,13 @@ func (t *Type) Describe() string {
 		return "Task"
 	}
 	return t.Name
+}
+
+// Shown is a type as a task answer carries it (task_work_type), nil for a
+// plain Task.
+func (t *Type) Shown() *dgraphStruct.TaskWorkType {
+	if t == nil {
+		return nil
+	}
+	return &dgraphStruct.TaskWorkType{ID: t.ID.String(), Builtin: t.Builtin, Name: t.Name, Icon: t.Icon}
 }

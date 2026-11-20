@@ -119,20 +119,21 @@ func GetLevelsInChannel(query string, channelID string, userIDs []string) (map[s
 	return levels, nil
 }
 
-// GetMemberIDs runs query, which takes a channel's id and a limit and answers
-// user ids, into a list. Any error answers no list: a partial one would read
-// as fewer members.
-func GetMemberIDs(ctx context.Context, query string, channelID string, limit int) ([]string, error) {
-	return pgexec.Query(ctx, query, func(r pgexec.Row) (id string, err error) {
-		err = r.Scan(&id)
+// GetMembers runs query, which takes a channel's id and a limit and answers
+// (user id, level) rows, into the ids in order and each one's level. Any
+// error answers neither: a partial list would read as fewer members.
+func GetMembers(ctx context.Context, query string, channelID string, limit int) (ids []string, levels map[string]string, err error) {
+	type member struct{ id, level string }
+	got, err := pgexec.Query(ctx, query, func(r pgexec.Row) (m member, err error) {
+		err = r.Scan(&m.id, &m.level)
 		return
 	}, channelID, limit)
-}
-
-// GetMembersOnAll is the ids query reads for channelID, every one of them.
-func GetMembersOnAll(ctx context.Context, query string, channelID string) ([]string, error) {
-	return pgexec.Query(ctx, query, func(r pgexec.Row) (id string, err error) {
-		err = r.Scan(&id)
-		return
-	}, channelID)
+	if err != nil {
+		return nil, nil, err
+	}
+	ids, levels = make([]string, len(got)), make(map[string]string, len(got))
+	for i, m := range got {
+		ids[i], levels[m.id] = m.id, m.level
+	}
+	return ids, levels, nil
 }

@@ -115,7 +115,7 @@ func TestADefaultPerCalendarRemindsWhenNoneIsSet(t *testing.T) {
 	sam, maya := h.member("Sam"), h.member("Maya")
 	project := uuid.NewString()
 	projectsDecide(t, map[string]map[string]accessBusiness.Level{personOf(sam).String(): {project: accessBusiness.LevelEdit}}, nil)
-	cal, err := h.s.ProjectCalendarFor(ctx, sam, project)
+	cal, err := h.s.projectCalendarFor(ctx, sam, project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestALiveChangeTellsOnlyWhoMayReadItAndOnlyWhenItIs(t *testing.T) {
 	// A project calendar's event is told on the project's topic too.
 	project := uuid.NewString()
 	projectsDecide(t, map[string]map[string]accessBusiness.Level{personOf(sam).String(): {project: accessBusiness.LevelEdit}}, nil)
-	cal, err := h.s.ProjectCalendarFor(ctx, sam, project)
+	cal, err := h.s.projectCalendarFor(ctx, sam, project)
 	if err != nil {
 		t.Fatal(err)
 	}

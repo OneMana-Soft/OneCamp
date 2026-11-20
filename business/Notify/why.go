@@ -193,19 +193,29 @@ func recalled(asker, eventID string, rows []deliveryModels.Row) Trace {
 	cause := Cause(rows[0].Cause)
 	tr := Trace{UserID: asker, EventID: eventID}
 	d := Decision{UserID: asker, Cause: cause}
-	anyHoldable := false
+	// A hold keeps back every holdable delivery; a wait the push alone, while
+	// the desktop notice went (A4 H4). So a dropped push beside nothing held
+	// waited, and was then read first, deleted or held.
+	held := slices.ContainsFunc(rows, func(r deliveryModels.Row) bool {
+		return r.State == "held" || (r.State == "dropped" && Delivery(r.Delivery) != ToPush)
+	})
+	anyHoldable, waited := false, false
 	for _, r := range rows {
 		to := Delivery(r.Delivery)
 		tr.Deliveries = append(tr.Deliveries, DeliveryState{Delivery: to, State: r.State, HoldUntil: r.HoldUntil, At: r.CreatedAt})
 		anyHoldable = anyHoldable || holdable(to)
-		switch r.State {
-		case "held", "dropped":
+		switch {
+		case r.State == "waiting", r.State == "dropped" && to == ToPush && !held:
+			d.Waiting, d.WaitTill, waited = append(d.Waiting, to), r.HoldUntil, true
+		case r.State == "held", r.State == "dropped":
 			d.Held = append(d.Held, to)
 			if r.HoldUntil != nil && (d.HoldTill == nil || r.HoldUntil.After(*d.HoldTill)) {
 				d.HoldTill = r.HoldUntil
 			}
 		default:
 			d.To = append(d.To, to)
+			// A push sent with a time it was due at waited first.
+			waited = waited || (to == ToPush && r.HoldUntil != nil)
 		}
 	}
 	hold := "nothing_to_hold"
@@ -221,6 +231,9 @@ func recalled(asker, eventID string, rows []deliveryModels.Row) Trace {
 		{Step: "cause", Verdict: "chosen", Causes: []Cause{cause}},
 		{Step: "preference", Verdict: "kept"},
 		{Step: "hold", Verdict: hold},
+	}
+	if waited {
+		tr.Steps = append(tr.Steps, Step{Step: "wait", Verdict: "in_onecamp"})
 	}
 	tr.Decision = &d
 	return tr

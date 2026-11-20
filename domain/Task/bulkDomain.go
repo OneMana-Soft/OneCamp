@@ -104,9 +104,11 @@ func SetGitHubIssueFieldsOnTasks(ctx context.Context, links []GitHubIssueLink) e
 	return nil
 }
 
-// ClearGitHubLinkFromTasks unlinks tasks from GitHub, in one statement.
+// ClearGitHubLinkFromTasks unlinks tasks from GitHub (unlinkFromGitHub), in
+// one statement.
 func ClearGitHubLinkFromTasks(ctx context.Context, ids []uuid.UUID) error {
-	if err := models.ClearGitHubLinkFromTasks(ctx, ids); err != nil {
+	query := `UPDATE tasks SET ` + unlinkFromGitHub + ` WHERE id = ANY($1::uuid[])`
+	if err := models.ClearGitHubLinkFromTasks(ctx, query, ids); err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/ClearGitHubLinkFromTasks err: %+v", err)
 		return err
 	}

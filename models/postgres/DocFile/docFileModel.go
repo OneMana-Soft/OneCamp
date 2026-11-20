@@ -72,6 +72,9 @@ const recordVersion = `
 	FROM att
 	RETURNING n, created_at`
 
+// VersionsLockKey is the lock a doc's file versions are numbered under.
+func VersionsLockKey(doc uuid.UUID) string { return "doc_file_versions:" + doc.String() }
+
 // RecordVersion records a new version of the file v names, as its next n,
 // and answers it. Two at once for one file are taken in turn (a lock on the
 // file for the transaction), so each gets its own n.
@@ -79,7 +82,7 @@ func RecordVersion(ctx context.Context, v NewVersion) (Version, error) {
 	out := Version{DocUUID: v.DocUUID, AttachmentID: v.AttachmentID, Name: v.Name, SizeBytes: v.SizeBytes,
 		MIME: v.MIME, Note: v.Note, CreatedBy: v.CreatedBy}
 	err := pgexec.InTx(ctx, func(ctx context.Context) error {
-		if _, err := pgexec.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "doc_file_versions:"+v.DocUUID.String()); err != nil {
+		if err := pgexec.LockXact(ctx, VersionsLockKey(v.DocUUID)); err != nil {
 			return err
 		}
 		row, found, err := pgexec.QueryOne(ctx, recordVersion, func(r pgexec.Row) (Version, error) {

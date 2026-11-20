@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	transcriptSearch "github.com/akashc777/OneCamp/business/TranscriptSearch"
 	transcriptionBusiness "github.com/akashc777/OneCamp/business/Transcription"
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	"github.com/akashc777/OneCamp/helpers"
@@ -107,12 +108,13 @@ func StoreCallLine(ctx context.Context, line CallLine) error {
 	// the egress starts) gets nothing; the line goes to the call's own
 	// session instead of making a node of its own.
 	if recordingEgress != "" {
-		attached, err := recordingDomain.AttachTranscriptLine(ctx, recordingEgress, transcript)
+		lineUID, err := recordingDomain.AttachTranscriptLine(ctx, recordingEgress, transcript)
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/StoreCallLine Failed to save transcript err: %+v", err)
 			return err
 		}
-		if attached {
+		if lineUID != "" {
+			indexCallLine(ctx, transcriptSearch.Written{Key: recordingEgress, LineUID: lineUID, SessionKey: sessionKey, Room: line.RoomName})
 			return nil
 		}
 	}
@@ -123,13 +125,29 @@ func StoreCallLine(ctx context.Context, line CallLine) error {
 		helpers.LogErrorWithContext(ctx, "business/StoreCallLine Failed to prepare the call session err: %+v", err)
 		return err
 	}
-	attached, err := recordingDomain.AttachTranscriptLine(ctx, sessionKey, transcript)
+	lineUID, err := recordingDomain.AttachTranscriptLine(ctx, sessionKey, transcript)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/StoreCallLine Failed to save transcript err: %+v", err)
 		return err
 	}
-	if !attached {
+	if lineUID == "" {
 		return errNoTranscriptHome
 	}
+	indexCallLine(ctx, transcriptSearch.Written{Key: sessionKey, LineUID: lineUID, SessionKey: sessionKey, Room: line.RoomName})
 	return nil
+}
+
+// lineIndexTimeout bounds indexing one line, off the request.
+const lineIndexTimeout = 30 * time.Second
+
+// indexCallLine makes a line just filed findable by search, off the request:
+// a write that fails is repaired by the transcripts backfill, and never fails
+// the line, which is filed already.
+func indexCallLine(ctx context.Context, w transcriptSearch.Written) {
+	detached := context.WithoutCancel(ctx)
+	helpers.GoSafeNamed("transcript.search", func() {
+		ctx, cancel := context.WithTimeout(detached, lineIndexTimeout)
+		defer cancel()
+		_ = transcriptSearch.IndexLine(ctx, w)
+	})
 }

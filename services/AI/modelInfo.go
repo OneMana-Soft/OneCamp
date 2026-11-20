@@ -58,6 +58,10 @@ var isCloudEndpoint = func(cfg *AIConfig, ep Endpoint) bool {
 // userPick is a member's own model pick: a seam over the store.
 var userPick = aiModels.GetUserModelPreference
 
+// pickEndpoint is where a member's pick is served: a seam over the store,
+// beside userPick, for the resolver and DescribeModel alike.
+var pickEndpoint = endpointFromProvider
+
 // DescribeModel is the model llm is, where llm is the client
 // ResolveUserModelWithLimits gave userUUID.
 func (s *AIService) DescribeModel(ctx context.Context, userUUID string, llm LLMProvider) DocModel {
@@ -73,12 +77,18 @@ func (s *AIService) DescribeModel(ctx context.Context, userUUID string, llm LLMP
 		return def
 	}
 	providerID := pref.ProviderID
-	ep, err := endpointFromProvider(ctx, &providerID, pref.Model, 0, s.Config)
+	ep, err := pickEndpoint(ctx, &providerID, pref.Model, 0, s.Config)
 	if err != nil {
 		return def
 	}
-	info := describeEndpoint(s.Config, ep)
-	if l := strings.TrimSpace(pref.Label); l != "" && l != pref.Model {
+	return describePick(s.Config, ep, pref.Label, pref.Model)
+}
+
+// describePick is what a member's pick of model on ep is shown as: its
+// endpoint's description, under the label an admin gave it.
+func describePick(cfg *AIConfig, ep Endpoint, label, model string) DocModel {
+	info := describeEndpoint(cfg, ep)
+	if l := strings.TrimSpace(label); l != "" && l != model {
 		info.Label = l
 	}
 	return info

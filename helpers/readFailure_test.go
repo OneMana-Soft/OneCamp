@@ -48,3 +48,28 @@ func TestWriteReadFailureAnswersNotFoundAs404AndAFailedReadAs503(t *testing.T) {
 		}
 	}
 }
+
+// WriteFailedRead answers only a read that failed; a read that worked and one
+// that found nothing (wrapped or not) are left to the caller, unanswered.
+func TestWriteFailedReadAnswersOnlyAReadThatFailed(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/ch/x", nil)
+	for _, c := range []struct {
+		name     string
+		err      error
+		answered bool
+	}{
+		{"a read that worked", nil, false},
+		{"nothing by that id", NotFound("channel not found in dgraph"), false},
+		{"wrapped", fmt.Errorf("business: %w", NotFound("channel not found in dgraph")), false},
+		{"a failed read", errors.New("rpc error: Unavailable"), true},
+	} {
+		w := httptest.NewRecorder()
+		got := WriteFailedRead(w, r, c.err, "channel", "helpers/test")
+		if got != c.answered || (w.Body.Len() > 0) != c.answered {
+			t.Errorf("%s: answered %v with %d %q, want answered %v", c.name, got, w.Code, w.Body.String(), c.answered)
+		}
+		if c.answered && (w.Code != http.StatusServiceUnavailable || !json.Valid(w.Body.Bytes())) {
+			t.Errorf("%s: %d %s, want 503 try again", c.name, w.Code, w.Body.String())
+		}
+	}
+}

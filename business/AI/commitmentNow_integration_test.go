@@ -111,7 +111,11 @@ func TestACommitmentNeedsMeNowOnlyWhileRecentlyOverdue(t *testing.T) {
 
 	t.Run("the engine nudges only of recently overdue commitments", func(t *testing.T) {
 		var got []string
-		for _, c := range gatherMemoryNudges(ctx, time.Now()) {
+		signals, err := gatherMemoryNudges(ctx, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range signals.candidates {
 			if c.userID == owner && c.kind == nudgeModels.KindOverdueCommitment {
 				got = append(got, nameOf(c.sourceID))
 			}

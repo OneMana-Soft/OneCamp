@@ -566,7 +566,7 @@ func diagramTypeNoun(t string) string {
 
 // parseBoardGraph extracts and validates the model's JSON object.
 func parseBoardGraph(raw string) (*boardGraphRaw, error) {
-	js := extractJSONObject(raw)
+	js := helpers.ExtractJSON(raw, '{')
 	if js == "" {
 		return nil, fmt.Errorf("no JSON object found")
 	}
@@ -578,21 +578,6 @@ func parseBoardGraph(raw string) (*boardGraphRaw, error) {
 		return nil, fmt.Errorf("no nodes")
 	}
 	return &g, nil
-}
-
-// extractJSONObject returns the first top-level JSON object substring, tolerant
-// of code fences and surrounding prose.
-func extractJSONObject(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start == -1 || end == -1 || end <= start {
-		return ""
-	}
-	return s[start : end+1]
 }
 
 // sanitizeLabel is a board label as cleanLabel makes one.

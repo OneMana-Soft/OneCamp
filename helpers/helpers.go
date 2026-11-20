@@ -239,6 +239,19 @@ func CreateTimeOrNow(ctx context.Context) time.Time {
 	return time.Now()
 }
 
+// ImportTimeOnly is a fresh context that carries ctx's backdated creation
+// time (WithImportTimestamp) and nothing else, or context.Background() when
+// ctx has none. A write hands it to the work it starts on its own goroutine
+// (a post's, a chat's or a thread reply's notices), so what that work stamps
+// is as of the write, as the write itself is: a message the demo's seed
+// writes 12 h ago is told of 12 h ago, not at the reset (V-871).
+func ImportTimeOnly(ctx context.Context) context.Context {
+	if t := GetImportTimestamp(ctx); t != nil {
+		return WithImportTimestamp(context.Background(), *t)
+	}
+	return context.Background()
+}
+
 // Default context keys to be logged in all context-aware logs
 var DefaultContextKeys = []ContextKey{
 	UserInfoContextKey,

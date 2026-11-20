@@ -34,6 +34,7 @@ import (
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
+	triageBusiness "github.com/akashc777/OneCamp/business/Triage"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	"github.com/akashc777/OneCamp/helpers"
@@ -314,14 +315,22 @@ func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusInternalServerError, "couldn't create the task")
 		return
 	}
+	// A project with triage on takes the task into it (package 9 R5a). The
+	// task is made either way (triage Arrive logs an item that didn't stick),
+	// as a retry would make the task twice.
+	held := triageBusiness.Arrive(ctx, "controllers/V1 CreateTaskV1", projectID, taskID, triageBusiness.FromAPI, triageBusiness.Requester{UserUUID: &user.UserPostgresInfo.Id})
 	audited(r, "create_task", map[string]interface{}{"task_id": taskID.String(), "project_id": projectID.String()})
 	key := taskKeys.KeyOf(ctx, taskID)
 	msg := fmt.Sprintf("Task %s created in project %s", taskKeys.Named(key, strconv.Quote(name)), project.Name) + taskPriority.Noted(priority)
 	if assignee != nil {
 		msg += ", assigned to " + assignee.DisplayName()
 	}
+	if held {
+		msg += triageBusiness.WaitsNote
+	}
 	answer(w, http.StatusOK, msg, map[string]string{
 		"tool": "create_task", "task_uuid": taskID.String(), "key": key, "project_uuid": projectID.String(), "task_name": name,
+		"in_triage": strconv.FormatBool(held),
 	})
 }
 

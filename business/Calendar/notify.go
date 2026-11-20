@@ -298,6 +298,35 @@ func (s *service) notice(ctx context.Context, actor *model.UserInfo, kind, ref s
 	}
 }
 
+// tellRoomTakenAtGoogle tells e's organiser, through the router's plan as a
+// recap is told, that Google changed e to a time its room is booked and that
+// OneCamp kept its own version. Each refusal is told once (its caller tells
+// it when the refusal is first kept), so its key is its own.
+func tellRoomTakenAtGoogle(ctx context.Context, e *models.Event, taken *RoomTakenError) {
+	people, inboxOnly, err := planned(ctx, noticeUpdated, uuid.Nil, []uuid.UUID{e.CreatedBy}, false)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Calendar: a room refused at Google couldn't be planned: %v", err)
+		return
+	}
+	recipients := make([]notificationBusiness.NoticeRecipient, 0, len(people))
+	for _, id := range people {
+		recipients = append(recipients, notificationBusiness.NoticeRecipient{UserUUID: id.String(), Reason: "organiser", InboxOnly: inboxOnly[id]})
+	}
+	if len(recipients) == 0 {
+		return
+	}
+	ref := e.ID.String()
+	tellNotice(ctx, notificationBusiness.Notice{
+		Kind: noticeUpdated, ResourceKind: KindEvent, ResourceUUID: ref, ResourceTitle: e.Title,
+		Data:     map[string]string{"room": taken.Room, "date": taken.Date, "from": "google"},
+		DedupKey: noticeUpdated + "|" + ref + "|room-at-google|" + strconv.FormatInt(time.Now().UnixNano(), 10),
+		Title:    "Google moved " + e.Title + " to a time its room is booked",
+		Body:     taken.Room + " is booked then (" + taken.Date + "), so OneCamp kept its own version. Change it here to put Google in step.",
+		Path:     eventPath(ref),
+		Push:     &notificationBusiness.Push{Type: firebaseInit.FIREBASE_PUSH_DATA_TYPE_CALENDAR, ID: ref, Tag: "calendar:" + ref},
+	}, recipients)
+}
+
 // planned is people as business/Notify's router plans a notice of kind for
 // them (a site's audience: each once, never the actor), and who of them it
 // tells in the inbox alone: everyone when the organiser said not to send.

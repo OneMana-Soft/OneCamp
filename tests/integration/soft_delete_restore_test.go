@@ -44,6 +44,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	cycleModel "github.com/akashc777/OneCamp/models/postgres/Cycle"
 	tableModel "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	formModel "github.com/akashc777/OneCamp/models/postgres/Form"
@@ -246,7 +247,9 @@ func TestEveryDeletedProjectPartComesBackWhole(t *testing.T) {
 			},
 			shown: func() bool {
 				fields, _ := taskFieldBusiness.List(ctx, project)
-				values, _, _ := fieldModel.ReadValues(ctx, tasks)
+				read, valuesOf := fieldModel.ValuesRead(tasks)
+				pgexec.Batch(ctx, read)
+				values, _, _ := valuesOf()
 				_, valued := values[w.task][field.ID.String()]
 				for _, f := range fields {
 					if f.ID == field.ID {

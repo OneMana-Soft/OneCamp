@@ -62,7 +62,7 @@ func GetMyNotificationPreferences(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status": "success",
 		"data": map[string]any{
-			"email_supported":            emailService.IsEmailEnabled(),
+			"email_supported":            emailService.NotificationEmailEnabled(),
 			"email_enabled":              pref.EmailEnabled,
 			"email_mentions":             pref.EmailMentions,
 			"email_dms":                  pref.EmailDMs,
@@ -73,6 +73,7 @@ func GetMyNotificationPreferences(w http.ResponseWriter, r *http.Request) {
 			"email_calendar_invites":     pref.EmailCalendarInvites,
 			"email_calendar_changes":     pref.EmailCalendarChanges,
 			"email_calendar_answers":     pref.EmailCalendarAnswers,
+			"email_calendar_recaps":      pref.EmailCalendarRecaps,
 			"email_channel_invites":      pref.EmailChannelInvites,
 			"email_only_when_offline":    pref.EmailOnlyWhenOffline,
 			"email_digest_frequency":     pref.EmailDigestFrequency,

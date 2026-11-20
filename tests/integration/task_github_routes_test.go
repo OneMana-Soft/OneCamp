@@ -639,6 +639,8 @@ func (w *githubWorkspace) queued(task string) (state string) {
 // repository (move) answers with its new address, as GitHub does. A
 // repository's webhooks are OneCamp's one (id 9), at the address it registers.
 // A search's terms (its q) are kept too, the last for each call (searched).
+// A test that reads what OneCamp holds while GitHub is asked sets at
+// (atEachCall).
 type githubRecorder struct {
 	real   http.RoundTripper
 	mu     sync.Mutex
@@ -646,6 +648,7 @@ type githubRecorder struct {
 	sent   map[string]string
 	moved  map[string]string
 	search map[string]string
+	at     func(call string) error
 }
 
 func recordGitHub(t *testing.T) *githubRecorder {
@@ -674,7 +677,13 @@ func (g *githubRecorder) RoundTrip(r *http.Request) (*http.Response, error) {
 		g.search[call] = q.Get("q")
 	}
 	address, moved := g.moved[r.URL.Path]
+	at := g.at
 	g.mu.Unlock()
+	if at != nil {
+		if err := at(call); err != nil {
+			return nil, err
+		}
+	}
 	if !moved {
 		address = "https://github.com" + strings.Replace(r.URL.Path, "/repos", "", 1)
 	}
@@ -708,6 +717,15 @@ func (g *githubRecorder) searched(call string) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.search[call]
+}
+
+// atEachCall runs at as each later request reaches GitHub, before GitHub
+// answers it, with its "METHOD /path"; an error at answers is the request's,
+// as when GitHub can't be reached. nil stops it.
+func (g *githubRecorder) atEachCall(at func(call string) error) {
+	g.mu.Lock()
+	g.at = at
+	g.mu.Unlock()
 }
 
 // move answers GitHub's API path with the address an issue has moved to.

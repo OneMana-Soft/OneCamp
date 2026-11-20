@@ -28,7 +28,6 @@ import (
 
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
-	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -67,10 +66,10 @@ func fetchUnreadAcrossScopes(ctx context.Context, userInfo *userModels.UserInfo,
 	}), nil
 }
 
-// readDocFor reads a doc as the person sees it. A seam for tests.
-var readDocFor = func(ctx context.Context, docUUID, userUID string) (*dgraphStruct.DgraphDoc, error) {
-	return docBusiness.GetBasicDgraphDocByUUID(ctx, docUUID, userUID)
-}
+// readableDocs answers which of the docs a person (by uuid) may read now, a
+// deleted doc being readable by nobody: docBusiness.ReadableDocsFor reads
+// them all at once. A seam for tests.
+var readableDocs = docBusiness.ReadableDocsFor
 
 // readableBoards answers which of the boards a person (by uuid) may read now,
 // a deleted board being readable by nobody: boardBusiness.ReadableBoardsFor
@@ -79,7 +78,8 @@ var readableBoards = boardBusiness.ReadableBoardsFor
 
 // keepReadableDocs returns the results without the hits on a doc, or on a
 // comment on one, that the person can't read now, nor, for an agent run acting
-// for someone else, that person (docReaders). Each doc is read once per reader.
+// for someone else, that person (docReaders). Each reader is asked once about
+// every doc, and once about every board.
 //
 // A comment on a board is held to the board the same way: its entry carries a
 // copy of the board's privacy and sharing from when the comment was written,
@@ -111,28 +111,41 @@ func refOf(contentType, contentUUID, docUUID, boardUUID string) readRef {
 }
 
 // keepReadable drops the items about a doc or a board that a reader can't read
-// now, asking each doc and board once.
+// now: each reader is asked once about all the docs and once about all the
+// boards, so N hits cost one doc call and one board call per reader.
 func keepReadable[T any](ctx context.Context, userInfo *userModels.UserInfo, items []T, ref func(T) readRef) []T {
 	if len(items) == 0 {
 		return items
 	}
-	readers, known := docReaders(ctx, userInfo)
-	readable := map[string]bool{}
-	allowed := func(key string, check func() bool) bool {
-		ok, asked := readable[key]
-		if !asked {
-			ok = known && check()
-			readable[key] = ok
+	var docs, boards []string
+	named := map[string]bool{}
+	for _, it := range items {
+		r := ref(it)
+		if r.doc != "" && !named["doc:"+strings.ToLower(r.doc)] {
+			named["doc:"+strings.ToLower(r.doc)] = true
+			docs = append(docs, r.doc)
 		}
-		return ok
+		if r.board != "" && !named["board:"+strings.ToLower(r.board)] {
+			named["board:"+strings.ToLower(r.board)] = true
+			boards = append(boards, r.board)
+		}
+	}
+	var docOK, boardOK map[string]bool
+	if len(docs)+len(boards) > 0 {
+		readers, known := docReaders(ctx, userInfo)
+		if !known {
+			readers = nil
+		}
+		docOK = readableByAll(ctx, docs, readers, readableDocs)
+		boardOK = readableByAll(ctx, boards, readers, readableBoards)
 	}
 	kept := make([]T, 0, len(items))
 	for _, it := range items {
 		r := ref(it)
-		if r.doc != "" && !allowed("doc:"+r.doc, func() bool { return readableByAll(ctx, r.doc, readers) }) {
+		if r.doc != "" && !docOK[strings.ToLower(r.doc)] {
 			continue
 		}
-		if r.board != "" && !allowed("board:"+r.board, func() bool { return boardReadableByAll(ctx, r.board, readers) }) {
+		if r.board != "" && !boardOK[strings.ToLower(r.board)] {
 			continue
 		}
 		kept = append(kept, it)
@@ -140,17 +153,32 @@ func keepReadable[T any](ctx context.Context, userInfo *userModels.UserInfo, ite
 	return kept
 }
 
-// boardReadableByAll reports whether every reader may read the board now, read
-// for each with its deletion: a deleted board's comments, which the delete's
-// cascade missed, were still quoted, since the board read as live.
-func boardReadableByAll(ctx context.Context, boardUUID string, readers []docReader) bool {
+// readableByAll answers, of the ids (docs, or boards), which every reader may
+// read now, keyed by lower-case uuid, asking read once per reader for the lot:
+// docBusiness.ReadableDocsFor or boardBusiness.ReadableBoardsFor, each of which
+// holds a deleted one readable by nobody. A reader whose call fails reads none
+// of them, so an error drops every hit of that kind, and with no readers (one
+// who can't be resolved) none is readable.
+func readableByAll(ctx context.Context, ids []string, readers []docReader, read func(context.Context, []string, string) (map[string]bool, error)) map[string]bool {
+	ok := map[string]bool{}
+	if len(ids) == 0 || len(readers) == 0 {
+		return ok
+	}
+	for _, id := range ids {
+		ok[strings.ToLower(id)] = true
+	}
 	for _, p := range readers {
-		readable, err := readableBoards(ctx, []string{boardUUID}, p.uuid)
-		if err != nil || !readable[strings.ToLower(boardUUID)] {
-			return false
+		readable, err := read(ctx, ids, p.uuid)
+		if err != nil {
+			return map[string]bool{}
+		}
+		for id := range ok {
+			if !readable[id] {
+				delete(ok, id)
+			}
 		}
 	}
-	return len(readers) > 0
+	return ok
 }
 
 // docReader is a person a doc hit must be readable by: their graph uid, which a
@@ -181,18 +209,4 @@ func docReaders(ctx context.Context, userInfo *userModels.UserInfo) (readers []d
 		return nil, false
 	}
 	return append(readers, docReader{uid: asker.Uid, uuid: requester}), true
-}
-
-// readableByAll reports whether every reader may read the doc, read for each,
-// and the doc isn't deleted. Vector searches drop deleted docs again on their
-// own (ai.KeepLive); the catch-up window doesn't, and an entry whose doc was
-// deleted without the index hearing of it would otherwise still be quoted.
-func readableByAll(ctx context.Context, docUUID string, readers []docReader) bool {
-	for _, p := range readers {
-		doc, err := readDocFor(ctx, docUUID, p.uid)
-		if err != nil || !docBusiness.CanRead(doc, p.uuid) || helpers.IsSoftDeleted(doc.DeletedAt) {
-			return false
-		}
-	}
-	return len(readers) > 0
 }

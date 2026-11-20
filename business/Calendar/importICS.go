@@ -236,15 +236,26 @@ func importedUID(uid string, calendar uuid.UUID) string { return uid + "~" + cal
 
 // importCalendars makes the files' events in who's own calendar.
 func (s *service) importCalendars(ctx context.Context, who *model.UserInfo, cals []ics.Calendar, report func(done, total int)) (contentIOBusiness.Made, error) {
-	return s.importFiles(ctx, who, cals, report, uuid.Nil)
+	return s.importFiles(ctx, who, cals, report, uuid.Nil, func(ctx context.Context, ids []string) {
+		eventsChanged(ctx, ids, []string{personOf(who).String()}) // who owns what they import
+	})
+}
+
+// importPulled is importCalendars for events read from a linked provider
+// (a move, the sweep's read): they are the provider's already, so they ask
+// for their search entries only, never a send back (no sync entry: a drain
+// before the caller keeps their refs would make each again there).
+func (s *service) importPulled(ctx context.Context, who *model.UserInfo, cals []ics.Calendar, report func(done, total int)) (contentIOBusiness.Made, error) {
+	return s.importFiles(ctx, who, cals, report, uuid.Nil, SearchEntriesChanged)
 }
 
 // importFiles makes the files' events: each file into a calendar of its
 // own as an import does, or, for a calendar read from an address
 // (subscribed, calendar B8), every event into that one calendar as a copy
 // that is the address's: read only, never busy, with no guests and no
-// alarms, its UID kept apart from any the workspace has.
-func (s *service) importFiles(ctx context.Context, who *model.UserInfo, cals []ics.Calendar, report func(done, total int), subscribed uuid.UUID) (contentIOBusiness.Made, error) {
+// alarms, its UID kept apart from any the workspace has. changed asks for
+// the written events' outbox entries (eventsChanged, SearchEntriesChanged).
+func (s *service) importFiles(ctx context.Context, who *model.UserInfo, cals []ics.Calendar, report func(done, total int), subscribed uuid.UUID, changed func(context.Context, []string)) (contentIOBusiness.Made, error) {
 	var made contentIOBusiness.Made
 	if err := s.ready(ctx); err != nil {
 		return made, err
@@ -380,7 +391,7 @@ func (s *service) importFiles(ctx context.Context, who *model.UserInfo, cals []i
 	if subscribed == uuid.Nil {
 		nodesChanged(ctx, workGraph.KindEvent, written)
 	}
-	SearchEntriesChanged(ctx, written)
+	changed(ctx, written)
 	made.Show = next
 	if made.Show == nil {
 		made.Show = latest

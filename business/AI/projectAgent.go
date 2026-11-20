@@ -269,7 +269,7 @@ func executeCreateProject(ctx context.Context, action ai.ProposedAction, userUUI
 		return "", nil, fmt.Errorf("failed to look up user: %w", err)
 	}
 
-	dgraphTeam, err := teamBusiness.GetBasicDgraphTeamInfoByUUID(ctx, teamUUIDStr, userInfo.UserDgraphInfo.Uid)
+	dgraphTeam, may, err := projectBusiness.MayMakeProjectIn(ctx, teamUUIDStr, userInfo)
 	if err != nil || dgraphTeam == nil || dgraphTeam.Uuid == "" {
 		return "", nil, fmt.Errorf("team not found or you don't have access")
 	}
@@ -280,7 +280,7 @@ func executeCreateProject(ctx context.Context, action ai.ProposedAction, userUUI
 	if helpers.IsSoftDeleted(dgraphTeam.DeletedAt) {
 		return "", nil, fmt.Errorf("team not found or you don't have access")
 	}
-	if !workAccess.CanMakeProjects(ctx, dgraphTeam) {
+	if !may {
 		teamName := dgraphTeam.Name
 		if teamName == "" {
 			teamName = "this team"

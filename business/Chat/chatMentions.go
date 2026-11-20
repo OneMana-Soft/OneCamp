@@ -6,6 +6,7 @@ import (
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	notifyBusiness "github.com/akashc777/OneCamp/business/Notify"
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
 	chatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
@@ -23,6 +24,16 @@ func tellChatMentionsAdded(ctx context.Context, actor *dgraphStruct.DgraphUser, 
 	if actor == nil || grpID == "" {
 		return
 	}
+	n := chatMentionNotice(actor, grpID, chatUUID, commentUUID, html)
+	ctx = context.WithoutCancel(ctx)
+	helpers.GoSafeNamed("business/Chat tellChatMentionsAdded", func() {
+		notifyBusiness.TellAddedMentions(ctx, notifyBusiness.Place{Kind: notifyBusiness.PlaceDM, ID: grpID}, n, s)
+	})
+}
+
+// chatMentionNotice is how a mention an edit adds to a DM's or a group's
+// message (or to a reply in its thread, commentUUID) reads. Pure.
+func chatMentionNotice(actor *dgraphStruct.DgraphUser, grpID, chatUUID, commentUUID, html string) notificationBusiness.Notice {
 	data := map[string]string{"message_id": chatUUID}
 	push := &notificationBusiness.Push{Type: firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT, ID: grpID, Thread: chatUUID}
 	if commentUUID != "" {
@@ -37,7 +48,7 @@ func tellChatMentionsAdded(ctx context.Context, actor *dgraphStruct.DgraphUser, 
 			viewer = id
 		}
 	}
-	n := notificationBusiness.Notice{
+	return notificationBusiness.Notice{
 		Kind:          notificationBusiness.MessageMentioned,
 		ResourceKind:  chatNotificationBusiness.NoticeKind,
 		ResourceUUID:  grpID,
@@ -49,9 +60,8 @@ func tellChatMentionsAdded(ctx context.Context, actor *dgraphStruct.DgraphUser, 
 		Path:          helpers.ChatPath(grpID, viewer, chatUUID),
 		Email:         notificationBusiness.EventGroupChatMention,
 		Push:          push,
+		// Its email is asked again at the send: the message in its
+		// conversation, and the reply when there is one, as someone it names.
+		About: &notificationBusiness.About{Kind: notificationBusiness.AboutChat, Item: chatUUID, Place: grpID, Reply: commentUUID, Heard: notifylevel.Named},
 	}
-	ctx = context.WithoutCancel(ctx)
-	helpers.GoSafeNamed("business/Chat tellChatMentionsAdded", func() {
-		notifyBusiness.TellAddedMentions(ctx, notifyBusiness.Place{Kind: notifyBusiness.PlaceDM, ID: grpID}, n, s)
-	})
 }

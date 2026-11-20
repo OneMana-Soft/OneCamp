@@ -15,11 +15,14 @@ package business
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	aiBusiness "github.com/akashc777/OneCamp/business/AI"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 )
 
@@ -69,6 +72,13 @@ func ListDMableAgentPrincipals(ctx context.Context) ([]DMTarget, error) {
 
 // dmAbleAgents returns the cached active DM-able agents, falling back to a live
 // query before the trigger workers have started (e.g. very early startup).
+// The seams AgentForDMPrincipal reads through, for tests.
+var (
+	listDMAble     = dmAbleAgents
+	ensureAgentBot = userBusiness.EnsureAgentBot
+	readReceiver   = userDomain.GetDgraphRecipientByUUID
+)
+
 func dmAbleAgents(ctx context.Context) ([]*model.AiAgent, error) {
 	trigMu.RLock()
 	started := trigStarted
@@ -91,12 +101,22 @@ func AgentForDMPrincipal(ctx context.Context, receiverID string) (*model.AiAgent
 	if receiverID == "" {
 		return nil, nil, nil
 	}
-	agents, err := dmAbleAgents(ctx)
+	// Only a bot can be an agent's (bots are external by class): a DM to a
+	// person, or to no one, is answered from one light read, with no agent
+	// listed and no bot ensured. A receiver named by its graph uid, or one
+	// that couldn't be read, is looked for among the agents' bots as before.
+	if helpers.IsCanonicalUUID(receiverID) {
+		u, err := readReceiver(ctx, receiverID)
+		if errors.Is(err, dgexec.ErrNotFound) || (err == nil && u != nil && !u.IsBot) {
+			return nil, nil, nil
+		}
+	}
+	agents, err := listDMAble(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, a := range agents {
-		bot, berr := userBusiness.EnsureAgentBot(ctx, a.Id, a.Name, deref(a.AvatarKey))
+		bot, berr := ensureAgentBot(ctx, a.Id, a.Name, deref(a.AvatarKey))
 		if berr != nil || bot == nil {
 			continue
 		}

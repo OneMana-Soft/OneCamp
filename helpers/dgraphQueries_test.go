@@ -38,10 +38,48 @@ func dgraphQueries(t *testing.T) []dgraphQuery {
 
 // dgraphQuery is one graph query in the server's source: the file it is in
 // (from the repository's root), the line it starts on, and its text.
+// fn is the function it is built in and calls the functions its sum calls,
+// each named "dir.Name" (models/dgraph/Recording.MemberRecordingsBlock), so a
+// fragment one function builds is known where a query calls it.
 type dgraphQuery struct {
-	file string
-	line int
-	text string
+	file  string
+	line  int
+	text  string
+	fn    string
+	calls []string
+}
+
+// calleeKey names the function a call in a query's sum calls, as "dir.Name",
+// through the file's own imports; "" for a call it can't name.
+func calleeKey(call *ast.CallExpr, dir string, imports map[string]string) string {
+	switch f := call.Fun.(type) {
+	case *ast.Ident:
+		return dir + "." + f.Name
+	case *ast.SelectorExpr:
+		if x, ok := f.X.(*ast.Ident); ok && imports[x.Name] != "" {
+			return imports[x.Name] + "." + f.Sel.Name
+		}
+	}
+	return ""
+}
+
+// importDirs is a file's imports of the server's own packages, by the name
+// the file calls them (the alias, or the path's last element): their dirs.
+func importDirs(node *ast.File) map[string]string {
+	dirs := map[string]string{}
+	for _, imp := range node.Imports {
+		p, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || !strings.HasPrefix(p, modulePath+"/") {
+			continue
+		}
+		dir := strings.TrimPrefix(p, modulePath+"/")
+		name := dir[strings.LastIndex(dir, "/")+1:]
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		dirs[name] = dir
+	}
+	return dirs
 }
 
 // dgraphQueriesIn is each graph query in a Go file: a string literal that
@@ -60,7 +98,21 @@ func dgraphQueriesIn(t *testing.T, path string) []dgraphQuery {
 	}
 	var out []dgraphQuery
 	inSum := map[ast.Node]bool{}
-	ast.Inspect(node, func(n ast.Node) bool {
+	dir, imports := filepath.Dir(file), importDirs(node)
+	for _, decl := range node.Decls {
+		fn := ""
+		if fd, ok := decl.(*ast.FuncDecl); ok {
+			fn = dir + "." + fd.Name.Name
+		}
+		out = append(out, queriesInDecl(decl, fset, file, fn, dir, imports, inSum)...)
+	}
+	return out
+}
+
+// queriesInDecl is dgraphQueriesIn for one declaration, built in fn.
+func queriesInDecl(decl ast.Decl, fset *token.FileSet, file, fn, dir string, imports map[string]string, inSum map[ast.Node]bool) []dgraphQuery {
+	var out []dgraphQuery
+	ast.Inspect(decl, func(n ast.Node) bool {
 		if n == nil || inSum[n] {
 			return true
 		}
@@ -70,6 +122,7 @@ func dgraphQueriesIn(t *testing.T, path string) []dgraphQuery {
 				return true
 			}
 			var b strings.Builder
+			var calls []string
 			var walk func(ast.Expr)
 			walk = func(x ast.Expr) {
 				switch v := x.(type) {
@@ -90,19 +143,23 @@ func dgraphQueriesIn(t *testing.T, path string) []dgraphQuery {
 						b.WriteString(s)
 						return
 					}
+				case *ast.CallExpr:
+					if key := calleeKey(v, dir, imports); key != "" {
+						calls = append(calls, key)
+					}
 				}
 				b.WriteString(" ")
 			}
 			walk(e)
 			if text := b.String(); strings.Contains(text, "(func:") {
-				out = append(out, dgraphQuery{file: file, line: fset.Position(e.Pos()).Line, text: text})
+				out = append(out, dgraphQuery{file: file, line: fset.Position(e.Pos()).Line, text: text, fn: fn, calls: calls})
 			}
 		case *ast.BasicLit:
 			if e.Kind != token.STRING {
 				return true
 			}
 			if text, err := strconv.Unquote(e.Value); err == nil && strings.Contains(text, "(func:") {
-				out = append(out, dgraphQuery{file: file, line: fset.Position(e.Pos()).Line, text: text})
+				out = append(out, dgraphQuery{file: file, line: fset.Position(e.Pos()).Line, text: text, fn: fn})
 			}
 		}
 		return true

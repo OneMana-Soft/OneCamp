@@ -46,7 +46,7 @@ func repairTaskLinks(ctx context.Context, project uuid.UUID) ([]taskModels.TaskG
 		return nil, err
 	}
 	// Offline links included (the demo's fixture, V-841): every other read
-	// of links leaves them out.
+	// of links but a sync's check (syncReach) leaves them out.
 	links, err := githubLinkModel.GetLinksForRepair(ctx, project)
 	if err != nil {
 		return nil, err

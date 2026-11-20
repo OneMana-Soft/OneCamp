@@ -601,13 +601,10 @@ func fillOneCell(ctx context.Context, f filler, t *model.DataTable, fields []*mo
 // residency), and never loops because fillOneCell persists via the model
 // layer directly, so an autofill write does not re-dispatch
 // table.row.updated. The actor has already been permission-checked by the
-// CreateRow/UpdateRow caller.
-func AutofillRowOnWrite(ctx context.Context, t *model.DataTable, row *model.Row, changed map[string]bool, actor Actor) {
+// CreateRow/UpdateRow caller. fields are the table's live fields as the
+// write read them: the autofill reads none again (a batch's rows share them).
+func AutofillRowOnWrite(ctx context.Context, t *model.DataTable, fields []*model.Field, row *model.Row, changed map[string]bool, actor Actor) {
 	if t == nil || row == nil {
-		return
-	}
-	fields, ferr := model.ListFields(ctx, t.Id)
-	if ferr != nil {
 		return
 	}
 	due := autofillDue(fields, row, changed)

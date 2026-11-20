@@ -545,9 +545,8 @@ type RecordingPagination struct {
 func GetChannelAllRecordingList(ctx context.Context, channelUUID string, userDgraphUUID string, startDate string, endDate string, pageIndex int, pageSize int) (recordingsPagination RecordingPagination, err error) {
 	channelInfo, err := domain.GetChannelAllRecordingList(ctx, channelUUID, userDgraphUUID, startDate, endDate, pageIndex, pageSize)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetChannelAllRecordingList Failed to get channel recording info by channel uuid err: %+v",
-			err)
+		// ErrNotFound (no channel, or one the reader isn't in) is the route's
+		// answer, not a fault; a failed read is logged where it's answered.
 		return
 	}
 

@@ -9,6 +9,7 @@ import (
 // what the people running it do to it.
 func mountCallSessions(rt callsRouters) {
 	rt.Member.Get("/calls/current", callsController.CurrentCall)
+	rt.Member.Get("/calls/linkable", callsController.LinkableCalls)
 	rt.Member.Get("/calls/{session_id}", callsController.GetCall)
 	rt.Member.Post("/calls/{session_id}/act", callsController.ActInCall)
 	// A member of its DM or group says no to it ringing them (slack-06 H2):

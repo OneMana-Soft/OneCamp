@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"time"
 
 	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
@@ -89,19 +90,48 @@ func ConversationOf(members []uuid.UUID) (Ref, bool) {
 	return Ref{}, false
 }
 
-// eventCallArtefacts reads what calls filed under events (a seam for tests).
-var eventCallArtefacts = recordingDomain.EventCallArtefacts
+// eventCallArtefacts reads what calls filed under events started in a span
+// (a seam for tests).
+var eventCallArtefacts = recordingDomain.EventCallArtefactsStarted
 
 // EventArtefacts lists what an event's call made, for someone the calendar has
 // let read the event (business/Calendar CallArtefactKeys): everything filed
 // under the event, its series, and the first event that held its call, since
-// an instance changed on its own and a series split in two share the call.
+// an instance changed on its own and a series split in two share the call;
+// for one instance of a series, only the calls it held (keys.Holds).
 func EventArtefacts(ctx context.Context, keys calendarBusiness.CallKeys) ([]recordingDomain.CallArtefact, error) {
 	events, err := eventsOfCall(ctx, keys)
 	if err != nil {
 		return nil, err
 	}
-	return eventCallArtefacts(ctx, events)
+	var from, to time.Time
+	if keys.Span != nil {
+		from, to = keys.Span.From, keys.Span.To
+	}
+	calls, err := eventCallArtefacts(ctx, events, from, to)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(calls, func(c recordingDomain.CallArtefact) bool { return !keys.Holds(c.StartedAt, c.EndedAt) }), nil
+}
+
+// eventCallArtefact reads one call filed under events (a seam for tests).
+var eventCallArtefact = recordingDomain.EventCallArtefact
+
+// EventArtefact is the call with this key (its node's egress id) of those
+// EventArtefacts lists, for someone the calendar has let read the event or
+// change it (keys): nil when there is none, it was deleted, or it is filed
+// under any other event or held by another instance of its series.
+func EventArtefact(ctx context.Context, keys calendarBusiness.CallKeys, key string) (*recordingDomain.CallArtefact, error) {
+	events, err := eventsOfCall(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	call, err := eventCallArtefact(ctx, events, key)
+	if err != nil || call == nil || !keys.Holds(call.StartedAt, call.EndedAt) {
+		return nil, err
+	}
+	return call, nil
 }
 
 // eventsOfCall is every event an event's call files what it makes under: the
@@ -153,7 +183,8 @@ type readRecording func(ctx context.Context, key string) (*dgraphStruct.DgraphRe
 // eventRecordingIn is the recording with this key, as read finds it, when it
 // is filed under one of the events an event's call files under
 // (eventsOfCall): nil when read finds none, or it is filed under any other
-// event. A read that fails is an error, never "none".
+// event or held by another instance of its series (keys.Holds). A read that
+// fails is an error, never "none".
 func eventRecordingIn(ctx context.Context, keys calendarBusiness.CallKeys, key string, read readRecording) (*dgraphStruct.DgraphRecording, error) {
 	events, err := eventsOfCall(ctx, keys)
 	if err != nil {
@@ -166,7 +197,7 @@ func eventRecordingIn(ctx context.Context, keys calendarBusiness.CallKeys, key s
 	if err != nil || rec == nil {
 		return nil, err
 	}
-	if event, perr := uuid.Parse(rec.Event); perr != nil || !slices.Contains(events, event) {
+	if event, perr := uuid.Parse(rec.Event); perr != nil || !slices.Contains(events, event) || !keys.Holds(rec.StartedAt, rec.EndedAt) {
 		return nil, nil
 	}
 	return rec, nil

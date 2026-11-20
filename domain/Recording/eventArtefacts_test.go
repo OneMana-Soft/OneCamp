@@ -1,12 +1,15 @@
 package domain
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // An event's "Recordings & notes" say which calls were recorded (head D), so a
 // recording is offered to play and a call that was only transcribed isn't.
 func TestAnEventsArtefactsSayWhichCallsWereRecorded(t *testing.T) {
 	raw := []byte(`{"artefacts":[{"recording_egress_id":"EG_1","lines":3},{"recording_egress_id":"call:s1","recording_transcript_only":true,"lines":5}]}`)
-	got, err := parseEventCallArtefacts(raw)
+	got, err := parseEventCallArtefacts(context.Background(), raw)
 	if err != nil || len(got) != 2 {
 		t.Fatalf("parseEventCallArtefacts = %+v, %v; want two calls", got, err)
 	}

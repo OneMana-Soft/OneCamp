@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -49,8 +50,9 @@ type Reading struct {
 // few reads as the Access Resolver can (conversationBusiness.ResolveAll): the
 // refs whose calls who may see, each with how; one they may not is left out.
 // An instant meeting is left out too: its host's rule is MayRead's, one read
-// each.
-func MayReadAll(ctx context.Context, who *userModels.UserInfo, refs []Ref) (map[Ref]Reading, error) {
+// each. who is a subject, so an agent acting for a person reaches the call
+// rule as that agent (CR-374 NB2).
+func MayReadAll(ctx context.Context, who accessBusiness.Subject, refs []Ref) (map[Ref]Reading, error) {
 	out := make(map[Ref]Reading, len(refs))
 	asked := make([]conversationBusiness.Ref, 0, len(refs))
 	of := make(map[conversationBusiness.Ref]Ref, len(refs))
@@ -62,7 +64,7 @@ func MayReadAll(ctx context.Context, who *userModels.UserInfo, refs []Ref) (map[
 		of[c] = ref
 		asked = append(asked, c)
 	}
-	got, err := conversationBusiness.ResolveAll(ctx, who, asked)
+	got, err := conversationBusiness.ResolveAllFor(ctx, who, asked)
 	if err != nil {
 		return nil, err
 	}

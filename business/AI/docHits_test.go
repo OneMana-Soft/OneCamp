@@ -14,13 +14,15 @@ import (
 	"time"
 
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
+	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 )
 
 // A search hit on a doc, or on a comment on one, stays only if the person can
-// read the doc now; everything else passes untouched, and each doc is read once.
+// read the doc now; everything else passes untouched, and the docs are read in
+// one call, each named once.
 func TestKeepReadableDocs(t *testing.T) {
 	yes, no := true, false
 	docs := map[string]*dgraphStruct.DgraphDoc{
@@ -31,18 +33,16 @@ func TestKeepReadableDocs(t *testing.T) {
 		"missing": nil,
 	}
 	reads := map[string]int{}
-	restore := readDocFor
-	defer func() { readDocFor = restore }()
-	readDocFor = func(_ context.Context, docUUID, userUID string) (*dgraphStruct.DgraphDoc, error) {
+	calls := 0
+	restore := readableDocs
+	defer func() { readableDocs = restore }()
+	readableDocs = readDocsAs(func(docUUID, userUUID string) *dgraphStruct.DgraphDoc {
 		reads[docUUID]++
-		if userUID != "0xme" {
-			t.Errorf("read %s as %q", docUUID, userUID)
+		if userUUID != "me-uuid" {
+			t.Errorf("read %s as %q", docUUID, userUUID)
 		}
-		if docUUID == "broken" {
-			return nil, errors.New("dgraph is down")
-		}
-		return docs[docUUID], nil
-	}
+		return docs[docUUID]
+	}, &calls)
 	me := &userModels.UserInfo{}
 	me.UserDgraphInfo = dgraphStruct.DgraphUser{Uid: "0xme", Uuid: "me-uuid"}
 
@@ -55,7 +55,6 @@ func TestKeepReadableDocs(t *testing.T) {
 		{ContentType: "doc", ContentUUID: "shared"},
 		{ContentType: "doc", ContentUUID: "theirs"},
 		{ContentType: "doc", ContentUUID: "missing"},
-		{ContentType: "doc", ContentUUID: "broken"},
 		{ContentType: "comment", ContentUUID: "c3", PostUUID: "p1", ChannelUUID: "ch"},
 		{ContentType: "chat", ContentUUID: "m1"},
 	}
@@ -71,8 +70,8 @@ func TestKeepReadableDocs(t *testing.T) {
 			t.Errorf("%s was read %d times", doc, n)
 		}
 	}
-	if len(reads) != 6 {
-		t.Errorf("read %d docs, want the 6 named: %v", len(reads), reads)
+	if len(reads) != 5 || calls != 1 {
+		t.Errorf("read %d docs in %d calls, want the 5 named in 1: %v", len(reads), calls, reads)
 	}
 	if got := keepReadableDocs(context.Background(), me, nil); len(got) != 0 {
 		t.Errorf("no hits: %v", got)
@@ -137,18 +136,18 @@ func TestWorkspaceSearchesGoThroughTheDocCheck(t *testing.T) {
 // private docs.
 func TestADocHitForSomeoneElseIsReadableByThemToo(t *testing.T) {
 	yes, no := true, false
-	// Each doc as read for the sponsor (0xsana) and for the asker (0xravi):
+	// Each doc as read for the sponsor (sana) and for the asker (ravi):
 	// sharing counts belong to the reader a doc is read for.
 	docs := map[string]map[string]*dgraphStruct.DgraphDoc{
-		"open":   {"0xsana": {Uuid: "open", IsPrivate: &no}, "0xravi": {Uuid: "open", IsPrivate: &no}},
-		"hers":   {"0xsana": {Uuid: "hers", IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "sana"}}, "0xravi": {Uuid: "hers", IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "sana"}}},
-		"shared": {"0xsana": {Uuid: "shared", IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "sana"}}, "0xravi": {Uuid: "shared", IsPrivate: &yes, HasReadAccess: 1, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "sana"}}},
+		"open":   {"sana": {Uuid: "open", IsPrivate: &no}, "ravi": {Uuid: "open", IsPrivate: &no}},
+		"hers":   {"sana": {Uuid: "hers", IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "sana"}}, "ravi": {Uuid: "hers", IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "sana"}}},
+		"shared": {"sana": {Uuid: "shared", IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "sana"}}, "ravi": {Uuid: "shared", IsPrivate: &yes, HasReadAccess: 1, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "sana"}}},
 	}
-	restoreRead, restorePerson := readDocFor, lookupPerson
-	t.Cleanup(func() { readDocFor, lookupPerson = restoreRead, restorePerson })
-	readDocFor = func(_ context.Context, docUUID, userUID string) (*dgraphStruct.DgraphDoc, error) {
-		return docs[docUUID][userUID], nil
-	}
+	restoreRead, restorePerson := readableDocs, lookupPerson
+	t.Cleanup(func() { readableDocs, lookupPerson = restoreRead, restorePerson })
+	readableDocs = readDocsAs(func(docUUID, userUUID string) *dgraphStruct.DgraphDoc {
+		return docs[docUUID][userUUID]
+	}, nil)
 	people := map[string]*dgraphStruct.DgraphUser{"ravi": {Uid: "0xravi", Uuid: "ravi"}}
 	lookupPerson = func(_ context.Context, uuid string) (*dgraphStruct.DgraphUser, error) {
 		if p, ok := people[uuid]; ok {
@@ -186,6 +185,24 @@ func TestADocHitForSomeoneElseIsReadableByThemToo(t *testing.T) {
 		if got := kept(c.ctx); got != c.want {
 			t.Errorf("%s: kept %s, want %s", c.name, got, c.want)
 		}
+	}
+}
+
+// readDocsAs stands in for the graph behind docBusiness.ReadableDocsFor: each
+// doc as read for a reader (by uuid; nil for none), held to the doc rule, its
+// deletion included. calls, when given, counts the asks.
+func readDocsAs(doc func(docUUID, userUUID string) *dgraphStruct.DgraphDoc, calls *int) func(context.Context, []string, string) (map[string]bool, error) {
+	return func(_ context.Context, ids []string, userUUID string) (map[string]bool, error) {
+		if calls != nil {
+			*calls++
+		}
+		out := map[string]bool{}
+		for _, id := range ids {
+			if d := doc(id, userUUID); d != nil {
+				out[strings.ToLower(id)] = docBusiness.CanRead(d, userUUID)
+			}
+		}
+		return out, nil
 	}
 }
 
@@ -233,7 +250,6 @@ func TestKeepReadableBoardComments(t *testing.T) {
 		{ContentType: "comment", ContentUUID: "c-shared", BoardUUID: "shared"},
 		{ContentType: "comment", ContentUUID: "c-binned", BoardUUID: "binned"},
 		{ContentType: "comment", ContentUUID: "c-gone", BoardUUID: "gone"},
-		{ContentType: "comment", ContentUUID: "c-broken", BoardUUID: "broken"},
 		// A board's own entry (what it says) is the board's to grant.
 		{ContentType: ai.BoardContentType, ContentUUID: "private", BoardUUID: "private"},
 		{ContentType: ai.BoardContentType, ContentUUID: "shared", BoardUUID: "shared"},
@@ -248,6 +264,15 @@ func TestKeepReadableBoardComments(t *testing.T) {
 	}
 	if reads["private"] != 1 {
 		t.Errorf("the private board was read %d times, want once", reads["private"])
+	}
+	// The boards are read in one call: when it fails, no board hit is kept.
+	kept = kept[:0]
+	broken := append(hits, ai.SimilarResult{ContentType: "comment", ContentUUID: "c-broken", BoardUUID: "broken"})
+	for _, h := range keepReadableDocs(context.Background(), me, broken) {
+		kept = append(kept, h.ContentUUID)
+	}
+	if got, want := strings.Join(kept, ","), "p1"; got != want {
+		t.Errorf("the board read failed: kept %s, want %s", got, want)
 	}
 }
 
@@ -266,17 +291,17 @@ func TestTheBoardCheckReadsTheBoardsDeletion(t *testing.T) {
 // item about a doc or a board the person can't read now is dropped.
 func TestCatchUpItemsAreCheckedLikeSearchHits(t *testing.T) {
 	yes := true
-	restoreDoc, restoreBoard := readDocFor, readableBoards
-	defer func() { readDocFor, readableBoards = restoreDoc, restoreBoard }()
+	restoreDoc, restoreBoard := readableDocs, readableBoards
+	defer func() { readableDocs, readableBoards = restoreDoc, restoreBoard }()
 	no := false
 	deleted := time.Now().Add(-time.Hour)
-	readDocFor = func(_ context.Context, docUUID, _ string) (*dgraphStruct.DgraphDoc, error) {
+	readableDocs = readDocsAs(func(docUUID, _ string) *dgraphStruct.DgraphDoc {
 		if docUUID == "binned" {
 			// Readable by everyone, but deleted.
-			return &dgraphStruct.DgraphDoc{Uuid: docUUID, IsPrivate: &no, DeletedAt: &deleted}, nil
+			return &dgraphStruct.DgraphDoc{Uuid: docUUID, IsPrivate: &no, DeletedAt: &deleted}
 		}
-		return &dgraphStruct.DgraphDoc{Uuid: docUUID, IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "owner"}}, nil
-	}
+		return &dgraphStruct.DgraphDoc{Uuid: docUUID, IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "owner"}}
+	}, nil)
 	readableBoards = readBoardsAs(map[string]*dgraphStruct.DgraphBoard{
 		"roadmap": {Uuid: "roadmap", IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "owner"}},
 		// Readable by everyone, but deleted.
@@ -302,5 +327,105 @@ func TestCatchUpItemsAreCheckedLikeSearchHits(t *testing.T) {
 	}
 	if got, want := strings.Join(kept, ","), "standup notes,ship it"; got != want {
 		t.Errorf("kept %s, want %s", got, want)
+	}
+}
+
+// Every doc hit is asked about in one call per reader, and every board in one
+// more (A1-13): five doc hits and two boards make one doc call and one board
+// call for the person searching, and two of each when a run acts for someone
+// else. The answers are each doc's own: a private doc among open ones is
+// still dropped, and a call that fails drops every hit of its kind.
+func TestDocHitsAreAskedInOneCallPerReader(t *testing.T) {
+	yes, no := true, false
+	owner := &dgraphStruct.DgraphUser{Uuid: "owner"}
+	// Each doc as read for a reader (by uuid): sharing counts are the reader's.
+	docs := map[string]map[string]*dgraphStruct.DgraphDoc{
+		"sana": {
+			"open":   {Uuid: "open", IsPrivate: &no},
+			"secret": {Uuid: "secret", IsPrivate: &yes, CreatedBy: owner},
+			"shared": {Uuid: "shared", IsPrivate: &yes, HasReadAccess: 1, CreatedBy: owner},
+			"theirs": {Uuid: "theirs", IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "sana"}},
+		},
+		"ravi": {
+			"open":   {Uuid: "open", IsPrivate: &no},
+			"secret": {Uuid: "secret", IsPrivate: &yes, CreatedBy: owner},
+			"shared": {Uuid: "shared", IsPrivate: &yes, CreatedBy: owner},
+			"theirs": {Uuid: "theirs", IsPrivate: &yes, HasReadAccess: 1, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "sana"}},
+		},
+	}
+	boards := map[string]*dgraphStruct.DgraphBoard{
+		"roadmap": {Uuid: "roadmap", IsPrivate: &no},
+		"payroll": {Uuid: "payroll", IsPrivate: &yes},
+	}
+	var docCalls, boardCalls int
+	failDocs := false
+	restoreDocs, restoreBoards, restorePerson := readableDocs, readableBoards, lookupPerson
+	t.Cleanup(func() { readableDocs, readableBoards, lookupPerson = restoreDocs, restoreBoards, restorePerson })
+	readableDocs = func(_ context.Context, ids []string, userUUID string) (map[string]bool, error) {
+		docCalls++
+		if failDocs {
+			return nil, errors.New("dgraph is down")
+		}
+		out := map[string]bool{}
+		for _, id := range ids {
+			if d, ok := docs[userUUID][id]; ok {
+				out[strings.ToLower(id)] = docBusiness.CanRead(d, userUUID)
+			}
+		}
+		return out, nil
+	}
+	boardReads := readBoardsAs(boards, map[string]int{})
+	readableBoards = func(ctx context.Context, ids []string, userUUID string) (map[string]bool, error) {
+		boardCalls++
+		return boardReads(ctx, ids, userUUID)
+	}
+	lookupPerson = func(_ context.Context, uuid string) (*dgraphStruct.DgraphUser, error) {
+		if uuid == "ravi" {
+			return &dgraphStruct.DgraphUser{Uid: "0xravi", Uuid: "ravi"}, nil
+		}
+		return nil, errors.New("no such person")
+	}
+	sana := &userModels.UserInfo{}
+	sana.UserDgraphInfo = dgraphStruct.DgraphUser{Uid: "0xsana", Uuid: "sana"}
+	hits := []ai.SimilarResult{
+		{ContentType: "post", ContentUUID: "p1", ChannelUUID: "ch"},
+		{ContentType: "doc", ContentUUID: "open"},
+		{ContentType: "doc", ContentUUID: "secret"},
+		{ContentType: "doc", ContentUUID: "shared"},
+		{ContentType: "doc", ContentUUID: "theirs"},
+		{ContentType: "doc", ContentUUID: "missing"},
+		{ContentType: "comment", ContentUUID: "c1", DocUUID: "secret"},
+		{ContentType: "comment", ContentUUID: "c2", DocUUID: "shared"},
+		{ContentType: "comment", ContentUUID: "c3", BoardUUID: "roadmap"},
+		{ContentType: "comment", ContentUUID: "c4", BoardUUID: "payroll"},
+		{ContentType: ai.BoardContentType, ContentUUID: "roadmap"},
+	}
+	cases := []struct {
+		name               string
+		ctx                context.Context
+		fail               bool
+		want               string
+		wantDocs, wantBrds int
+	}{
+		{"the person's own search", ai.WithoutRunRequester(context.Background()), false, "p1,open,shared,theirs,c2,c3,roadmap", 1, 1},
+		{"for someone else", ai.WithRunRequester(context.Background(), "ravi", "sana"), false, "p1,open,theirs,c3,roadmap", 2, 2},
+		{"the doc read fails", ai.WithoutRunRequester(context.Background()), true, "p1,c3,roadmap", 1, 1},
+		{"for someone who can't be resolved", ai.WithRunRequester(context.Background(), "gone", "sana"), false, "p1", 0, 0},
+	}
+	for _, c := range cases {
+		docCalls, boardCalls, failDocs = 0, 0, c.fail
+		var kept []string
+		for _, h := range keepReadableDocs(c.ctx, sana, hits) {
+			kept = append(kept, h.ContentUUID)
+		}
+		if got := strings.Join(kept, ","); got != c.want {
+			t.Errorf("%s: kept %s, want %s", c.name, got, c.want)
+		}
+		if docCalls != c.wantDocs {
+			t.Errorf("%s: %d doc access calls, want %d", c.name, docCalls, c.wantDocs)
+		}
+		if boardCalls != c.wantBrds {
+			t.Errorf("%s: %d board access calls, want %d", c.name, boardCalls, c.wantBrds)
+		}
 	}
 }

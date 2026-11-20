@@ -6,6 +6,7 @@ package business
 import (
 	"context"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -52,6 +53,133 @@ func whereFor(mode, provider, baseURL string) string {
 	default:
 		return provider
 	}
+}
+
+// LeavesServer reports whether call audio sent to where leaves this server:
+// everywhere but the bundled transcriber ("" is nowhere: transcription off).
+func LeavesServer(where string) bool {
+	return where != "" && where != WhereServer
+}
+
+// Why captions can't run, as a stable code the clients put in words (the
+// words, and what an admin should do, are the web's).
+const (
+	// ReasonTranscriptionDisabled: an admin turned transcription off.
+	ReasonTranscriptionDisabled = "transcription_disabled"
+	// ReasonTranscriberNotRunning: server mode, and the server's transcriber
+	// (the agent that joins calls, started by `make stt_up` with the bundled
+	// model) hasn't said it is running, or it can't reach the call server.
+	// Captions stay off; nothing falls through to a browser or a cloud.
+	ReasonTranscriberNotRunning = "transcriber_not_running"
+)
+
+// CaptionsOffReason is why captions can't run now, "" when they can. The
+// transcriber's heartbeat is read only in server mode, which alone needs it.
+func CaptionsOffReason(ctx context.Context) string {
+	mode := Mode()
+	if mode != ModeBackend {
+		return captionsOffReason(mode, AgentStatus{})
+	}
+	return captionsOffReason(mode, Agent(ctx))
+}
+
+// captionsOffReason is CaptionsOffReason for a mode and the agent's status.
+// Pure.
+func captionsOffReason(mode string, agent AgentStatus) string {
+	switch {
+	case mode == ModeOff:
+		return ReasonTranscriptionDisabled
+	case mode == ModeBackend && !(agent.Running && agent.LiveKit):
+		return ReasonTranscriberNotRunning
+	default:
+		return ""
+	}
+}
+
+// AcknowledgedWhere is where an admin last acknowledged call audio going, ""
+// when nobody has.
+func AcknowledgedWhere() string {
+	return strings.TrimSpace(loadAll()[keyAudioAck])
+}
+
+// AcknowledgementRequired refuses a save that would send call audio off the
+// server, to Where, without the admin's acknowledgement of exactly that place.
+type AcknowledgementRequired struct{ Where string }
+
+func (e *AcknowledgementRequired) Error() string {
+	return "call audio would go to " + e.Where + ": acknowledge it first"
+}
+
+// Acknowledgement is an admin's new acknowledgement of where call audio goes,
+// for its audit row: the place, and the configuration that sends it there.
+type Acknowledgement struct {
+	Where    string
+	Mode     string
+	Provider string // the speech provider, server mode only
+	Host     string // the endpoint's host, for an address the admin typed
+}
+
+// Acknowledge checks a save against where it would send call audio and the
+// acknowledgement given with it (a Where word, "" for none). It returns the
+// acknowledgement to record when this one is new, nil when there is nothing
+// to record, or *AcknowledgementRequired. The caller records it in the audit
+// log, then saves it (SaveInput.Acknowledged).
+func Acknowledge(in SaveInput, given string) (*Acknowledgement, error) {
+	mode, provider, baseURL := configAfter(in)
+	where := whereFor(mode, provider, baseURL)
+	record, err := checkAcknowledgement(where, AcknowledgedWhere(), strings.TrimSpace(given))
+	if err != nil || !record {
+		return nil, err
+	}
+	a := &Acknowledgement{Where: where, Mode: mode}
+	if mode == ModeBackend {
+		a.Provider = provider
+	}
+	if where == WhereCustom {
+		if u, err := url.Parse(baseURL); err == nil {
+			a.Host = u.Hostname()
+		}
+	}
+	return a, nil
+}
+
+// checkAcknowledgement decides a save to next, over the stored
+// acknowledgement, with the one given: audio staying on the server needs none;
+// leaving it needs the stored one or a given one naming exactly next, and only
+// a given one that isn't stored yet is recorded. Pure.
+func checkAcknowledgement(next, stored, given string) (bool, error) {
+	if !acknowledgementNeeded(next, stored) {
+		return false, nil
+	}
+	if given != next {
+		return false, &AcknowledgementRequired{Where: next}
+	}
+	return true, nil
+}
+
+// acknowledgementNeeded reports whether audio going to where needs an
+// acknowledgement the admin hasn't given. Pure.
+func acknowledgementNeeded(where, stored string) bool {
+	return LeavesServer(where) && stored != where
+}
+
+// configAfter is the mode, provider and address once in is saved: each
+// field in sets, else what is set now, read the way Mode, STTProvider and
+// STTBaseURL read it.
+func configAfter(in SaveInput) (mode, provider, baseURL string) {
+	mode, provider, baseURL = Mode(), STTProvider(), STTBaseURL()
+	if in.Mode != nil {
+		mode = normalizeMode(*in.Mode)
+	}
+	if in.STTProvider != nil {
+		provider = normalizeSTT(*in.STTProvider)
+	}
+	if in.STTBaseURL != nil {
+		if baseURL = strings.TrimSpace(*in.STTBaseURL); baseURL == "" {
+			baseURL = strings.TrimSpace(os.Getenv("STT_BASE_URL"))
+		}
+	}
+	return mode, provider, baseURL
 }
 
 // isOpenAIHost reports whether an OpenAI-compatible base URL is OpenAI's own

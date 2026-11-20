@@ -143,3 +143,106 @@ func TestInvoiceLife(t *testing.T) {
 		t.Fatalf("the restored draft: %+v %v", back, err)
 	}
 }
+
+// ADMIN-17, Stripe's rule: void only from sent. A paid invoice is marked
+// unpaid first, so money that arrived is never voided by one click; the
+// refusal says what to do, and the invoice stays paid.
+func TestPaidInvoiceCannotBeVoided(t *testing.T) {
+	ctx := context.Background()
+	env := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
+		t.Fatal(err)
+	}
+	project, by := uuid.New(), uuid.New()
+	inv, err := Create(ctx, project, input(), by)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetStatus(ctx, project, inv.ID, model.StatusSent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetStatus(ctx, project, inv.ID, model.StatusPaid); err != nil {
+		t.Fatal(err)
+	}
+	var ie *InputError
+	if _, err := SetStatus(ctx, project, inv.ID, model.StatusVoid); !errors.As(err, &ie) || ie.Error() != "A paid invoice is marked unpaid before it is voided." {
+		t.Fatalf("voiding a paid invoice: %v", err)
+	}
+	if still, err := Get(ctx, project, inv.ID); err != nil || still.Status != model.StatusPaid || still.PaidAt == nil {
+		t.Fatalf("after the refusal it is still paid: %+v %v", still, err)
+	}
+	// Marked unpaid, it voids.
+	if _, err := SetStatus(ctx, project, inv.ID, model.StatusSent); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := SetStatus(ctx, project, inv.ID, model.StatusVoid); err != nil || v.Status != model.StatusVoid {
+		t.Fatalf("voiding it once unpaid: %+v %v", v, err)
+	}
+}
+
+// ADMIN-17: void only from sent. A draft is deleted, not voided; a draft that
+// was sent before keeps its number, so it is marked sent and voided from there.
+func TestDraftIsNotVoided(t *testing.T) {
+	ctx := context.Background()
+	env := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
+		t.Fatal(err)
+	}
+	project, by := uuid.New(), uuid.New()
+	draft, err := Create(ctx, project, input(), by)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ie *InputError
+	if _, err := SetStatus(ctx, project, draft.ID, model.StatusVoid); !errors.As(err, &ie) || ie.Error() != "A draft is deleted rather than voided." {
+		t.Fatalf("voiding a draft: %v", err)
+	}
+	if still, err := Get(ctx, project, draft.ID); err != nil || still.Status != model.StatusDraft {
+		t.Fatalf("after the refusal it is still a draft: %+v %v", still, err)
+	}
+	// Sent, then taken back to a draft: it can't be deleted, nor voided as a
+	// draft; the refusal says how to void it.
+	if _, err := SetStatus(ctx, project, draft.ID, model.StatusSent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetStatus(ctx, project, draft.ID, model.StatusDraft); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetStatus(ctx, project, draft.ID, model.StatusVoid); !errors.As(err, &ie) || ie.Error() != "This draft was sent before, so it keeps its number. Mark it sent, then void it." {
+		t.Fatalf("voiding a draft that was sent: %v", err)
+	}
+	if err := Delete(ctx, project, draft.ID, by); !errors.Is(err, ErrWasSent) {
+		t.Fatalf("deleting a draft that was sent: %v, want ErrWasSent", err)
+	}
+	if _, err := SetStatus(ctx, project, draft.ID, model.StatusSent); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := SetStatus(ctx, project, draft.ID, model.StatusVoid); err != nil || v.Status != model.StatusVoid {
+		t.Fatalf("voiding it once sent again: %+v %v", v, err)
+	}
+}
+
+// Only a move to void needs the invoice sent; every other move keeps its old
+// path. A draft paid straight away is paid and counts as sent (it has both
+// sent times), and a paid invoice taken back to a draft moves, losing its
+// sent and paid times but keeping when it was first sent.
+func TestNonVoidMoveKeepsItsPath(t *testing.T) {
+	ctx := context.Background()
+	env := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
+		t.Fatal(err)
+	}
+	project, by := uuid.New(), uuid.New()
+	draft, err := Create(ctx, project, input(), by)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paid, err := SetStatus(ctx, project, draft.ID, model.StatusPaid)
+	if err != nil || paid.Status != model.StatusPaid || paid.PaidAt == nil || paid.SentAt == nil || paid.FirstSentAt == nil {
+		t.Fatalf("a draft paid straight away: %+v %v", paid, err)
+	}
+	back, err := SetStatus(ctx, project, draft.ID, model.StatusDraft)
+	if err != nil || back.Status != model.StatusDraft || back.PaidAt != nil || back.SentAt != nil || back.FirstSentAt == nil || !back.FirstSentAt.Equal(*paid.FirstSentAt) {
+		t.Fatalf("paid, taken back to a draft: %+v %v", back, err)
+	}
+}

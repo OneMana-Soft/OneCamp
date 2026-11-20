@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	triageBusiness "github.com/akashc777/OneCamp/business/Triage"
 	"regexp"
 	"strings"
 	"sync"
@@ -76,6 +77,9 @@ type WorkflowAction struct {
 	DueInDays *int `json:"due_in_days,omitempty"`
 	// notify: whom (taskActions.go Notify*).
 	Notify string `json:"notify,omitempty"`
+	// triage: accept (into Status, if set) or decline (Text is the reason
+	// the requester is told), through the triage queue.
+	Decision string `json:"decision,omitempty"`
 	// ask_agent: the AI teammate asked (its principal's user id); empty asks
 	// the workspace's assistant.
 	AgentID string `json:"agent_id,omitempty"`
@@ -201,6 +205,7 @@ var engineTriggers = []string{
 	workflowModel.TriggerTaskOverdue,
 	// A project's form sent (business/Form's form.submitted).
 	workflowModel.TriggerFormSubmitted,
+	workflowModel.TriggerTaskArrived,
 	// A task's approval request answered (business/Approvals).
 	workflowModel.TriggerApprovalDecided,
 }
@@ -403,6 +408,8 @@ func handleEvent(ctx context.Context, eventType string, data map[string]interfac
 		handleTaskEvent(ctx, workflowModel.TriggerFormSubmitted, data)
 	case "task.approval_decided":
 		handleTaskEvent(ctx, workflowModel.TriggerApprovalDecided, data)
+	case triageBusiness.ArrivedEvent:
+		handleTaskEvent(ctx, workflowModel.TriggerTaskArrived, data)
 	}
 }
 

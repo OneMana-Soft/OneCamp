@@ -1,5 +1,16 @@
 // Package business (Transcription) is the admin-managed configuration layer
-// for call transcription. It follows the exact DB-first / ENV-fallback pattern
+// for call transcription.
+//
+// By default no call audio leaves the server (zoom-09 C2): with no mode and no
+// provider chosen, calls are transcribed by the transcriber bundled with
+// OneCamp, on this server, and while it isn't running captions are off and say
+// why (CaptionsOffReason) instead of falling through to a browser or a cloud.
+// The browser's speech service and every cloud provider send the audio
+// elsewhere, so an admin chooses one only with an acknowledgement naming where
+// (Acknowledge), recorded in the admin audit log. A mode an install's env or an
+// admin already chose is kept as it is.
+//
+// It follows the exact DB-first / ENV-fallback pattern
 // used by business/Settings (system_configs + helpers.EncryptSecret), so an
 // admin can change the transcription mode and the STT model at runtime from the
 // admin panel WITHOUT a redeploy or a frontend rebuild.
@@ -43,13 +54,16 @@ import (
 
 // Config keys in system_configs.
 const (
-	keyMode              = "transcription_mode"               // frontend | backend | off
+	keyMode              = "transcription_mode"               // frontend | backend | off, and unset means backend
 	keySTTProvider       = "transcription_stt_provider"       // deepgram | google | openai
 	keySTTModel          = "transcription_stt_model"          // free-text model (nova-2, whisper-1, …)
 	keySTTBaseURL        = "transcription_stt_base_url"       // openai-compatible endpoint (optional)
 	keySTTLanguage       = "transcription_stt_language"       // BCP-47 hint (optional, e.g. "en")
 	keySTTAPIKey         = "transcription_stt_api_key"        // encrypted generic key (deepgram/openai)
 	keyGoogleCredentials = "transcription_google_credentials" // encrypted service-account JSON (google)
+	// keyAudioAck is the Where an admin last acknowledged call audio going to
+	// (Acknowledge); the card asks again for anywhere else.
+	keyAudioAck = "transcription_audio_acknowledged"
 	// Legacy key, still read as a fallback so existing installs keep working
 	// after the generic key was introduced.
 	keyLegacyDeepgramAPIKey = "transcription_deepgram_api_key"
@@ -178,9 +192,13 @@ func defaultModelForProvider(provider string) string {
 	}
 }
 
+// The defaults keep call audio on the server: a server where nobody chose a
+// mode or a provider transcribes with the bundled transcriber. Installs made
+// before this chose both in their env (the old template wrote the browser mode
+// and Deepgram), so they keep what they had.
 const (
-	defaultMode        = ModeFrontend
-	defaultSTTProvider = STTDeepgram
+	defaultMode        = ModeBackend
+	defaultSTTProvider = STTLocal
 )
 
 var (
@@ -194,7 +212,7 @@ const cacheTTL = 30 * time.Second
 // allConfigKeys is the set loaded in one batched read.
 var allConfigKeys = []string{
 	keyMode, keySTTProvider, keySTTModel, keySTTBaseURL, keySTTLanguage,
-	keySTTAPIKey, keyGoogleCredentials, keyLegacyDeepgramAPIKey,
+	keySTTAPIKey, keyGoogleCredentials, keyLegacyDeepgramAPIKey, keyAudioAck,
 }
 
 // loadAll pulls the transcription keys once (cached). Missing keys simply
@@ -232,7 +250,7 @@ func invalidate() {
 	mu.Unlock()
 }
 
-// normalizeMode coerces any value to a valid mode, defaulting to frontend.
+// normalizeMode coerces any value to a valid mode, defaulting to backend.
 func normalizeMode(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case ModeBackend:
@@ -246,7 +264,8 @@ func normalizeMode(v string) string {
 	}
 }
 
-// normalizeSTT coerces any value to a valid STT provider, defaulting to deepgram.
+// normalizeSTT coerces any value to a valid STT provider, defaulting to the
+// bundled server.
 func normalizeSTT(v string) string {
 	p := strings.ToLower(strings.TrimSpace(v))
 	if validSTTProviders[p] {
@@ -262,7 +281,8 @@ func IsValidSTTProvider(v string) bool {
 }
 
 // Mode returns the effective transcription mode. DB-first, then the
-// TRANSCRIPTION_MODE env var, then "frontend". Always a valid value.
+// TRANSCRIPTION_MODE env var, then "backend" (with the bundled server, so call
+// audio stays here). Always a valid value.
 func Mode() string {
 	all := loadAll()
 	if v, ok := all[keyMode]; ok && v != "" {
@@ -275,7 +295,7 @@ func Mode() string {
 }
 
 // STTProvider returns the effective backend STT provider. DB-first, then the
-// STT_PROVIDER env var, then "deepgram". Always a valid value.
+// STT_PROVIDER env var, then "local" (the bundled server). Always a valid value.
 func STTProvider() string {
 	all := loadAll()
 	if v, ok := all[keySTTProvider]; ok && v != "" {
@@ -413,6 +433,17 @@ type Status struct {
 	// Agent is whether the server's transcriber is running, which server
 	// mode needs and nothing else provides.
 	Agent AgentStatus `json:"agent"`
+	// AudioLeavesServer is whether Where is anywhere but this server.
+	AudioLeavesServer bool `json:"audio_leaves_server"`
+	// AcknowledgedWhere is where an admin last acknowledged call audio going,
+	// "" when nobody has; NeedsAcknowledgement is whether the card must ask for
+	// it before anything else (audio leaves for somewhere not acknowledged,
+	// as an install whose env chose the browser does until an admin answers).
+	AcknowledgedWhere    string `json:"acknowledged_where"`
+	NeedsAcknowledgement bool   `json:"needs_acknowledgement"`
+	// CaptionsOffReason is why captions can't run now, "" when they can
+	// (CaptionsOffReason); members see the same code in /config/client.
+	CaptionsOffReason string `json:"captions_off_reason"`
 }
 
 // GetStatus returns the redacted settings view for the admin UI.
@@ -429,8 +460,10 @@ func GetStatus(ctx context.Context) Status {
 		hasGoogle, googleSrc = true, "env"
 	}
 
+	mode, where, acked := Mode(), Where(), AcknowledgedWhere()
+	agent := Agent(ctx)
 	return Status{
-		Mode:                 Mode(),
+		Mode:                 mode,
 		ModeSource:           sourceOf(keyMode, "TRANSCRIPTION_MODE"),
 		STTProvider:          STTProvider(),
 		STTProviderSource:    sourceOf(keySTTProvider, "STT_PROVIDER"),
@@ -441,8 +474,12 @@ func GetStatus(ctx context.Context) Status {
 		STTAPIKeySource:      keySrc,
 		HasGoogleCredentials: hasGoogle,
 		GoogleSource:         googleSrc,
-		Where:                Where(),
-		Agent:                Agent(ctx),
+		Where:                where,
+		Agent:                agent,
+		AudioLeavesServer:    LeavesServer(where),
+		AcknowledgedWhere:    acked,
+		NeedsAcknowledgement: acknowledgementNeeded(where, acked),
+		CaptionsOffReason:    captionsOffReason(mode, agent),
 	}
 }
 
@@ -494,6 +531,9 @@ type SaveInput struct {
 	STTLanguage       *string
 	STTAPIKey         *string
 	GoogleCredentials *string
+	// Acknowledged is a new acknowledgement of where call audio goes, set only
+	// from Acknowledge once its audit row is written.
+	Acknowledged *string
 }
 
 // checkSTTKeyStays is helpers.CheckKeptSecret for the speech-to-text key, for
@@ -530,6 +570,13 @@ func Save(in SaveInput) error {
 	if in.STTBaseURL != nil || in.STTProvider != nil {
 		stored, _ := hasSTTAPIKey(loadAll())
 		if err := checkSTTKeyStays(stored, STTBaseURL(), STTProvider(), in); err != nil {
+			return err
+		}
+	}
+	// The acknowledgement first: a save that stops part way never leaves audio
+	// going somewhere the stored state says nobody acknowledged.
+	if in.Acknowledged != nil {
+		if err := configModel.UpsertConfig(keyAudioAck, *in.Acknowledged); err != nil {
 			return err
 		}
 	}

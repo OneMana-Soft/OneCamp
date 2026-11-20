@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	"github.com/akashc777/OneCamp/helpers"
@@ -138,7 +139,7 @@ func BoardCalls(ctx context.Context, who *userModels.UserInfo, board string) ([]
 			}
 		}
 		if len(ask) > 0 {
-			got, err := mayReadCalls(ctx, who, ask)
+			got, err := mayReadCalls(ctx, accessBusiness.SubjectOf(who), ask)
 			if err != nil {
 				return nil, err
 			}

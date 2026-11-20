@@ -268,8 +268,8 @@ func TestStoredTokensAreReadSealedOrPlain(t *testing.T) {
 }
 
 func TestTheLinkedAccountIsNamed(t *testing.T) {
-	meta := `{"account_email":"maya@outlook.com"}`
-	if got := GoogleCalendarAccount(&integrationModel.Integration{Metadata: &meta}); got != "maya@outlook.com" {
+	meta := `{"account_email":"maya@example.com"}`
+	if got := GoogleCalendarAccount(&integrationModel.Integration{Metadata: &meta}); got != "maya@example.com" {
 		t.Errorf("account %q", got)
 	}
 	empty := `{}`

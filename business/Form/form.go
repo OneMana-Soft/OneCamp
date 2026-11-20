@@ -30,6 +30,7 @@ import (
 	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskWriter "github.com/akashc777/OneCamp/business/TaskWriter"
+	triageBusiness "github.com/akashc777/OneCamp/business/Triage"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
@@ -799,12 +800,13 @@ func GetPublic(ctx context.Context, token string) (*Public, error) {
 }
 
 // Seams for tests: the form a link opens, the form its token names (open or
-// not), the Task Writer, the event a sent form is, and its submissions.
+// not), the Task Writer, triage, the event a sent form is, and its submissions.
 var (
-	loadLive    = load
-	formByToken = formModel.ByToken
-	makeTask    = taskWriter.MakeTask
-	tellRules   = func(ctx context.Context, data map[string]interface{}) {
+	loadLive       = load
+	formByToken    = formModel.ByToken
+	makeTask       = taskWriter.MakeTask
+	arriveInTriage = triageBusiness.Arrive
+	tellRules      = func(ctx context.Context, data map[string]interface{}) {
 		webhookBusiness.DispatchEvent(ctx, "form.submitted", data)
 	}
 	countSince       = formModel.CountSince
@@ -883,6 +885,9 @@ func Submit(ctx context.Context, token string, raw map[string]any, signs formula
 		files.release(ctx)
 		return err
 	}
+	// A project with triage on takes the task into it (package 9 R5a). The
+	// task is made either way (triage Arrive logs an item that didn't stick).
+	arriveInTriage(ctx, "business/Form Submit", f.ProjectUUID, taskID, triageBusiness.FromForm, requesterOf(l.fields, answers))
 	stored, _ := json.Marshal(answers)
 	sent, err := recordSubmission(ctx, f.Id, &taskID, nil, stored)
 	if err != nil {
@@ -892,6 +897,24 @@ func Submit(ctx context.Context, token string, raw map[string]any, signs formula
 	told, event := context.WithoutCancel(ctx), submitted(l, sent, taskID, name, answers)
 	helpers.GoSafeNamed("business/Form.tellRules", func() { tellRules(told, event) })
 	return nil
+}
+
+// requesterOf is who sent a form, as triage keeps them: the address its first
+// email question was answered with, if any. The visitor is nobody the
+// workspace knows. Pure.
+func requesterOf(fields []Field, answers []Answer) triageBusiness.Requester {
+	email := map[string]bool{}
+	for _, f := range fields {
+		if f.Type == Email {
+			email[f.Id] = true
+		}
+	}
+	for _, a := range answers {
+		if email[a.Id] && a.Value != "" {
+			return triageBusiness.Requester{Email: a.Value}
+		}
+	}
+	return triageBusiness.Requester{}
 }
 
 // submitted is the event a sent form is: a project rule can run on it

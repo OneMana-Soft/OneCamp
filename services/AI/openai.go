@@ -893,48 +893,9 @@ func parseTagFunctionCall(s string) (string, string, bool) {
 	if name == "" {
 		return "", "", false
 	}
-	args := extractFirstJSONObject(rest)
+	args := helpers.ExtractJSON(rest, '{')
 	if strings.TrimSpace(args) == "" {
 		args = "{}"
 	}
 	return name, args, true
-}
-
-// extractFirstJSONObject returns the first balanced {...} substring of s
-// (string-literal and escape aware so a "}" inside a string doesn't close the
-// object early), or "" when there is none.
-func extractFirstJSONObject(s string) string {
-	start := strings.IndexByte(s, '{')
-	if start < 0 {
-		return ""
-	}
-	depth := 0
-	inStr := false
-	esc := false
-	for i := start; i < len(s); i++ {
-		c := s[i]
-		if inStr {
-			switch {
-			case esc:
-				esc = false
-			case c == '\\':
-				esc = true
-			case c == '"':
-				inStr = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inStr = true
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return s[start : i+1]
-			}
-		}
-	}
-	return ""
 }

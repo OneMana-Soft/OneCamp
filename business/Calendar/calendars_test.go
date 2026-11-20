@@ -69,15 +69,15 @@ func TestAProjectsCalendarIsAsTheProjectIs(t *testing.T) {
 		personOf(maya).String():  {project: accessBusiness.LevelView},
 	}, map[string]string{project: "Launch"})
 
-	cal, err := h.s.ProjectCalendarFor(context.Background(), jonas, project)
+	cal, err := h.s.projectCalendarFor(context.Background(), jonas, project)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := h.s.ProjectCalendarFor(context.Background(), maya, strings.ToUpper(project))
+	again, err := h.s.projectCalendarFor(context.Background(), maya, strings.ToUpper(project))
 	if err != nil || again != cal {
 		t.Fatalf("one calendar a project: %s, then %s (%v)", cal, again, err)
 	}
-	if _, err := h.s.ProjectCalendarFor(context.Background(), lee, project); err != ErrEventNotFound {
+	if _, err := h.s.projectCalendarFor(context.Background(), lee, project); err != ErrEventNotFound {
 		t.Fatalf("someone who can't see the project made its calendar: %v", err)
 	}
 
@@ -114,7 +114,7 @@ func TestACalendarsChipNamesItsNextThreeEvents(t *testing.T) {
 	jonas, lee := h.member("Jonas"), h.member("Lee")
 	project := uuid.NewString()
 	projectsDecide(t, map[string]map[string]accessBusiness.Level{personOf(jonas).String(): {project: accessBusiness.LevelEdit}}, map[string]string{project: "Launch"})
-	cal, err := h.s.ProjectCalendarFor(context.Background(), jonas, project)
+	cal, err := h.s.projectCalendarFor(context.Background(), jonas, project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,11 +158,11 @@ func TestChipsOfManyCalendarsReadTheirEventsOnce(t *testing.T) {
 	projectsDecide(t, map[string]map[string]accessBusiness.Level{personOf(jonas).String(): {launch: accessBusiness.LevelEdit, hiring: accessBusiness.LevelView}},
 		map[string]string{launch: "Launch", hiring: "Hiring"})
 	ctx := context.Background()
-	a, err := h.s.ProjectCalendarFor(ctx, jonas, launch)
+	a, err := h.s.projectCalendarFor(ctx, jonas, launch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := h.s.ProjectCalendarFor(ctx, jonas, hiring)
+	b, err := h.s.projectCalendarFor(ctx, jonas, hiring)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestAProjectCalendarsEventsAreItsMembers(t *testing.T) {
 		personOf(jonas).String(): {project: accessBusiness.LevelEdit},
 		personOf(maya).String():  {project: accessBusiness.LevelView},
 	}, map[string]string{project: "Launch"})
-	cal, err := h.s.ProjectCalendarFor(context.Background(), jonas, project)
+	cal, err := h.s.projectCalendarFor(context.Background(), jonas, project)
 	if err != nil {
 		t.Fatal(err)
 	}

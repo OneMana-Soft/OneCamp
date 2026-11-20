@@ -33,6 +33,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/akashc777/OneCamp/helpers"
 	"strings"
 
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -104,16 +105,8 @@ func normalizeSelectorKind(raw string) SelectorKind {
 // parseable is found — the caller then falls back to retrieval-scoped context,
 // so a weak model never blocks a whole-repo run. Result is sanitized. Pure.
 func ParseSelectors(raw string) []Selector {
-	arr := extractFirstJSONArray(raw)
-	if arr == "" {
-		if obj := extractFirstJSONObject(raw); obj != "" {
-			arr = "[" + obj + "]"
-		} else {
-			return nil
-		}
-	}
-	var items []map[string]interface{}
-	if err := json.Unmarshal([]byte(arr), &items); err != nil {
+	items := selectorItems(raw)
+	if items == nil {
 		return nil
 	}
 	out := make([]Selector, 0, len(items))
@@ -127,6 +120,22 @@ func ParseSelectors(raw string) []Selector {
 		out = append(out, Selector{Kind: kind, Query: query, Language: lang})
 	}
 	return SanitizeSelectors(out)
+}
+
+// selectorItems is the reply's selector list: its first JSON array of objects,
+// or else its first object as a list of one ("[see below]" in prose is stepped
+// over, and an array that is a value inside the object is not a list). nil
+// when the reply holds neither.
+func selectorItems(raw string) []map[string]interface{} {
+	var items []map[string]interface{}
+	if arr := helpers.ExtractJSON(raw, '['); arr != "" && json.Unmarshal([]byte(arr), &items) == nil {
+		return items
+	}
+	var one map[string]interface{}
+	if obj := helpers.ExtractJSON(raw, '{'); obj != "" && json.Unmarshal([]byte(obj), &one) == nil {
+		return []map[string]interface{}{one}
+	}
+	return nil
 }
 
 // SanitizeSelectors trims, drops empty/oversized, de-duplicates (by kind+query+
@@ -182,44 +191,4 @@ func AuthorSelectors(ctx context.Context, task string) ([]Selector, error) {
 	}
 	svc.Resiliency.CB.RecordSuccess()
 	return ParseSelectors(answer), nil
-}
-
-// extractFirstJSONArray returns the first balanced [...] array in s (ignoring
-// brackets inside strings), or "" when there is none — tolerating a fenced
-// block, leading/trailing prose, or a bare array. Mirrors extractFirstJSONObject
-// for arrays. Pure.
-func extractFirstJSONArray(s string) string {
-	start := strings.IndexByte(s, '[')
-	if start < 0 {
-		return ""
-	}
-	depth := 0
-	inStr := false
-	esc := false
-	for i := start; i < len(s); i++ {
-		c := s[i]
-		if inStr {
-			switch {
-			case esc:
-				esc = false
-			case c == '\\':
-				esc = true
-			case c == '"':
-				inStr = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inStr = true
-		case '[':
-			depth++
-		case ']':
-			depth--
-			if depth == 0 {
-				return s[start : i+1]
-			}
-		}
-	}
-	return ""
 }

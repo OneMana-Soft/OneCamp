@@ -534,6 +534,9 @@ func importedPerson(ctx context.Context, maps *messageMaps, cache map[string]*us
 		return nil, nil
 	}
 	pgUser, err := userBusiness.GetUserByUUID(ctx, ocUUID)
+	if errors.Is(err, helpers.ErrNotFound) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading person %s: %w", ocUUID, err)
 	}

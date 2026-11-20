@@ -3,8 +3,12 @@ package business
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
 	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
@@ -108,9 +112,17 @@ func inBreakoutRooms(ctx context.Context, room string) bool {
 // HumanActiveRoomNames returns the own rooms of the calls going on now, for
 // the sidebar to light many conversations' dots in a single pass: a room with
 // a person in it, and the call's own room of a breakout room with a person in
-// it (callOwnRoom), as IsCallActive answers for one call.
+// it (callOwnRoom), as IsCallActive answers for one call. A whole answer is
+// kept for activeRoomsTTL (activeRooms), and each load is handed its own copy.
 func HumanActiveRoomNames(ctx context.Context) (map[string]bool, error) {
-	rooms, err := livekitInit.LiveKitService.HumanActiveRoomNames(ctx)
+	activeRooms.Lock()
+	kept, ok := activeRooms.kept.Get(activeRoomsKey)
+	began := activeRooms.changes
+	activeRooms.Unlock()
+	if ok {
+		return maps.Clone(kept), nil
+	}
+	rooms, complete, err := livekitInit.LiveKitService.HumanActiveRoomNames(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +130,63 @@ func HumanActiveRoomNames(ctx context.Context) (map[string]bool, error) {
 	for room := range rooms {
 		active[callOwnRoom(room)] = true
 	}
+	if complete {
+		activeRooms.Lock()
+		if activeRooms.changes == began {
+			activeRooms.kept.Set(activeRoomsKey, maps.Clone(active))
+		}
+		activeRooms.Unlock()
+	}
 	return active, nil
+}
+
+// activeRooms keeps the sidebar's answer of which calls are going on
+// (HumanActiveRoomNames) for activeRoomsTTL (H3C, 19 Nov 2026). The sidebar
+// asked LiveKit for every room, then who was in each busy one, on every load
+// of everybody's. One key: the answer is the call server's rooms, no person's.
+//
+// Emptied by CallRoomsChanged: the webhook's room_finished, participant_joined
+// and participant_left, once the room is found ours. Only a whole answer is
+// kept: a failed listing, or one missing a room whose people couldn't be read,
+// serves its own load only, as does a read that began before a change.
+//
+// Stale: a dot lit up to 3 s after its call ended, or dark up to 3 s after one
+// began, only where the call's event missed this process (another instance
+// took the webhook, or it was lost). It decides nothing about who may join,
+// ring, record or read a call (IsCallActive and CheckRoomExists ask LiveKit
+// every time): it only lights rows of the reader's own sidebar.
+var activeRooms = struct {
+	sync.Mutex
+	kept *helpers.TTLCache[map[string]bool]
+	// changes counts CallRoomsChanged, so a read under way when a call
+	// changes isn't kept.
+	changes uint64
+}{kept: helpers.NewTTLCacheClocked[map[string]bool](activeRoomsTTL, activeRoomsNow)}
+
+// activeRoomsHeldAt, when set, is the time activeRooms ages by instead of the
+// clock's: only HoldClockForTest, in the integration build, sets it.
+var activeRoomsHeldAt atomic.Pointer[time.Time]
+
+func activeRoomsNow() time.Time {
+	if t := activeRoomsHeldAt.Load(); t != nil {
+		return *t
+	}
+	return time.Now()
+}
+
+const (
+	activeRoomsTTL = 3 * time.Second
+	activeRoomsKey = "rooms"
+)
+
+// CallRoomsChanged empties the sidebar's kept answer of which calls are going
+// on (activeRooms): a call of this workspace began or ended, or someone joined
+// or left it.
+func CallRoomsChanged() {
+	activeRooms.Lock()
+	defer activeRooms.Unlock()
+	activeRooms.changes++
+	activeRooms.kept.Purge()
 }
 
 // DeleteRoom force-closes a LiveKit room (evicting any remaining

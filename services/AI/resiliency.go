@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -192,12 +193,16 @@ func envInt(key string) int {
 	return 0
 }
 
+// allowAIRate is the limiter CheckRateLimit asks; a test swaps it to pin the window it returns.
+var allowAIRate = redisStore.AllowFixedWindow
+
 // CheckRateLimit verifies the user hasn't exceeded their per-minute AI request limit.
 // Backed by registry.AIRate; the store helper handles the increment+TTL pin atomically.
 func (rm *ResiliencyManager) CheckRateLimit(ctx context.Context, userUUID string) error {
-	res := redisStore.AllowFixedWindow(ctx, registry.AIRate, []string{userUUID}, rm.rateLimitPerMin)
+	res := allowAIRate(ctx, registry.AIRate, []string{userUUID}, rm.rateLimitPerMin)
 	if !res.Allowed {
-		return ErrRateLimited
+		// The refusal already holds the window's end (the limiter read its TTL), so the answer can say when.
+		return RateLimitedFor(res.RetryAfter)
 	}
 	return nil
 }
@@ -252,17 +257,17 @@ func FriendlyProviderError(err error) string {
 	case errors.Is(err, ErrOllamaUpdateRequired):
 		return "This model needs a newer Ollama. Update Ollama on the AI server, then pull the model again."
 	case errors.Is(err, errServiceDisabled) || strings.Contains(msg, "ai service is not enabled"):
-		return "AI is turned off for this workspace. An admin can turn it on under Admin > AI Models."
+		return AIOffWords
 	case errors.Is(err, ErrCircuitOpen):
 		return "The AI provider isn't answering right now. Please try again in a minute."
 	case errors.Is(err, ErrUserTokenBudgetExceeded):
-		return "You've reached your daily AI usage limit. It resets tomorrow, or an admin can raise your limit under Admin > AI Models."
+		return "You've reached your daily AI usage limit. It resets tomorrow, or an admin can raise your limit under Admin > AI & agents."
 	case errors.Is(err, ErrAgentTokenBudgetExceeded):
-		return "This AI teammate has reached its daily usage limit. It resets tomorrow, or an admin can raise the agent's limit under Admin > AI Models."
+		return "This AI teammate has reached its daily usage limit. It resets tomorrow, or an admin can raise the agent's limit under Admin > AI & agents."
 	case errors.Is(err, ErrChannelTokenBudgetExceeded):
-		return "This channel has reached its daily AI usage limit. It resets tomorrow, or an admin can raise the channel's limit under Admin > AI Models."
+		return "This channel has reached its daily AI usage limit. It resets tomorrow, or an admin can raise the channel's limit under Admin > AI & agents."
 	case errors.Is(err, ErrWorkspaceTokenBudgetExceeded):
-		return "The workspace has reached its daily AI usage limit. It resets tomorrow, or an admin can raise the limit under Admin > AI Models."
+		return "The workspace has reached its daily AI usage limit. It resets tomorrow, or an admin can raise the limit under Admin > AI & agents."
 	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "timeout") || strings.Contains(msg, "timed out"):
 		return "The AI model took too long to respond. If it's a local model it may still be loading - try again in a moment, or pick a faster model in the assistant's model menu."
 	case errors.Is(err, context.Canceled) || strings.Contains(msg, "context canceled"):
@@ -273,13 +278,13 @@ func FriendlyProviderError(err error) string {
 	case errors.Is(err, ErrProviderRateLimited) || strings.Contains(msg, "rate limit") || strings.Contains(msg, "429") || strings.Contains(msg, "too many requests"):
 		return "The AI provider is rate-limiting requests right now. Please wait a few seconds and try again."
 	case strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host") || strings.Contains(msg, "dial ") || strings.Contains(msg, "connect: ") || strings.Contains(msg, "eof"):
-		return "Can't reach the AI model server right now. If you're running a local model, make sure it's up; otherwise check the provider settings under Admin > AI Models."
+		return "Can't reach the AI model server right now. If you're running a local model, make sure it's up; otherwise check the provider settings under Admin > AI & agents."
 	case strings.Contains(msg, "status 401") || strings.Contains(msg, "status 403") || strings.Contains(msg, "unauthorized") || strings.Contains(msg, "invalid api key") || strings.Contains(msg, "api key"):
-		return "The AI provider rejected the request (authentication). An admin may need to update the API key under Admin > AI Models."
+		return "The AI provider rejected the request (authentication). An admin may need to update the API key under Admin > AI & agents."
 	case strings.Contains(msg, "status 404") || strings.Contains(msg, "model not found") || strings.Contains(msg, "not found"):
-		return "The selected AI model isn't available. An admin may need to pull or re-select it under Admin > AI Models."
+		return "The selected AI model isn't available. An admin may need to pull or re-select it under Admin > AI & agents."
 	default:
-		return "The AI model couldn't complete that request. Please try again."
+		return genericFailure
 	}
 }
 
@@ -290,13 +295,29 @@ func FriendlyProviderError(err error) string {
 //   - So does any error that holds text written outside the workspace (foreignText): a provider's reply, a remote
 //     agent's message, a failed connection. That text can name the provider's account (Groq's 413 carried the
 //     organization id), its hosts and its limits, so it belongs in the server's log only.
-//   - Any other error is one the workspace wrote for people ("that image is too large to analyze (limit 8 MB)"), and
-//     keeps its words.
+//   - Any other error is one no case names: it may hold a store's or a library's own text, so the person gets the
+//     generic line and the text goes to the log (UX-IA-H3 M2). A caller that keeps its own status (a 400 on the
+//     person's input) uses ClientWords, which keeps words the workspace wrote for people ("that image is too large to
+//     analyze (limit 8 MB)").
 //
 // The text it withholds goes to the server's log with ctx's trace, so no caller can drop it.
 func ClientError(ctx context.Context, err error) (int, string) {
+	status, words, named := clientAnswer(ctx, err)
+	if !named {
+		helpers.LogWarnWithContext(ctx, "ai: an error no case names was answered in the generic words; its text withheld: %+v", err)
+		return status, genericFailure
+	}
+	return status, words
+}
+
+// clientAnswer is ClientError's status and words; named is false when no case names err and the words are its own.
+func clientAnswer(ctx context.Context, err error) (int, string, bool) {
 	if err == nil {
-		return http.StatusInternalServerError, FriendlyProviderError(err)
+		return http.StatusInternalServerError, FriendlyProviderError(err), true
+	}
+	var pw *peopleWords
+	if errors.As(err, &pw) {
+		return pw.status, pw.words, true
 	}
 	foreign := foreignText(err)
 	if foreign {
@@ -313,11 +334,11 @@ func ClientError(ctx context.Context, err error) (int, string) {
 		status = http.StatusServiceUnavailable
 	case errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusGatewayTimeout
-	case errors.Is(err, context.Canceled), foreign:
+	case errors.Is(err, context.Canceled), errors.Is(err, ErrOllamaUpdateRequired), foreign:
 	default:
-		return status, err.Error()
+		return status, err.Error(), false
 	}
-	return status, FriendlyProviderError(err)
+	return status, FriendlyProviderError(err), true
 }
 
 // foreignText reports whether err holds text written outside the workspace: a provider's or a remote agent's reply
@@ -342,8 +363,108 @@ func foreignText(err error) bool {
 	return strings.Contains(msg, "dial tcp") || strings.Contains(msg, "dial udp")
 }
 
-// ClientWords is ClientError's words, for a caller that keeps its own status.
+// peopleWords is an error whose words were written for the person who asked, such as a refusal of an action they
+// may not take: ClientError and ClientWords answer them as they are, with status (CR-437 N1).
+type peopleWords struct {
+	status int
+	words  string
+}
+
+func (e *peopleWords) Error() string { return e.words }
+
+// ForPeople is words written for the person who asked, such as a refusal, with the status they're answered with.
+func ForPeople(status int, words string) error { return &peopleWords{status: status, words: words} }
+
+// machineMarks finds text a library, a store or a connection wrote rather than people. It names internal hosts,
+// files, queries and values, so ClientWords answers it in the generic line (CR-437 N2; FIX-2: every class CR-437's
+// probe got back raw). One alternation per class.
+var machineMarks = regexp.MustCompile(strings.Join([]string{
+	// URL: a request line (`Post "http://ollama:11434/api/chat": EOF`) or any scheme's URL with a host.
+	`\b(Get|Head|Post|Put|Patch|Delete|Options) "|(?i:\b[a-z][a-z0-9+.-]*://[\w\[])`,
+	// Address: an IPv4, a host:port in any case (`OLLAMA:11434`), an IPv6 with a port (`[::1]:11434`), a DSN's keys.
+	`\b\d{1,3}(\.\d{1,3}){3}\b|(?i:\b[a-z][a-z0-9.-]*:\d{2,5}\b)|\[[0-9a-fA-F:]+\]:\d+|\b(host|port|user|dbname|sslmode|password)=`,
+	// Path: two or more segments, absolute or relative (`/var/lib/...`, `./templates/...`).
+	`(^|[\s"'(=:])\.{0,2}/[\w.-]+/`,
+	// Connection: its own words, also when a %v on the way flattened a deadline.
+	`\bEOF\b|i/o timeout|connection (refused|reset)|no such host|broken pipe|\btls: |\bx509: |context deadline exceeded`,
+	// SQL: a driver's prefix, Postgres's `ERROR: ` and constraint words, a raw query.
+	`\bpq: |SQLSTATE|\bsql: |\bERROR: |violates [\w-]+( key)? constraint|\b(SELECT|INSERT|UPDATE|DELETE)\b[^.]*\b(FROM|INTO|SET|WHERE)\b`,
+	// Store: gRPC, Redis (its name, `ERR ` or a reply's code), dgo's abort, OpenSearch's status and JSON body, minio.
+	`rpc error|(?i:\bredis\b|\bdgraph\b)|\bERR |(^|: )(WRONGTYPE|NOAUTH|NOPERM|MOVED|LOADING|READONLY|NOSCRIPT|EXECABORT|CROSSSLOT|MISCONF) |` +
+		`Transaction has been aborted|\[\d{3} [A-Za-z ]+\] \{|\bminio: `,
+	// JSON: encoding/json's prefix and its decoder's words.
+	`\bjson: |Go (struct field|value of type)|looking for beginning of value|unexpected end of JSON input`,
+	// Go value: a type, a pointer or a value printed by Go (`*ai.ProviderError`, `&{...}`, `0xc000123400`, `map[...]`).
+	`\b0x[0-9a-f]{6,}\b|\*[a-z]\w*\.[A-Za-z]\w*|&\{|\b[a-z]\w*\.[A-Z]\w*\{|interface \{\}|map\[\w+\]`,
+	// Stack: a goroutine, a panic, a runtime error, a frame (`pkg.(*T).Method(0x...)`, `file.go:7`), a line break.
+	`goroutine |\bpanic: |\bruntime error: |\.\(\*?\w+\)\.\w+\(|\.go:\d+\b|\n`,
+}, "|"))
+
+// typedURL is a url.Parse error's quoted URL (`parse "http://exa mple.com": invalid character " " in host name`):
+// a setting a person typed, so ClientWords drops its scheme before the URL mark reads it; every other mark still does.
+var typedURL = regexp.MustCompile(`\bparse "[a-zA-Z][a-zA-Z0-9+.-]*://`)
+
+// ClientWords is ClientError's words for a caller that keeps its own status: words written for people stay theirs.
+// A text no case names keeps its words unless a library, a store or a connection wrote it (machineMarks): that
+// text goes to the log and the person gets the generic line.
 func ClientWords(ctx context.Context, err error) string {
-	_, words := ClientError(ctx, err)
+	_, words, named := clientAnswer(ctx, err)
+	if !named && machineMarks.MatchString(typedURL.ReplaceAllString(words, `parse "`)) {
+		helpers.LogWarnWithContext(ctx, "ai: a library's or connection's text was answered in the generic words; its text withheld: %+v", err)
+		return genericFailure
+	}
 	return words
+}
+
+// AIOffWords is what every AI route answers while AI is off in the workspace: what happened and who can change it.
+const AIOffWords = "AI is turned off for this workspace. An admin can turn it on under Admin > AI & agents."
+
+// genericFailure is the line for an AI failure no case names.
+const genericFailure = "The AI model couldn't complete that request. Please try again."
+
+// rateWindow is a refusal that knows when it ends: the limiter's own window.
+type rateWindow struct{ after time.Duration }
+
+func (e *rateWindow) Error() string { return ErrRateLimited.Error() }
+func (e *rateWindow) Unwrap() error { return ErrRateLimited }
+
+// RateLimitedFor is ErrRateLimited carrying how long until the limiter's window ends; 0 when it isn't known.
+func RateLimitedFor(after time.Duration) error { return &rateWindow{after: after} }
+
+// retryNow is the clock RetryAfterSeconds reads; a test sets it.
+var retryNow = time.Now
+
+// RetryAfterSeconds is the Retry-After an AI answer with these words carries for err, in whole seconds; 0 is none.
+// The web offers Try again exactly when an answer carries the header, so it follows the words: an answer that tells
+// the person to try again carries it, and no other does (a daily limit "resets tomorrow"; AI off needs an admin).
+// The wait is the breaker's minute, the limiter's own window (else to the next minute), or 5 seconds.
+func RetryAfterSeconds(err error, words string) int {
+	if !strings.Contains(strings.ToLower(words), "try again") {
+		return 0
+	}
+	var w *rateWindow
+	switch {
+	case errors.Is(err, ErrCircuitOpen):
+		return 60
+	case errors.As(err, &w) && w.after > 0:
+		return wholeSeconds(w.after)
+	case errors.Is(err, ErrRateLimited):
+		now := retryNow()
+		return wholeSeconds(now.Truncate(time.Minute).Add(time.Minute).Sub(now))
+	default:
+		return 5
+	}
+}
+
+// wholeSeconds rounds d up, so a client never asks again before the wait is over.
+func wholeSeconds(d time.Duration) int {
+	return max(1, int((d+time.Second-1)/time.Second))
+}
+
+// SetRetryAfter sets an AI answer's Retry-After on h, by RetryAfterSeconds. Call it before the status is written.
+// A stream's error after its first byte can't carry a header: the SSE frame has the words only.
+func SetRetryAfter(h http.Header, err error, words string) {
+	if s := RetryAfterSeconds(err, words); s > 0 {
+		h.Set("Retry-After", strconv.Itoa(s))
+	}
 }

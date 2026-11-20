@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/akashc777/OneCamp/helpers"
 	"strings"
 
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
@@ -128,7 +129,7 @@ func agentDraftSystemPrompt() string {
 
 // parseAgentDraft extracts the model's JSON object (tolerant of fences/prose).
 func parseAgentDraft(raw string) (*AgentDraft, error) {
-	js := extractDraftJSON(raw)
+	js := helpers.ExtractJSON(raw, '{')
 	if js == "" {
 		return nil, fmt.Errorf("no JSON object found")
 	}
@@ -137,20 +138,6 @@ func parseAgentDraft(raw string) (*AgentDraft, error) {
 		return nil, err
 	}
 	return &d, nil
-}
-
-// extractDraftJSON returns the first top-level JSON object substring.
-func extractDraftJSON(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start == -1 || end == -1 || end <= start {
-		return ""
-	}
-	return s[start : end+1]
 }
 
 // sanitizeAgentDraft clamps the model output to the allowed vocabulary + bounds

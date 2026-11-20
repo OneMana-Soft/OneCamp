@@ -7,7 +7,8 @@ package business
 // open work has been open, and time in status how long done work spent at
 // each step. Each comes as its spread (the 25th to 95th percentiles), whole
 // and sliced by project, person, priority, type, status, labels, cycle,
-// estimate and every custom field of the projects (L32), each slice with its
+// estimate, SLA (linear-24: where its reader reads SLA state) and every
+// custom field of the projects (L32), each slice with its
 // open, overdue and done work and their effort beside, and each done task as
 // a point for a control chart. Linear keeps insights for its Business plan,
 // Jira its control chart for its paid ones; this is on every plan.
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	estimateScale "github.com/akashc777/OneCamp/business/EstimateScale"
+	slaBusiness "github.com/akashc777/OneCamp/business/SLA"
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
@@ -134,11 +136,14 @@ func effortOf(scale *estimateScale.Scale, t *dgraphStruct.DgraphTask) Effort {
 // label, a field's value. An empty key is the work with none: nobody's, no
 // priority, a plain task, no label, cycle or estimate. Beside the spreads
 // are its open tasks, those of them overdue, its tasks done in the weeks
-// shown, and their effort (L32).
+// shown, and their effort (L32). Rank is its place within its way when the
+// way has a domain order (1 first, and its slices come in that order: by
+// SLA, slaBusiness.State.Rank); 0, and none in the JSON, when it has none.
 type InsightSlice struct {
 	By      string         `json:"by"`
 	Key     string         `json:"key"`
 	Name    string         `json:"name"`
+	Rank    int            `json:"rank,omitempty"`
 	Cycle   helpers.Spread `json:"cycle"`
 	Lead    helpers.Spread `json:"lead"`
 	Age     helpers.Spread `json:"age"`
@@ -161,7 +166,7 @@ func (in Insights) SlicesBy(by string) []InsightSlice {
 
 // InsightBys are the built-in ways work is sliced, in order (builtInDims);
 // a custom field's is "field:<id>".
-var InsightBys = []string{"project", "person", "priority", "type", "status", "labels", "cycle", "estimate"}
+var InsightBys = []string{"project", "person", "priority", "type", "status", "labels", "cycle", "estimate", "sla"}
 
 // InsightBy is by as a way to slice work, a field's with its id written
 // canonically, and whether it is one: what a dashboard's breakdown may be
@@ -185,10 +190,12 @@ type insightKey struct{ key, name string }
 // (one, or several for labels or a multi-select), or none to leave it out
 // (an agent's work is nobody's load; another project's task has no value of
 // a field). A custom field is one more of these, with field set (fieldDims).
+// rank, on a way with a domain order, is a key's place in it (1 first).
 type insightDim struct {
 	by    string
 	of    func(p *domain.ReportProject, t *dgraphStruct.DgraphTask) []insightKey
 	field *InsightField
+	rank  func(key string) int
 }
 
 // one is a single key, or none when ok is false.
@@ -205,8 +212,10 @@ func one(key, name string, ok bool) []insightKey {
 // due before it), the projects kept (none: all), their own statuses' names
 // by id (live ones: a status taken away reads as its category, as on the
 // board), each task's live cycle by task uuid, each project's estimate
-// scale (none: hours) and the custom fields' ways (fieldDims). Each is one
-// read for the whole report (getReport).
+// scale (none: hours), the custom fields' ways (fieldDims), and the
+// projects whose SLA state the reader reads (business/SLA ReadsIn: members,
+// never a guest, SLAs on; each task's state is laid on it for its reader).
+// Each is one read for the whole report (getReport).
 type insightIn struct {
 	own        map[string]map[string]string
 	first, now time.Time
@@ -216,6 +225,7 @@ type insightIn struct {
 	cycles     map[string]cycleModel.Cycle
 	scales     map[string]*estimateScale.Scale
 	fields     []insightDim
+	sla        map[string]bool
 }
 
 // hourBands are the estimates in time an estimate slice groups, by minutes
@@ -309,6 +319,17 @@ func builtInDims(in insightIn) []insightDim {
 			i := slices.IndexFunc(hourBands, func(b hourBand) bool { return *t.EstimateMinutes < b.under })
 			return one(hourBands[i].key, hourBands[i].name, true)
 		}},
+		// Where a task's timer stands, in a project whose SLA state the
+		// reader reads; no project's elsewhere (SLAs off, a guest).
+		{by: "sla", of: func(p *domain.ReportProject, t *dgraphStruct.DgraphTask) []insightKey {
+			switch {
+			case !in.sla[strings.ToLower(p.UUID)]:
+				return nil
+			case t.SLA == nil:
+				return none
+			}
+			return one(t.SLA.State, slaBusiness.State(t.SLA.State).Name(), true)
+		}, rank: func(key string) int { return slaBusiness.State(key).Rank() }},
 	}
 }
 
@@ -579,6 +600,9 @@ func buildInsights(projects []domain.ReportProject, in insightIn) Insights {
 				s := byKey[id]
 				if s == nil {
 					s = &sliceOf{InsightSlice: InsightSlice{By: d.by, Key: k.key, Name: k.name}}
+					if d.rank != nil {
+						s.Rank = d.rank(k.key)
+					}
 					byKey[id] = s
 					order = append(order, id)
 				}
@@ -706,7 +730,35 @@ func buildInsights(projects []domain.ReportProject, in insightIn) Insights {
 		s.Cycle, s.Lead, s.Age, s.Effort = helpers.SpreadOf(s.cycle), helpers.SpreadOf(s.lead), helpers.SpreadOf(s.age), s.Effort.rounded()
 		out.Slices = append(out.Slices, s.InsightSlice)
 	}
+	inRankOrder(out.Slices)
 	return out
+}
+
+// inRankOrder puts each ranked way's slices in rank order (a key breaks a
+// tie) in the places its slices hold among them all; an unranked way's
+// slices stay where they are.
+func inRankOrder(slices []InsightSlice) {
+	at := map[string][]int{}
+	for i, s := range slices {
+		if s.Rank > 0 {
+			at[s.By] = append(at[s.By], i)
+		}
+	}
+	for _, places := range at {
+		way := make([]InsightSlice, len(places))
+		for j, i := range places {
+			way[j] = slices[i]
+		}
+		sort.Slice(way, func(a, b int) bool {
+			if way[a].Rank != way[b].Rank {
+				return way[a].Rank < way[b].Rank
+			}
+			return way[a].Key < way[b].Key
+		})
+		for j, i := range places {
+			slices[i] = way[j]
+		}
+	}
 }
 
 // triageOf is when a task made in the backlog first left it; false if it

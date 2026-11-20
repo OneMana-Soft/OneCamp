@@ -1,8 +1,9 @@
 package business
 
 // A relation field's cells when it links to OneCamp items: docs, tasks,
-// boards, projects and people (relation_target "doc", "task", "board",
-// "project", "user", or "any" for all of them). A row keeps [{id, type}] only;
+// boards, projects, people, channels and calls (relation_target "doc",
+// "task", "board", "project", "user", "channel", "call", or "any" for all of
+// them). A row keeps [{id, type}] only;
 // every read names the items for the person reading (business/DataTable
 // itemLinks.go), so no title written with a link is stored or shown
 // (TAB-BUG-5). A relation linking to a table's rows ("table") keeps its links
@@ -25,13 +26,21 @@ const (
 	ItemBoard   = "board"
 	ItemProject = "project"
 	ItemUser    = "user"
+	ItemChannel = "channel"
+	ItemCall    = "call"
 	ItemAny     = "any"
 )
 
 // ItemKinds is each kind of item, as a refusal names many of them.
 var ItemKinds = map[string]string{
 	ItemDoc: "docs", ItemTask: "tasks", ItemBoard: "boards", ItemProject: "projects", ItemUser: "people",
+	ItemChannel: "channels", ItemCall: "calls",
 }
+
+// EveryItemKind names every kind in ItemKinds at once, as a refusal of any
+// item link does (the "any" target, a rollup, a change of type): the one list,
+// so a new kind can't go missing from one of them (CR-374 NB4).
+const EveryItemKind = "docs, tasks, boards, projects, channels, calls or people"
 
 // RelationTarget is what a relation field links to: TargetTable, one kind
 // of item, or ItemAny (a config naming no kind, or one nothing knows). Pure.

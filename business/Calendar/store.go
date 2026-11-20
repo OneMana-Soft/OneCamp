@@ -8,6 +8,7 @@ package Calendar
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -37,16 +38,26 @@ type store interface {
 	updateCalendar(ctx context.Context, id uuid.UUID, name, hue *string) error
 	sharedWith(ctx context.Context, person uuid.UUID) ([]models.Calendar, error)
 	personalCalendarsOf(ctx context.Context, owners []uuid.UUID) ([]models.Calendar, error)
-	containerCalendars(ctx context.Context, kind string, limit int) ([]models.Calendar, error)
+	// containerCalendars are the calendars of each kind of container, at
+	// most limit of each, in one read.
+	containerCalendars(ctx context.Context, kinds []string, limit int) ([]models.Calendar, error)
 	rangeOnCalendars(ctx context.Context, calendars []uuid.UUID, w models.Window, limit int) ([]*models.Event, error)
-	// Secret feeds (feeds.go): a person's live feed of a calendar, the live
-	// feed a token's hash finds, a new feed (the old one revoked with it),
-	// and none. makeFeed and revokeFeed give the scope of the live feed they
-	// stopped, "" when there was none, for the audit log (V-398).
-	liveFeed(ctx context.Context, calendar, person uuid.UUID) (*models.Feed, error)
+	// Secret feeds (feeds.go): a person's live feed of a calendar (or the one
+	// that stopped last), the live feed a token's hash finds, a new feed (the old one revoked with it),
+	// and none. makeFeed gives the scope of the live feed it stopped, "" when
+	// there was none, and revokeFeed the feed it stopped (its id and scope),
+	// nil when there was none, for the audit log (V-398).
+	latestFeed(ctx context.Context, calendar, person uuid.UUID) (*models.Feed, error)
 	feedByHash(ctx context.Context, hash []byte) (*models.Feed, error)
 	makeFeed(ctx context.Context, f models.Feed) (string, error)
-	revokeFeed(ctx context.Context, calendar, person uuid.UUID) (string, error)
+	revokeFeed(ctx context.Context, calendar, person uuid.UUID) (*models.Feed, error)
+	// A workspace admin's (feeds.go): the live feeds, newest first, and one
+	// stopped by its id, as it was (nil when none was live). A feed of
+	// everything its person may see has calendar uuid.Nil.
+	liveFeeds(ctx context.Context, limit int) ([]*models.Feed, error)
+	revokeFeedByID(ctx context.Context, id, by uuid.UUID) (*models.Feed, error)
+	// feedRead marks a live feed read now, unless it was within every.
+	feedRead(ctx context.Context, id uuid.UUID, every time.Duration) error
 	// importedCalendar is owner's calendar of this name brought from another
 	// app, made the first time.
 	importedCalendar(ctx context.Context, owner uuid.UUID, name, tz string) (uuid.UUID, error)
@@ -97,6 +108,8 @@ type store interface {
 	// is fed to, shared with or laid over for, and who see when others are
 	// busy.
 	membersNow(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error)
+	// heldRooms is the rooms each of events holds (its live bookings).
+	heldRooms(ctx context.Context, events []uuid.UUID) (map[uuid.UUID][]models.Room, error)
 	// peopleByEmail is the accounts these addresses (in lower case) belong to.
 	peopleByEmail(ctx context.Context, emails []string) (map[string]uuid.UUID, error)
 
@@ -125,6 +138,9 @@ type store interface {
 	// setCallRoom gives an event (and its series' own instances) the call in
 	// room while its call is still was, saying whether it took it.
 	setCallRoom(ctx context.Context, id uuid.UUID, room, was string, now time.Time) (bool, error)
+	// setRecapToGuests turns an event's "Send the recap to guests" on or off,
+	// saying whether that changed it; its sequence stays.
+	setRecapToGuests(ctx context.Context, id uuid.UUID, on bool) (bool, error)
 	// holdingRoom is the live events, series and single ones, that hold the
 	// call in room (models.HoldingRoom).
 	holdingRoom(ctx context.Context, room string) ([]*models.Event, error)
@@ -261,16 +277,28 @@ func (postgresStore) ownCalendars(ctx context.Context, owner uuid.UUID) ([]model
 	return models.OwnCalendars(ctx, owner)
 }
 
-func (postgresStore) containerCalendars(ctx context.Context, kind string, limit int) ([]models.Calendar, error) {
-	return models.ContainerCalendars(ctx, kind, limit)
+func (postgresStore) containerCalendars(ctx context.Context, kinds []string, limit int) ([]models.Calendar, error) {
+	return models.ContainerCalendars(ctx, kinds, limit)
 }
 
 func (postgresStore) rangeOnCalendars(ctx context.Context, calendars []uuid.UUID, w models.Window, limit int) ([]*models.Event, error) {
 	return models.RangeOnCalendars(ctx, models.Pool(), calendars, w, limit)
 }
 
-func (postgresStore) liveFeed(ctx context.Context, calendar, person uuid.UUID) (*models.Feed, error) {
-	return models.LiveFeed(ctx, calendar, person)
+func (postgresStore) latestFeed(ctx context.Context, calendar, person uuid.UUID) (*models.Feed, error) {
+	return models.LatestFeed(ctx, calendar, person)
+}
+
+func (postgresStore) liveFeeds(ctx context.Context, limit int) ([]*models.Feed, error) {
+	return models.LiveFeeds(ctx, limit)
+}
+
+func (postgresStore) revokeFeedByID(ctx context.Context, id, by uuid.UUID) (*models.Feed, error) {
+	return models.RevokeFeedByID(ctx, id, by)
+}
+
+func (postgresStore) feedRead(ctx context.Context, id uuid.UUID, every time.Duration) error {
+	return models.FeedRead(ctx, id, every)
 }
 
 func (postgresStore) feedByHash(ctx context.Context, hash []byte) (*models.Feed, error) {
@@ -283,9 +311,12 @@ func (postgresStore) feedByHash(ctx context.Context, hash []byte) (*models.Feed,
 func (postgresStore) makeFeed(ctx context.Context, f models.Feed) (string, error) {
 	var replaced string
 	err := pgexec.InTx(ctx, func(ctx context.Context) error {
-		var err error
-		if replaced, err = models.RevokeFeeds(ctx, f.CalendarID, f.PersonID); err != nil {
+		old, err := models.RevokeFeeds(ctx, f.CalendarID, f.PersonID, f.PersonID)
+		if err != nil {
 			return err
+		}
+		if old != nil {
+			replaced = old.Scope
 		}
 		return models.InsertFeed(ctx, f)
 	})
@@ -295,8 +326,8 @@ func (postgresStore) makeFeed(ctx context.Context, f models.Feed) (string, error
 	return replaced, nil
 }
 
-func (postgresStore) revokeFeed(ctx context.Context, calendar, person uuid.UUID) (string, error) {
-	return models.RevokeFeeds(ctx, calendar, person)
+func (postgresStore) revokeFeed(ctx context.Context, calendar, person uuid.UUID) (*models.Feed, error) {
+	return models.RevokeFeeds(ctx, calendar, person, person)
 }
 
 func (postgresStore) subscribedCalendar(ctx context.Context, id, owner uuid.UUID, name, hue, tz string) error {
@@ -387,6 +418,34 @@ func (postgresStore) membersNow(ctx context.Context, ids []uuid.UUID) (map[uuid.
 	return models.MembersIn(ctx, ids)
 }
 
+func (postgresStore) heldRooms(ctx context.Context, events []uuid.UUID) (map[uuid.UUID][]models.Room, error) {
+	held, err := models.RoomsHeldBy(ctx, models.Pool(), events)
+	if err != nil || len(held) == 0 {
+		return nil, err
+	}
+	var ids []uuid.UUID
+	for _, rs := range held {
+		ids = append(ids, rs...)
+	}
+	rows, err := models.RoomsByID(ctx, models.Pool(), ids)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[uuid.UUID]models.Room, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	out := make(map[uuid.UUID][]models.Room, len(held))
+	for ev, rs := range held {
+		for _, id := range rs {
+			if r, ok := byID[id]; ok {
+				out[ev] = append(out[ev], r)
+			}
+		}
+	}
+	return out, nil
+}
+
 func (postgresStore) peopleByEmail(ctx context.Context, emails []string) (map[string]uuid.UUID, error) {
 	return models.PeopleByEmail(ctx, models.Pool(), emails)
 }
@@ -394,6 +453,9 @@ func (postgresStore) peopleByEmail(ctx context.Context, emails []string) (map[st
 func (postgresStore) create(ctx context.Context, e *models.Event, guests []models.Attendee, files []models.EventFile) error {
 	return inTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := models.Insert(ctx, tx, e); err != nil {
+			return err
+		}
+		if err := holdRoomsIn(ctx, tx, []*models.Event{e}, uuid.Nil, time.Now(), false); err != nil {
 			return err
 		}
 		if err := models.AddAttendees(ctx, tx, guests); err != nil {
@@ -435,6 +497,9 @@ func (postgresStore) update(ctx context.Context, e *models.Event, expect *int, w
 		if err := dropGuests(ctx, tx, e.ID, w.remove, w.removeEmails); err != nil {
 			return err
 		}
+		if err := holdRoomsIn(ctx, tx, []*models.Event{e}, uuid.Nil, time.Now(), false); err != nil {
+			return err
+		}
 		if err := models.AddAttendees(ctx, tx, w.add); err != nil {
 			return err
 		}
@@ -456,7 +521,24 @@ func dropGuests(ctx context.Context, tx *sql.Tx, event uuid.UUID, people []uuid.
 }
 
 func (postgresStore) setDeleted(ctx context.Context, id uuid.UUID, at *time.Time, by *uuid.UUID, now time.Time, expect *int) (int, error) {
-	return models.SetDeleted(ctx, models.Pool(), id, at, by, now, expect)
+	if at != nil {
+		return models.SetDeleted(ctx, models.Pool(), id, at, by, now, expect)
+	}
+	// Out of the trash: its rooms are held again, as another event may have
+	// booked them while it was away (a room booked meanwhile is let go).
+	var seq int
+	err := inTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		var err error
+		if seq, err = models.SetDeleted(ctx, tx, id, nil, nil, now, expect); err != nil {
+			return err
+		}
+		back, err := models.GetMany(ctx, tx, []uuid.UUID{id})
+		if err != nil {
+			return err
+		}
+		return holdRoomsIn(ctx, tx, back, uuid.Nil, now, true)
+	})
+	return seq, err
 }
 
 func (postgresStore) removeGuest(ctx context.Context, event, person uuid.UUID, now time.Time) (bool, error) {
@@ -478,6 +560,10 @@ func (postgresStore) removeGuest(ctx context.Context, event, person uuid.UUID, n
 
 func (postgresStore) setCallRoom(ctx context.Context, id uuid.UUID, room, was string, now time.Time) (bool, error) {
 	return models.SetCallRoom(ctx, id, room, was, now)
+}
+
+func (postgresStore) setRecapToGuests(ctx context.Context, id uuid.UUID, on bool) (bool, error) {
+	return models.SetRecapToGuests(ctx, id, on)
 }
 
 func (postgresStore) holdingRoom(ctx context.Context, room string) ([]*models.Event, error) {
@@ -550,8 +636,43 @@ func (postgresStore) apply(ctx context.Context, b batch) error {
 				return err
 			}
 		}
-		return models.RemoveFoldedOverrides(ctx, tx, b.folded)
+		if err := models.RemoveFoldedOverrides(ctx, tx, b.folded); err != nil {
+			return err
+		}
+		return holdBatchRooms(ctx, tx, b)
 	})
+}
+
+// holdBatchRooms holds the rooms of what a batch wrote, in its transaction:
+// its rows, those it brought out of the trash among them (holdRoomsIn). A
+// batch restores only one occurrence of a series, whose rooms are the
+// series': a room booked meanwhile refuses it (never let go by the whole
+// series), and the series stays editable.
+func holdBatchRooms(ctx context.Context, tx *sql.Tx, b batch) error {
+	rows := append([]*models.Event{}, b.inserts...)
+	for _, u := range b.updates {
+		rows = append(rows, u.e)
+	}
+	if len(b.restore) > 0 {
+		back, err := models.GetMany(ctx, tx, b.restore)
+		if err != nil {
+			return err
+		}
+		rows = append(rows, back...)
+	}
+	series, now := uuid.Nil, b.now
+	if b.guard != nil {
+		series = b.guard.id
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	err := holdRoomsIn(ctx, tx, rows, series, now, false)
+	var taken *RoomTakenError
+	if len(b.restore) > 0 && errors.As(err, &taken) {
+		taken.occurrence = true
+	}
+	return err
 }
 
 func (postgresStore) answer(ctx context.Context, event uuid.UUID, rid *time.Time, k models.GuestKey, response, note string, at time.Time, p *models.Proposal, byAway bool) (bool, error) {
@@ -595,4 +716,10 @@ func (postgresStore) setLink(ctx context.Context, event uuid.UUID, email string,
 
 func (postgresStore) setNudged(ctx context.Context, event uuid.UUID, people []uuid.UUID, emails []string, at time.Time) error {
 	return models.SetNudged(ctx, models.Pool(), event, people, emails, at)
+}
+
+// reachWrites is the generation of calendars and calendar_shares
+// (models.ReachWrites), which search's kept reach is checked against.
+func (postgresStore) reachWrites() uint64 {
+	return models.ReachWrites()
 }

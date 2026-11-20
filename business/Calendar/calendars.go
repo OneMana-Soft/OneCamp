@@ -17,6 +17,7 @@ package Calendar
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -36,9 +37,24 @@ import (
 // Events and Live Entity Chips name it. Never renamed once shipped.
 const KindCalendar = "calendar"
 
-// The containers a calendar can belong to, and the kinds of resource the
-// Access Resolver decides them by.
-const containerProject = "project"
+// The containers a calendar can belong to (migration 479's container_kind),
+// each named as the Access Resolver names the kind of resource that decides
+// it: a project's, a channel's (business/Conversation) and a team's
+// (business/Team).
+const (
+	containerProject = "project"
+	containerChannel = "channel"
+	containerTeam    = "team"
+)
+
+// calendarContainers are the containers a calendar belongs to, in the order a
+// list reads them.
+var calendarContainers = []string{containerProject, containerChannel, containerTeam}
+
+// isContainer is whether kind is a container a calendar can belong to. Pure.
+func isContainer(kind string) bool {
+	return slices.Contains(calendarContainers, kind)
+}
 
 // chipEvents is how many of its next events a calendar's chip names.
 const chipEvents = 3
@@ -47,6 +63,8 @@ const chipEvents = 3
 // level, and one a member sees as free and busy alone (owner decision O7).
 const (
 	reasonProject  = "project"
+	reasonChannel  = "channel"
+	reasonTeam     = "team"
 	reasonShared   = "shared"
 	reasonFreeBusy = "freebusy"
 	// reasonSubscribed is a calendar read from an address, or an event on
@@ -89,12 +107,24 @@ func init() {
 	})
 }
 
-// ProjectCalendarFor is a project's calendar for someone who may see the
-// project, made the first time: the calendar's id, or ErrEventNotFound when
-// they can't see the project.
-func (s *service) ProjectCalendarFor(ctx context.Context, who *model.UserInfo, projectUUID string) (uuid.UUID, error) {
-	id := strings.ToLower(strings.TrimSpace(projectUUID))
-	res := accessBusiness.Resource{Kind: containerProject, UUID: id}
+// projectCalendarFor is a project's calendar (ContainerCalendarFor).
+func (s *service) projectCalendarFor(ctx context.Context, who *model.UserInfo, projectUUID string) (uuid.UUID, error) {
+	return s.ContainerCalendarFor(ctx, who, containerProject, projectUUID)
+}
+
+// ContainerCalendarFor is a project's, a channel's or a team's calendar for
+// someone who may see that container, made the first time: the calendar's
+// id, or ErrEventNotFound when they can't see it (the container's own rule,
+// through the Access Resolver).
+func (s *service) ContainerCalendarFor(ctx context.Context, who *model.UserInfo, kind, containerUUID string) (uuid.UUID, error) {
+	if !isContainer(kind) {
+		return uuid.Nil, inputError("Only a project, a channel or a team has a calendar of its own.")
+	}
+	id := strings.ToLower(strings.TrimSpace(containerUUID))
+	if _, err := uuid.Parse(id); err != nil {
+		return uuid.Nil, ErrEventNotFound
+	}
+	res := accessBusiness.Resource{Kind: kind, UUID: id}
 	decided, err := s.resolveAll(ctx, subjectOf(who), []accessBusiness.Resource{res})
 	if err != nil {
 		return uuid.Nil, err
@@ -102,18 +132,22 @@ func (s *service) ProjectCalendarFor(ctx context.Context, who *model.UserInfo, p
 	if decided[res].Level < accessBusiness.LevelView {
 		return uuid.Nil, ErrEventNotFound
 	}
-	return s.projectCalendar(ctx, id, s.zoneOf(ctx, personOf(who)))
+	return s.containerCalendar(ctx, kind, id, s.zoneOf(ctx, personOf(who)))
 }
 
 func (s *service) projectCalendar(ctx context.Context, projectUUID, tz string) (uuid.UUID, error) {
+	return s.containerCalendar(ctx, containerProject, projectUUID, tz)
+}
+
+func (s *service) containerCalendar(ctx context.Context, kind, containerUUID, tz string) (uuid.UUID, error) {
 	if err := s.ready(ctx); err != nil {
 		return uuid.Nil, err
 	}
-	id := strings.ToLower(strings.TrimSpace(projectUUID))
-	if _, err := uuid.Parse(id); err != nil {
-		return uuid.Nil, inputError("That isn't a project.")
+	id := strings.ToLower(strings.TrimSpace(containerUUID))
+	if _, err := uuid.Parse(id); err != nil || !isContainer(kind) {
+		return uuid.Nil, inputError("That has no calendar of its own.")
 	}
-	return s.store.containerCalendar(ctx, containerProject, id, zoneOrUTC(tz))
+	return s.store.containerCalendar(ctx, kind, id, zoneOrUTC(tz))
 }
 
 type calendarRules struct{}
@@ -123,11 +157,20 @@ func (calendarRules) DecideMany(ctx context.Context, who accessBusiness.Subject,
 }
 
 // decideCalendars is the calendar rule for many calendars at once: one read
-// of the calendars, one decision of the projects they belong to.
+// of the calendars, one decision of the projects, channels and teams they
+// belong to (each by its own rule, through the Access Resolver).
 func (s *service) decideCalendars(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]accessBusiness.Decision, error) {
+	out, _, err := s.decideCalendarRows(ctx, who, ids)
+	return out, err
+}
+
+// decideCalendarRows is decideCalendars with the calendars it read, for a
+// caller that needs them too (a feed: its name and its tasks), so none reads
+// them again.
+func (s *service) decideCalendarRows(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]accessBusiness.Decision, []models.Calendar, error) {
 	out := map[string]accessBusiness.Decision{}
 	if err := s.ready(ctx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	asked := map[uuid.UUID][]string{}
 	var keys []uuid.UUID
@@ -141,39 +184,65 @@ func (s *service) decideCalendars(ctx context.Context, who accessBusiness.Subjec
 	}
 	cals, err := s.store.calendarsByID(ctx, keys)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var projects []accessBusiness.Resource
+	byCalendar, err := s.decideRows(ctx, who, cals, nil)
+	if err != nil {
+		return nil, nil, err
+	}
 	for _, c := range cals {
-		if c.ContainerKind == containerProject {
-			projects = append(projects, accessBusiness.Resource{Kind: containerProject, UUID: c.ContainerID})
+		for _, id := range asked[c.ID] {
+			out[id] = byCalendar[c.ID]
+		}
+	}
+	return out, cals, nil
+}
+
+// decideRows decides each of cals for who, keyed by calendar: a project's,
+// channel's or team's as who may see the container (read fresh every time);
+// someone else's as they shared it with who (shares, when the caller read
+// them already; else read here), else, when no share decides it, as busy and
+// nothing more while who may see them busy (busySeenOf).
+func (s *service) decideRows(ctx context.Context, who accessBusiness.Subject, cals []models.Calendar, shares map[uuid.UUID]string) (map[uuid.UUID]accessBusiness.Decision, error) {
+	var containers []accessBusiness.Resource
+	for _, c := range cals {
+		if isContainer(c.ContainerKind) {
+			containers = append(containers, accessBusiness.Resource{Kind: c.ContainerKind, UUID: c.ContainerID})
 		}
 	}
 	decided := map[accessBusiness.Resource]accessBusiness.Decision{}
-	if len(projects) > 0 {
-		if decided, err = s.resolveAll(ctx, who, projects); err != nil {
+	var err error
+	if len(containers) > 0 {
+		if decided, err = s.resolveAll(ctx, who, containers); err != nil {
 			return nil, err
 		}
 	}
 	person, _ := uuid.Parse(who.UserUUID)
 	// Someone else's calendar: as they shared it, else (to a member) when
-	// they are busy and nothing more.
-	var others []uuid.UUID
+	// they are busy and nothing more, unless they keep that to themselves.
+	others := othersCalendars(cals, person)
+	if shares == nil {
+		shares = map[uuid.UUID]string{}
+		if len(others) > 0 && person != uuid.Nil {
+			if shares, err = s.store.sharesFor(ctx, person, others); err != nil {
+				return nil, err
+			}
+		}
+	}
+	// Whose busy times who sees is asked only of the owners no share decides.
+	var owners []string
 	for _, c := range cals {
-		if c.OwnerID != nil && *c.OwnerID != person && c.ContainerKind == "" {
-			others = append(others, c.ID)
+		if c.OwnerID != nil && *c.OwnerID != person && c.ContainerKind == "" && !shareDecides(shares[c.ID]) {
+			owners = append(owners, c.OwnerID.String())
 		}
 	}
-	shares := map[uuid.UUID]string{}
-	member := false
-	if len(others) > 0 && person != uuid.Nil {
-		if shares, err = s.store.sharesFor(ctx, person, others); err != nil {
-			return nil, err
-		}
-		if member, err = s.seesWhenOthersAreBusy(ctx, person); err != nil {
+	busySeen := map[string]bool{}
+	if len(owners) > 0 && person != uuid.Nil {
+		if busySeen, err = s.busySeenOf(ctx, person, owners); err != nil {
 			return nil, err
 		}
 	}
+	out := make(map[uuid.UUID]accessBusiness.Decision, len(cals))
 	for _, c := range cals {
 		var d accessBusiness.Decision
 		switch {
@@ -184,11 +253,11 @@ func (s *service) decideCalendars(ctx context.Context, who accessBusiness.Subjec
 			if c.OwnerID != nil && *c.OwnerID == person && person != uuid.Nil {
 				d.Level, d.Owner, d.Reasons = accessBusiness.LevelView, true, []string{reasonSubscribed}
 			}
-		case c.ContainerKind == containerProject:
-			p := decided[accessBusiness.Resource{Kind: containerProject, UUID: c.ContainerID}]
+		case isContainer(c.ContainerKind):
+			p := decided[accessBusiness.Resource{Kind: c.ContainerKind, UUID: c.ContainerID}]
 			d.Level, d.Archived = calendarLevelOf(p.Level), p.Archived
 			if d.Level > accessBusiness.LevelNone {
-				d.Reasons = []string{reasonProject}
+				d.Reasons = []string{reasonOfContainer(c.ContainerKind)}
 			}
 		case c.OwnerID != nil && *c.OwnerID == person && person != uuid.Nil:
 			d.Level, d.Owner, d.Reasons = accessBusiness.LevelFull, true, []string{reasonOwner}
@@ -201,7 +270,7 @@ func (s *service) decideCalendars(ctx context.Context, who accessBusiness.Subjec
 			case models.ShareDetails:
 				d.Level, d.Reasons = accessBusiness.LevelView, []string{reasonShared}
 			default:
-				if member {
+				if busySeen[c.OwnerID.String()] {
 					d.Level, d.Reasons = accessBusiness.LevelView, []string{reasonFreeBusy}
 				}
 			}
@@ -210,16 +279,51 @@ func (s *service) decideCalendars(ctx context.Context, who accessBusiness.Subjec
 		if c.Deleted {
 			d.Deleted, d.Level = true, accessBusiness.LevelNone
 		}
-		for _, id := range asked[c.ID] {
-			out[id] = d
-		}
+		out[c.ID] = d
 	}
 	return out, nil
 }
 
-// calendarLevelOf is what a level on a project gives on its calendar: edit
-// or more edits its events (managing the project isn't managing its
-// calendar's every event), a view sees them, and a comment sees them. Pure.
+// othersCalendars are the calendars of cals that are someone's other than
+// person's own and no container's: those a share with person decides.
+// Pure.
+func othersCalendars(cals []models.Calendar, person uuid.UUID) []uuid.UUID {
+	var out []uuid.UUID
+	for _, c := range cals {
+		if c.OwnerID != nil && *c.OwnerID != person && c.ContainerKind == "" {
+			out = append(out, c.ID)
+		}
+	}
+	return out
+}
+
+// shareDecides is whether a share at level decides its calendar (else the
+// owner's busy times may). Pure.
+func shareDecides(level string) bool {
+	switch level {
+	case models.ShareManage, models.ShareEdit, models.ShareDetails:
+		return true
+	}
+	return false
+}
+
+// reasonOfContainer is the reason a container's calendar is decided by: its
+// project's, channel's or team's. Pure.
+func reasonOfContainer(kind string) string {
+	switch kind {
+	case containerChannel:
+		return reasonChannel
+	case containerTeam:
+		return reasonTeam
+	}
+	return reasonProject
+}
+
+// calendarLevelOf is what a level on a project, a channel or a team gives on
+// its calendar: edit or more (posting in the channel, being in the team)
+// edits its events (managing the container isn't managing its calendar's
+// every event), a view sees them (a public channel read by someone not in
+// it), and a comment (replying in an announcement channel) sees them. Pure.
 func calendarLevelOf(project accessBusiness.Level) accessBusiness.Level {
 	switch {
 	case project >= accessBusiness.LevelEdit:
@@ -273,7 +377,7 @@ func (s *service) calendarChips(ctx context.Context, who accessBusiness.Subject,
 }
 
 // calendarNames is what each calendar is called for who: its own name, its
-// project's (read as its chip names it), or, for someone else's own
+// project's, channel's or team's (read as its chip names it), or, for someone else's own
 // calendar, its owner's name; else "Calendar".
 func (s *service) calendarNames(ctx context.Context, who accessBusiness.Subject, cals []models.Calendar) (map[uuid.UUID]string, error) {
 	out := map[uuid.UUID]string{}
@@ -281,8 +385,8 @@ func (s *service) calendarNames(ctx context.Context, who accessBusiness.Subject,
 	var owners []string
 	for _, c := range cals {
 		out[c.ID] = c.Name
-		if c.Name == "" && c.ContainerKind == containerProject {
-			refs = append(refs, entityLinkBusiness.Ref{Kind: containerProject, ID: c.ContainerID})
+		if c.Name == "" && isContainer(c.ContainerKind) {
+			refs = append(refs, entityLinkBusiness.Ref{Kind: c.ContainerKind, ID: c.ContainerID})
 		}
 		if c.Name == "" && c.Kind == "personal" && c.OwnerID != nil && !strings.EqualFold(c.OwnerID.String(), who.UserUUID) {
 			owners = append(owners, c.OwnerID.String())
@@ -310,15 +414,15 @@ func (s *service) calendarNames(ctx context.Context, who accessBusiness.Subject,
 		if err != nil {
 			return nil, err
 		}
-		byProject := map[string]string{}
+		byContainer := map[string]string{}
 		for _, e := range got {
 			if e.Access == entityLinkBusiness.AccessOK {
-				byProject[strings.ToLower(e.ID)] = e.Title
+				byContainer[e.Kind+":"+strings.ToLower(e.ID)] = e.Title
 			}
 		}
 		for _, c := range cals {
 			if out[c.ID] == "" {
-				out[c.ID] = byProject[strings.ToLower(c.ContainerID)]
+				out[c.ID] = byContainer[c.ContainerKind+":"+strings.ToLower(c.ContainerID)]
 			}
 		}
 	}
@@ -494,38 +598,136 @@ func (s *service) Calendars(ctx context.Context, who *model.UserInfo) ([]Calenda
 }
 
 // seenCalendars are the calendars who (me) may see, each with its decision:
-// their own, those shared with them and each project's they may see, never
+// their own, those shared with them and each project's, channel's and team's they may see, never
 // one they see only as busy. The one list for the calendar list (Calendars)
-// and search's (SearchCalendars).
+// and search's (SearchCalendars), which reads its rows through searchReach.
 func (s *service) seenCalendars(ctx context.Context, who accessBusiness.Subject, me uuid.UUID) ([]models.Calendar, map[string]accessBusiness.Decision, error) {
-	own, err := s.store.ownCalendars(ctx, me)
+	mine, err := s.readMine(ctx, me)
 	if err != nil {
 		return nil, nil, err
 	}
-	shared, err := s.store.sharedWith(ctx, me)
+	containers, err := s.readContainers(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	projects, err := s.store.containerCalendars(ctx, containerProject, maxListedContainers)
+	return s.seenOf(ctx, who, mine, containers)
+}
+
+// seenOf is seenCalendars from its rows as read: the calendars are decided
+// as they were read, not read again, and every container's decision is
+// asked fresh.
+func (s *service) seenOf(ctx context.Context, who accessBusiness.Subject, mine, containers reachRows) ([]models.Calendar, map[string]accessBusiness.Decision, error) {
+	all := append(append([]models.Calendar{}, mine.rows...), containers.rows...)
+	shares := mine.shares
+	if person, _ := uuid.Parse(who.UserUUID); person != mine.reader {
+		shares = nil // read for someone else: decideRows reads who's own
+	}
+	byCalendar, err := s.decideRows(ctx, who, all, shares)
 	if err != nil {
 		return nil, nil, err
 	}
-	all := append(append(append([]models.Calendar{}, own...), shared...), projects...)
-	ids := make([]string, 0, len(all))
-	for _, c := range all {
-		ids = append(ids, c.ID.String())
-	}
-	decided, err := s.decideCalendars(ctx, who, ids)
-	if err != nil {
-		return nil, nil, err
-	}
+	decided := make(map[string]accessBusiness.Decision, len(all))
 	var seen []models.Calendar
 	for _, c := range all {
-		if d := decided[c.ID.String()]; d.Level >= accessBusiness.LevelView && !busyOnly(d) {
+		d := byCalendar[c.ID]
+		decided[c.ID.String()] = d
+		if d.Level >= accessBusiness.LevelView && !busyOnly(d) {
 			seen = append(seen, c)
 		}
 	}
 	return seen, decided, nil
+}
+
+// reachRows are calendars as Postgres has them, with the level each of
+// someone else's is shared with reader at (none for containers').
+type reachRows struct {
+	reader uuid.UUID
+	rows   []models.Calendar
+	shares map[uuid.UUID]string
+}
+
+// readMine are me's own calendars and those shared with them, with the
+// level of each share.
+func (s *service) readMine(ctx context.Context, me uuid.UUID) (reachRows, error) {
+	own, err := s.store.ownCalendars(ctx, me)
+	if err != nil {
+		return reachRows{}, err
+	}
+	shared, err := s.store.sharedWith(ctx, me)
+	if err != nil {
+		return reachRows{}, err
+	}
+	r := reachRows{reader: me, rows: append(own, shared...), shares: map[uuid.UUID]string{}}
+	if others := othersCalendars(r.rows, me); len(others) > 0 && me != uuid.Nil {
+		if r.shares, err = s.store.sharesFor(ctx, me, others); err != nil {
+			return reachRows{}, err
+		}
+	}
+	return r, nil
+}
+
+// readContainers are every project's, channel's and team's calendar, at
+// most maxListedContainers of each kind.
+func (s *service) readContainers(ctx context.Context) (reachRows, error) {
+	rows, err := s.store.containerCalendars(ctx, calendarContainers, maxListedContainers)
+	return reachRows{rows: rows}, err
+}
+
+// searchReachMaxAge is how long search keeps the calendars a person finds
+// events on (searchReach). A write on this instance ends it at once
+// (models.ReachWrites); one on another instance only by this age, while each
+// event found is still decided fresh (readableEvents), so a calendar lost
+// costs its events nothing but the search, and one gained is missed until
+// then.
+const searchReachMaxAge = 30 * time.Second
+
+// searchReaches keep reachRows per reader (their uuid; their own and shared
+// calendars) and once for everyone (containersReach: every container's
+// calendar), each with the generation it was read at.
+var searchReaches = helpers.NewTTLCache[keptReach](searchReachMaxAge)
+
+const containersReach = "containers"
+
+type keptReach struct {
+	generation uint64
+	reach      reachRows
+}
+
+// reachGenerations is a store that says when the rows a reach is read from
+// were last written (models.ReachWrites); search keeps reaches only for one.
+type reachGenerations interface {
+	reachWrites() uint64
+}
+
+// searchReach is readMine and readContainers for search: kept between
+// searches while nothing wrote calendars or calendar_shares since they were
+// read and for at most searchReachMaxAge. The generation is read before the
+// rows, so a write during the read leaves them stale at once. Only the rows
+// are kept: who may see each container is asked every search.
+func (s *service) searchReach(ctx context.Context, me uuid.UUID) (mine, containers reachRows, err error) {
+	gens, ok := s.store.(reachGenerations)
+	if !ok {
+		if mine, err = s.readMine(ctx, me); err == nil {
+			containers, err = s.readContainers(ctx)
+		}
+		return mine, containers, err
+	}
+	generation := gens.reachWrites()
+	kept := func(key string, read func() (reachRows, error)) (reachRows, error) {
+		if k, ok := searchReaches.Get(key); ok && k.generation == generation {
+			return k.reach, nil
+		}
+		r, err := read()
+		if err == nil {
+			searchReaches.Set(key, keptReach{generation: generation, reach: r})
+		}
+		return r, err
+	}
+	if mine, err = kept(me.String(), func() (reachRows, error) { return s.readMine(ctx, me) }); err != nil {
+		return reachRows{}, reachRows{}, err
+	}
+	containers, err = kept(containersReach, func() (reachRows, error) { return s.readContainers(ctx) })
+	return mine, containers, err
 }
 
 // CalendarEvents are the events between from and to on the calendars of ids
@@ -586,7 +788,11 @@ func (s *service) CalendarEvents(ctx context.Context, who *model.UserInfo, ids [
 		}
 		out = append(out, v)
 	}
-	return out, cut, nil
+	derived, err := s.derivedEntries(ctx, who, allowed, from, to)
+	if err != nil {
+		return nil, false, err
+	}
+	return append(out, derived...), cut, nil
 }
 
 // busyView is an event as someone who may see only that its owner is busy
@@ -594,7 +800,7 @@ func (s *service) CalendarEvents(ctx context.Context, who *model.UserInfo, ids [
 // isn't shown. Pure.
 func busyView(e Event) Event {
 	return Event{ID: e.ID, CalendarID: e.CalendarID, SeriesID: e.SeriesID, RecurrenceID: e.RecurrenceID, Kind: EventPlain, Title: "Busy",
-		Files: []FileRef{}, Start: e.Start, End: e.End, AllDay: e.AllDay, Transparency: e.Transparency, Visibility: visibilityPrivate, Status: e.Status,
+		Files: []FileRef{}, Rooms: []Room{}, Start: e.Start, End: e.End, AllDay: e.AllDay, Transparency: e.Transparency, Visibility: visibilityPrivate, Status: e.Status,
 		Organiser: Person{}, Attendees: []Attendee{}}
 }
 
@@ -752,9 +958,56 @@ var freeBusyPolicy = func(ctx context.Context) bool {
 	return policyBusiness.Policies.Bool(ctx, policyBusiness.CalendarFreeBusy)
 }
 
-// seesWhenOthersAreBusy is the one rule for whether person sees when others
-// are busy: a member now, while the workspace lets members see it (O7). The
-// calendar's views and Find a time both ask it.
+// freeBusyShownBy is whether each of people (lower-case uuids) lets other
+// members see when they're busy: their own value of
+// calendar.freebusy.members (the Policy Registry's person scope), else the
+// workspace's, all in one read; an error when their choices couldn't be
+// read. Tests swap it.
+var freeBusyShownBy = func(ctx context.Context, people []string) (map[string]bool, error) {
+	return policyBusiness.Policies.BoolsIn(ctx, policyBusiness.CalendarFreeBusy, policyBusiness.ScopePerson, people)
+}
+
+// busySeenOf is the one rule for whose busy times reader may see, of people:
+// their own always; anyone else's while reader sees when others are busy
+// (seesWhenOthersAreBusy) and that person hasn't kept it to themselves
+// (freeBusyShownBy). The workspace's "off" wins over anyone's own "on", and
+// choices that can't be read show nobody's. The calendar's decisions, Find a
+// time, the team calendar's time off and everything that tells when someone
+// is busy (PeopleSeenBy) ask it. Keyed by people as asked.
+func (s *service) busySeenOf(ctx context.Context, reader uuid.UUID, people []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(people))
+	var others, ids []string
+	for _, p := range people {
+		id, err := uuid.Parse(p)
+		switch {
+		case err != nil:
+			out[p] = false
+		case id == reader && reader != uuid.Nil:
+			out[p] = true
+		default:
+			others, ids = append(others, p), append(ids, id.String())
+		}
+	}
+	if len(others) == 0 {
+		return out, nil
+	}
+	members, err := s.seesWhenOthersAreBusy(ctx, reader)
+	if err != nil || !members {
+		return out, err
+	}
+	shown, err := freeBusyShownBy(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i, p := range others {
+		out[p] = shown[ids[i]]
+	}
+	return out, nil
+}
+
+// seesWhenOthersAreBusy is whether person may see when other members are
+// busy at all: a member now, while the workspace lets members see it (O7).
+// busySeenOf then asks each person's own choice.
 func (s *service) seesWhenOthersAreBusy(ctx context.Context, person uuid.UUID) (bool, error) {
 	if person == uuid.Nil || !freeBusyPolicy(ctx) {
 		return false, nil

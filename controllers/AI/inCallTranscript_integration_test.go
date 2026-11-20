@@ -221,6 +221,10 @@ func (c inCallChannel) askInCall(t *testing.T, uid, heard string) (int, string) 
 	return rec.Code, out.Msg
 }
 
+// aiOffHere is what the in-call assistant answers while AI is off, as every
+// AI route does.
+const aiOffHere = "AI is turned off for this workspace. An admin can turn it on under Admin > AI & agents."
+
 // TestOnlySomeoneInTheCallMayAskItsAssistant (V-860): a live call's transcript
 // is for the people connected to it. A member of the channel who isn't in the
 // call was answered from what it had kept, silently, while the people in it
@@ -233,8 +237,8 @@ func TestOnlySomeoneInTheCallMayAskItsAssistant(t *testing.T) {
 	c.startCall(t, sid, time.Now().Add(-10*time.Minute))
 	livekitfake.Serve(t, c.channel, sid, c.maya)
 
-	if code, msg := c.askInCall(t, c.maya, ""); code != http.StatusServiceUnavailable || msg != "AI is not enabled" {
-		t.Errorf("someone in the call: %d %q, want to reach the model (503 \"AI is not enabled\" here)", code, msg)
+	if code, msg := c.askInCall(t, c.maya, ""); code != http.StatusServiceUnavailable || msg != aiOffHere {
+		t.Errorf("someone in the call: %d %q, want to reach the model (503, AI off, here)", code, msg)
 	}
 	for name, heard := range map[string]string{"nothing heard": "", "lines of their own": "Maya Chen: hello"} {
 		if code, msg := c.askInCall(t, c.jonas, heard); code != http.StatusForbidden || msg != "You're not in this call." {
@@ -259,8 +263,8 @@ func TestTheAskLeavesWithThem(t *testing.T) {
 	ctx := context.Background()
 	inCall := func(when, uid string) {
 		t.Helper()
-		if code, msg := c.askInCall(t, uid, ""); code != http.StatusServiceUnavailable || msg != "AI is not enabled" {
-			t.Errorf("%s: %d %q, want to reach the model (503 \"AI is not enabled\" here)", when, code, msg)
+		if code, msg := c.askInCall(t, uid, ""); code != http.StatusServiceUnavailable || msg != aiOffHere {
+			t.Errorf("%s: %d %q, want to reach the model (503, AI off, here)", when, code, msg)
 		}
 	}
 	refused := func(when, uid string) {

@@ -10,6 +10,7 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
@@ -333,6 +335,7 @@ func TestCallBreakoutRoomTokensForGuests(t *testing.T) {
 // ask; and ending the call ends its rooms.
 func TestCallGoesOnInItsBreakoutRooms(t *testing.T) {
 	ctx, pg, dg, lk := breakoutEnv(t)
+	heard := integration.RecordMqtt(t)
 	room := uuid.NewString()
 	people := seedChannel(t, pg, dg, room, "sam", "ana", "lee", "outsider")
 	s, in := enterCall(t, ctx, lk, room, people, "sam", "ana", "lee")
@@ -377,6 +380,27 @@ func TestCallGoesOnInItsBreakoutRooms(t *testing.T) {
 	}
 	if cur, _ := callStateBusiness.Current(ctx, callStateBusiness.Ref{Kind: "channel", ID: room}); cur == nil || cur.ID != s.ID {
 		t.Errorf("the channel's call is %+v, want Sam's call, not one of its rooms", cur)
+	}
+	// The channel hears of the call as everyone in it, whichever room they
+	// are in: its call state counts and names the three in Design.
+	settle(t)
+	callStateBusiness.Publish(ctx, room)
+	settle(t)
+	states := heard.Messages(helpers.GetMqttTopicForChannelMessage(room), mqttStruct.MESSAGE_CALL_STATE)
+	if len(states) == 0 {
+		t.Fatal("the channel heard nothing of its call")
+	}
+	var state mqttStruct.MqttCallState
+	if err := json.Unmarshal(states[len(states)-1], &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Session != s.ID || !state.Live || state.Count != 3 {
+		t.Errorf("the channel heard of call %s (live %v) with %d in it, want %s live with Sam, Ana and Lee in it from Design", state.Session, state.Live, state.Count, s.ID)
+	}
+	for _, name := range []string{"ana", "lee", "sam"} {
+		if !slices.ContainsFunc(state.People, func(p mqttStruct.MqttCallPerson) bool { return p.Identity == people[name].Uid }) {
+			t.Errorf("the channel's call state doesn't name %s, in Design: %+v", name, state.People)
+		}
 	}
 
 	// Sam closes the rooms from Design; everyone is called back once.

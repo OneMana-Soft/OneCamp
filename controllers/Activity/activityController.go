@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -212,4 +213,48 @@ func GetActivityUnread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Counted your Inbox.", "data": helpers.Envolope{"count": n}})
+}
+
+// dismissFromPriority writes a dismissal, a seam for tests.
+var dismissFromPriority = business.Dismiss
+
+// dismissBodyLimit holds a page of keys (business/Activity maxDismissKeys,
+// each at most 200 bytes) with room to spare.
+const dismissBodyLimit = 16 << 10
+
+// DismissFromPriority is POST /activity/dismiss, {"keys": [...], "dismissed":
+// true|false}: the signed-in person takes items out of their own Priority, or
+// puts them back, by the keys their feed sent (each item's "key"; a collapsed
+// row sends its echoes' keys too). The person is the session's, never one the
+// body names, and only their own rows change. It answers 204 whatever the key
+// names, so no answer says what exists; 400 for a body or a key that isn't a
+// Priority item's; 503 when it couldn't be written.
+func DismissFromPriority(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
+	var in struct {
+		Keys      []string `json:"keys"`
+		Dismissed *bool    `json:"dismissed"`
+	}
+	if !httpx.ReadJSON(w, r, dismissBodyLimit, &in) {
+		return
+	}
+	if in.Dismissed == nil {
+		helpers.WriteBadRequest(w, "Say whether to take it out of Priority or put it back.")
+		return
+	}
+	err := dismissFromPriority(ctx, userInfo.UserPostgresInfo.Id, in.Keys, *in.Dismissed)
+	switch {
+	case errors.Is(err, business.ErrBadKey):
+		helpers.WriteBadRequest(w, "That isn't an item in your Priority.")
+	case err != nil:
+		helpers.LogErrorWithContext(ctx, "controllers/DismissFromPriority Failed to write the dismissal err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't change your Priority. Try again."})
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
 }

@@ -248,7 +248,7 @@ func TestSearchFindsEventsOnTheCalendarsTheGridShows(t *testing.T) {
 		personOf(jonas).String(): {project: accessBusiness.LevelEdit},
 		personOf(maya).String():  {project: accessBusiness.LevelView},
 	}, map[string]string{project: "Launch"})
-	launch, err := h.s.ProjectCalendarFor(ctx, jonas, project)
+	launch, err := h.s.projectCalendarFor(ctx, jonas, project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,6 +314,8 @@ func TestSearchFindsEventsOnTheCalendarsTheGridShows(t *testing.T) {
 func TestAnImportAsksSearchForItsEventsEntries(t *testing.T) {
 	h := newHarness(t)
 	sam := h.member("Sam")
+	markLinked(sam.UserPostgresInfo.Id, true) // Sam has a two-way link in step: an import asks for sync entries (R384-N1)
+	t.Cleanup(func() { markLinked(sam.UserPostgresInfo.Id, false) })
 	file := googleFile("jonas@example.com")
 	made, err := h.s.importCalendars(context.Background(), sam, readFile(t, file), func(int, int) {})
 	if err != nil || len(made.Created) != 2 {
@@ -321,6 +323,9 @@ func TestAnImportAsksSearchForItsEventsEntries(t *testing.T) {
 	}
 	if want := []string{made.Created[0].UUID, made.Created[1].UUID}; !slices.Equal(h.searchTold, want) {
 		t.Errorf("search was asked for %v, want %v", h.searchTold, want)
+	}
+	if want := []string{made.Created[0].UUID, made.Created[1].UUID}; !slices.Equal(h.syncTold, want) {
+		t.Errorf("the linked calendars were asked for %v, want %v", h.syncTold, want)
 	}
 	if _, err := h.s.importCalendars(context.Background(), sam, readFile(t, file), func(int, int) {}); err != nil || len(h.searchTold) != 2 {
 		t.Errorf("an import that made nothing asked search for %v (%v)", h.searchTold[2:], err)

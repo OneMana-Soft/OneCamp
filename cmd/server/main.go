@@ -36,6 +36,7 @@ import (
 	mcpServerBusiness "github.com/akashc777/OneCamp/business/MCPServer"
 	marketplaceBusiness "github.com/akashc777/OneCamp/business/Marketplace"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	recordingBusiness "github.com/akashc777/OneCamp/business/Recording"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	slackBridgeBusiness "github.com/akashc777/OneCamp/business/SlackBridge"
@@ -220,6 +221,10 @@ func startBackgroundLoops(ctx context.Context) {
 	// Once per install: every private doc's privacy and sharing onto its AI
 	// search entries, which saves had been rewriting as public.
 	docBusiness.EmbeddingAccessBackfill.Start(ctx)
+	// Once per install: every task's assignee now onto its AI search entry,
+	// which a hand-over made before they were written left naming the old one
+	// (the AI edition's; nothing without it).
+	taskBusiness.StartAIAssigneeBackfill(ctx)
 	// Once per install: every doc's global search entries rewritten from the
 	// doc (who may find it, whether it is deleted), and its comments' too.
 	docBusiness.SearchRepair.Start(ctx)
@@ -268,6 +273,10 @@ func startBackgroundLoops(ctx context.Context) {
 	// Every start: a search name for each person who has none (people saved
 	// before there were search names), so people searches find them.
 	userBusiness.StartSearchNameBackfill(ctx)
+	// Once per install: each call from before calls named their notes doc is
+	// tied to it by the recap it posted, so a departed owner's handover keeps
+	// a private conversation's notes in it (V-1209).
+	recordingBusiness.NotesDocBackfill.Start(ctx)
 	// Every start: the listed form of each template saved before it was kept,
 	// so the Templates list never reads a payload (audit C11).
 	marketplaceBusiness.StartListedFormBackfill(ctx)

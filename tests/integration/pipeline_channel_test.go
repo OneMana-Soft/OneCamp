@@ -294,7 +294,7 @@ func TestADurableChannelPostWhoseWriterDiedIsDecidedByItsNode(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		id, err := outboxBusiness.Add(ctx, tx, outboxBusiness.Entry{Topic: postBusiness.MessageTopic, Kind: postBusiness.MessageCreated, Key: key,
+		id, err := addOneEvent(ctx, tx, outboxBusiness.Entry{Topic: postBusiness.MessageTopic, Kind: postBusiness.MessageCreated, Key: key,
 			Entities: map[string]string{"message": post, "conversation": w.channel.String(), "kind": "channel"}, Sinks: sinks})
 		if err != nil {
 			t.Fatal(err)

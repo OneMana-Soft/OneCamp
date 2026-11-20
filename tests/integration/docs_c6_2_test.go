@@ -18,12 +18,16 @@ package integration_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	departedBusiness "github.com/akashc777/OneCamp/business/Departed"
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	departedModel "github.com/akashc777/OneCamp/models/postgres/Departed"
@@ -267,5 +271,109 @@ func TestDocsOwnedCountsByTheOwnerRule(t *testing.T) {
 	}
 	if none, err := docDomain.DocsOwnedCounts(ctx, nil); err != nil || len(none) != 0 {
 		t.Fatalf("nobody: %v %v", none, err)
+	}
+}
+
+// A handover on a real graph and Postgres (business/Departed HandOver,
+// miro-32): Dana left owning a board and a doc, and both reach Maya as their
+// owner, Dana kept on the board as a co-owner and each move recorded. An heir
+// who left too is refused first, and nothing moves. Her scratch board (one the
+// app made and took away again) is never counted as hers, nor handed on.
+func TestAHandoverGivesALeftOwnersBoardAndDocToTheHeir(t *testing.T) {
+	env, people, _ := c62Setup(t)
+	ctx := context.Background()
+	integration.SetupRedis(t)
+	integration.StubMqttClient(t)
+	dg := integration.SetupDgraph(t)
+	t.Cleanup(dg.Close)
+	lee := uuid.New()
+	if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at, deleted_at) VALUES ($1, $2, 'lee', 'lee', NOW(), NOW(), NOW())`,
+		lee, "lee-"+lee.String()[:8]+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	board, doc, scratch := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	dg.Mutate(t, []map[string]any{
+		{"uid": "_:dana", "dgraph.type": "User", "user_uuid": people["dana"].String()},
+		{"uid": "_:maya", "dgraph.type": "User", "user_uuid": people["maya"].String()},
+		{"uid": "_:lee", "dgraph.type": "User", "user_uuid": lee.String()},
+		{"dgraph.type": "Board", "board_uuid": board, "board_title": "Roadmap", "board_private": true,
+			"board_deleted_at": "0001-01-01T00:00:00Z", "board_created_by": map[string]any{"uid": "_:dana"}},
+		{"dgraph.type": "Board", "board_uuid": scratch, "board_title": "Kickoff", "board_private": true, "board_scratch": true,
+			"board_deleted_at": "2026-10-01T00:00:00Z", "board_created_by": map[string]any{"uid": "_:dana"}},
+		{"dgraph.type": "Doc", "doc_uuid": doc, "doc_owner": map[string]any{"uid": "_:dana"},
+			"doc_created_by": map[string]any{"uid": "_:dana"}, "doc_deleted_at": "0001-01-01T00:00:00Z"},
+	})
+	type person struct {
+		UUID string `json:"user_uuid"`
+	}
+	var b struct {
+		N []struct {
+			By  person   `json:"board_created_by"`
+			Cos []person `json:"board_owning_users"`
+		} `json:"n"`
+	}
+	readBoard := func(id string) {
+		t.Helper()
+		b.N = nil
+		if err := json.Unmarshal(dg.Query(t, `{ n(func: eq(board_uuid, "`+id+`")) { board_created_by { user_uuid } board_owning_users { user_uuid } } }`), &b); err != nil || len(b.N) != 1 {
+			t.Fatalf("read the board %s: %+v %v", id, b, err)
+		}
+	}
+	admin := accessBusiness.Subject{UserUUID: people["owner"].String(), Admin: true}
+
+	left, err := departedBusiness.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	danas := -1
+	for _, p := range left {
+		if p.UserUUID == people["dana"].String() {
+			danas = p.Boards
+		}
+	}
+	if danas != 1 {
+		t.Errorf("Dana's boards as the admin sees them: %d (-1: not listed), want one: her scratch board is not hers to hand on", danas)
+	}
+
+	if _, err := departedBusiness.HandOver(ctx, admin, people["dana"], lee); !errors.Is(err, departedBusiness.ErrNotAMember) {
+		t.Fatalf("a handover to someone who left: %v, want ErrNotAMember", err)
+	}
+	if readBoard(board); b.N[0].By.UUID != people["dana"].String() || len(b.N[0].Cos) != 0 {
+		t.Fatalf("the refused handover moved the board: %+v", b.N[0])
+	}
+
+	m, err := departedBusiness.HandOver(ctx, admin, people["dana"], people["maya"])
+	if err != nil || m.Boards != 1 || m.Docs != 1 || m.Failed != 0 {
+		t.Fatalf("the handover: %+v %v, want one board and one doc moved", m, err)
+	}
+	if readBoard(board); b.N[0].By.UUID != people["maya"].String() || len(b.N[0].Cos) != 1 || b.N[0].Cos[0].UUID != people["dana"].String() {
+		t.Errorf("the board after the handover %+v, want Maya its owner and Dana a co-owner", b.N[0])
+	}
+	if readBoard(scratch); b.N[0].By.UUID != people["dana"].String() || len(b.N[0].Cos) != 0 {
+		t.Errorf("the scratch board after the handover %+v, want it still Dana's alone", b.N[0])
+	}
+	var d struct {
+		N []struct {
+			Owner person `json:"doc_owner"`
+		} `json:"n"`
+	}
+	if err := json.Unmarshal(dg.Query(t, `{ n(func: eq(doc_uuid, "`+doc+`")) { doc_owner { user_uuid } } }`), &d); err != nil || len(d.N) != 1 || d.N[0].Owner.UUID != people["maya"].String() {
+		t.Errorf("the doc's owner after the handover %+v %v, want Maya", d, err)
+	}
+	var kinds []string
+	rows, err := env.PG.Query(`SELECT resource_kind FROM access_recoveries WHERE from_owner_uuid = $1 AND to_owner_uuid = $2 ORDER BY resource_kind`, people["dana"], people["maya"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			t.Fatal(err)
+		}
+		kinds = append(kinds, k)
+	}
+	if strings.Join(kinds, ",") != "board,doc" {
+		t.Errorf("the recoveries recorded %v, want a board's and a doc's", kinds)
 	}
 }

@@ -104,41 +104,33 @@ func GetLevelsInChannel(ctx context.Context, channelId string, userIds []string)
 	return levels, nil
 }
 
-// MemberIDs is the user ids of the people in a channel now, up to limit, by
-// the same rows GetLevelsInChannel reads: each member has a setting for the
-// channel from joining until they leave. For who a broadcast reaches
-// (business/Reach) and the "@" list's "Not in #launch".
+// MemberIDs is Members' ids alone: who a broadcast reaches (business/Reach),
+// the "@" list's "Not in #launch" and a keyword's reach (business/Post).
 func MemberIDs(ctx context.Context, channelID string, limit int) ([]string, error) {
+	ids, _, err := Members(ctx, channelID, limit)
+	return ids, err
+}
+
+// Members is the user ids of the people in a channel now, up to limit (0:
+// every one of them), and each one's setting for it, by the same rows
+// GetLevelsInChannel reads: each member has a setting for the channel from
+// joining until they leave. The Notification Router's all_posts and call
+// candidates (business/Notify, every one, with the levels its access step
+// would read again: whether each hears is business/NotifyLevel Lets').
+func Members(ctx context.Context, channelID string, limit int) (ids []string, levels map[string]string, err error) {
 	query := `
-		SELECT lower(user_id::text)
+		SELECT lower(user_id::text), notification_type::text
 		FROM users_channel_notification
 		WHERE channel_id = $1
 		ORDER BY user_id
-		LIMIT $2
+		LIMIT NULLIF($2, 0)
 	`
-	ids, err := models.GetMemberIDs(ctx, query, channelID, limit)
+	ids, levels, err = models.GetMembers(ctx, query, channelID, limit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"domain/MemberIDs Failed to get the channel's members err: %+v",
+			"domain/Members Failed to get the channel's members err: %+v",
 			err)
-		return nil, err
+		return nil, nil, err
 	}
-	return ids, nil
-}
-
-// MembersOnAll is who of the channel's members hears everything in it (on
-// "all"), by lower-case user id, every one of them (no cap: each hears of
-// every post). The Notification Router's all_posts and call audience
-// (business/Notify); whether a cause reaches someone is its levelLets'.
-func MembersOnAll(ctx context.Context, channelID string) ([]string, error) {
-	ids, err := models.GetMembersOnAll(ctx, `
-		SELECT lower(user_id::text)
-		FROM users_channel_notification
-		WHERE channel_id = $1 AND notification_type = 'all'
-	`, channelID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/MembersOnAll Failed to get the channel's members on all err: %+v", err)
-		return nil, err
-	}
-	return ids, nil
+	return ids, levels, nil
 }

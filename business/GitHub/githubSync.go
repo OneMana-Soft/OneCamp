@@ -27,7 +27,6 @@ import (
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	prReviewModel "github.com/akashc777/OneCamp/models/postgres/GitHubPRReview"
 	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -262,9 +261,6 @@ func executeGitHubSync(taskID uuid.UUID, syncType string, payloadJSON string) er
 		return nil
 	}
 
-	// Mark as pending at start
-	_ = taskDomain.SetGitHubSyncStatus(ctx, taskID, "pending", nil, 0)
-
 	githubIssueURL, githubPRURL, err := taskDomain.GetTaskGitHubURLs(ctx, taskID)
 	if err != nil {
 		_ = taskDomain.SetGitHubSyncStatus(ctx, taskID, "failed", strPtr("task not found"), 1)
@@ -288,9 +284,15 @@ func executeGitHubSync(taskID uuid.UUID, syncType string, payloadJSON string) er
 		_ = taskDomain.SetGitHubSyncStatus(ctx, taskID, "failed", strPtr("invalid GitHub URL"), 1)
 		return fmt.Errorf("invalid GitHub URL: %w", err)
 	}
-	if err := syncAllowed(ctx, taskID, owner, repo); err != nil {
+	// A repository its project links offline has nothing to send to: the
+	// sync is done, and the task's sync state stays as it was, so it is
+	// marked pending only past this check.
+	if err := syncAllowed(ctx, taskID, owner, repo); errors.Is(err, errNothingToSend) {
+		return nil
+	} else if err != nil {
 		return err
 	}
+	_ = taskDomain.SetGitHubSyncStatus(ctx, taskID, "pending", nil, 0)
 
 	integration, err := integrationDomain.GetIntegration(context.Background(), "org", uuid.Nil, "github")
 	if err != nil || integration == nil || integration.AccessToken == nil || *integration.AccessToken == "" {
@@ -894,7 +896,6 @@ func RefreshFromGitHub(ctx context.Context, taskUUID uuid.UUID, backfillComments
 	if err := RefreshableTask(ctx, taskUUID); err != nil {
 		return err
 	}
-	_ = taskDomain.SetGitHubSyncStatus(ctx, taskUUID, "pending", nil, 0)
 
 	// 1. Resolve GitHub URLs
 	issueURL, prURL, err := taskDomain.GetTaskGitHubURLs(ctx, taskUUID)
@@ -920,9 +921,14 @@ func RefreshFromGitHub(ctx context.Context, taskUUID uuid.UUID, backfillComments
 		_ = taskDomain.SetGitHubSyncStatus(ctx, taskUUID, "failed", strPtr("invalid GitHub URL"), 1)
 		return fmt.Errorf("invalid GitHub URL: %w", err)
 	}
-	if err := syncAllowed(ctx, taskUUID, owner, repo); err != nil {
+	// A repository its project links offline has nothing to read from: the
+	// refresh is done, and the task's sync state stays as it was.
+	if err := syncAllowed(ctx, taskUUID, owner, repo); errors.Is(err, errNothingToSend) {
+		return nil
+	} else if err != nil {
 		return err
 	}
+	_ = taskDomain.SetGitHubSyncStatus(ctx, taskUUID, "pending", nil, 0)
 
 	integration, err := integrationDomain.GetIntegration(ctx, "org", uuid.Nil, "github")
 	if err != nil || integration == nil || integration.AccessToken == nil || *integration.AccessToken == "" {
@@ -972,7 +978,7 @@ func RefreshFromGitHub(ctx context.Context, taskUUID uuid.UUID, backfillComments
 
 	// 6. For PRs: sync PR-specific data
 	if isPR {
-		if err := syncPRDetailsFromGitHub(ctx, taskUUID, owner, repo, number, token, dgraphTaskInfo, actorDgraphInfo); err != nil {
+		if err := syncPRDetailsFromGitHub(ctx, taskUUID, targetURL, owner, repo, number, token, dgraphTaskInfo, actorDgraphInfo); err != nil {
 			helpers.LogErrorWithContext(ctx, "RefreshFromGitHub PR detail sync failed: %v", err)
 		}
 	}
@@ -1291,18 +1297,16 @@ type githubComment struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// syncPRDetailsFromGitHub fetches PR details, checks, and reviews and syncs them.
-func syncPRDetailsFromGitHub(ctx context.Context, taskUUID uuid.UUID, owner, repo string, number int, token string, dgraphTaskInfo *dgraphStruct.DgraphTask, actor *dgraphStruct.DgraphUser) error {
+// syncPRDetailsFromGitHub fetches PR details, checks, and reviews and syncs
+// them, for the task holding the pull request at taskURL (as the task holds it).
+func syncPRDetailsFromGitHub(ctx context.Context, taskUUID uuid.UUID, taskURL string, owner, repo string, number int, token string, dgraphTaskInfo *dgraphStruct.DgraphTask, actor *dgraphStruct.DgraphUser) error {
 	// Fetch PR details
 	prData, err := fetchGitHubPullRequest(ctx, owner, repo, number, token)
 	if err != nil {
 		return err
 	}
 
-	prState := prData.State
-	if prData.Merged {
-		prState = "merged"
-	}
+	prState := pullState(prData.State, prData.Merged)
 	if err := taskDomain.UpdateTaskPRState(ctx, taskUUID, prState, "", "", boolPtr(prData.Draft)); err != nil {
 		helpers.LogErrorWithContext(ctx, "syncPRDetailsFromGitHub PR state update failed: %v", err)
 	}
@@ -1315,21 +1319,25 @@ func syncPRDetailsFromGitHub(ctx context.Context, taskUUID uuid.UUID, owner, rep
 		_ = taskDomain.UpdateTaskPRState(ctx, taskUUID, "", checkStatus, "", nil)
 	}
 
-	// Fetch reviews and update aggregate state
+	// Fetch reviews and update aggregate state. GitHub lists them oldest
+	// first, every page of them, a reviewer's replies among them: they go
+	// through the one write together, so the decision is GitHub's. A list
+	// not read whole writes nothing: the stored reviews stand. They stand under
+	// the address the task holds, which its read compares, not GitHub's
+	// spelling of it (a trailing slash, http, www., any case).
 	reviews, err := fetchGitHubPRReviews(ctx, owner, repo, number, token)
+	if err != nil {
+		helpers.LogWarnWithContext(ctx, "syncPRDetailsFromGitHub: task %s's reviews weren't read whole, the stored ones stand: %v", taskUUID, err)
+	}
 	if err == nil && len(reviews) > 0 {
-		reviewModels := make([]prReviewModel.GitHubPRReview, 0, len(reviews))
+		prURL := taskURL
+		batch := make([]githubPRReviewDomain.Review, 0, len(reviews))
 		for _, r := range reviews {
-			reviewModels = append(reviewModels, prReviewModel.GitHubPRReview{
-				TaskId:          taskUUID,
-				GitHubLogin:     r.User.Login,
-				GitHubAvatarURL: r.User.AvatarURL,
-				GitHubHTMLURL:   r.User.HTMLURL,
-				ReviewState:     strings.ToUpper(r.State),
-				SubmittedAt:     time.Now(),
-			})
+			batch = append(batch, githubPRReviewDomain.Review{ID: r.ID, Login: r.User.Login, AvatarURL: r.User.AvatarURL, HTMLURL: r.User.HTMLURL, State: r.State, SubmittedAt: reviewTime(r.SubmittedAt)})
 		}
-		_ = githubPRReviewDomain.BatchUpsertGitHubPRReview(ctx, taskUUID, reviewModels)
+		if err := githubPRReviewDomain.RecordGitHubPRReviews(ctx, taskUUID, prURL, batch); err != nil {
+			helpers.LogErrorWithContext(ctx, "syncPRDetailsFromGitHub reviews failed: %v", err)
+		}
 		updateTaskReviewState(ctx, taskUUID)
 	}
 
@@ -1413,38 +1421,65 @@ type githubCheckRun struct {
 	Conclusion string `json:"conclusion"`
 }
 
-// fetchGitHubPRReviews fetches reviews for a PR.
+// maxReviewPages is the most pages of a pull request's reviews the sync
+// reads: 1,000 reviews, at GitHub's largest page.
+const maxReviewPages = 10
+
+// fetchGitHubPRReviews fetches every review of a PR, oldest first, page by
+// page as GitHub's Link header names them (extractNextPageURL). A list it
+// can't read whole (a page fails, or there are more than maxReviewPages) is
+// an error, not part of the list: part of it must not replace a decision a
+// later review made.
 func fetchGitHubPRReviews(ctx context.Context, owner, repo string, number int, token string) ([]githubPRReview, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/reviews", owner, repo, number), nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	client := githubHTTPClient
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if err := checkGitHubRateLimit(resp); err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("GitHub API error %d", resp.StatusCode)
-	}
-
 	var reviews []githubPRReview
-	if err := json.NewDecoder(resp.Body).Decode(&reviews); err != nil {
-		return nil, err
+	next := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/reviews?per_page=100", owner, repo, number)
+	for pages := 0; next != ""; pages++ {
+		if pages == maxReviewPages {
+			return nil, fmt.Errorf("more than %d pages of reviews", maxReviewPages)
+		}
+		page, link, err := fetchGitHubPRReviewPage(ctx, next, token)
+		if err != nil {
+			return nil, err
+		}
+		reviews = append(reviews, page...)
+		next = extractNextPageURL(link)
 	}
 	return reviews, nil
 }
 
+// fetchGitHubPRReviewPage fetches one page of a PR's reviews, and the Link
+// header naming the next.
+func fetchGitHubPRReviewPage(ctx context.Context, url string, token string) ([]githubPRReview, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := githubHTTPClient.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if err := checkGitHubRateLimit(resp); err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, "", fmt.Errorf("GitHub API error %d", resp.StatusCode)
+	}
+	var reviews []githubPRReview
+	if err := json.NewDecoder(resp.Body).Decode(&reviews); err != nil {
+		return nil, "", err
+	}
+	return reviews, resp.Header.Get("Link"), nil
+}
+
 // githubPRReview represents a GitHub PR review.
 type githubPRReview struct {
-	State string `json:"state"`
-	User  struct {
+	ID          int64  `json:"id"`
+	State       string `json:"state"`
+	SubmittedAt string `json:"submitted_at"`
+	User        struct {
 		Login     string `json:"login"`
 		AvatarURL string `json:"avatar_url"`
 		HTMLURL   string `json:"html_url"`

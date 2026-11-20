@@ -85,7 +85,7 @@ func replyInChannel(t *testing.T, told ReplyTold, repliers []string, by string, 
 	for _, m := range mentioned {
 		ms = append(ms, &dgraphStruct.DgraphUser{Uuid: m})
 	}
-	NotifyThreadReply(ThreadReply{
+	NotifyThreadReply(context.Background(), ThreadReply{
 		By: &dgraphStruct.DgraphUser{Uuid: by, UserName: "w"}, Post: post, CommentUUID: "c1",
 		HTML: "<p>on it</p>", PlainText: "on it", Mentioned: ms, At: rootAt.Add(time.Hour),
 	})

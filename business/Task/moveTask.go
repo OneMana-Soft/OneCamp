@@ -21,11 +21,15 @@ func MoveTask(ctx context.Context, taskUUID uuid.UUID, status string, beforeUUID
 		projectUUID = dgraphTaskInfo.Project.Uuid
 	}
 	// An unknown column is refused before anything moves.
-	if _, err := taskStatusBusiness.Resolve(ctx, projectUUID, status); err != nil {
+	next, err := taskStatusBusiness.Resolve(ctx, projectUUID, status)
+	if err != nil {
 		return err
 	}
+	// The drag's changes, its status and its place, are logged once, together.
+	ctx, logChanges := holdChanges(ctx)
+	defer logChanges()
 	// Does nothing when the card stayed in its column.
-	if err := UpdateTaskStatusByTaskUUID(ctx, taskUUID, status, dgraphTaskInfo, userInfo); err != nil {
+	if err := setStatus(ctx, taskUUID, next, dgraphTaskInfo, userInfo); err != nil {
 		return err
 	}
 	// Its place is in the project's one order, which every view shares.

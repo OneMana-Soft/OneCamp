@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
 	cycleModel "github.com/akashc777/OneCamp/models/postgres/Cycle"
 	"github.com/google/uuid"
 )
@@ -109,5 +110,34 @@ func TestTheListenerReadsOnlyTheServersOwnEvent(t *testing.T) {
 	event("task.status_changed", map[string]interface{}{"task_id": task.String(), "project_id": project.String(), "old_status": "todo", "new_status": "inProgress"})
 	if w.put[task] != running.Id {
 		t.Fatalf("a started task went to %v, want %s", w.put[task], running.Id)
+	}
+}
+
+// A status change whose own write found its project has no schedule marks
+// ctx (helpers.WithNoCycleSchedule), and the listener reads no schedule for
+// that project (H4W); another project's start, or an unmarked one, reads as
+// before.
+func TestAStartInAProjectMarkedUnscheduledReadsNoSchedule(t *testing.T) {
+	project, other, task := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now()
+	running := cycleModel.Cycle{Id: uuid.New(), StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour)}
+	w := &joinsWorld{schedule: &cycleModel.Schedule{AddStarted: true}, cycles: []cycleModel.Cycle{running}, in: map[uuid.UUID]*cycleModel.Cycle{}, put: map[uuid.UUID]uuid.UUID{}}
+	w.install(t)
+	reads := 0
+	read := scheduleOfProject
+	scheduleOfProject = func(ctx context.Context, p uuid.UUID) (*cycleModel.Schedule, error) {
+		reads++
+		return read(ctx, p)
+	}
+	start := func(ctx context.Context, project uuid.UUID) {
+		startedJoinsCycle(ctx, "task.status_changed", map[string]interface{}{"task_id": task.String(), "project_id": project.String(), "old_status": "todo", "new_status": "inProgress"})
+	}
+	start(helpers.WithNoCycleSchedule(context.Background(), project), project)
+	if reads != 0 || len(w.put) != 0 {
+		t.Fatalf("a start in a project marked unscheduled read its schedule %d times and put %v", reads, w.put)
+	}
+	start(helpers.WithNoCycleSchedule(context.Background(), other), project)
+	if reads != 1 || w.put[task] != running.Id {
+		t.Fatalf("a start marked for another project: %d reads, put %v; want its own read and the join", reads, w.put)
 	}
 }

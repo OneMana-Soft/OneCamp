@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	workFeed "github.com/akashc777/OneCamp/business/WorkFeed"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -81,6 +82,7 @@ var (
 	factsFor    = model.FactsFor
 	placeOf     = taskDomain.PlaceOf
 	epicsIn     = model.Epics
+	recordTasks = workFeed.RecordTasks
 )
 
 func bad(format string, args ...any) error {
@@ -271,6 +273,13 @@ func SetTaskType(ctx context.Context, task *dgraphStruct.DgraphTask, typeID *uui
 	// turned into a failure the person would retry.
 	if err := writeLine(ctx, line, nil); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/WorkTaxonomy SetTaskType history err: %+v", err)
+	}
+	// The change goes into the Work Change Log, as every task change does, so
+	// what follows a task's type (its SLA timer, webhooks) hears of it.
+	if task.Project != nil {
+		changed := &dgraphStruct.DgraphTask{Uuid: task.Uuid, WorkType: after.Shown()}
+		recordTasks(ctx, by.Uuid, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: task.Project.Uuid, Task: changed,
+			Fields: []string{"task_work_type"}})
 	}
 	return after, nil
 }

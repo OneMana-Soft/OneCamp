@@ -91,11 +91,11 @@ func TestCalendarSyncLedger(t *testing.T) {
 	must(err)
 
 	// A move starts once while it runs, and again once it has stopped.
-	link, started, err := models.StartMove(ctx, uuid.New(), person, "google", "sam@outlook.com", time.Hour)
+	link, started, err := models.StartMove(ctx, uuid.New(), person, "google", "sam@example.com", time.Hour)
 	if err != nil || !started || link.State != models.SyncMoving {
 		t.Fatalf("first: %+v %v %v", link, started, err)
 	}
-	if _, again, err := models.StartMove(ctx, uuid.New(), person, "google", "sam@outlook.com", time.Hour); err != nil || again {
+	if _, again, err := models.StartMove(ctx, uuid.New(), person, "google", "sam@example.com", time.Hour); err != nil || again {
 		t.Fatalf("a second move while one runs: %v %v", again, err)
 	}
 	skipped, _ := json.Marshal([]map[string]string{{"what": "Broken", "why": "It couldn't be read from Google."}})
@@ -108,7 +108,7 @@ func TestCalendarSyncLedger(t *testing.T) {
 	if err != nil || len(links) != 1 {
 		t.Fatalf("synced links %v %v", links, err)
 	}
-	must(models.KeepSyncCalendar(ctx, models.SyncCalendar{LinkID: link.ID, RemoteID: "sam@outlook.com", Name: "sam@outlook.com", Primary: true, CalendarID: &calendar, Cursor: "tok-1"}))
+	must(models.KeepSyncCalendar(ctx, models.SyncCalendar{LinkID: link.ID, RemoteID: "sam@example.com", Name: "sam@example.com", Primary: true, CalendarID: &calendar, Cursor: "tok-1"}))
 	cals, err := models.SyncCalendarsOf(ctx, link.ID)
 	if err != nil || len(cals) != 1 || cals[0].Cursor != "tok-1" || *cals[0].CalendarID != calendar {
 		t.Fatalf("calendars %+v %v", cals, err)
@@ -124,8 +124,8 @@ func TestCalendarSyncLedger(t *testing.T) {
 	}
 	inStep, changed, fresh := event(), event(), event()
 	must(models.KeepSyncRefs(ctx, []models.SyncRef{
-		{LinkID: link.ID, RemoteID: "sam@outlook.com", ExternalID: "g1", EventID: inStep, ETag: "e1"},
-		{LinkID: link.ID, RemoteID: "sam@outlook.com", ExternalID: "g2", EventID: changed, ETag: "e2"},
+		{LinkID: link.ID, RemoteID: "sam@example.com", ExternalID: "g1", EventID: inStep, ETag: "e1"},
+		{LinkID: link.ID, RemoteID: "sam@example.com", ExternalID: "g2", EventID: changed, ETag: "e2"},
 	}))
 	_, err = db.Exec(`UPDATE events SET title = 'Changed', updated_at = NOW() + interval '1 minute' WHERE id = $1`, changed)
 	must(err)
@@ -141,7 +141,7 @@ func TestCalendarSyncLedger(t *testing.T) {
 		t.Fatalf("to send: %v (changed %s, fresh %s, in step %s)", got, changed, fresh, inStep)
 	}
 	// Stamped again, the changed one is in step: no earlier than its change.
-	must(models.KeepSyncRefs(ctx, []models.SyncRef{{LinkID: link.ID, RemoteID: "sam@outlook.com", ExternalID: "g2", EventID: changed, ETag: "e3"}}))
+	must(models.KeepSyncRefs(ctx, []models.SyncRef{{LinkID: link.ID, RemoteID: "sam@example.com", ExternalID: "g2", EventID: changed, ETag: "e3"}}))
 	refs, err := models.SyncRefsOf(ctx, link.ID)
 	if err != nil || refs[changed].ETag != "e3" {
 		t.Fatalf("refs %+v %v", refs, err)
@@ -197,7 +197,7 @@ func TestCalendarGoogleWholeReadMigrationClearsOnlyGooglesCursors(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, c := range []models.SyncCalendar{
-		{LinkID: google.ID, RemoteID: "sam@outlook.com", Primary: true, CalendarID: &calendar, Cursor: "t9"},
+		{LinkID: google.ID, RemoteID: "sam@example.com", Primary: true, CalendarID: &calendar, Cursor: "t9"},
 		{LinkID: google.ID, RemoteID: "team@group.calendar.google.com", Cursor: "t4"},
 		{LinkID: outlook.ID, RemoteID: "cal1", Cursor: `{"delta":"d1"}`},
 	} {
@@ -222,7 +222,7 @@ func TestCalendarGoogleWholeReadMigrationClearsOnlyGooglesCursors(t *testing.T) 
 			got[remote] = cursor
 		}
 		rows.Close()
-		if want := map[string]string{"sam@outlook.com": "", "team@group.calendar.google.com": "", "cal1": `{"delta":"d1"}`}; !maps.Equal(got, want) {
+		if want := map[string]string{"sam@example.com": "", "team@group.calendar.google.com": "", "cal1": `{"delta":"d1"}`}; !maps.Equal(got, want) {
 			t.Fatalf("step %d: cursors %v, want %v", i, got, want)
 		}
 	}
@@ -251,7 +251,7 @@ func TestCalendarInstancePrivacyMigrationClearsGooglesAndOutlooksCursors(t *test
 		t.Fatal(err)
 	}
 	for _, c := range []models.SyncCalendar{
-		{LinkID: google.ID, RemoteID: "sam@outlook.com", Primary: true, CalendarID: &calendar, Cursor: "t9"},
+		{LinkID: google.ID, RemoteID: "sam@example.com", Primary: true, CalendarID: &calendar, Cursor: "t9"},
 		{LinkID: outlook.ID, RemoteID: "cal1", Cursor: `{"delta":"d1"}`},
 		{LinkID: address.ID, RemoteID: "holidays", Cursor: "etag-1"},
 	} {
@@ -276,7 +276,7 @@ func TestCalendarInstancePrivacyMigrationClearsGooglesAndOutlooksCursors(t *test
 			got[remote] = cursor
 		}
 		rows.Close()
-		if want := map[string]string{"sam@outlook.com": "", "cal1": "", "holidays": "etag-1"}; !maps.Equal(got, want) {
+		if want := map[string]string{"sam@example.com": "", "cal1": "", "holidays": "etag-1"}; !maps.Equal(got, want) {
 			t.Fatalf("step %d: cursors %v, want %v", i, got, want)
 		}
 	}
@@ -296,7 +296,7 @@ func syncLedgerOf(t *testing.T, ctx context.Context, env *integration.Env) (pers
 	if _, err := env.PG.Exec(`INSERT INTO calendars (id, owner_id) VALUES ($1, $2)`, calendar, person); err != nil {
 		t.Fatal(err)
 	}
-	link, _, err := models.StartMove(ctx, uuid.New(), person, "google", "sam@outlook.com", time.Hour)
+	link, _, err := models.StartMove(ctx, uuid.New(), person, "google", "sam@example.com", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,13 +364,13 @@ func TestCalendarSyncRefusalsWaitAndLinksBreak(t *testing.T) {
 
 	// A new event that failed for now waits for its retry.
 	waiting := event()
-	must(models.KeepSyncRefusal(ctx, models.SyncRefusal{LinkID: link.ID, EventID: waiting, Tries: 1, RetryAt: &retry, Why: "503"}, now))
+	must(keptRefusal(models.KeepSyncRefusal(ctx, models.SyncRefusal{LinkID: link.ID, EventID: waiting, Tries: 1, RetryAt: &retry, Why: "503"}, now)))
 	if toSend(now)[waiting] || !toSend(later)[waiting] {
 		t.Fatalf("a failed change: sent now %v, after its retry %v", toSend(now)[waiting], toSend(later)[waiting])
 	}
 	// Refused for good: it waits past any retry, until it changes.
 	refused := event()
-	must(models.KeepSyncRefusal(ctx, models.SyncRefusal{LinkID: link.ID, EventID: refused, Tries: 3, Why: "400"}, now))
+	must(keptRefusal(models.KeepSyncRefusal(ctx, models.SyncRefusal{LinkID: link.ID, EventID: refused, Tries: 3, Why: "400"}, now)))
 	if toSend(later)[refused] {
 		t.Fatal("a change refused for good is sent again unchanged")
 	}
@@ -385,13 +385,13 @@ func TestCalendarSyncRefusalsWaitAndLinksBreak(t *testing.T) {
 	}
 	// In step, but an instance of it failed: sent again at its retry.
 	inStep := event()
-	must(models.KeepSyncRefs(ctx, []models.SyncRef{{LinkID: link.ID, RemoteID: "sam@outlook.com", ExternalID: "g1", EventID: inStep}}))
-	must(models.KeepSyncRefusal(ctx, models.SyncRefusal{LinkID: link.ID, EventID: inStep, Tries: 1, RetryAt: &retry, Why: "503"}, now))
+	must(models.KeepSyncRefs(ctx, []models.SyncRef{{LinkID: link.ID, RemoteID: "sam@example.com", ExternalID: "g1", EventID: inStep}}))
+	must(keptRefusal(models.KeepSyncRefusal(ctx, models.SyncRefusal{LinkID: link.ID, EventID: inStep, Tries: 1, RetryAt: &retry, Why: "503"}, now)))
 	if toSend(now)[inStep] || !toSend(later)[inStep] {
 		t.Fatal("an event whose instance failed isn't sent at its retry, or is sent before")
 	}
 	// Kept in step, or dropped, the refusal is over.
-	must(models.KeepSyncRefs(ctx, []models.SyncRef{{LinkID: link.ID, RemoteID: "sam@outlook.com", ExternalID: "g1", EventID: inStep, ETag: "e2"}}))
+	must(models.KeepSyncRefs(ctx, []models.SyncRef{{LinkID: link.ID, RemoteID: "sam@example.com", ExternalID: "g1", EventID: inStep, ETag: "e2"}}))
 	must(models.DropSyncRefs(ctx, link.ID, []uuid.UUID{waiting}))
 	if got, err := models.SyncRefusalsOf(ctx, link.ID, []uuid.UUID{waiting, refused, inStep}); err != nil || len(got) != 1 || got[refused].Tries != 3 {
 		t.Fatalf("after keeping and dropping: %+v %v", got, err)
@@ -422,23 +422,46 @@ func TestCalendarSyncRefusalsWaitAndLinksBreak(t *testing.T) {
 	}
 	// Another Google account connected, or one whose address Google didn't
 	// give, leaves it broken: that token isn't this link's account's.
-	for _, other := range []string{"lee@outlook.com", ""} {
+	for _, other := range []string{"lee@example.com", ""} {
 		must(models.ReconnectSyncLinks(ctx, person, "google", other))
-		if l, _ := models.SyncLinkOf(ctx, person, "google"); l.State != models.SyncBroken || l.Account != "sam@outlook.com" || synced() {
+		if l, _ := models.SyncLinkOf(ctx, person, "google"); l.State != models.SyncBroken || l.Account != "sam@example.com" || synced() {
 			t.Fatalf("%q connected: %+v, synced %v", other, l, synced())
 		}
 	}
 	// Its own account, however Google writes the address, syncs it again.
-	must(models.ReconnectSyncLinks(ctx, person, "google", "Sam@Outlook.com"))
-	if l, _ := models.SyncLinkOf(ctx, person, "google"); l.State != models.SyncSynced || l.Error != "" || l.Account != "sam@outlook.com" || !synced() {
+	must(models.ReconnectSyncLinks(ctx, person, "google", "Sam@Example.com"))
+	if l, _ := models.SyncLinkOf(ctx, person, "google"); l.State != models.SyncSynced || l.Error != "" || l.Account != "sam@example.com" || !synced() {
 		t.Fatalf("connected again: %+v, synced %v", l, synced())
 	}
 	// A link kept before its address was takes the account connected.
 	_, err = db.Exec(`UPDATE calendar_sync_links SET account = '' WHERE id = $1`, link.ID)
 	must(err)
 	must(models.BreakSyncLink(ctx, link.ID, "Google stopped answering for this account. Connect it again."))
-	must(models.ReconnectSyncLinks(ctx, person, "google", "sam@outlook.com"))
-	if l, _ := models.SyncLinkOf(ctx, person, "google"); l.State != models.SyncSynced || l.Account != "sam@outlook.com" || !synced() {
+	must(models.ReconnectSyncLinks(ctx, person, "google", "sam@example.com"))
+	if l, _ := models.SyncLinkOf(ctx, person, "google"); l.State != models.SyncSynced || l.Account != "sam@example.com" || !synced() {
 		t.Fatalf("a link without its address, connected again: %+v, synced %v", l, synced())
 	}
 }
+
+// A refusal's row is made once: keeping it again says it was kept already,
+// so what is told of a refusal (a room booked when Google moved an event) is
+// told once, however many polls meet it.
+func TestCalendarSyncRefusalIsMadeOnce(t *testing.T) {
+	ctx := context.Background()
+	env := integration.SetupEnv(t)
+	person, calendar, link := syncLedgerOf(t, ctx, env)
+	id := uuid.New()
+	if _, err := env.PG.Exec(`INSERT INTO events (id, calendar_id, created_by, ical_uid, start_at, end_at, updated_at) VALUES ($1, $2, $3, $4, NOW(), NOW() + interval '1 hour', NOW())`,
+		id, calendar, person, id.String()+"@onecamp"); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []bool{true, false} {
+		made, err := models.KeepSyncRefusal(ctx, models.SyncRefusal{LinkID: link.ID, EventID: id, Why: "Huddle is booked then."}, time.Now())
+		if err != nil || made != want {
+			t.Fatalf("refusal kept %d time(s): made %v (%v), want %v", i+1, made, err, want)
+		}
+	}
+}
+
+// keptRefusal is a kept refusal's error alone.
+func keptRefusal(_ bool, err error) error { return err }

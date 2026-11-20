@@ -35,9 +35,19 @@ func writeCalendarError(w http.ResponseWriter, r *http.Request, where string, er
 	var input *business.EventInputError
 	var refused *business.EventRefusal
 	var readOnly *business.CalendarReadOnlyError
+	var taken *business.RoomTakenError
 	switch {
 	case errors.As(err, &stale):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": stale.Error(), "data": stale.Current})
+	case errors.As(err, &taken):
+		// The value, not the error: a response redacts every error value it carries.
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": taken.Error(), "code": "room_taken", "data": *taken})
+	case errors.Is(err, business.ErrNoRoom):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That room isn't available."})
+	case errors.Is(err, business.ErrNoSuchSyncLink):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That sync link isn't there any more."})
+	case errors.Is(err, business.ErrRoomsTooMany):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": err.Error(), "code": "rooms_too_many"})
 	case errors.As(err, &readOnly):
 		// A calendar its provider lets OneCamp only read (V-594): the code
 		// lets the web offer another calendar.
@@ -67,8 +77,14 @@ func member(w http.ResponseWriter, r *http.Request) (*model.UserInfo, bool) {
 }
 
 func decodeEvent(w http.ResponseWriter, r *http.Request, into any) bool {
+	return decodeBody(w, r, into, "event")
+}
+
+// decodeBody reads a JSON body (up to eventBodyLimit) into into, or answers
+// 400 naming what it couldn't read.
+func decodeBody(w http.ResponseWriter, r *http.Request, into any, what string) bool {
 	if err := json.NewDecoder(io.LimitReader(r.Body, eventBodyLimit)).Decode(into); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that event."})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that " + what + "."})
 		return false
 	}
 	return true
@@ -134,6 +150,7 @@ func CreateCalendarEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e, err := business.Events.Create(r.Context(), who, in)
+	err = business.NameRoomClash(r.Context(), who, err)
 	if err != nil {
 		writeCalendarError(w, r, "CreateCalendarEvent", err)
 		return
@@ -153,6 +170,7 @@ func UpdateCalendarEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e, err := business.Events.Update(r.Context(), who, chi.URLParam(r, "eventId"), p)
+	err = business.NameRoomClash(r.Context(), who, err)
 	if err != nil {
 		writeCalendarError(w, r, "UpdateCalendarEvent", err)
 		return
@@ -196,6 +214,7 @@ func RestoreCalendarEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e, err := business.Events.Restore(r.Context(), who, chi.URLParam(r, "eventId"))
+	err = business.NameRoomClash(r.Context(), who, err)
 	if err != nil {
 		writeCalendarError(w, r, "RestoreCalendarEvent", err)
 		return
@@ -288,21 +307,75 @@ func MoveFrom(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"data": st})
 }
 
-// ProjectCalendar is a project's own calendar, made the first time, for a
-// member who may see the project (calendar A6; the project home's Calendar
-// card reads it as a "calendar" chip).
+// ProjectCalendar, ChannelCalendar and TeamCalendar are a project's, a
+// channel's and a team's own calendar, made the first time, for a member who
+// may see that project, channel or team (calendar A6, gcal-14; the project
+// home's Calendar card reads it as a "calendar" chip). Anyone else learns
+// nothing of it: 404.
 // POST /calendar/projects/{projectId}/calendar → 200 {data: {id}}
+// POST /calendar/channels/{channelId}/calendar → 200 {data: {id}}
+// POST /calendar/teams/{teamId}/calendar → 200 {data: {id}}
 func ProjectCalendar(w http.ResponseWriter, r *http.Request) {
+	containerCalendar(w, r, "project", chi.URLParam(r, "projectId"))
+}
+
+func ChannelCalendar(w http.ResponseWriter, r *http.Request) {
+	containerCalendar(w, r, "channel", chi.URLParam(r, "channelId"))
+}
+
+func TeamCalendar(w http.ResponseWriter, r *http.Request) {
+	containerCalendar(w, r, "team", chi.URLParam(r, "teamId"))
+}
+
+func containerCalendar(w http.ResponseWriter, r *http.Request, kind, id string) {
 	who, ok := member(w, r)
 	if !ok {
 		return
 	}
-	id, err := business.Events.ProjectCalendarFor(r.Context(), who, chi.URLParam(r, "projectId"))
+	cal, err := business.Events.ContainerCalendarFor(r.Context(), who, kind, id)
 	if err != nil {
-		writeCalendarError(w, r, "ProjectCalendar", err)
+		writeCalendarError(w, r, "ContainerCalendar", err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]string{"id": id.String()}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]string{"id": cal.String()}})
+}
+
+// MyFreeBusy is the asker's own choice to keep when they're busy to
+// themselves, and whether the workspace shows anyone's at all.
+// GET /calendar/freebusy → 200 {data: {hidden, workspace}}
+func MyFreeBusy(w http.ResponseWriter, r *http.Request) {
+	who, ok := member(w, r)
+	if !ok {
+		return
+	}
+	c, err := business.MyFreeBusy(r.Context(), who)
+	if err != nil {
+		writeCalendarError(w, r, "MyFreeBusy", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": c})
+}
+
+// SetMyFreeBusy sets the asker's own choice. PUT /calendar/freebusy {hidden}
+// → 200 {data: {hidden, workspace}}
+func SetMyFreeBusy(w http.ResponseWriter, r *http.Request) {
+	who, ok := member(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Hidden *bool `json:"hidden"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&body); err != nil || body.Hidden == nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Say whether to keep when you're busy to yourself: hidden true or false."})
+		return
+	}
+	c, err := business.SetMyFreeBusy(r.Context(), who, *body.Hidden)
+	if err != nil {
+		writeCalendarError(w, r, "SetMyFreeBusy", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": c})
 }
 
 // ListCalendars are the calendars the asker may see: their own, then each
@@ -470,6 +543,84 @@ func StopCalendarFeed(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := business.Events.StopFeed(r.Context(), who, chi.URLParam(r, "calendarId")); err != nil {
 		writeCalendarError(w, r, "StopCalendarFeed", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// CalendarFeeds are the workspace's live calendar links, for a workspace
+// admin (basecamp-05): whose, of what, showing what, made when; never a
+// link's address or token. The /admin gate is the check.
+// GET /admin/calendar/feeds → 200 {data: FeedList}
+func CalendarFeeds(w http.ResponseWriter, r *http.Request) {
+	who, ok := member(w, r)
+	if !ok {
+		return
+	}
+	v, err := business.Events.Feeds(r.Context(), who)
+	if err != nil {
+		writeCalendarError(w, r, "CalendarFeeds", err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": v})
+}
+
+// StopAnyCalendarFeed stops one live calendar link by its id, for a
+// workspace admin; the audit log records it and its person is shown who
+// stopped it. 404 for an id no live link has.
+// DELETE /admin/calendar/feeds/{feedId} → 204
+func StopAnyCalendarFeed(w http.ResponseWriter, r *http.Request) {
+	who, ok := member(w, r)
+	if !ok {
+		return
+	}
+	if err := business.Events.StopAnyFeed(r.Context(), who, chi.URLParam(r, "feedId")); err != nil {
+		writeCalendarError(w, r, "StopAnyCalendarFeed", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// CalendarSyncLedger is a page of the workspace's Google and Outlook sync
+// links, for a workspace admin (gcal-8 H1): whose, which address, its state,
+// when last in step, stale since, why not as a class, refusals and dead
+// sends; never a token, an event or a provider's words. The /admin gate is
+// the check. ?state= and ?provider= filter it; ?limit= (at most 100) and
+// ?cursor= (the last page's next) page it.
+// GET /admin/calendar/sync → 200 {data: SyncLedger}
+func CalendarSyncLedger(w http.ResponseWriter, r *http.Request) {
+	who, ok := member(w, r)
+	if !ok {
+		return
+	}
+	v, err := business.Events.SyncLedger(r.Context(), who, r.URL.Query())
+	if err != nil {
+		writeCalendarError(w, r, "CalendarSyncLedger", err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": v})
+}
+
+// BreakCalendarSyncLink breaks one person's sync link by its id, for a
+// workspace admin: its tokens are cleared as the person's own disconnect
+// clears them, the audit log records it, and its person is told on their
+// own status. 404 for an id no Google or Outlook link has.
+// POST /admin/calendar/sync/break {link_id} → 204
+func BreakCalendarSyncLink(w http.ResponseWriter, r *http.Request) {
+	who, ok := member(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		LinkID string `json:"link_id"`
+	}
+	if !decodeBody(w, r, &in, "link") {
+		return
+	}
+	if err := business.Events.BreakSyncLink(r.Context(), who, in.LinkID); err != nil {
+		writeCalendarError(w, r, "BreakCalendarSyncLink", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

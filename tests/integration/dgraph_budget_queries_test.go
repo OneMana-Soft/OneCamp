@@ -12,6 +12,7 @@ package integration_test
 import (
 	"context"
 	"fmt"
+	messageDomain "github.com/akashc777/OneCamp/domain/Message"
 	"net/url"
 	"time"
 
@@ -106,21 +107,21 @@ var budgetRunners = map[string]budgetRunner{
 	},
 	// §1.5 2: #general's newest page, and a page from the middle of its history.
 	"channel.latest": func(ctx context.Context, f *dgfixture.Fixture) (int, error) {
-		posts, err := postDomain.GetDgraphLatestPostFromDgraph(ctx, f.General)
+		posts, err := postDomain.PostPage(ctx, f.General, messageDomain.Latest, time.Time{})
 		return nonEmpty("the page", len(posts), err)
 	},
 	"channel.older": func(ctx context.Context, f *dgfixture.Fixture) (int, error) {
-		posts, err := postDomain.GetDgraphOldPostFromDgraph(ctx, f.General, budgetMidHistory)
+		posts, err := postDomain.PostPage(ctx, f.General, messageDomain.Older, budgetMidHistory)
 		return nonEmpty("the page", len(posts), err)
 	},
 	// §1.5 3: the viewer's busiest DM, and a group.
 	"dm.latest": func(ctx context.Context, f *dgfixture.Fixture) (int, error) {
-		chats, err := chatDomain.GetDgraphLatestChatFromDgraph(ctx, f.BusiestDM)
-		return nonEmpty("the page", len(chats), err)
+		page, err := chatDomain.ChatPage(ctx, f.BusiestDM, messageDomain.Latest, time.Time{}, "")
+		return nonEmpty("the page", len(page.Chats), err)
 	},
 	"group.latest": func(ctx context.Context, f *dgfixture.Fixture) (int, error) {
-		chats, err := chatDomain.GetDgraphLatestChatFromDgraph(ctx, f.ViewerGroup)
-		return nonEmpty("the page", len(chats), err)
+		page, err := chatDomain.ChatPage(ctx, f.ViewerGroup, messageDomain.Latest, time.Time{}, "")
+		return nonEmpty("the page", len(page.Chats), err)
 	},
 	// §1.5 4: the sidebar's first page of the viewer's channels, each with its
 	// newest post (#general's among them).

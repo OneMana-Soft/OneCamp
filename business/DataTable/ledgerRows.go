@@ -227,6 +227,9 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 	if err != nil {
 		return nil, storeFailed("failed to load fields")
 	}
+	// The cell index reads none again, in this request's ledger write alone
+	// (fieldsForWrite): what runs on after it takes ctx.
+	wctx := rowQuery.WithFieldsRead(ctx, tableId, fields)
 	var problems BatchErrors
 	refuse := func(index *int, row uuid.UUID, err error) {
 		var ce fieldTypes.CellErrors
@@ -242,25 +245,32 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 	b.At, b.Delete = at, in.Delete
 	files := filesOf(ctx, tableId)
 	var linkedTables []uuid.UUID
+	// The new rows' cells linking to tables are read for all of them at once
+	// (linkCellsOf), as the patches' are below, not a row at a time.
+	created := make([]rowCells, len(in.Create))
 	for i, r := range in.Create {
 		values := r.Values
 		if values == nil {
 			values = map[string]interface{}{}
 		}
-		id := uuid.New()
-		links, tables, err := takeLinks(ctx, actor, fields, values, id)
+		created[i] = rowCells{row: uuid.New(), values: values}
+	}
+	linkCellsOf(ctx, actor, fields, created, false)
+	for i := range created {
+		rc := &created[i]
+		if rc.err != nil {
+			i := i
+			refuse(&i, uuid.Nil, rc.err)
+			continue
+		}
+		cells, err := storedCells(fields, rc.values, fieldTypes.Input{New: true, Complete: completeWrite(actor), Files: files})
 		if err != nil {
 			i := i
 			refuse(&i, uuid.Nil, err)
 			continue
 		}
-		cells, err := storedCells(fields, values, fieldTypes.Input{New: true, Complete: completeWrite(actor), Files: files})
-		if err != nil {
-			i := i
-			refuse(&i, uuid.Nil, err)
-			continue
-		}
-		b.Create = append(b.Create, model.NewRow{ID: id, Values: cells})
+		links, tables := rc.links()
+		b.Create = append(b.Create, model.NewRow{ID: rc.row, Values: cells})
 		b.Links = append(b.Links, links...)
 		linkedTables = append(linkedTables, tables...)
 	}
@@ -325,7 +335,7 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 	}
 	cs := newChangeSet(ctx, tableId, actor, batchKind(in))
 	cs.Operation = in.Operation
-	done, err := model.ApplyBatch(ctx, tableId, actor.UserID, b, aiColumns(fields), maxValuesBytes, maxLinks, keys, cs, observe)
+	done, err := model.ApplyBatch(wctx, tableId, actor.UserID, b, aiColumns(fields), maxValuesBytes, maxLinks, keys, cs, observe)
 	if err != nil {
 		return nil, batchErr(err)
 	}
@@ -350,7 +360,7 @@ func Batch(ctx context.Context, tableId uuid.UUID, in BatchInput, actor Actor) (
 		for i := range stored {
 			r := stored[i]
 			if written := changedIn(cs, r.Id); len(written) > 0 {
-				AutofillRowOnWrite(later, t, &r, written, actor)
+				AutofillRowOnWrite(later, t, fields, &r, written, actor)
 			}
 		}
 	})

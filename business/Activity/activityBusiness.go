@@ -137,6 +137,11 @@ func GetUnifiedActivity(ctx context.Context, q FeedQuery) (page dgraphModels.Uni
 	// wrote and decided, read once for the page. Best-effort: a read failure
 	// leaves priorities as scored. The dots go by what they have read.
 	demoteAnswered(page.Activities, readAnswers(ctx, q.User, q.DgraphID, page.Activities))
+	// Then what Priority still holds lets go a week on, or once the person
+	// took it out themselves (clearFromPriority): each item carries its key
+	// for that, and whether they did.
+	keyItems(page.Activities)
+	clearFromPriority(page.Activities, dismissalsOf(ctx, q.User, page.Activities), time.Now())
 	l, lerr := readLooks(ctx, q.User, page.Activities)
 	if lerr != nil {
 		// No dots rather than a guess: the badge, which reads the same last
@@ -151,8 +156,10 @@ func GetUnifiedActivity(ctx context.Context, q FeedQuery) (page dgraphModels.Uni
 // feedPage is a page of the person's feed before beforeTime, newest first:
 // the feed's query and its model's filters, cut to limit, then kept to what
 // they may read now (readable.go), less the mentions told by a notice
-// (dropToldMentions). The feed and the Inbox badge both count from it, so the
-// badge never counts what the feed won't show.
+// (dropToldMentions) and what their setting for its channel or conversation
+// doesn't let it tell them of (keepHeard), both from one read (toldAndHeard).
+// The feed and the Inbox badge both
+// count from it, so the badge never counts what the feed won't show.
 func feedPage(ctx context.Context, userUUID uuid.UUID, userDgraphId string, beforeTime time.Time, limit int) (page dgraphModels.UnifiedActivityPagination, err error) {
 	mentions, comments, reactions, err := domain.GetUnifiedActivity(ctx, userDgraphId, beforeTime, limit)
 	if err != nil {
@@ -176,7 +183,7 @@ func feedPage(ctx context.Context, userUUID uuid.UUID, userDgraphId string, befo
 	// leaving an item out makes a page short, never the last. The person's
 	// graph uuid is their account id.
 	page.Activities = keepReadable(ctx, userUUID.String(), page.Activities, itemAbout)
-	page.Activities = dropToldMentions(ctx, userUUID.String(), page.Activities)
+	page.Activities = toldAndHeard(ctx, userUUID.String(), page.Activities)
 	return
 }
 

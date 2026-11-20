@@ -29,12 +29,14 @@ type Table struct {
 	Rows   string // the messages' table: id, <RowKey>, created_by, created_at, deleted_at
 	RowKey string // the conversation's column in Rows
 	KeyOf  string // the key's SQL type, for its parameter
+	Levels string // the members' settings: user_id, <Key>, notification_type
+	Places string // the conversations' own table, when they have one: id, deleted_at
 }
 
 // Channel is a channel's posts; Chat is a DM's or a group's messages.
 var (
-	Channel = Table{Marker: "last_seen_channel", Key: "channel_id", Rows: "posts", RowKey: "post_channel", KeyOf: "uuid"}
-	Chat    = Table{Marker: "last_seen_chat", Key: "grp_id", Rows: "chats", RowKey: "grp_id", KeyOf: "varchar"}
+	Channel = Table{Marker: "last_seen_channel", Key: "channel_id", Rows: "posts", RowKey: "post_channel", KeyOf: "uuid", Levels: "users_channel_notification", Places: "channels"}
+	Chat    = Table{Marker: "last_seen_chat", Key: "grp_id", Rows: "chats", RowKey: "grp_id", KeyOf: "varchar", Levels: "users_chat_notification"}
 )
 
 // Unread is the join condition for the rows a marker hasn't read, with the

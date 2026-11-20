@@ -110,7 +110,7 @@ func TestTheEngineSettlesStaleNudges(t *testing.T) {
 	// pass a raise, a nudge whose signal holds would never go quiet.
 	in := nudgeModels.UpsertInput{UserID: owner, Kind: nudgeModels.KindOverdueCommitment, Title: "Overdue commitment",
 		Body: "You committed to: send the launch numbers.", SourceType: "memory", SourceID: staleSource, Priority: 1, DedupKey: "memory:" + staleSource}
-	if _, err := nudgeModels.UpsertMany(ctx, owner, []nudgeModels.UpsertInput{in}); err != nil {
+	if _, err := nudgeModels.UpsertMany(ctx, []nudgeModels.UpsertInput{in}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -162,7 +162,7 @@ func TestTheEngineSettlesStaleNudges(t *testing.T) {
 	})
 
 	t.Run("the engine finding its signal again leaves it quiet; raising it again makes it urgent", func(t *testing.T) {
-		if _, err := nudgeModels.UpsertMany(ctx, owner, []nudgeModels.UpsertInput{in}); err != nil {
+		if _, err := nudgeModels.UpsertMany(ctx, []nudgeModels.UpsertInput{in}); err != nil {
 			t.Fatal(err)
 		}
 		// When a pass raises a nudge is CHAT35-C10's (V-577); its priority is

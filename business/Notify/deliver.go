@@ -4,8 +4,10 @@ package business
 // goes through Plan and then Deliver, which records one row per person and
 // delivery (notification_deliveries, migration 585) and tells only what the
 // record says is new, so a retry or a double fire tells nobody twice. A held
-// delivery is a row in state held until the hold ends, for the Sweeper (A4
-// H4). Deleting a message retracts its rows.
+// delivery is a row in state held (email when the hold ends, the rest never);
+// a push that waits while its person is in OneCamp is a row in state waiting,
+// which the Sweeper sends when due (A4 H4, pushWait.go). Deleting a message
+// retracts its rows.
 //
 // Permission model: the rows are their person's alone (read by Explain for
 // that person only, a later head); Retract runs only on a message's delete
@@ -16,6 +18,7 @@ package business
 import (
 	"context"
 	"slices"
+	"time"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	"github.com/akashc777/OneCamp/helpers"
@@ -27,8 +30,10 @@ import (
 var (
 	recordRows     = deliveryModels.Record
 	retractRows    = deliveryModels.Retract
+	settleRows     = deliveryModels.Settle
 	retractNotices = notificationBusiness.RetractMentionNotices
 	deliverThrough = notificationBusiness.DeliverThroughPause
+	deliverHalf    = notificationBusiness.DeliverHalfThroughPause
 )
 
 func (r router) Deliver(ctx context.Context, ev Event, ds []Decision) []Decision {
@@ -38,24 +43,72 @@ func (r router) Deliver(ctx context.Context, ev Event, ds []Decision) []Decision
 	told := ds
 	if ev.ID != "" {
 		told = r.record(ctx, ev, ds)
+	} else {
+		// Nothing recorded is nothing a pass could send later.
+		told = pushingNow(ds)
 	}
-	var push []string
+	told = r.keepWaiting(ctx, ev, told)
+	// Each told by push or desktop notice now hears both, as today; one whose
+	// push waits hears the desktop notice alone now (the push half follows,
+	// from the Sweeper, unless they read it first).
+	var both, desktop []string
 	for _, d := range told {
-		if slices.Contains(d.To, ToPush) || slices.Contains(d.To, ToDesktop) {
-			push = append(push, d.UserID)
+		switch {
+		case slices.Contains(d.To, ToPush) || (slices.Contains(d.To, ToDesktop) && !slices.Contains(d.Waiting, ToPush)):
+			both = append(both, d.UserID)
+		case slices.Contains(d.To, ToDesktop):
+			desktop = append(desktop, d.UserID)
 		}
 	}
-	if len(push) == 0 {
+	if len(both) == 0 && len(desktop) == 0 {
 		return told
 	}
 	// A chat event's hold was decided in Plan (a VIP's words and Notify
 	// anyway pass it); a site's event is held by the push gate, as today.
 	if ev.Place.Kind == "" {
-		deliver(ctx, push, ev.Push, ev.ID)
-	} else if err := deliverThrough(ctx, push, ev.Push, ev.ID); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Notify Deliver %s: %+v", ev.ID, err)
+		deliver(ctx, both, ev.Push, ev.ID)
+		return told
+	}
+	if len(both) > 0 {
+		if err := deliverThrough(ctx, both, ev.Push, ev.ID); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/Notify Deliver %s: %+v", ev.ID, err)
+		}
+	}
+	if len(desktop) > 0 {
+		if err := deliverHalf(ctx, notificationBusiness.DesktopHalf, desktop, ev.Push, ev.ID); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/Notify Deliver %s: the desktop notices: %+v", ev.ID, err)
+		}
 	}
 	return told
+}
+
+// pushingNow is ds with every waiting delivery sent now instead: what can't
+// wait (no row to wait in) is never lost. Pure.
+func pushingNow(ds []Decision) []Decision {
+	out := make([]Decision, len(ds))
+	for i, d := range ds {
+		if len(d.Waiting) > 0 {
+			d.To, d.Waiting, d.WaitTill = append(slices.Clone(d.To), d.Waiting...), nil, nil
+		}
+		out[i] = d
+	}
+	return out
+}
+
+// stamp is when ctx's deliveries are sent and written (V-871): now, written
+// at the column's own now (zero); or, for a message written earlier (an
+// import, the demo's seed: helpers.WithImportTimestamp), the message's time,
+// so Why's "Where it went" never reads later than it; never after now.
+func (r router) stamp(ctx context.Context) (sent, written time.Time) {
+	now := r.now().UTC()
+	t := helpers.GetImportTimestamp(ctx)
+	if t == nil {
+		return now, time.Time{}
+	}
+	if t.Before(now) {
+		return t.UTC(), t.UTC()
+	}
+	return now, now
 }
 
 // record writes ds's rows, each (event, person, delivery) once, and answers
@@ -63,19 +116,23 @@ func (r router) Deliver(ctx context.Context, ev Event, ds []Decision) []Decision
 // written before. When the rows can't be written, it is logged and everyone
 // is told as planned: a record never fails the change that caused it.
 func (r router) record(ctx context.Context, ev Event, ds []Decision) []Decision {
-	now := r.now().UTC()
+	now, written := r.stamp(ctx)
 	var rows []deliveryModels.Row
 	for _, d := range ds {
 		if _, err := uuid.Parse(d.UserID); err != nil {
 			continue
 		}
-		row := deliveryModels.Row{EventID: ev.ID, UserID: d.UserID, Cause: string(d.Cause), MessageID: ev.MessageID}
+		row := deliveryModels.Row{EventID: ev.ID, UserID: d.UserID, Cause: string(d.Cause), MessageID: ev.MessageID, CreatedAt: written}
 		for _, to := range d.To {
 			row.Delivery, row.State, row.SentAt, row.HoldUntil = string(to), "sent", &now, nil
 			rows = append(rows, row)
 		}
 		for _, to := range d.Held {
 			row.Delivery, row.State, row.SentAt, row.HoldUntil = string(to), "held", nil, d.HoldTill
+			rows = append(rows, row)
+		}
+		for _, to := range d.Waiting {
+			row.Delivery, row.State, row.SentAt, row.HoldUntil = string(to), "waiting", nil, d.WaitTill
 			rows = append(rows, row)
 		}
 	}
@@ -87,7 +144,7 @@ func (r router) record(ctx context.Context, ev Event, ds []Decision) []Decision 
 	fresh, err := recordRows(ctx, rows)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Notify Deliver %s: could not record the deliveries, telling everyone as planned: %+v", ev.ID, err)
-		return ds
+		return pushingNow(ds)
 	}
 	isNew := make(map[string]bool, len(fresh))
 	for _, f := range fresh {
@@ -96,7 +153,7 @@ func (r router) record(ctx context.Context, ev Event, ds []Decision) []Decision 
 	var told []Decision
 	for _, d := range ds {
 		if _, err := uuid.Parse(d.UserID); err != nil {
-			told = append(told, d) // not recorded: told as planned
+			told = append(told, pushingNow([]Decision{d})...) // not recorded: told as planned, now
 			continue
 		}
 		keep := func(in []Delivery) []Delivery {
@@ -109,8 +166,11 @@ func (r router) record(ctx context.Context, ev Event, ds []Decision) []Decision 
 			return out
 		}
 		n := d
-		n.To, n.Held = keep(d.To), keep(d.Held)
-		if len(n.To) > 0 || len(n.Held) > 0 {
+		n.To, n.Held, n.Waiting = keep(d.To), keep(d.Held), keep(d.Waiting)
+		if len(n.Waiting) == 0 {
+			n.WaitTill = nil
+		}
+		if len(n.To) > 0 || len(n.Held) > 0 || len(n.Waiting) > 0 {
 			told = append(told, n)
 		}
 	}
@@ -121,10 +181,24 @@ func (router) Retract(ctx context.Context, messageID string) {
 	if _, err := uuid.Parse(messageID); err != nil {
 		return
 	}
-	people, err := retractRows(ctx, messageID)
+	rows, err := retractRows(ctx, messageID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Notify Retract %s: %+v", messageID, err)
 		return
+	}
+	// A push that waited is dropped with its payload (A4 H4); the payload of
+	// a held one was never kept, so forgetting it costs nothing.
+	var people, payloads []string
+	for _, r := range rows {
+		if !slices.Contains(people, r.UserID) {
+			people = append(people, r.UserID)
+		}
+		if r.Delivery == string(ToPush) && r.State == "dropped" {
+			payloads = append(payloads, waitKey(r.EventID, r.UserID))
+		}
+	}
+	if len(payloads) > 0 {
+		forgetPayloads(ctx, payloads...)
 	}
 	// Every notice the message made goes with it: the inbox notice of a
 	// mention an edit added (NoteMentionsAdded) reached only those told here.
@@ -180,35 +254,56 @@ func mentionAdded(where Place, actor string, mentions []string) Event {
 	return Event{Cause: CauseMention, Actor: actor, Mentions: mentions, Place: where}
 }
 
-// Told is who of ds hears of the event at all, now or after their hold, in
-// order. Pure.
+// Told is who of ds hears of the event at all, now or after their hold or
+// wait, in order. Pure.
 func Told(ds []Decision) []string {
 	var out []string
 	for _, d := range ds {
-		if len(d.To) > 0 || len(d.Held) > 0 {
+		if len(d.To) > 0 || len(d.Held) > 0 || len(d.Waiting) > 0 {
 			out = append(out, d.UserID)
 		}
 	}
 	return out
 }
 
-// By is who of ds is told by delivery, now or after their hold, in order.
-// Pure.
+// By is who of ds is told by delivery, now or after their hold or wait, in
+// order. Pure.
 func By(ds []Decision, delivery Delivery) []string {
 	var out []string
 	for _, d := range ds {
-		if slices.Contains(d.To, delivery) || slices.Contains(d.Held, delivery) {
+		if toldBy(d, delivery) {
 			out = append(out, d.UserID)
 		}
 	}
 	return out
+}
+
+// ByOf is who of ds is told by delivery (By), split into those who hear of
+// the event by one of causes (Of) and the rest, each in order: an email that
+// says why it came goes to each by how they heard. Pure.
+func ByOf(ds []Decision, delivery Delivery, causes ...Cause) (of, rest []string) {
+	for _, d := range ds {
+		switch {
+		case !toldBy(d, delivery):
+		case slices.Contains(causes, d.Cause):
+			of = append(of, d.UserID)
+		default:
+			rest = append(rest, d.UserID)
+		}
+	}
+	return of, rest
+}
+
+// toldBy is whether d is told by delivery, now or after a hold or wait.
+func toldBy(d Decision, delivery Delivery) bool {
+	return slices.Contains(d.To, delivery) || slices.Contains(d.Held, delivery) || slices.Contains(d.Waiting, delivery)
 }
 
 // Of is who of ds hears of the event by one of causes, in order. Pure.
 func Of(ds []Decision, causes ...Cause) []string {
 	var out []string
 	for _, d := range ds {
-		if slices.Contains(causes, d.Cause) && (len(d.To) > 0 || len(d.Held) > 0) {
+		if slices.Contains(causes, d.Cause) && (len(d.To) > 0 || len(d.Held) > 0 || len(d.Waiting) > 0) {
 			out = append(out, d.UserID)
 		}
 	}

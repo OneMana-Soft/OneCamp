@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
@@ -94,6 +95,29 @@ func UUIDPage(ctx context.Context, pred, filter string, offset, first int) ([]st
 		ids[i] = r[pred]
 	}
 	return ids, nil
+}
+
+// LiveUUIDs is which of ids are a node's pred (the uuid every node of a kind
+// holds: task_uuid, project_uuid) whose deleted (its soft delete's time:
+// task_deleted_at) is unset, in one read of the graph: a deleted or unknown
+// one isn't in it. It says nothing else of them.
+func LiveUUIDs(ctx context.Context, pred, deleted string, ids []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := List[map[string]string](ctx, `{ live(func: eq(`+pred+`, `+string(list)+`)) @filter(`+dgraphquery.Live(deleted)+`) { `+pred+` } }`, nil, "live")
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r[pred]] = true
+	}
+	return out, nil
 }
 
 // First reads the first node of one block of a read-only query: ErrNotFound

@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -21,8 +22,9 @@ import (
 )
 
 // ErrThroughToken is a rule set through an API or MCP token: rules act on
-// their own for as long as they are on, so they are set in the app.
-var ErrThroughToken = errors.New("rules are set in the app, not through a token")
+// their own for as long as they are on, so they are set in the app. It is a
+// refusal (403), so an install through a token says so (CR-444 D1).
+var ErrThroughToken error = &helpers.Refusal{Status: http.StatusForbidden, Msg: "rules are set in the app, not through a token"}
 
 // ErrTooManyRules is a project at its cap.
 var ErrTooManyRules = fmt.Errorf("a project has at most %d rules", workflowModel.MaxRulesPerProject)

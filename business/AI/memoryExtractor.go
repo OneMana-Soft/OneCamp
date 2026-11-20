@@ -154,7 +154,7 @@ func MaybeExtractMemory(ctx context.Context, text string, scope MemoryScope) (in
 // items. Tolerates code fences and leading/trailing prose by extracting
 // the first JSON array. Invalid elements are skipped.
 func parseExtractedItems(raw string) []rawExtractedItem {
-	jsonArr := extractJSONArray(raw)
+	jsonArr := helpers.ExtractJSON(raw, '[')
 	if jsonArr == "" {
 		return nil
 	}
@@ -210,22 +210,6 @@ var wordRe = regexp.MustCompile(`\p{L}{2,}`)
 // token and text without words never do.
 func makesACommitment(content string) bool {
 	return promiseRe.MatchString(content) && len(wordRe.FindAllString(content, -1)) >= 3
-}
-
-// extractJSONArray returns the first top-level JSON array substring, or ""
-// if none is found. Handles ```json fences and surrounding prose.
-func extractJSONArray(s string) string {
-	s = strings.TrimSpace(s)
-	// Strip common code fences.
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	start := strings.Index(s, "[")
-	end := strings.LastIndex(s, "]")
-	if start == -1 || end == -1 || end <= start {
-		return ""
-	}
-	return s[start : end+1]
 }
 
 // persistMemoryItem upserts one item to Postgres and projects it to

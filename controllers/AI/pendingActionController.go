@@ -16,6 +16,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	pendingModels "github.com/akashc777/OneCamp/models/postgres/PendingAction"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -58,10 +59,9 @@ func ApprovePendingAction(w http.ResponseWriter, r *http.Request) {
 
 	action, err := business.ApprovePendingAction(ctx, &userInfo, id)
 	if err != nil {
-		status, msg := pendingActionStatus(err)
 		// On a "resolved/expired" race the latest record is still returned so
 		// the client can reconcile its card to the authoritative state.
-		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg, "data": action})
+		writePendingActionError(w, err, action)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Action approved", "data": action})
@@ -81,25 +81,32 @@ func RejectPendingAction(w http.ResponseWriter, r *http.Request) {
 
 	action, err := business.RejectPendingAction(ctx, &userInfo, id)
 	if err != nil {
-		status, msg := pendingActionStatus(err)
-		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg, "data": action})
+		writePendingActionError(w, err, action)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Action rejected", "data": action})
+}
+
+// writePendingActionError answers an approve or reject that didn't go through, with the latest record when there is
+// one, and Retry-After only on the words that say try again.
+func writePendingActionError(w http.ResponseWriter, err error, action any) {
+	status, msg := pendingActionStatus(err)
+	ai.SetRetryAfter(w.Header(), err, msg)
+	helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg, "data": action})
 }
 
 // pendingActionStatus maps a business error to an HTTP status + message.
 func pendingActionStatus(err error) (int, string) {
 	switch {
 	case errors.Is(err, business.ErrPendingActionNotFound):
-		return http.StatusNotFound, "Pending action not found"
+		return http.StatusNotFound, "That request is gone. It may have been handled already."
 	case errors.Is(err, business.ErrPendingActionForbidden):
-		return http.StatusForbidden, "Not authorized to act on this action"
+		return http.StatusForbidden, "Only the person it was proposed to can approve or reject it."
 	case errors.Is(err, business.ErrPendingActionResolved):
 		return http.StatusConflict, "This action was already handled"
 	case errors.Is(err, business.ErrPendingActionExpired):
-		return http.StatusGone, "This action expired"
+		return http.StatusGone, "This request expired. Ask again to run it."
 	default:
-		return http.StatusInternalServerError, "Failed to process action"
+		return http.StatusInternalServerError, "That didn't run. Try again in a moment."
 	}
 }

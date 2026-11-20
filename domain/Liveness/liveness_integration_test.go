@@ -32,4 +32,17 @@ func TestEveryCheckRunsAgainstTheRealSchema(t *testing.T) {
 			t.Errorf("%s: content that was never created reads as found", contentType)
 		}
 	}
+	ids := map[string][]string{}
+	for contentType := range Tables {
+		ids[contentType] = []string{missing}
+	}
+	got, err := checkTables(ctx, ids)
+	if err != nil {
+		t.Fatalf("every table in one statement: %v", err)
+	}
+	for contentType := range Tables {
+		if _, found := got[contentType][missing]; found {
+			t.Errorf("%s: content that was never created reads as found", contentType)
+		}
+	}
 }

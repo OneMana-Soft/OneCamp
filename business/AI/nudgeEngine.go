@@ -35,6 +35,7 @@ package business
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -69,7 +70,8 @@ const (
 	// is "stale" once untouched for this long.
 	nudgeStaleAfter = 7 * 24 * time.Hour
 
-	// Don't re-surface a signal the user dismissed/acted on within this window.
+	// A signal its member dismissed or acted on stays down at least this long,
+	// and after that until its item changes (nudgeHeld).
 	nudgeSuppressAfterTerminal = 3 * 24 * time.Hour
 
 	// Bound rows scanned and nudges generated per user per run.
@@ -150,38 +152,176 @@ func runNudgePass(ctx context.Context) {
 		return
 	}
 
-	now := time.Now()
-	candidates := gatherMemoryNudges(ctx, now)
-
-	// Group by owner so we can cap per user and supersede stale in one shot.
-	byUser := map[uuid.UUID][]candidateNudge{}
-	for _, c := range candidates {
-		byUser[c.userID] = append(byUser[c.userID], c)
-	}
-
-	totalCreated := 0
-	for userID, list := range byUser {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		created := applyUserNudges(ctx, userID, list)
-		totalCreated += created
-	}
-
-	// Reconcile users whose signals ALL resolved since the last pass: they
-	// produce no candidates this run, so they're absent from byUser and their
-	// stale open nudges would otherwise linger. Supersede all open nudges for
-	// any user with open nudges who had no candidate this pass.
-	reconcileResolvedUsers(ctx, byUser)
+	owners, totalCreated := raiseNudges(ctx, time.Now())
 
 	// Housekeeping: purge old terminal rows. Best-effort.
 	if n, perr := nudgeModels.PurgeOldTerminal(ctx, nudgePurgeAfter); perr == nil && n > 0 {
 		helpers.LogInfoWithContext(ctx, "nudge engine: purged %d old terminal nudge(s)", n)
 	}
 
-	helpers.LogInfoWithContext(ctx, "nudge engine: evaluated %d owner(s), created/refreshed %d nudge(s)", len(byUser), totalCreated)
+	helpers.LogInfoWithContext(ctx, "nudge engine: evaluated %d owner(s), created/refreshed %d nudge(s)", owners, totalCreated)
+}
+
+// raiseNudges is the pass after its gates: it raises each owner's nudges and
+// closes those whose signal no longer holds, one statement per step for
+// everyone (NOTIF M11: each owner was their own read, write and supersede).
+// It closes only what it read as gone: a failed read raises and closes
+// nothing, a read cut off at its cap raises but closes nothing, and an
+// owner's items whose scope couldn't be read keep their nudges as they are.
+// Before, a failed read closed every open nudge of everyone, and the next
+// good pass raised them all again as new. It answers how many owners it
+// evaluated and how many nudges it created.
+func raiseNudges(ctx context.Context, now time.Time) (owners, created int) {
+	signals, err := gatherMemoryNudges(ctx, now)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "nudge engine: actionable items unread, no nudge raised or closed: %v", err)
+		return 0, 0
+	}
+	return applyNudges(ctx, now, signals)
+}
+
+// applyNudges raises and closes everyone's nudges for what a pass read
+// (raiseNudges).
+func applyNudges(ctx context.Context, now time.Time, signals nudgeSignals) (owners, created int) {
+	// Each owner's signals, highest priority first, then stable. Their keys
+	// are EVERY currently-valid signal, taken BEFORE the per-pass cap: a
+	// person with more than nudgeMaxPerUser live signals never has the
+	// still-valid ones superseded for missing the cap.
+	byUser := map[uuid.UUID][]candidateNudge{}
+	for _, c := range signals.candidates {
+		byUser[c.userID] = append(byUser[c.userID], c)
+	}
+	signalKeys := make(map[uuid.UUID][]string, len(byUser))
+	for u, list := range byUser {
+		sort.SliceStable(list, func(i, j int) bool { return list[i].priority > list[j].priority })
+		for _, c := range list {
+			signalKeys[u] = append(signalKeys[u], c.dedupKey)
+		}
+	}
+
+	// The signals their member handled stay down (nudgeHeld): when each was
+	// handled is one read for everyone. Unread, nothing is raised or closed
+	// this pass: a dismissal is never lost to a blip.
+	handled, err := nudgeModels.LastHandled(ctx, signalKeys)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "nudge engine: dismissals unread, no nudge raised or closed: %v", err)
+		return len(byUser), 0
+	}
+
+	// Cap how many each owner gets per pass (bounds work and nudge volume),
+	// after the held ones are left out so they never take a new signal's
+	// place; the rest stay in the keep-set so they're not superseded. Every
+	// owner's are written in one statement.
+	signal := map[string]candidateNudge{}
+	var inputs []nudgeModels.UpsertInput
+	for u, list := range byUser {
+		n := 0
+		for _, c := range list {
+			if nudgeHeld(handled[u][c.dedupKey], c.changedAt, now) {
+				continue
+			}
+			if n == nudgeMaxPerUser {
+				break
+			}
+			n++
+			if _, dup := signal[c.dedupKey]; !dup {
+				signal[c.dedupKey] = c
+			}
+			inputs = append(inputs, nudgeModels.UpsertInput{
+				UserID:     u,
+				Kind:       c.kind,
+				Title:      c.title,
+				Body:       c.body,
+				CTAURL:     c.ctaURL,
+				CTAText:    c.ctaText,
+				SourceType: c.sourceType,
+				SourceID:   c.sourceID,
+				Priority:   c.priority,
+				DedupKey:   c.dedupKey,
+			})
+		}
+	}
+	written, err := nudgeModels.UpsertMany(ctx, inputs)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "nudge engine: upsert failed: %v", err)
+	}
+	raised := map[uuid.UUID][]raisedNudge{}
+	for _, w := range written {
+		if w.Inserted {
+			created++
+			raised[w.UserID] = append(raised[w.UserID], raisedNudge{id: w.ID, signal: signal[w.DedupKey]})
+		}
+	}
+
+	// Close every open nudge, of anyone, whose signal no longer holds
+	// (resolved, no longer overdue, or every signal of its person resolved),
+	// in one statement. Kept: each owner's signals, and the items whose
+	// scope was unread. Only when the read was whole: one cut off at its cap
+	// left signals unread, and no nudge is closed for a signal not read.
+	var closed map[uuid.UUID][]uuid.UUID
+	if signals.complete {
+		keep := make(map[uuid.UUID][]string, len(signalKeys)+len(signals.held))
+		for u, keys := range signalKeys {
+			keep[u] = keys
+		}
+		for u, keys := range signals.held {
+			keep[u] = slices.Concat(keep[u], keys)
+		}
+		if closed, err = nudgeModels.SupersedeStale(ctx, keep); err != nil {
+			helpers.LogErrorWithContext(ctx, "nudge engine: supersede stale nudges failed: %v", err)
+		}
+	} else {
+		helpers.LogErrorWithContext(ctx, "nudge engine: the actionable items read stopped at its cap (%d): no nudge closed this pass", nudgeMaxRows)
+	}
+	tellOwners(ctx, raised, closed)
+	return len(byUser), created
+}
+
+// raisedNudge is a nudge a pass created, and the signal it was raised for.
+type raisedNudge struct {
+	id     uuid.UUID
+	signal candidateNudge
+}
+
+// tellOwners tells each person what a pass (or one item's settle,
+// ClearNudgeForMemoryItem) did to their nudges: a "new" for each one raised
+// for them, and ONE "cleared" naming every one of theirs it closed (none when
+// theirs only went quiet). Their open counts after are read once for
+// everyone. Each event goes only to its owner's own topic.
+func tellOwners(ctx context.Context, raised map[uuid.UUID][]raisedNudge, closed map[uuid.UUID][]uuid.UUID) {
+	told := slices.Collect(maps.Keys(raised))
+	for u := range closed {
+		if _, ok := raised[u]; !ok {
+			told = append(told, u)
+		}
+	}
+	if len(told) == 0 {
+		return
+	}
+	counts, err := nudgeModels.CountOpenForUsers(ctx, told)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "nudge engine: count the open nudges of %d person(s) failed: %v", len(told), err)
+	}
+	createdAt := time.Now().UTC().Format(time.RFC3339)
+	for u, list := range raised {
+		for _, r := range list {
+			PublishNudgeToUser(u.String(), &mqttStruct.MqttNudge{
+				Action:    "new",
+				NudgeID:   r.id.String(),
+				Kind:      r.signal.kind,
+				Title:     r.signal.title,
+				Body:      r.signal.body,
+				CTAURL:    r.signal.ctaURL,
+				CTAText:   r.signal.ctaText,
+				Priority:  r.signal.priority,
+				OpenCount: counts[u],
+				CreatedAt: createdAt,
+			})
+		}
+	}
+	for u, ids := range closed {
+		PublishNudgeCleared(u.String(), counts[u], ids...)
+	}
 }
 
 // nudgeQuietAfter is how long an urgent nudge stays urgent without being
@@ -242,35 +382,7 @@ func settleOpenNudges(ctx context.Context, now time.Time) {
 			closed[u] = nil
 		}
 	}
-	if len(closed) == 0 {
-		return
-	}
-	counts, err := nudgeModels.CountOpenForUsers(ctx, slices.Collect(maps.Keys(closed)))
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "nudge engine: count the open nudges of %d person(s) failed: %v", len(closed), err)
-	}
-	for u, ids := range closed {
-		PublishNudgeCleared(u.String(), counts[u], ids...)
-	}
-}
-
-// reconcileResolvedUsers supersedes open nudges for users who had open nudges
-// but produced zero candidates this pass (every signal resolved). Without this,
-// a nudge for a commitment that got done would never clear on its own.
-func reconcileResolvedUsers(ctx context.Context, byUser map[uuid.UUID][]candidateNudge) {
-	openUsers, err := nudgeModels.UsersWithOpenNudges(ctx)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "nudge engine: list open-nudge users failed: %v", err)
-		return
-	}
-	for _, uid := range openUsers {
-		if _, hadCandidates := byUser[uid]; hadCandidates {
-			continue // already reconciled in applyUserNudges via its keep-set
-		}
-		if closed, serr := nudgeModels.SupersedeStaleForUser(ctx, uid, nil); serr == nil {
-			publishCleared(ctx, uid, closed...)
-		}
-	}
+	tellOwners(ctx, nil, closed)
 }
 
 // candidateNudge is a pre-delivery nudge with its dedup key + priority.
@@ -285,20 +397,50 @@ type candidateNudge struct {
 	sourceID   string
 	priority   int
 	dedupKey   string
+	// changedAt is when the signal's item last changed: a dismissal before
+	// it no longer holds the signal (nudgeHeld).
+	changedAt time.Time
+}
+
+// nudgeHeld: a signal its member dismissed or acted on (at handledAt; zero
+// when never) stays down for at least nudgeSuppressAfterTerminal, and after
+// that until its item changes (changedAt after handledAt). The one rule for
+// every nudge kind (V-615): Dismiss is an end, not a 3-day hold.
+func nudgeHeld(handledAt, changedAt, now time.Time) bool {
+	return !handledAt.IsZero() && (now.Sub(handledAt) < nudgeSuppressAfterTerminal || !changedAt.After(handledAt))
+}
+
+// listActionable is the pass's read of the actionable memory items: a seam,
+// so a test can make the read fail.
+var listActionable = memoryModels.ListActionableForDigest
+
+// ownerProfileNow is the read of an owner's current profile (where they are):
+// a seam, so a test can make the lookup fail.
+var ownerProfileNow = userDomain.GetActiveDgraphUserInfoByUUID
+
+// nudgeSignals is what a pass read: its candidate nudges; each owner's dedup
+// keys of the items whose scope couldn't be read (held: their nudges stay as
+// they are, neither raised nor closed); and whether the read was whole, not
+// cut off at nudgeMaxRows.
+type nudgeSignals struct {
+	candidates []candidateNudge
+	held       map[uuid.UUID][]string
+	complete   bool
 }
 
 // gatherMemoryNudges turns actionable memory items (overdue commitments + stale
 // open questions) into candidate nudges. This is the first rule source; more
 // (blocked tasks, unreviewed PRs) can be appended here following the same shape.
-func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
+// It errs when the items are unread: then the pass knows nothing.
+func gatherMemoryNudges(ctx context.Context, now time.Time) (nudgeSignals, error) {
 	overdueBefore := now
 	staleBefore := now.Add(-nudgeStaleAfter)
 
-	items, err := memoryModels.ListActionableForDigest(ctx, overdueBefore, staleBefore, nudgeMaxRows)
+	items, err := listActionable(ctx, overdueBefore, staleBefore, nudgeMaxRows)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "nudge engine: actionable items query failed: %v", err)
-		return nil
+		return nudgeSignals{}, err
 	}
+	out := nudgeSignals{held: map[uuid.UUID][]string{}, complete: len(items) < nudgeMaxRows}
 
 	// PRIVACY GATE: ListActionableForDigest selects on owner_user_id only — an
 	// item's owner was a scope member when it was captured, but membership
@@ -307,9 +449,8 @@ func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
 	// content) would follow a user out of a conversation they've left, leaking
 	// it. When we can positively confirm the owner left, we also clear
 	// owner_user_id so future passes don't re-scan it (self-healing).
-	memberCache := map[string]*memoryScopes{}
+	memberCache := map[string]ownerScope{}
 
-	var out []candidateNudge
 	var stale []uuid.UUID
 	defer func() {
 		// Detached in one statement once the pass has looked at them all.
@@ -319,12 +460,20 @@ func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
 	}()
 	for _, di := range items {
 		it := di.Item
-		inScope, resolved := ownerScopeStatus(ctx, di.OwnerID, it, memberCache)
+		dedupKey := "memory:" + it.ID.String()
+		inScope, resolved, serr := ownerScopeStatus(ctx, di.OwnerID, it, memberCache)
+		if serr != nil {
+			// Where the owner is couldn't be read: nothing is known, so the
+			// item's nudge is held as it is (neither raised nor closed) and
+			// it stays theirs. The lookup is one per owner, so a held owner
+			// has no candidates this pass.
+			out.held[di.OwnerID] = append(out.held[di.OwnerID], dedupKey)
+			continue
+		}
 		if !inScope {
 			// Only DETACH when we positively resolved the owner's profile and
-			// confirmed they're no longer in scope. On a transient lookup
-			// failure (resolved == false) we skip this pass but keep ownership
-			// intact, so a Dgraph blip can't orphan items.
+			// confirmed they're no longer in scope. When their profile is gone
+			// (resolved == false) we skip it but keep ownership intact.
 			if resolved {
 				stale = append(stale, it.ID)
 			}
@@ -336,6 +485,10 @@ func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
 		if it.Kind == memoryModels.KindCommitment && !commitmentNeedsMeNow(it, now) {
 			continue
 		}
+		// A question likewise only while recently stale (questionNeedsMeNow).
+		if it.Kind == memoryModels.KindQuestion && !questionNeedsMeNow(it, now) {
+			continue
+		}
 		c := candidateNudge{
 			userID:     di.OwnerID,
 			sourceType: "memory",
@@ -343,9 +496,10 @@ func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
 			// Deep-link straight to THIS item (the panel reads ?item= to switch
 			// to the open view, scroll to, and highlight it) — not the generic
 			// list — so clicking the nudge lands the user on the exact thing.
-			ctaURL:   "/app/ai/memory?item=" + it.ID.String(),
-			ctaText:  "View",
-			dedupKey: "memory:" + it.ID.String(),
+			ctaURL:    "/app/ai/memory?item=" + it.ID.String(),
+			ctaText:   "View",
+			dedupKey:  dedupKey,
+			changedAt: it.UpdatedAt,
 		}
 		switch it.Kind {
 		case memoryModels.KindCommitment:
@@ -365,9 +519,16 @@ func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
 		default:
 			continue
 		}
-		out = append(out, c)
+		out.candidates = append(out.candidates, c)
 	}
-	return out
+	return out, nil
+}
+
+// ownerScope is a pass's read of where an owner is: their scopes (nil when
+// their profile is gone), or the error that left it unread.
+type ownerScope struct {
+	scopes *memoryScopes
+	err    error
 }
 
 // ownerScopeStatus reports whether the owner currently belongs to the item's
@@ -375,142 +536,41 @@ func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
 // resolved at all. This is the fire-time complement to memoryItemVisibleTo,
 // by the same check (memoryScopes): an item is only ever nudged to an owner
 // who can still see where it lives. The owner's postgres Id equals their
-// Dgraph user_uuid. cache holds each owner's scopes for the pass (one lookup
-// per distinct owner; nil when unresolved).
+// Dgraph user_uuid. cache holds each owner's read for the pass (one lookup
+// per distinct owner).
 //
-// Returns (inScope, resolved). When resolved is false the owner's profile
-// couldn't be loaded (deleted user / transient error) and inScope is false —
-// the caller must NOT clear ownership in that case, only skip the pass.
-func ownerScopeStatus(ctx context.Context, ownerID uuid.UUID, it *memoryModels.MemoryItem, cache map[string]*memoryScopes) (inScope bool, resolved bool) {
+// Returns (inScope, resolved, err). When resolved is false the owner's
+// profile is gone (deleted user) and inScope is false: the caller must NOT
+// clear ownership in that case, only skip the item. err is a lookup that
+// failed: nothing is known, and the caller must neither raise nor close.
+func ownerScopeStatus(ctx context.Context, ownerID uuid.UUID, it *memoryModels.MemoryItem, cache map[string]ownerScope) (inScope, resolved bool, err error) {
 	key := ownerID.String()
-	scopes, ok := cache[key]
+	s, ok := cache[key]
 	if !ok {
-		scopes = ownerScopesNow(ctx, ownerID)
-		cache[key] = scopes
+		s.scopes, s.err = ownerScopesNow(ctx, ownerID)
+		cache[key] = s
 	}
-	if scopes == nil {
-		return false, false
+	if s.err != nil || s.scopes == nil {
+		return false, false, s.err
 	}
-	return scopes.canRead(it), true
+	return s.scopes.canRead(it), true, nil
 }
 
 // ownerScopesNow is where a person is now, from their current Dgraph profile,
 // for a reader with no request (the nudge engine, the digest). nil when the
-// profile can't be loaded, so the caller fails closed rather than leaking.
-func ownerScopesNow(ctx context.Context, ownerID uuid.UUID) *memoryScopes {
-	info, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, ownerID.String())
+// profile is gone (no live user: a deleted member), and an error when it
+// couldn't be read: either way the caller fails closed rather than leaking.
+// Gone is a read, not an unread one, so the pass closes a gone member's
+// nudges; only an error holds them.
+func ownerScopesNow(ctx context.Context, ownerID uuid.UUID) (*memoryScopes, error) {
+	info, err := ownerProfileNow(ctx, ownerID.String())
+	if errors.Is(err, helpers.ErrNotFound) {
+		return nil, nil
+	}
 	if err != nil || info == nil {
-		return nil
+		return nil, err
 	}
-	return newMemoryScopes(info)
-}
-
-// applyUserNudges upserts a user's candidate nudges (capped, dedup-suppressed),
-// publishes new ones live, then supersedes any of their open nudges whose
-// signal no longer appears. Returns the count newly created.
-func applyUserNudges(ctx context.Context, userID uuid.UUID, list []candidateNudge) int {
-	// Highest priority first, then stable.
-	sort.SliceStable(list, func(i, j int) bool { return list[i].priority > list[j].priority })
-
-	// The supersede keep-set is EVERY currently-valid signal for this user —
-	// computed from the full candidate list BEFORE the per-pass cap. If we
-	// derived `keep` only from the capped/created subset, a user with more than
-	// nudgeMaxPerUser live signals would have their still-valid open nudges
-	// wrongly superseded just because they didn't make this pass's cap.
-	keep := make([]string, 0, len(list))
-	for _, c := range list {
-		keep = append(keep, c.dedupKey)
-	}
-
-	// Cap how many we upsert/create per pass (bounds work + nudge volume); the
-	// rest remain represented in `keep` so they're not superseded.
-	work := list
-	if len(work) > nudgeMaxPerUser {
-		work = work[:nudgeMaxPerUser]
-	}
-
-	// The work's recent dismissals in one read, and its nudges written in one
-	// statement, where each was a read and a write (backend audit #36).
-	keys := make([]string, 0, len(work))
-	for _, c := range work {
-		keys = append(keys, c.dedupKey)
-	}
-	handled, err := nudgeModels.RecentlyTerminal(ctx, keys, nudgeSuppressAfterTerminal)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "nudge engine: recent dismissals unread: %v", err)
-		handled = map[string]bool{}
-	}
-	byKey := map[string]candidateNudge{}
-	inputs := make([]nudgeModels.UpsertInput, 0, len(work))
-	for _, c := range work {
-		// Skip signals the user just handled (don't re-surface a dismissed one).
-		if handled[c.dedupKey] {
-			continue
-		}
-		if _, dup := byKey[c.dedupKey]; !dup {
-			byKey[c.dedupKey] = c
-		}
-		inputs = append(inputs, nudgeModels.UpsertInput{
-			UserID:     userID,
-			Kind:       c.kind,
-			Title:      c.title,
-			Body:       c.body,
-			CTAURL:     c.ctaURL,
-			CTAText:    c.ctaText,
-			SourceType: c.sourceType,
-			SourceID:   c.sourceID,
-			Priority:   c.priority,
-			DedupKey:   c.dedupKey,
-		})
-	}
-	created := 0
-	written, err := nudgeModels.UpsertMany(ctx, userID, inputs)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "nudge engine: upsert failed: %v", err)
-	}
-	for _, u := range written {
-		if u.Inserted {
-			created++
-			publishNudge(ctx, userID, u.ID, byKey[u.DedupKey])
-		}
-	}
-
-	// Supersede the user's open nudges whose signal no longer holds (resolved /
-	// no longer overdue). If the user had open nudges and none survive, this
-	// clears them — keeping the bell honest.
-	if closed, err := nudgeModels.SupersedeStaleForUser(ctx, userID, keep); err == nil {
-		// Each one closed is told by its id, so open tabs drop exactly it.
-		publishCleared(ctx, userID, closed...)
-	}
-	return created
-}
-
-// publishNudge sends a real-time "new nudge" event to the user's activity topic.
-func publishNudge(ctx context.Context, userID, nudgeID uuid.UUID, c candidateNudge) {
-	count, _ := nudgeModels.CountOpenForUser(ctx, userID)
-	msg := &mqttStruct.MqttNudge{
-		Action:    "new",
-		NudgeID:   nudgeID.String(),
-		Kind:      c.kind,
-		Title:     c.title,
-		Body:      c.body,
-		CTAURL:    c.ctaURL,
-		CTAText:   c.ctaText,
-		Priority:  c.priority,
-		OpenCount: count,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-	}
-	PublishNudgeToUser(userID.String(), msg)
-}
-
-// publishCleared tells the person each nudge of theirs that closed, by id,
-// with their open count after; nothing when none did.
-func publishCleared(ctx context.Context, userID uuid.UUID, closed ...uuid.UUID) {
-	if len(closed) == 0 {
-		return
-	}
-	count, _ := nudgeModels.CountOpenForUser(ctx, userID)
-	PublishNudgeCleared(userID.String(), count, closed...)
+	return newMemoryScopes(info), nil
 }
 
 // ClearNudgeForMemoryItem supersedes the OPEN nudge for a memory item the
@@ -528,7 +588,7 @@ func ClearNudgeForMemoryItem(ctx context.Context, memoryItemID string) {
 	if userID == uuid.Nil {
 		return // no open nudge for this item — nothing to clear
 	}
-	publishCleared(ctx, userID, nudgeID)
+	tellOwners(ctx, nil, map[uuid.UUID][]uuid.UUID{userID: {nudgeID}})
 }
 
 // PublishNudgeToUser publishes a nudge event to a single user's activity topic.

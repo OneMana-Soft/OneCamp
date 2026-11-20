@@ -312,8 +312,9 @@ func GetDgraphUserTaskList(w http.ResponseWriter, r *http.Request) {
 	// One mapping from the sorts the list offers to the graph's: no key a
 	// request names is passed to the graph as it came.
 	sortingQuery, err := dgraphquery.TaskListOrder(queryParams.Get("sorting"))
-	if sortingQuery == dgraphquery.ManualOrder {
-		// My Tasks spans projects, each with its own order: newest first.
+	if dgraphquery.SideOrdered(sortingQuery) {
+		// My Tasks spans projects, each with its own order and SLAs: newest
+		// first.
 		sortingQuery, _ = dgraphquery.TaskListOrder("")
 	}
 	if err != nil {
@@ -1691,7 +1692,7 @@ func GetGrpChatRecordingURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteRecordingURL(w, r, dgraphRecording)
+	httpx.WriteRecordingURL(w, r, dgraphRecording, grpIdString, userInfo.UserDgraphInfo.Uid, egressIdString)
 }
 
 func GetChatRecordingURL(w http.ResponseWriter, r *http.Request) {
@@ -1743,7 +1744,7 @@ func GetChatRecordingURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteRecordingURL(w, r, dgraphRecording)
+	httpx.WriteRecordingURL(w, r, dgraphRecording, grpId, userInfo.UserDgraphInfo.Uid, egressIdString)
 }
 
 func GetChannelRecordingURL(w http.ResponseWriter, r *http.Request) {
@@ -1793,31 +1794,28 @@ func GetChannelRecordingURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteRecordingURL(w, r, dgraphRecording)
+	httpx.WriteRecordingURL(w, r, dgraphRecording, channelUUIDString, userInfo.UserDgraphInfo.Uid, egressIdString)
 }
 
 // channelRecordingAccess is whether a recording opened by a channel's route
-// may be played: 404 when there is none, or it is a DM's or a group's (that
-// used to dereference a nil channel and answer 500), 403 when the asker isn't
-// in the channel or it is another channel's, 0 when it may. Pure.
+// may be played: 0 when it may, else 404, the one answer for a recording
+// there isn't, a DM's or a group's (that used to dereference a nil channel
+// and answer 500), another channel's, or one in a channel the asker isn't in.
+// Whoever can't see a recording learns nothing of whether its id exists
+// (V-1126). Pure.
 func channelRecordingAccess(rec *dgraphStruct.DgraphRecording, channelUUID string) int {
-	switch {
-	case rec == nil || rec.Channel == nil:
+	if rec == nil || rec.Channel == nil || !rec.ReaderIsIn(channelUUID) {
 		return http.StatusNotFound
-	case rec.Channel.IsMember == 0 || rec.Channel.Uuid != channelUUID:
-		return http.StatusForbidden
 	}
 	return 0
 }
 
 // chatRecordingAccess is channelRecordingAccess for a DM's or a group's
-// route. Pure.
+// route: 404 for a recording there isn't, a channel's, another
+// conversation's, or one in a conversation the asker isn't in. Pure.
 func chatRecordingAccess(rec *dgraphStruct.DgraphRecording, groupingID string) int {
-	switch {
-	case rec == nil || rec.Dm == nil:
+	if rec == nil || rec.Dm == nil || !rec.ReaderIsIn(groupingID) {
 		return http.StatusNotFound
-	case rec.Dm.ParticipantIsMember == 0 || rec.Dm.GroupingId != groupingID:
-		return http.StatusForbidden
 	}
 	return 0
 }

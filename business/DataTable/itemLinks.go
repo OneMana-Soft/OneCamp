@@ -1,8 +1,8 @@
 package business
 
 // Relation fields that link rows to OneCamp items: docs, tasks, boards,
-// projects and people (relation_target "doc", "task", "board", "project",
-// "user", or "any" for all of them).
+// projects, people, channels and calls (relation_target "doc", "task",
+// "board", "project", "user", "channel", "call", or "any" for all of them).
 //
 // A link was stored as {id, label, type}, with the label copied when the link
 // was made, and every reader of the table saw that label, and so did anyone
@@ -19,7 +19,12 @@ package business
 //   - a task by business/Task CanViewTask, unless it or its project is
 //     deleted;
 //   - a project by being in it, unless it's deleted;
-//   - a person by being in the workspace.
+//   - a person by being in the workspace;
+//   - a channel and a call by the title reader their own package registers
+//     with business/Access (ReadableTitles): a channel by the channel's
+//     access rule (business/EntityLink), unless it's deleted; a call by
+//     whether the reader may read its conversation's calls
+//     (business/CallState callTitles.go), never an instant meeting's.
 //
 // An item the reader can't open, that's gone, or that's past what one read
 // names comes back {id, type, hidden: true}, so the web keeps it when it
@@ -34,6 +39,7 @@ import (
 	"strings"
 	"time"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
@@ -51,6 +57,7 @@ import (
 // untitled is what an item with no title of its own is called.
 var untitled = map[string]string{
 	fieldTypes.ItemDoc: "Untitled doc", fieldTypes.ItemTask: "Untitled task", fieldTypes.ItemBoard: "Untitled board", fieldTypes.ItemProject: "Untitled project", fieldTypes.ItemUser: "Someone",
+	fieldTypes.ItemChannel: "Untitled channel", fieldTypes.ItemCall: "Call",
 }
 
 const (
@@ -144,6 +151,33 @@ var itemNamers = map[string]func(ctx context.Context, ids []string, who *itemRea
 	},
 	fieldTypes.ItemProject: projectTitles,
 	fieldTypes.ItemUser:    peopleNames,
+	fieldTypes.ItemChannel: sharedTitles(fieldTypes.ItemChannel),
+	fieldTypes.ItemCall:    sharedTitles(fieldTypes.ItemCall),
+}
+
+// sharedTitles names a kind by the title reader its own package registers
+// with business/Access, which every other reader of its titles asks too
+// (ReadableTitles): one batch of ids in as few reads as that reader takes.
+func sharedTitles(kind string) func(ctx context.Context, ids []string, who *itemReader) (map[string]string, error) {
+	return func(ctx context.Context, ids []string, who *itemReader) (map[string]string, error) {
+		uid, err := who.graphUID(ctx)
+		if err != nil || uid == "" {
+			return map[string]string{}, err
+		}
+		refs := make([]accessBusiness.ItemRef, 0, len(ids))
+		for _, id := range ids {
+			refs = append(refs, accessBusiness.ItemRef{Kind: kind, ID: id})
+		}
+		got, err := accessBusiness.ReadableTitles(ctx, []accessBusiness.Subject{{UserUID: uid, UserUUID: who.uuid}}, refs)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]string, len(got))
+		for r, title := range got {
+			out[strings.ToLower(r.ID)] = title
+		}
+		return out, nil
+	}
 }
 
 // projectTitles names the projects a reader is in, by projectDomain's

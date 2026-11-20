@@ -45,7 +45,7 @@ func PropagateUserInfoChangeInOpenSearch(ctx context.Context, userUUID string, n
 	if opensearchInit.OpenSearchClient == nil {
 		return errors.New("search is not connected")
 	}
-	indices := []string{openSearchStruct.POST_INDEX, openSearchStruct.CHAT_INDEX, openSearchStruct.COMMENT_INDEX, openSearchStruct.ATTACHMENT_INDEX, openSearchStruct.DOC_INDEX, openSearchStruct.TASK_INDEX, openSearchStruct.USER_INDEX}
+	indices := []string{openSearchStruct.POST_INDEX, openSearchStruct.CHAT_INDEX, openSearchStruct.COMMENT_INDEX, openSearchStruct.ATTACHMENT_INDEX, openSearchStruct.DOC_INDEX, openSearchStruct.TASK_INDEX, openSearchStruct.TRANSCRIPT_INDEX, openSearchStruct.USER_INDEX}
 
 	for _, index := range indices {
 		var script string
@@ -143,6 +143,11 @@ func PropagateUserInfoChangeInOpenSearch(ctx context.Context, userUUID string, n
 		case openSearchStruct.TASK_INDEX:
 			script = `ctx._source.task_assignee_user_full_name = params.newName; ctx._source.task_assignee_profile = params.newProfile`
 			query = fmt.Sprintf(`{"term": {"task_assignee_user_id": "%s"}}`, userUUID)
+		case openSearchStruct.TRANSCRIPT_INDEX:
+			// A call's line is found by who said it, by the name people see;
+			// it holds no picture of them.
+			script = `ctx._source.transcript_by_user_full_name = params.newName`
+			query = fmt.Sprintf(`{"term": {"transcript_by_user_id": "%s"}}`, userUUID)
 		case openSearchStruct.USER_INDEX:
 			// The profile only. Every index above holds who wrote something
 			// (or whose task it is) by the name people see, which is newName;

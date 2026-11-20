@@ -104,7 +104,7 @@ type rawPlan struct {
 }
 
 func decodePlan(out string) (*rawPlan, bool) {
-	js := extractJSONObject(StripReasoning(out))
+	js := helpers.ExtractJSON(StripReasoning(out), '{')
 	if js == "" {
 		return nil, false
 	}

@@ -40,6 +40,9 @@ const (
 	CapabilityComment = "comment"
 	// CapabilityPost lets a channel guest write as well as read.
 	CapabilityPost = "post"
+	// CapabilityEdit is a board link's guest who draws (miro-33): reads,
+	// comments and changes the canvas, and nothing else.
+	CapabilityEdit = "edit"
 )
 
 // GuestGrant mirrors a row of guest_grants. The raw token is never stored.
@@ -169,10 +172,17 @@ func scanGrant(s scanner) (*GuestGrant, error) {
 // transaction: a personal room's link is made and published at its address
 // in one (business/Guest NewRoom).
 func CreateGrant(ctx context.Context, tokenHash []byte, resourceType, resourceID, capability string, createdBy uuid.UUID, expiresAt *time.Time) (uuid.UUID, error) {
+	return CreateLockedGrant(ctx, tokenHash, resourceType, resourceID, capability, createdBy, expiresAt, nil)
+}
+
+// CreateLockedGrant is CreateGrant for a link made with a password: its
+// bcrypt hash (nil for none) is written with the row, so the link never
+// opens without it, not even for a moment.
+func CreateLockedGrant(ctx context.Context, tokenHash []byte, resourceType, resourceID, capability string, createdBy uuid.UUID, expiresAt *time.Time, passwordHash *string) (uuid.UUID, error) {
 	id := uuid.New()
-	const q = `INSERT INTO guest_grants (id, token_hash, resource_type, resource_id, capability, created_by, expires_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)`
-	_, err := pgexec.Exec(ctx, q, id, tokenHash, resourceType, resourceID, capability, createdBy, expiresAt)
+	const q = `INSERT INTO guest_grants (id, token_hash, resource_type, resource_id, capability, created_by, expires_at, password_hash)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
+	_, err := pgexec.Exec(ctx, q, id, tokenHash, resourceType, resourceID, capability, createdBy, expiresAt, passwordHash)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Guest/CreateGrant err: %+v", err)
 		return uuid.Nil, err
@@ -479,13 +489,14 @@ func SlugFree(ctx context.Context, slug, resourceType, resourceID string) (bool,
 }
 
 // Unpublish takes a grant's address away, and its page with it; the link's
-// token keeps working until it is revoked. Nil when the grant isn't live.
+// token keeps working until it is revoked. Nil when the grant isn't live or
+// has no address: a grant that isn't on the web keeps its password.
 func Unpublish(ctx context.Context, id uuid.UUID) (*GuestGrant, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	const q = `UPDATE guest_grants SET slug = NULL, indexable = false, allow_copies = false, password_hash = NULL,
 		unlock_version = unlock_version + 1, published_at = NULL, published_by = NULL
-		WHERE id = $1 AND revoked_at IS NULL RETURNING ` + grantColumns
+		WHERE id = $1 AND revoked_at IS NULL AND slug IS NOT NULL RETURNING ` + grantColumns
 	g, err := scanGrant(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -517,4 +528,44 @@ func ForgetResources(ctx context.Context, resourceType string, resourceIDs []str
 		return 0, nil
 	}
 	return pgexec.Exec(ctx, `DELETE FROM guest_grants WHERE resource_type = $1 AND resource_id = ANY($2)`, resourceType, resourceIDs)
+}
+
+// LinkChange is a live link's new role, end and password, as ChangeLink
+// writes them: PasswordHash is the whole new value (nil: none), and
+// NewUnlock moves the unlock version, ending every unlock and live token
+// given under the password before.
+type LinkChange struct {
+	Capability   string
+	ExpiresAt    *time.Time
+	PasswordHash *string
+	NewUnlock    bool
+}
+
+// ChangeLink writes a live board link's role, end and password, and answers
+// the link as it now is; nil when it is not a live board link (revoked, or
+// never one) or is no longer as was (read before the change was made) left it:
+// a compare-and-set, so a change made from a stale read (two managers at
+// once) never writes back what the other just set, a new password above all.
+func ChangeLink(ctx context.Context, id uuid.UUID, was *GuestGrant, c LinkChange) (*GuestGrant, error) {
+	if was == nil {
+		return nil, nil
+	}
+	bump := 0
+	if c.NewUnlock {
+		bump = 1
+	}
+	const q = `UPDATE guest_grants SET capability = $2, expires_at = $3, password_hash = $4, unlock_version = unlock_version + $5
+		WHERE id = $1 AND revoked_at IS NULL AND resource_type = 'board'
+		  AND capability = $6 AND expires_at IS NOT DISTINCT FROM $7 AND password_hash IS NOT DISTINCT FROM $8 AND unlock_version = $9
+		RETURNING ` + grantColumns
+	g, ok, err := pgexec.QueryOne(ctx, q, grantRow, id, c.Capability, c.ExpiresAt, c.PasswordHash, bump,
+		was.Capability, was.ExpiresAt, was.PasswordHash, was.UnlockVersion)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/Guest/ChangeLink err: %+v", err)
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return g, nil
 }

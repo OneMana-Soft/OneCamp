@@ -85,6 +85,6 @@ func TestWhoIsInAGroupThatCantBeReadIsAnError(t *testing.T) {
 	if !errors.Is(err, down) || got != nil {
 		t.Errorf("kept %v (%v), want the read's error and nobody", got, err)
 	}
-	// Who hears tells nobody then: MembersOnAll and GetLevelsInConversation
+	// Who hears tells nobody then: Members and GetLevelsInConversation
 	// pass the error on (business/Notify plans with them).
 }

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // Limits for a workspace whose email is lent to it by OneCamp Cloud.
@@ -32,10 +34,32 @@ func EssentialOnly() bool {
 	return v == "true" || v == "1" || v == "yes"
 }
 
+// EssentialEmailEnabled is whether the email someone is waiting on, an
+// invitation or a password reset, can go out: email is on and this is not the
+// public demo (helpers.DemoMode), whose addresses are its shared visitor's,
+// its cast's and those of the few who run it (V-1261). OneCamp Cloud's
+// essentials-only tier still sends it. Every send is refused without it
+// (SendEmailWithOptions), and the public sign-in answer's email_configured is
+// it, so no page promises a link that can't come.
+func EssentialEmailEnabled() bool {
+	return sendingKey() != ""
+}
+
+// sendingKey is the key a send may use: none on the public demo, else the key
+// set (apiKeyFrom). The demo is asked first, so it never resolves one.
+func sendingKey() string {
+	if helpers.DemoMode() {
+		return ""
+	}
+	return apiKeyFrom()
+}
+
 // NotificationEmailEnabled is whether notification email (mentions, digests,
-// reminders) goes out: email is on and not restricted to the essentials.
+// reminders, guests' calendar mail) goes out: the essentials can
+// (EssentialEmailEnabled, so never on the demo) and email is not restricted
+// to them. The one rule for every such sender.
 func NotificationEmailEnabled() bool {
-	return IsEmailEnabled() && !EssentialOnly()
+	return EssentialEmailEnabled() && !EssentialOnly()
 }
 
 // dailyCapFromEnv is EMAIL_DAILY_CAP, or 0 for no cap.
@@ -52,6 +76,13 @@ func dailyCapFromEnv() int {
 // person locked out should still get theirs after an admin has invited a whole
 // imported team. At most a quarter of the cap is kept (kept).
 const InvitationReserve = 5
+
+// NoticeReserve is how many of the day's capped messages a batched notice's
+// email (one notice or a list of them) leaves unspent (SendOptions.Keep):
+// reminders, calls, urgent tasks, sign-in and invitations share the cap, and
+// a busy day of chat shouldn't spend their part of it. At most a quarter of
+// the cap is kept (kept).
+const NoticeReserve = 25
 
 // kept is how many of a day's cap a send asking to keep keep holds back: at
 // most a quarter of the cap. With the whole reserve, a cap of 5 or less
@@ -93,8 +124,8 @@ func (c *dailyCounter) take(now time.Time, cap, keep int) error {
 		}
 	}
 	if c.count >= cap-keep {
-		msg := "today's emails for invitations are used up (the last " + strconv.Itoa(keep) + " of the day's " + strconv.Itoa(cap) +
-			" are kept for password resets); it can send more tomorrow (UTC)"
+		msg := "today's emails are used up but for the last " + strconv.Itoa(keep) + " of the day's " + strconv.Itoa(cap) +
+			", kept for password resets and what else can't wait; it can send more tomorrow (UTC)"
 		return &SendError{
 			StatusCode: http.StatusTooManyRequests,
 			Message:    msg,

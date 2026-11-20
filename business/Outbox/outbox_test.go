@@ -2,6 +2,7 @@ package business
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	models "github.com/akashc777/OneCamp/models/postgres/Outbox"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	"github.com/google/uuid"
@@ -27,6 +29,8 @@ type fakeRows struct {
 	now   models.Stats
 	// The statements a writer's path and its delivery cost.
 	inserts, releases, claims int
+	// failClaims fails a writer's own claim (Deliver's): it died first.
+	failClaims bool
 }
 
 type fakeState struct {
@@ -57,7 +61,9 @@ func (f *fakeRows) insert(_ context.Context, _ models.Execer, rs []models.Row) (
 	ids := make([]int64, 0, len(rs))
 	for _, r := range rs {
 		r.ID = int64(len(f.rows) + 1)
-		r.State = models.StateHeld
+		if r.State != models.StateReady {
+			r.State = models.StateHeld
+		}
 		r.CreatedAt = f.clock
 		f.rows = append(f.rows, &r)
 		f.state[r.ID] = &fakeState{available: f.clock, created: f.clock}
@@ -79,22 +85,24 @@ func (f *fakeRows) release(_ context.Context, ids []int64) error {
 	return nil
 }
 
-func (f *fakeRows) releaseWith(ctx context.Context, id int64, more map[string]string) (bool, error) {
+func (f *fakeRows) releaseWith(ctx context.Context, ids []int64, more []map[string]string) error {
 	f.mu.Lock()
-	r := f.row(id)
-	held := r != nil && r.State == models.StateHeld
-	if held {
+	for i, id := range ids {
+		r := f.row(id)
+		if r == nil || r.State != models.StateHeld {
+			continue
+		}
 		merged := map[string]string{}
 		for k, v := range r.Entities {
 			merged[k] = v
 		}
-		for k, v := range more {
+		for k, v := range more[i] {
 			merged[k] = v
 		}
 		r.Entities = merged
 	}
 	f.mu.Unlock()
-	return held, f.release(ctx, []int64{id})
+	return f.release(ctx, ids)
 }
 
 func (f *fakeRows) cancel(_ context.Context, _ models.Execer, id int64) error {
@@ -149,6 +157,9 @@ func (f *fakeRows) claim(_ context.Context, ids []int64, by string, l time.Durat
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.claims++
+	if f.failClaims {
+		return nil, errors.New("the writer died before it delivered")
+	}
 	var out []models.Row
 	for _, id := range ids {
 		if r := f.row(id); r != nil && f.claimable(r) {
@@ -270,11 +281,11 @@ func (r *recorder) calls() []string {
 
 func add(t *testing.T, key, message string, only ...string) int64 {
 	t.Helper()
-	id, err := Add(context.Background(), nil, Entry{Topic: "test", Kind: "test.made", Key: key, Entities: map[string]string{"message": message}, Sinks: only})
+	id, err := addOne(context.Background(), nil, Entry{Topic: "test", Kind: "test.made", Key: key, Entities: map[string]string{"message": message}, Sinks: only})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Release(context.Background(), id); err != nil {
+	if err := ReleaseMany(context.Background(), []int64{id}); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -466,7 +477,7 @@ func TestAHeldEventIsDecidedByItsTopicOnceItsWriterHadItsTime(t *testing.T) {
 	})
 	ids := map[string]int64{}
 	for _, m := range []string{"m1", "m2", "m3"} {
-		id, err := Add(context.Background(), nil, Entry{Topic: "test", Kind: "test.made", Key: "k-" + m, Entities: map[string]string{"message": m}})
+		id, err := addOne(context.Background(), nil, Entry{Topic: "test", Kind: "test.made", Key: "k-" + m, Entities: map[string]string{"message": m}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -501,7 +512,7 @@ func TestDeliverRunsTheReleasedEventAndTheKeysNextAtOnce(t *testing.T) {
 	}})
 	first := add(t, "channel:c1", "m1")
 	add(t, "channel:c1", "m2")
-	Deliver(first)
+	DeliverMany([]int64{first})
 	select {
 	case <-second:
 	case <-time.After(10 * time.Second):
@@ -523,12 +534,12 @@ func TestALaterEventsDeliveryWaitsForItsKeysEarlierOne(t *testing.T) {
 	Sinks.Register(rec.sink("test", "realtime", 1, nil))
 	m1 := add(t, "channel:c1", "m1")
 	m2 := add(t, "channel:c1", "m2")
-	Deliver(m2)
+	DeliverMany([]int64{m2})
 	helpers.SettleBackground(10 * time.Second)
 	if got := rec.calls(); len(got) != 0 {
 		t.Fatalf("ran %v while the key's earlier event waited", got)
 	}
-	Deliver(m1)
+	DeliverMany([]int64{m1})
 	helpers.SettleBackground(10 * time.Second)
 	if got := strings.Join(rec.calls(), ","); got != "realtime#m1,realtime#m2" {
 		t.Errorf("ran %s: m1, then m2", got)
@@ -550,7 +561,7 @@ func TestAnEventInBackoffDoesntHoldBackItsKeysNext(t *testing.T) {
 	}))
 	m1 := add(t, "channel:c1", "m1")
 	m2 := add(t, "channel:c1", "m2")
-	Deliver(m1)
+	DeliverMany([]int64{m1})
 	helpers.SettleBackground(10 * time.Second)
 	if got := strings.Join(rec.calls(), ","); got != "realtime#m1,realtime#m2" {
 		t.Errorf("ran %s: m1 failed, and m2 goes on", got)
@@ -599,11 +610,11 @@ func TestTheSystemCheckSaysWhatAnAdminNeedsToKnow(t *testing.T) {
 func TestAnEventNeedsATopicAKindAndAKey(t *testing.T) {
 	withFake(t)
 	for _, e := range []Entry{{Kind: "k", Key: "k"}, {Topic: "t", Key: "k"}, {Topic: "t", Kind: "k"}} {
-		if _, err := Add(context.Background(), nil, e); err == nil {
+		if _, err := addOne(context.Background(), nil, e); err == nil {
 			t.Errorf("%+v was added", e)
 		}
 	}
-	if _, err := Add(context.Background(), nil, Entry{Topic: "t", Kind: "k", Key: "k", Actor: uuid.NewString()}); err != nil {
+	if _, err := addOne(context.Background(), nil, Entry{Topic: "t", Kind: "k", Key: "k", Actor: uuid.NewString()}); err != nil {
 		t.Error(err)
 	}
 }
@@ -639,11 +650,11 @@ func TestAnEventReleasedWithMoreCarriesItToItsSinks(t *testing.T) {
 		got = ev.Entities
 		return nil
 	}})
-	id, err := Add(context.Background(), nil, Entry{Topic: "test", Kind: "test.made", Key: "dm:a b", Entities: map[string]string{"message": "m1"}})
+	id, err := addOne(context.Background(), nil, Entry{Topic: "test", Kind: "test.made", Key: "dm:a b", Entities: map[string]string{"message": "m1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ReleaseWith(context.Background(), id, map[string]string{"opened": "a,b"}); err != nil {
+	if err := ReleaseManyWith(context.Background(), []int64{id}, map[int64]map[string]string{id: {"opened": "a,b"}}); err != nil {
 		t.Fatal(err)
 	}
 	if f.stateOf(id) != models.StateReady {
@@ -767,4 +778,105 @@ func TestALongListIsDeliveredABatchAtATime(t *testing.T) {
 	if _, _, cl := f.statements(); cl != 2 {
 		t.Errorf("%d claims for %d events, want one per batch of %d", cl, len(ids), batch)
 	}
+}
+
+// withPostgres makes Enqueue see a connected Postgres, until t ends: the fake
+// store never uses it.
+func withPostgres(t *testing.T) {
+	t.Helper()
+	prev := postgresInit.DBConn
+	postgresInit.DBConn = &postgresInit.DB{SqlDB: &sql.DB{}}
+	t.Cleanup(func() { postgresInit.DBConn = prev })
+}
+
+func entries(key string, messages ...string) (es []Entry) {
+	for _, m := range messages {
+		es = append(es, Entry{Topic: "test", Kind: "test.made", Key: key + m, Entities: map[string]string{"message": m}})
+	}
+	return es
+}
+
+// Events no change's transaction holds (Refs' link events) are written ready
+// in one statement and delivered: there is nothing left to release.
+func TestEnqueueWritesItsEventsReadyInOneStatement(t *testing.T) {
+	f := withFake(t)
+	withPostgres(t)
+	rec := &recorder{}
+	Sinks.Register(rec.sink("test", "graph", 1, nil))
+	if err := Enqueue(context.Background(), entries("doc:", "a", "b", "c")...); err != nil {
+		t.Fatal(err)
+	}
+	helpers.SettleBackground(10 * time.Second)
+	got := rec.calls()
+	sort.Strings(got)
+	if strings.Join(got, ",") != "graph#a,graph#b,graph#c" {
+		t.Errorf("ran %v: each event once", got)
+	}
+	if ins, rel, cl := f.statements(); ins != 1 || rel != 0 || cl != 1 {
+		t.Errorf("%d inserts, %d releases, %d claims: one insert of ready events, and their claim", ins, rel, cl)
+	}
+}
+
+// A writer that dies after Enqueue wrote its events and before it delivered
+// them leaves them ready, so the drain runs each once: what a release that
+// went through and a delivery that didn't leave today.
+func TestEnqueuedEventsTheWriterNeverDeliveredAreTheDrains(t *testing.T) {
+	f := withFake(t)
+	withPostgres(t)
+	rec := &recorder{}
+	Sinks.Register(rec.sink("test", "graph", 1, nil))
+	f.mu.Lock()
+	f.failClaims = true
+	f.mu.Unlock()
+	if err := Enqueue(context.Background(), entries("doc:", "a", "b")...); err != nil {
+		t.Fatal(err)
+	}
+	helpers.SettleBackground(10 * time.Second)
+	if got := rec.calls(); len(got) != 0 {
+		t.Fatalf("ran %v before the drain", got)
+	}
+	f.mu.Lock()
+	f.failClaims = false
+	f.mu.Unlock()
+	_ = Drain(context.Background())
+	got := rec.calls()
+	sort.Strings(got)
+	if strings.Join(got, ",") != "graph#a,graph#b" {
+		t.Errorf("the drain ran %v: each event once", got)
+	}
+}
+
+// Events released together cost one statement, each carrying only what its
+// writer learnt for it (a DM's first message: whom it opened the
+// conversation for, on its live event).
+func TestEventsReleasedTogetherCarryEachItsOwnMoreInOneStatement(t *testing.T) {
+	f := withFake(t)
+	ctx := context.Background()
+	ids, err := AddMany(ctx, nil, entries("dm:a b ", "m1", "m2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ReleaseManyWith(ctx, ids, map[int64]map[string]string{ids[0]: {"opened": "a,b"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, rel, _ := f.statements(); rel != 1 {
+		t.Errorf("%d release statements, want 1", rel)
+	}
+	for i, id := range ids {
+		f.mu.Lock()
+		r := *f.row(id)
+		f.mu.Unlock()
+		if r.State != models.StateReady || (r.Entities["opened"] == "a,b") != (i == 0) {
+			t.Errorf("event %d is %s with %v: released, the first alone opened", i, r.State, r.Entities)
+		}
+	}
+}
+
+// addOne is AddMany for one entry: the id of the event it wrote held.
+func addOne(ctx context.Context, ex models.Execer, e Entry) (int64, error) {
+	ids, err := AddMany(ctx, ex, []Entry{e})
+	if err != nil {
+		return 0, err
+	}
+	return ids[0], nil
 }

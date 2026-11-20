@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -417,28 +418,34 @@ func CreateTableFromTemplate(ctx context.Context, in TableInput, fields []FieldI
 	return model.GetTableByID(ctx, id)
 }
 
+// tableRefused is a table's input refused in words: the person's to change,
+// not ours to retry, so a template install answers it 400 (CR-444 D1).
+func tableRefused(msg string) error {
+	return &helpers.Refusal{Status: http.StatusBadRequest, Msg: msg}
+}
+
 // createTableRow validates a TableInput and inserts the table row (no seeding),
 // returning the new id.
 func createTableRow(ctx context.Context, in TableInput, actor Actor) (uuid.UUID, error) {
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
-		return uuid.Nil, fmt.Errorf("name is required")
+		return uuid.Nil, tableRefused("name is required")
 	}
 	if tooLong(name, maxNameLen) {
-		return uuid.Nil, fmt.Errorf("name is too long")
+		return uuid.Nil, tableRefused("name is too long")
 	}
 	if tooLong(in.Description, maxDescriptionLen) {
-		return uuid.Nil, fmt.Errorf("description is too long")
+		return uuid.Nil, tableRefused("description is too long")
 	}
 	if len(in.Icon) > maxIconLen {
-		return uuid.Nil, fmt.Errorf("icon is too long")
+		return uuid.Nil, tableRefused("icon is too long")
 	}
 	visibility := strings.TrimSpace(in.Visibility)
 	if visibility == "" {
 		visibility = model.VisibilityWorkspace
 	}
 	if !model.ValidVisibility(visibility) {
-		return uuid.Nil, fmt.Errorf("invalid visibility")
+		return uuid.Nil, tableRefused("invalid visibility")
 	}
 	t := &model.DataTable{
 		Name:        name,
@@ -578,13 +585,45 @@ func loadViewable(ctx context.Context, id uuid.UUID, actor Actor) (*model.DataTa
 	if err != nil {
 		return nil, storeFailed("failed to load table")
 	}
-	if t == nil {
-		return nil, errNotFound
-	}
-	if !opens(ctx, t, actor) {
-		return nil, errForbidden
+	if err := viewable(ctx, t, actor); err != nil {
+		return nil, err
 	}
 	return t, nil
+}
+
+// viewable is loadViewable's rule for a table read from the store: none (nil)
+// is not found, and one actor can't open is forbidden.
+func viewable(ctx context.Context, t *model.DataTable, actor Actor) error {
+	if t == nil {
+		return errNotFound
+	}
+	if !opens(ctx, t, actor) {
+		return errForbidden
+	}
+	return nil
+}
+
+// openedAmong is loadViewable for many tables at once, in one read
+// (TablesByIDs): those among ids that are there and actor opens, by
+// loadViewable's own rule (viewable), in the order of ids; the rest left out.
+func openedAmong(ctx context.Context, ids []uuid.UUID, actor Actor) ([]*model.DataTable, error) {
+	found, err := tablesByIDs(ctx, ids)
+	if err != nil {
+		return nil, storeFailed("failed to load table")
+	}
+	live := make(map[uuid.UUID]*model.DataTable, len(found))
+	for _, t := range found {
+		if t.DeletedAt == nil {
+			live[t.Id] = t
+		}
+	}
+	out := make([]*model.DataTable, 0, len(ids))
+	for _, id := range ids {
+		if t := live[id]; viewable(ctx, t, actor) == nil {
+			out = append(out, t)
+		}
+	}
+	return out, nil
 }
 
 // TablePatch is a change to a table's header: only the fields it names
@@ -712,15 +751,43 @@ func wholeHeader(t *model.DataTable, in TablePatch) (TablePatch, error) {
 // DeleteTable soft-deletes a table (manage only): it goes to the tables'
 // trash, from which its creator or an admin can bring it back (RestoreTable).
 func DeleteTable(ctx context.Context, id uuid.UUID, actor Actor) error {
-	if _, err := loadManageable(ctx, id, actor); err != nil {
+	return DeleteTables(ctx, []uuid.UUID{id}, actor)
+}
+
+// DeleteTables soft-deletes tables, each one the actor may manage, as
+// DeleteTable does one: read at once and checked before any is deleted (one
+// that isn't there or isn't the actor's to manage refuses them all), then
+// deleted in one write.
+func DeleteTables(ctx context.Context, ids []uuid.UUID, actor Actor) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	want := uniqueIDs(ids)
+	found, err := tablesByIDs(ctx, want)
+	if err != nil {
+		return storeFailed("failed to load table")
+	}
+	live := make(map[uuid.UUID]*model.DataTable, len(found))
+	for _, t := range found {
+		if t.DeletedAt == nil {
+			live[t.Id] = t
+		}
+	}
+	for _, id := range ids {
+		switch t := live[id]; {
+		case t == nil:
+			return errNotFound
+		case !canManage(t, actor):
+			return errForbidden
+		}
+	}
+	if err := model.SoftDeleteTables(ctx, want, actor.UserID); err != nil {
 		return err
 	}
-	if err := model.SoftDeleteTable(ctx, id, actor.UserID); err != nil {
-		return err
-	}
-	// Its rows' pages go to the trash with it (rowPages.go), once it commits:
-	// a page's socket closed sooner reconnects to a table not yet deleted.
-	pgexec.AfterCommit(ctx, func(ctx context.Context) { tablePagesChanged(ctx, id) })
+	// Their rows' pages go to the trash with them (rowPages.go), once it
+	// commits: a page's socket closed sooner reconnects to a table not yet
+	// deleted.
+	pgexec.AfterCommit(ctx, func(ctx context.Context) { tablePagesChanged(ctx, want...) })
 	return nil
 }
 
@@ -1314,6 +1381,20 @@ func storedSet(cs *model.ChangeSet) *uuid.UUID {
 	return &id
 }
 
+// fieldsForWrite reads table tableId's live fields once for a write to a
+// row, for the write and for its cell index (rowQuery.WithFieldsRead), which
+// the ctx it gives carries. That ctx goes to the row's ledger write alone,
+// within the request: whatever runs on after it (an autofill writing when the
+// model answers, a webhook, a recount) takes the ctx from before, so a later
+// write's index reads the fields as they are then (CR-426 F2).
+func fieldsForWrite(ctx context.Context, tableId uuid.UUID) (context.Context, []*model.Field, error) {
+	fields, err := model.ListFields(ctx, tableId)
+	if err != nil {
+		return ctx, nil, storeFailed("failed to load fields")
+	}
+	return rowQuery.WithFieldsRead(ctx, tableId, fields), fields, nil
+}
+
 // CreateRow inserts a row (view/edit access) and broadcasts it. A row with no
 // position goes after the table's last row, wherever that is; the web put a
 // new row after the last one it held, which on a table past one page sorted it
@@ -1324,9 +1405,9 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	if err != nil {
 		return nil, err
 	}
-	fields, ferr := model.ListFields(ctx, tableId)
-	if ferr != nil {
-		return nil, storeFailed("failed to load fields")
+	wctx, fields, err := fieldsForWrite(ctx, tableId)
+	if err != nil {
+		return nil, err
 	}
 	values := in.Values
 	if values == nil {
@@ -1342,7 +1423,7 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 		return nil, verr
 	}
 	cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeCreate)
-	done, cerr := model.ApplyBatch(ctx, tableId, actor.UserID, model.Batch{
+	done, cerr := model.ApplyBatch(wctx, tableId, actor.UserID, model.Batch{
 		Create: []model.NewRow{{ID: id, Values: valuesJSON}}, At: model.Place{Number: in.Position}, Links: links,
 	}, nil, maxValuesBytes, maxLinks, keys, cs, observe)
 	if errors.Is(cerr, model.ErrTooManyLinks) {
@@ -1361,7 +1442,7 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	// Continuous AI autofill: fill the new row's auto AI columns it wasn't
 	// given, as the creator, off the request path. Loop-safe (writes via the
 	// model layer, not CreateRow/UpdateRow).
-	helpers.GoSafeNamed("AutofillRowOnWrite", func() { AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, written, actor) })
+	helpers.GoSafeNamed("AutofillRowOnWrite", func() { AutofillRowOnWrite(context.WithoutCancel(ctx), t, fields, &stored, written, actor) })
 	// Reactive triggers: let agents react to new table rows (Notion-DB-style
 	// automation). Loop-safe — DispatchEvent skips in-process listeners for
 	// automation-generated writes, so an agent's own row write can't re-trigger.
@@ -1384,9 +1465,9 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 	if err != nil {
 		return nil, err
 	}
-	fields, ferr := model.ListFields(ctx, tableId)
-	if ferr != nil {
-		return nil, storeFailed("failed to load fields")
+	wctx, fields, err := fieldsForWrite(ctx, tableId)
+	if err != nil {
+		return nil, err
 	}
 	values := in.Values
 	if values == nil {
@@ -1410,7 +1491,7 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 		return nil, verr
 	}
 	cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeEdit)
-	r, uerr := model.WriteRow(ctx, tableId, rowId, actor.UserID, valuesJSON, in.Position, aiColumns(fields), maxValuesBytes, keys, cs, observe)
+	r, uerr := model.WriteRow(wctx, tableId, rowId, actor.UserID, valuesJSON, in.Position, aiColumns(fields), maxValuesBytes, keys, cs, observe)
 	if errors.Is(uerr, model.ErrRowTooLarge) {
 		return nil, fmt.Errorf("row is too large")
 	}
@@ -1436,9 +1517,9 @@ func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]i
 	if err != nil {
 		return nil, err
 	}
-	fields, ferr := model.ListFields(ctx, tableId)
-	if ferr != nil {
-		return nil, storeFailed("failed to load fields")
+	wctx, fields, err := fieldsForWrite(ctx, tableId)
+	if err != nil {
+		return nil, err
 	}
 	if values == nil {
 		values = map[string]interface{}{}
@@ -1452,7 +1533,7 @@ func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]i
 		return nil, errNoCells
 	}
 	cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeEdit)
-	done, uerr := model.ApplyBatch(ctx, tableId, actor.UserID, model.Batch{Patch: []model.CellsPatch{{Row: rowId, Cells: patchJSON}}},
+	done, uerr := model.ApplyBatch(wctx, tableId, actor.UserID, model.Batch{Patch: []model.CellsPatch{{Row: rowId, Cells: patchJSON}}},
 		aiColumns(fields), maxValuesBytes, maxLinks, keys, cs, observe)
 	if uerr != nil {
 		return nil, singleRowErr(uerr, "failed to update row")
@@ -1492,7 +1573,7 @@ func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, 
 	broadcastRow(t.Id.String(), "updated", r, cs)
 	// Continuous AI autofill: refill the auto AI columns that read a changed
 	// cell. Loop-safe (model-layer write, no event).
-	helpers.GoSafeNamed("AutofillRowOnWrite", func() { AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, changed, actor) })
+	helpers.GoSafeNamed("AutofillRowOnWrite", func() { AutofillRowOnWrite(context.WithoutCancel(ctx), t, fields, &stored, changed, actor) })
 	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() {
 		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "table.row.updated", map[string]interface{}{
 			"table_id":   t.Id.String(),

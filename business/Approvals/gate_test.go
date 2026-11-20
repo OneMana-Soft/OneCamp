@@ -46,8 +46,15 @@ func seeAs(t *testing.T, blind func() map[string]bool) {
 }
 
 func (g *gateWorld) use(t *testing.T) {
-	oldR, oldQ, oldS, oldA, oldL := rulesFor, request, standingOf, afterRequest, clientLinks
-	t.Cleanup(func() { rulesFor, request, standingOf, afterRequest, clientLinks = oldR, oldQ, oldS, oldA, oldL })
+	oldR, oldQ, oldS, oldA, oldL, oldO := rulesFor, request, standingOf, afterRequest, clientLinks, rulesAndOpen
+	t.Cleanup(func() {
+		rulesFor, request, standingOf, afterRequest, clientLinks, rulesAndOpen = oldR, oldQ, oldS, oldA, oldL, oldO
+	})
+	// The gate reads its rules with the task's open request (none here).
+	rulesAndOpen = func(ctx context.Context, project, _ uuid.UUID, keys []string) ([]*model.StatusRule, bool, error) {
+		rules, err := rulesFor(ctx, project, keys)
+		return rules, false, err
+	}
 	seeAs(t, func() map[string]bool { return g.blind })
 	clientLinks = func(context.Context, uuid.UUID, uuid.UUID) ([]string, error) { return g.links, g.linkErr }
 	rulesFor = func(_ context.Context, _ uuid.UUID, keys []string) ([]*model.StatusRule, error) {

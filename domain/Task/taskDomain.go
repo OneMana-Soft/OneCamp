@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/akashc777/OneCamp/models/pgexec"
+	"github.com/lib/pq"
 	"slices"
 	"strings"
 	"time"
 
+	cycleDomain "github.com/akashc777/OneCamp/domain/Cycle"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -139,6 +142,25 @@ func UpdateTaskByTaskUUID(ctx context.Context, taskUUID uuid.UUID, currentTime t
 	return
 }
 
+// TouchForStatus is UpdateTaskByTaskUUID for a status change. The same
+// statement returns whether the task links a GitHub issue or pull request and
+// whether project (its project, invalid for none) runs its cycles on a
+// schedule, read fresh from the rows it writes beside, so a change of a task
+// that links neither, in a project with no schedule, reads neither again
+// (business/Task setStatus).
+func TouchForStatus(ctx context.Context, taskUUID uuid.UUID, project uuid.NullUUID, currentTime time.Time) (models.StatusTouch, error) {
+	query := `
+        UPDATE tasks
+        SET updated_at = $1
+		WHERE id = $2
+		RETURNING (COALESCE(github_issue_url, '') <> '' OR COALESCE(github_pr_url, '') <> ''), ` + cycleDomain.Scheduled("$3")
+	t, err := models.TouchForStatus(ctx, query, currentTime, taskUUID, project)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/TouchForStatus Failed to update task %s err: %+v", taskUUID, err)
+	}
+	return t, err
+}
+
 func UpdateTaskDeletedTimeByUUID(ctx context.Context, taskUUID uuid.UUID, deleteTime *time.Time, updateTime *time.Time) (err error) {
 	query := `
         UPDATE tasks
@@ -154,21 +176,47 @@ func UpdateTaskDeletedTimeByUUID(ctx context.Context, taskUUID uuid.UUID, delete
 
 	return
 }
+
+// UpdateTaskGoogleCalendarId writes the task's one Google id (nil forgets it).
 func UpdateTaskGoogleCalendarId(ctx context.Context, taskUUID uuid.UUID, googleEventId *string) error {
-	currentTime := time.Now()
+	return writeTaskGoogleCalendarId(ctx, taskUUID, googleEventId, nil)
+}
+
+// ClearTaskGoogleCalendarIdIf forgets the task's Google id only while the row
+// still holds was, the id just taken out of a calendar: an id another pass
+// wrote meanwhile (another server's hand-over) stays.
+func ClearTaskGoogleCalendarIdIf(ctx context.Context, taskUUID uuid.UUID, was string) error {
+	return writeTaskGoogleCalendarId(ctx, taskUUID, nil, &was)
+}
+
+// writeTaskGoogleCalendarId is the one writer of task_google_calendar_id; a
+// nil was writes whatever the row holds.
+func writeTaskGoogleCalendarId(ctx context.Context, taskUUID uuid.UUID, googleEventId *string, was *string) error {
 	query := `
 		UPDATE tasks
 		SET task_google_calendar_id = $1, updated_at = $2
-		WHERE id = $3
+		WHERE id = $3 AND ($4::text IS NULL OR task_google_calendar_id = $4::text)
 	`
-	// I'll reuse UpdateTaskNameByTaskUUID model or add a new one.
-	// Since UpdateTaskNameByTaskUUID takes projectUUID but queries by id, it's actually a generic update.
-	// No, wait, let's look at taskModel.go:138. It takes projectUUID but uses it as $2.
-	return models.UpdateTaskGoogleCalendarId(ctx, query, googleEventId, currentTime, taskUUID)
+	return models.UpdateTaskGoogleCalendarId(ctx, query, googleEventId, time.Now(), taskUUID, was)
 }
 
-func GetSyncedTaskGCalIds(ctx context.Context, userUUID uuid.UUID) ([]string, error) {
-	return models.GetSyncedTaskGCalIds(ctx, userUUID)
+// taskCopiesAmong is which of the given Google event ids are the copies of
+// live tasks, whoever each task is assigned to now. It matched on
+// tasks.task_assignee before, a column nothing writes, so it never found one.
+// Its last line repeats idx_tasks_google_calendar_id's predicate (migration
+// 603) so the partial index is provably usable under a generic plan.
+const taskCopiesAmong = `
+	SELECT task_google_calendar_id FROM tasks
+	WHERE task_google_calendar_id = ANY($1) AND deleted_at IS NULL
+	AND task_google_calendar_id IS NOT NULL AND task_google_calendar_id <> ''`
+
+// TaskCopiesAmong is which of googleEventIds are a live task's Google copy:
+// one statement, none when there are no ids.
+func TaskCopiesAmong(ctx context.Context, googleEventIds []string) ([]string, error) {
+	if len(googleEventIds) == 0 {
+		return nil, nil
+	}
+	return pgexec.Query(ctx, taskCopiesAmong, pgexec.Text, pq.Array(googleEventIds))
 }
 
 func UpdateTaskDeletedTimeToNullByUUID(ctx context.Context, projectUUID uuid.UUID, updatedTime *time.Time) (err error) {
@@ -994,9 +1042,14 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID
 	return
 }
 
+// prReviewFollowsPR is the review decision a task keeps when its pull
+// request is set to the one at $2: a different pull request starts with no
+// decision, as its reviews are its own (V-986), until a review of it comes.
+const prReviewFollowsPR = `github_pr_review_state = CASE WHEN github_pr_url IS DISTINCT FROM $2::text THEN NULL ELSE github_pr_review_state END`
+
 // SetGitHubPRFieldsOnTask sets PR metadata on a specific task.
 func SetGitHubPRFieldsOnTask(ctx context.Context, taskUUID uuid.UUID, prNumber int, prURL string, branch string) error {
-	query := `UPDATE tasks SET github_pr_number = $1, github_pr_url = $2, github_branch = $3, github_last_synced_at = NOW(), updated_at = NOW() WHERE id = $4`
+	query := `UPDATE tasks SET ` + prReviewFollowsPR + `, github_pr_number = $1, github_pr_url = $2, github_branch = $3, github_last_synced_at = NOW(), updated_at = NOW() WHERE id = $4`
 	err := models.SetGitHubPRFieldsOnTask(ctx, query, taskUUID, prNumber, prURL, branch)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/SetGitHubPRFieldsOnTask Failed err: %+v", err)
@@ -1005,9 +1058,31 @@ func SetGitHubPRFieldsOnTask(ctx context.Context, taskUUID uuid.UUID, prNumber i
 	return nil
 }
 
+// TakeGitHubPRIfNone sets the pull request on a task that holds none (no
+// address, or one of spaces, as the business reads it with TrimSpace), as
+// SetGitHubPRFieldsOnTask does, with its state ("" keeps the task's) and
+// draft, in one statement, so it can't overwrite one another delivery (the
+// opened pull request's) set meanwhile, and the task never holds the pull
+// request without its state. It reports whether the task took it.
+func TakeGitHubPRIfNone(ctx context.Context, taskUUID uuid.UUID, prNumber int, prURL string, branch string, prState string, isDraft bool) (bool, error) {
+	query := `WITH took AS (
+		UPDATE tasks SET ` + prReviewFollowsPR + `, github_pr_number = $1, github_pr_url = $2, github_branch = $3,
+			github_pr_state = COALESCE(NULLIF($5::text, ''), github_pr_state), github_pr_is_draft = $6::boolean,
+			github_last_synced_at = NOW(), updated_at = NOW()
+		WHERE id = $4 AND btrim(COALESCE(github_pr_url, '')) = ''
+		RETURNING 1
+	) SELECT EXISTS (SELECT 1 FROM took)`
+	took, err := models.TakeGitHubPRIfNone(ctx, query, taskUUID, prNumber, prURL, branch, prState, isDraft)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/TakeGitHubPRIfNone Failed err: %+v", err)
+		return false, err
+	}
+	return took, nil
+}
+
 // UpdateTaskPRInfo updates only PR number and URL for a task.
 func UpdateTaskPRInfo(ctx context.Context, taskUUID uuid.UUID, prNumber int, prURL string) error {
-	query := `UPDATE tasks SET github_pr_number = $1, github_pr_url = $2, github_last_synced_at = NOW(), updated_at = NOW() WHERE id = $3`
+	query := `UPDATE tasks SET ` + prReviewFollowsPR + `, github_pr_number = $1, github_pr_url = $2, github_last_synced_at = NOW(), updated_at = NOW() WHERE id = $3`
 	err := models.UpdateTaskPRInfo(ctx, query, taskUUID, prNumber, prURL)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/UpdateTaskPRInfo Failed err: %+v", err)
@@ -1119,17 +1194,41 @@ func ClearGitHubIssueFieldsFromTask(ctx context.Context, taskUUID uuid.UUID) err
 	return nil
 }
 
-// ClearGitHubLinkFromTask unlinks a task from GitHub: its issue, and its pull
-// request with that pull request's branch and state. Clearing only the issue
-// left a pull request linked, which the sync went on posting the task to.
-func ClearGitHubLinkFromTask(ctx context.Context, taskUUID uuid.UUID) error {
-	query := `UPDATE tasks SET github_issue_number = NULL, github_issue_url = NULL,
+// unlinkFromGitHub is the SET list unlinking a task from GitHub: its issue,
+// and its pull request with that pull request's branch and state. Every
+// unlink (a task, tasks, every task) writes this one list, so none leaves a
+// pull request's state behind its address. Clearing only the issue left a
+// pull request linked, which the sync went on posting the task to.
+const unlinkFromGitHub = `github_issue_number = NULL, github_issue_url = NULL,
 		github_pr_number = NULL, github_pr_url = NULL, github_branch = NULL, github_pr_state = NULL,
 		github_pr_check_status = NULL, github_pr_review_state = NULL, github_pr_is_draft = false,
-		github_last_synced_at = NULL, updated_at = NOW() WHERE id = $1`
+		github_last_synced_at = NULL, updated_at = NOW()`
+
+// holdsGitHub is a task holding any field unlinkFromGitHub clears, the
+// tasks unlinking every task writes (the rest are left as they are).
+const holdsGitHub = `(github_issue_number IS NOT NULL OR github_issue_url IS NOT NULL
+		OR github_pr_number IS NOT NULL OR github_pr_url IS NOT NULL OR github_branch IS NOT NULL OR github_pr_state IS NOT NULL
+		OR github_pr_check_status IS NOT NULL OR github_pr_review_state IS NOT NULL OR github_pr_is_draft
+		OR github_last_synced_at IS NOT NULL)`
+
+// ClearGitHubLinkFromTask unlinks a task from GitHub (unlinkFromGitHub).
+func ClearGitHubLinkFromTask(ctx context.Context, taskUUID uuid.UUID) error {
+	query := `UPDATE tasks SET ` + unlinkFromGitHub + ` WHERE id = $1`
 	err := models.ClearGitHubIssueFieldsFromTask(ctx, query, taskUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/ClearGitHubLinkFromTask Failed err: %+v", err)
+		return err
+	}
+	return nil
+}
+
+// ClearGitHubLinkFromAllTasks unlinks every task from GitHub, deleted ones
+// too (a restored task holds no link GitHub was disconnected from), in one
+// statement; a task holding none of it is left as it is.
+func ClearGitHubLinkFromAllTasks(ctx context.Context) error {
+	query := `UPDATE tasks SET ` + unlinkFromGitHub + ` WHERE ` + holdsGitHub
+	if err := models.ClearGitHubLinkFromAllTasks(ctx, query); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/ClearGitHubLinkFromAllTasks Failed err: %+v", err)
 		return err
 	}
 	return nil
@@ -1216,6 +1315,19 @@ func UpdateTaskPRState(ctx context.Context, taskUUID uuid.UUID, prState string, 
 	return nil
 }
 
+// SetTaskPRReviewState writes the task's pull request review decision as it
+// is, "" being no decision (NULL): UpdateTaskPRState keeps the decision on "",
+// and a last review dismissed must clear it. Unchanged, nothing is written.
+func SetTaskPRReviewState(ctx context.Context, taskUUID uuid.UUID, reviewState string) error {
+	query := `UPDATE tasks SET github_pr_review_state = NULLIF($1::text, ''), updated_at = NOW()
+		WHERE id = $2::uuid AND github_pr_review_state IS DISTINCT FROM NULLIF($1::text, '')`
+	if err := models.SetTaskPRReviewState(ctx, query, taskUUID, reviewState); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/SetTaskPRReviewState Failed err: %+v", err)
+		return err
+	}
+	return nil
+}
+
 // GetTaskProjectID returns the project UUID for a task.
 func GetTaskProjectID(ctx context.Context, taskUUID uuid.UUID) (uuid.UUID, error) {
 	projectID, err := models.GetTaskProjectID(ctx, taskUUID, false)
@@ -1267,14 +1379,10 @@ func GetGitHubMetaForTask(ctx context.Context, taskUUID uuid.UUID) (*models.GitH
 	return meta, nil
 }
 
-// GetGitHubMetaForTasks returns GitHub metadata for multiple tasks in one query.
-func GetGitHubMetaForTasks(ctx context.Context, taskUUIDs []uuid.UUID) (map[uuid.UUID]*models.GitHubMeta, error) {
-	meta, err := models.GetGitHubMetaForTasks(ctx, taskUUIDs)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetGitHubMetaForTasks Failed err: %+v", err)
-		return nil, err
-	}
-	return meta, nil
+// GitHubMetaRead is the tasks' GitHub metadata in one statement, as a read a
+// caller pipelines with others (pgexec.Batch).
+func GitHubMetaRead(taskUUIDs []uuid.UUID) (*pgexec.Read, func() (map[uuid.UUID]*models.GitHubMeta, error)) {
+	return models.GitHubMetaRead(taskUUIDs)
 }
 
 // BulkArchiveTasksInDgraph sets task_deleted_at on multiple tasks in a single Dgraph mutation (batched).

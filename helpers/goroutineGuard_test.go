@@ -14,12 +14,13 @@ import (
 
 // rawGoBaseline is how many go statements business/, controllers/, domain/,
 // initializers/ and services/ still start themselves rather than through
-// GoSafeNamed or GoSafeLoop (427 before F4, 165 after). It only goes down.
-const rawGoBaseline = 144
+// GoSafeNamed or GoSafeLoop (427 before F4, 165 after; 137 once D1 sent
+// every MQTT publish through publishTo). It only goes down.
+const rawGoBaseline = 137
 
 // unrecoveredGoBaseline is how many of those have no recover at all: a
 // panic on one ends the process (355 before F4). It only goes down.
-const unrecoveredGoBaseline = 76
+const unrecoveredGoBaseline = 73
 
 // goStatements counts the go statements under the trees, and those with no
 // recover in sight: a go func() {...}() whose body never calls recover (or a

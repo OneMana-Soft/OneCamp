@@ -14,6 +14,7 @@ package business
 import (
 	"context"
 	"errors"
+	messageDomain "github.com/akashc777/OneCamp/domain/Message"
 	"html"
 	"strings"
 	"time"
@@ -147,7 +148,7 @@ func GetGuestChannel(ctx context.Context, grant *guestModel.GuestGrant, before t
 	if before.IsZero() {
 		before = time.Now()
 	}
-	posts, err := postDomain.GetDgraphOldPostFromDgraph(ctx, channelID.String(), before)
+	posts, err := postDomain.PostPage(ctx, channelID.String(), messageDomain.Older, before)
 	if err != nil {
 		return nil, err
 	}

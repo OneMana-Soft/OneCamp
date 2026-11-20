@@ -27,4 +27,8 @@ func mountCalendarAnswers(rt calendarRouters) {
 	// What the event's call made is deleted, and brought back, by whoever may change the event.
 	rt.Member.Delete("/calendar/events/{eventId}/call/artefacts/{key}", eventController.DeleteCalendarEventCallArtefact)
 	rt.Member.Post("/calendar/events/{eventId}/call/artefacts/{key}/restore", eventController.RestoreCalendarEventCallArtefact)
+	// A call's recap on the event (gcal-new-event-notes): an action item made a task on the
+	// event by whoever may change it, and the organiser's "Send the recap to guests".
+	rt.Member.Post("/calendar/events/{eventId}/call/artefacts/{key}/action-items/{index}/task", eventController.MakeCalendarEventCallActionTask)
+	rt.Member.Post("/calendar/events/{eventId}/call/recap-to-guests", eventController.SetCalendarEventRecapToGuests)
 }

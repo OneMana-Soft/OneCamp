@@ -16,6 +16,7 @@ import (
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	taskField "github.com/akashc777/OneCamp/business/TaskField"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	taskFieldModel "github.com/akashc777/OneCamp/models/postgres/TaskField"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -116,7 +117,7 @@ func TestImportedFields(t *testing.T) {
 	if opts := got["Tags"].Options; len(opts) != 2 || opts[1].Label != "App" {
 		t.Errorf("the option first seen on a task is added: %+v", opts)
 	}
-	values, _, err := taskFieldModel.ReadValues(ctx, []uuid.UUID{t1})
+	values, err := readValues(ctx, t1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,7 @@ func TestImportedFields(t *testing.T) {
 		{Field: link, Value: "TBD"},
 	})
 	later.write(ctx, t2, ready)
-	if values, _, _ := taskFieldModel.ReadValues(ctx, []uuid.UUID{t2}); len(values[t2.String()]) != 0 {
+	if values, _ := readValues(ctx, t2); len(values[t2.String()]) != 0 {
 		t.Errorf("nothing set: %v", values)
 	}
 	if fmt.Sprint(lost) != "[{Reviewer Nobody Known} {Channel 3} {Budget lots} {Link TBD}]" {
@@ -219,7 +220,7 @@ func TestImportedFields(t *testing.T) {
 	if err := taskFieldModel.SetValue(ctx, used, got["Channel"].ID, json.RawMessage(`"`+got["Channel"].Options[0].ID+`"`), by); err != nil {
 		t.Fatal(err)
 	}
-	t1Values, _, err := taskFieldModel.ReadValues(ctx, []uuid.UUID{t1})
+	t1Values, err := readValues(ctx, t1)
 	if err != nil || len(t1Values[t1.String()]) != 7 {
 		t.Fatalf("the rolled-back task has its seven values: %v %v", t1Values, err)
 	}
@@ -255,7 +256,7 @@ func TestImportedFields(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	back, _, err := taskFieldModel.ReadValues(ctx, []uuid.UUID{t1})
+	back, err := readValues(ctx, t1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,4 +311,12 @@ func compact(raw json.RawMessage) string {
 	}
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// readValues is the tasks' field values, read as a task list reads them.
+func readValues(ctx context.Context, ids ...uuid.UUID) (taskFieldModel.Values, error) {
+	read, values := taskFieldModel.ValuesRead(ids)
+	pgexec.Batch(ctx, read)
+	out, _, err := values()
+	return out, err
 }

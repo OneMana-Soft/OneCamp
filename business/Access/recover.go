@@ -32,7 +32,10 @@ func Recover(ctx context.Context, admin Subject, res Resource, toUserUUID, reaso
 	if !admin.ActingAdmin() {
 		return nil, ErrForbidden
 	}
-	if res.Kind != KindDoc {
+	// A doc is handed on here (handOn); any other kind by the hand-on it
+	// registered (RegisterHandOn), and recorded the same way.
+	kindHandOn, ok := handOnFor(res.Kind)
+	if res.Kind != KindDoc && !ok {
 		return nil, ErrUnknownKind
 	}
 	resID, err := uuid.Parse(res.UUID)
@@ -55,8 +58,13 @@ func Recover(ctx context.Context, admin Subject, res Resource, toUserUUID, reaso
 	if utf8.RuneCountInString(reason) > maxNote {
 		reason = string([]rune(reason)[:maxNote])
 	}
-	from, err := handOn(ctx, res, toID.String(), admin, resourceEventBusiness.DocRecovered,
-		map[string]string{"admin": strings.ToLower(admin.UserUUID), "reason": reason})
+	var from string
+	if res.Kind == KindDoc {
+		from, err = handOn(ctx, res, toID.String(), admin, resourceEventBusiness.DocRecovered,
+			map[string]string{"admin": strings.ToLower(admin.UserUUID), "reason": reason})
+	} else {
+		from, err = kindHandOn(ctx, res.UUID, toID.String())
+	}
 	if err != nil {
 		return nil, err
 	}

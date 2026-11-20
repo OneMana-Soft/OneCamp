@@ -42,7 +42,7 @@ func init() {
 // Seams for tests: the reads and writes a row's page makes.
 var (
 	pagesOfRows     = model.PagesOfRows
-	pagesOfTable    = model.PagesOfTable
+	pagesOfTables   = model.PagesOfTables
 	ensureRowPage   = model.EnsureRowPage
 	ensureHostedDoc = docBusiness.EnsureHostedDoc
 	pageDocOf       = docBusiness.HostedDocOf
@@ -221,12 +221,12 @@ func WithPages(ctx context.Context, rows []*model.Row) {
 	}
 }
 
-// tablePagesChanged tells docs that who may open a table's pages changed (the
-// table made private, or put in the trash).
-func tablePagesChanged(ctx context.Context, table uuid.UUID) {
-	pages, err := pagesOfTable(ctx, table)
+// tablePagesChanged tells docs that who may open the tables' pages changed
+// (a table made private, or put in the trash), in one read.
+func tablePagesChanged(ctx context.Context, tables ...uuid.UUID) {
+	pages, err := pagesOfTables(ctx, tables)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/tablePagesChanged %s: its pages' sockets stay until they reconnect: %+v", table, err)
+		helpers.LogErrorWithContext(ctx, "business/tablePagesChanged %v: their pages' sockets stay until they reconnect: %+v", tables, err)
 		return
 	}
 	hostsChanged(helpers.UUIDStrings(pages))

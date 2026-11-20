@@ -9,6 +9,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.7.0
 	github.com/dgraph-io/dgo/v230 v230.0.1
 	github.com/eclipse/paho.mqtt.golang v1.5.1
+	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-chi/cors v1.2.2
 	github.com/golang-jwt/jwt/v5 v5.2.3
@@ -40,6 +41,8 @@ require (
 )
 
 require (
+	github.com/emersion/go-message v0.18.2 // indirect
+	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-webauthn/x v0.1.23 // indirect
 	github.com/google/go-tpm v0.9.5 // indirect

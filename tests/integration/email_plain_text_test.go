@@ -38,6 +38,8 @@ func TestNoticeEmailsShowWhatPeopleWroteAsPlainText(t *testing.T) {
 	ana, ben := w.people["ana"].String(), w.people["ben"].String()
 	// Ben is emailed whether or not he is online: no device is connected here.
 	w.exec(`INSERT INTO users_notification_preferences (user_id, unsubscribe_token, email_only_when_offline) VALUES ($1, $2, false)`, ben, uuid.NewString())
+	// Ben has no setting for the project (no row): a task's emails ask it
+	// (NOTIF M1), and no setting hears, so he is emailed all the same.
 
 	const wrote = `<a href="https://x">y</a> & <img src=z> <style>p{}</style>`
 	shown := template.HTMLEscapeString(wrote)
@@ -113,7 +115,7 @@ func TestNoticeEmailsShowWhatPeopleWroteAsPlainText(t *testing.T) {
 
 	t.Run("a task's name in the subject", func(t *testing.T) {
 		change := uuid.NewString()
-		notification.DispatchTaskStatusChange(ana, "ana", "", w.mine, "Ship "+wrote, "R&D", "To do", "Done", change, []string{ben})
+		notification.DispatchTaskStatusChange(ana, "ana", nil, w.mine, "Ship "+wrote, "R&D", "To do", "Done", change, []string{ben})
 		q := email(t, notification.EventTaskStatus, change)
 		if q.subject != "ana moved Ship "+wrote+" to Done" {
 			t.Errorf("the subject isn't the name as written: %q", q.subject)

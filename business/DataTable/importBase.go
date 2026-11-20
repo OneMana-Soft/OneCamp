@@ -125,6 +125,9 @@ type PersonRef struct {
 type ImportView struct {
 	Name, Type string
 	Config     map[string]any
+	// GroupBy is the select field, by Key, a board's columns are: kept as
+	// the view's display.boardGroup, its id ("" for the first select).
+	GroupBy string
 }
 
 // ImportNote is something an import couldn't bring, and why.
@@ -321,6 +324,7 @@ func (im *importer) run() error {
 			return err
 		}
 	}
+	im.mirrorLinks()
 	for i := range im.base.Tables {
 		if err := im.makeLinks(&im.base.Tables[i]); err != nil {
 			return err
@@ -364,17 +368,6 @@ func importName(s, none string) string {
 	return s
 }
 
-// uniqueName is name, numbered on from 2 ("Notes 2") while one taken has it,
-// ignoring case; seen holds those taken, and takes it.
-func uniqueName(name string, seen map[string]bool) string {
-	out := name
-	for n := 2; seen[strings.ToLower(out)]; n++ {
-		out = fmt.Sprintf("%s %d", name, n)
-	}
-	seen[strings.ToLower(out)] = true
-	return out
-}
-
 func (im *importer) makeTable(t *ImportTable) error {
 	visibility := model.VisibilityWorkspace
 	if im.base.Private {
@@ -390,7 +383,7 @@ func (im *importer) makeTable(t *ImportTable) error {
 		if !plain(f) {
 			continue
 		}
-		name := uniqueName(importName(f.Name, "Field"), seen)
+		name := helpers.UniqueName(importName(f.Name, "Field"), seen)
 		t.Fields[i].Name = name
 		fields = append(fields, FieldInput{Name: name, Type: f.Type, Config: f.Config, Description: f.Description, Position: float64(i)})
 	}
@@ -519,7 +512,7 @@ func (im *importer) makeComputed(t *ImportTable) {
 		var still []ImportField
 		var lastErr = map[string]error{}
 		for _, f := range left {
-			made, err := CreateField(im.ctx, table, FieldInput{Name: f.Name, Type: model.FieldFormula, Config: map[string]any{"formula": f.Formula}, Description: f.Description}, im.actor)
+			made, err := CreateField(im.ctx, table, FieldInput{Name: f.Name, Type: model.FieldFormula, Config: formulaConfig(f), Description: f.Description}, im.actor)
 			if err != nil {
 				still, lastErr[f.Key] = append(still, f), err
 				continue
@@ -955,6 +948,73 @@ func (im *importer) keepFiles(t *ImportTable, table uuid.UUID, field, row string
 	return out
 }
 
+// mirrorLinks names each link on the other side of its pair too. A relation
+// stores its links on one side, the one made first, and shows them on the
+// other, so a link a source names only on the showing side (a template
+// writes each link once) would be lost; one it names on both sides, as
+// Airtable's are, is named once. The source's own maps are never written to.
+func (im *importer) mirrorLinks() {
+	type side struct{ table, field string }
+	pair := map[side]side{}
+	for _, t := range im.base.Tables {
+		for _, f := range t.Fields {
+			if _, ok := im.tables[f.LinksTo]; ok && f.Type == model.FieldRelation && f.Pair != "" {
+				pair[side{t.Key, f.Key}] = side{f.LinksTo, f.Pair}
+			}
+		}
+	}
+	if len(pair) == 0 {
+		return
+	}
+	named := map[string]bool{} // "<table>/<row>/<field>/<linked row>"
+	at := map[string]int{}     // "<table>/<row>": its place in im.links[table]
+	for table, rows := range im.links {
+		for i, r := range rows {
+			at[table+"/"+r.Key] = i
+			for f, to := range r.Links {
+				for _, k := range to {
+					named[table+"/"+r.Key+"/"+f+"/"+k] = true
+				}
+			}
+		}
+	}
+	type mirror struct{ table, row, field, to string }
+	var mirrors []mirror
+	for _, t := range im.base.Tables {
+		for _, r := range im.links[t.Key] {
+			for _, f := range t.Fields {
+				p, ok := pair[side{t.Key, f.Key}]
+				for _, k := range r.Links[f.Key] {
+					if id := p.table + "/" + k + "/" + p.field + "/" + r.Key; ok && !named[id] {
+						named[id] = true
+						mirrors = append(mirrors, mirror{p.table, k, p.field, r.Key})
+					}
+				}
+			}
+		}
+	}
+	copied := map[string]bool{}
+	for _, m := range mirrors {
+		key := m.table + "/" + m.row
+		i, ok := at[key]
+		if !ok {
+			im.links[m.table] = append(im.links[m.table], ImportRow{Key: m.row})
+			i = len(im.links[m.table]) - 1
+			at[key] = i
+		}
+		r := &im.links[m.table][i]
+		if !copied[key] {
+			copied[key] = true
+			own := make(map[string][]string, len(r.Links)+1)
+			for f, to := range r.Links {
+				own[f] = slices.Clone(to)
+			}
+			r.Links = own
+		}
+		r.Links[m.field] = append(r.Links[m.field], m.to)
+	}
+}
+
 // makeLinks sets each row's links through t's relations, once every table's
 // rows are there. Of a pair, the side made first carries them (the other
 // shows the same links).
@@ -1041,8 +1101,28 @@ func (im *importer) makeViews(t *ImportTable) {
 		for k, val := range v.Config {
 			cfg[k] = val
 		}
+		if id, ok := im.field(t.Key, v.GroupBy); ok && v.GroupBy != "" {
+			display, _ := cfg["display"].(map[string]any)
+			if display == nil {
+				display = map[string]any{}
+			}
+			display["boardGroup"] = id.String()
+			cfg["display"] = display
+		}
 		if _, err := CreateView(im.ctx, table, ViewInput{Name: importName(v.Name, "View"), Type: v.Type, Config: cfg, Position: float64(i)}, im.actor); err != nil {
 			im.note(t.Key, "", "", "VIEW_LEFT_OUT", fmt.Sprintf("The view %q couldn't be made: %v", v.Name, err))
 		}
 	}
+}
+
+// formulaConfig is a formula's config as an import makes it: its text, and
+// the rest of what the source gave (how its result shows), as a rollup's.
+func formulaConfig(f ImportField) map[string]any {
+	cfg := map[string]any{"formula": f.Formula}
+	for k, v := range f.Config {
+		if _, set := cfg[k]; !set {
+			cfg[k] = v
+		}
+	}
+	return cfg
 }

@@ -7,8 +7,10 @@ package business
 // call's transcript is for its conversation's members, as the recap already
 // shares it with them. Every reader acting for a person asks here, after its
 // own check of the conversation: the in-call assistant (ConnectedCall), and
-// the readers of a room's newest transcript (NewestTranscriptOpenTo). The
-// recap acts for the call itself and asks nothing.
+// the readers of a room's newest transcript (NewestTranscriptOpenTo), and the
+// readers of one recording, its transcript and its playback link
+// (TranscriptOpenTo; the link through httpx.WriteRecordingURL). The recap
+// acts for the call itself and asks nothing.
 //
 // Presence is LiveKit's now (connectedNow), never the grant the write path
 // caches (ResolveTranscriptSession): that outlives a leave, a removal and the
@@ -69,26 +71,12 @@ func (c *LiveCall) Kept(ctx context.Context, limit int) ([]transcriptDomain.Tran
 // breakout room of it, has kept a line, and then no; until then it is a
 // finished call's, and yes. Unsure is no.
 func NewestTranscriptOpenTo(ctx context.Context, room, identity string) bool {
-	room = strings.TrimSpace(room)
-	open, err := callStateModel.OpenSessionOf(ctx, room)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/NewestTranscriptOpenTo call state err: %+v", err)
-		return false
+	running, ok := callGoingOn(ctx, room)
+	if !ok || running == nil {
+		return ok
 	}
-	if open == nil {
+	if connectedToAny(ctx, running, identity) {
 		return true
-	}
-	// A breakout room keeps its transcript where its call does (homeOfCall).
-	breakouts, err := callStateModel.OpenRoomsOf(ctx, open.ID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/NewestTranscriptOpenTo breakout rooms err: %+v", err)
-		return false
-	}
-	running := append([]callStateModel.Session{*open}, breakouts...)
-	for _, s := range running {
-		if _, err := connectedNow(ctx, s.Room, identity); err == nil {
-			return true
-		}
 	}
 	for _, s := range running {
 		if s.RoomSID == "" {
@@ -100,4 +88,66 @@ func NewestTranscriptOpenTo(ctx context.Context, room, identity string) bool {
 		}
 	}
 	return true
+}
+
+// TranscriptOpenTo reports whether identity, whom the room's conversation
+// already admits (the caller's own check, made first), may read what one
+// recording in it kept: the one filed under key, begun at began. With no call
+// going on in the room, yes. A recording the call going on made (its key, or
+// a breakout room's, or begun during it, by Kept's window) is that call's,
+// and then only someone connected to it, or to one of its breakout rooms,
+// may; one begun before it is a finished call's, and yes. Unsure is no.
+func TranscriptOpenTo(ctx context.Context, room, identity, key string, began *time.Time) bool {
+	running, ok := callGoingOn(ctx, room)
+	if !ok || running == nil {
+		return ok
+	}
+	if !madeBy(running, key, began) {
+		return true
+	}
+	return connectedToAny(ctx, running, identity)
+}
+
+// callGoingOn is the call going on in room with its breakout rooms (a
+// breakout room keeps its transcript where its call does, homeOfCall), the
+// call first; nil with ok for none. ok is false when Call State can't say.
+func callGoingOn(ctx context.Context, room string) (running []callStateModel.Session, ok bool) {
+	room = strings.TrimSpace(room)
+	open, err := callStateModel.OpenSessionOf(ctx, room)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/callGoingOn call state err: %+v", err)
+		return nil, false
+	}
+	if open == nil {
+		return nil, true
+	}
+	breakouts, err := callStateModel.OpenRoomsOf(ctx, open.ID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/callGoingOn breakout rooms err: %+v", err)
+		return nil, false
+	}
+	return append([]callStateModel.Session{*open}, breakouts...), true
+}
+
+// connectedToAny is whether identity is connected now to one of running.
+func connectedToAny(ctx context.Context, running []callStateModel.Session, identity string) bool {
+	for _, s := range running {
+		if _, err := connectedNow(ctx, s.Room, identity); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// madeBy is whether the recording filed under key, begun at began, is the
+// running call's: filed under its session key or a breakout room's, or begun
+// during it (Kept's window). One with no start time can't be told apart, so
+// it is. Pure.
+func madeBy(running []callStateModel.Session, key string, began *time.Time) bool {
+	for _, s := range running {
+		if k := helpers.CallSessionKeyFor(s.RoomSID); k != "" && k == key {
+			return true
+		}
+	}
+	return began == nil || began.IsZero() || !began.Before(running[0].StartedAt.Add(-recordingDomain.CallWindowSlack))
 }

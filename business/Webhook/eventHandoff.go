@@ -116,15 +116,29 @@ type handedOffEvent struct {
 type handoffOrigin struct {
 	GitHub           bool `json:"github,omitempty"`
 	PublicSubmission bool `json:"public_submission,omitempty"`
-	AgentWrite       bool `json:"agent_write,omitempty"`
+	// Door is the door a stranger's submission came through (helpers.SubmissionDoor);
+	// a handoff written before doors were named has none: a form.
+	Door       string `json:"submission_door,omitempty"`
+	AgentWrite bool   `json:"agent_write,omitempty"`
+	// Action is the action the event is one of (helpers.WithOrigin), so
+	// what the rule runs it sets going tell is told together there too.
+	Action string `json:"action,omitempty"`
 }
 
 func originOf(ctx context.Context) handoffOrigin {
 	return handoffOrigin{
 		GitHub:           helpers.IsGitHubOrigin(ctx),
 		PublicSubmission: helpers.IsPublicSubmission(ctx),
+		Door:             helpers.SubmissionDoor(ctx),
 		AgentWrite:       helpers.IsAgentWrite(ctx),
+		Action:           actionOf(ctx),
 	}
+}
+
+// actionOf is the action ctx is one of, or "".
+func actionOf(ctx context.Context) string {
+	id, _ := helpers.OriginOf(ctx)
+	return id
 }
 
 // context is the dispatching context's flags again, on a fresh context.
@@ -134,12 +148,12 @@ func (o handoffOrigin) context() context.Context {
 		ctx = helpers.WithGitHubOrigin(ctx)
 	}
 	if o.PublicSubmission {
-		ctx = helpers.WithPublicSubmission(ctx)
+		ctx = helpers.WithSubmissionDoor(ctx, o.Door)
 	}
 	if o.AgentWrite {
 		ctx = helpers.WithAgentWrite(ctx)
 	}
-	return ctx
+	return helpers.WithOrigin(ctx, o.Action)
 }
 
 // openTaskOf is the task data names (taskOfEvent) when ctx marks it open, or "".

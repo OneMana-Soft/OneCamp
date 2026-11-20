@@ -2,7 +2,12 @@
 
 package Calendar
 
-import "github.com/akashc777/OneCamp/tests/integration/processcache"
+import (
+	"sync/atomic"
+
+	domain "github.com/akashc777/OneCamp/domain/Calendar"
+	"github.com/akashc777/OneCamp/tests/integration/processcache"
+)
 
 // Every integration test starts with the booking pages forgotten
 // (tests/integration/processcache), as a new process would.
@@ -24,4 +29,38 @@ func init() {
 // into the old cache, which nothing reads.
 func ForgetBookingPagesForTest() {
 	pageCache = newBookingPagesCache()
+}
+
+// WhileRescheduleHeldForTest runs f inside each guest's move's page lock,
+// after its slot check and before the move, until the restore it returns is
+// called: the lock test books the same time meanwhile. Integration build only.
+func WhileRescheduleHeldForTest(f func()) (restore func()) {
+	old := rescheduleHeld
+	rescheduleHeld = f
+	return func() { rescheduleHeld = old }
+}
+
+// WhileSlotCheckForTest runs f as each booking's or move's slot check starts,
+// before the calendars are read, until the restore it returns is called: the
+// lock test asks whether the page's lock is held then. Integration build only.
+func WhileSlotCheckForTest(f func()) (restore func()) {
+	old := slotChecking
+	slotChecking = f
+	return func() { slotChecking = old }
+}
+
+// CountEventReadsForTest counts every read of one event, from either store
+// (the store's load, the graph's GetDgraphEventInfoByUUID), until the restore
+// it returns is called: a guest's move reads its meeting once. Integration
+// build only.
+func CountEventReadsForTest() (reads func() int64, restore func()) {
+	var n atomic.Int64
+	count := func() { n.Add(1) }
+	old := eventLoaded
+	eventLoaded = count
+	restoreGraph := domain.WhileEventReadForTest(count)
+	return n.Load, func() {
+		eventLoaded = old
+		restoreGraph()
+	}
 }
