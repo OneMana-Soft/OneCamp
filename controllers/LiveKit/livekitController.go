@@ -78,6 +78,8 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		if event.Room == nil || !callStateBusiness.BelongsHere(ctx, event.Room.Name) {
 			break
 		}
+		// The sidebar's kept answer of which calls are going on is out of date.
+		business.CallRoomsChanged()
 		roomName := event.Room.Name
 		helpers.LogInfoWithContext(ctx, "Room finished: %s", roomName)
 		// A call whose people are in its breakout rooms goes on there.
@@ -95,6 +97,7 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		if event.Room == nil || event.Participant == nil || !callStateBusiness.BelongsHere(ctx, event.Room.Name) {
 			break
 		}
+		business.CallRoomsChanged()
 		callControlBusiness.OnJoined(ctx, event.Room.Name, event.Room.Sid, event.Participant, at)
 
 	case "participant_left":
@@ -113,6 +116,7 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 			helpers.LogInfoWithContext(ctx, "controllers/HandleWebhook Skipping participant_left for non-local room: %s", roomName)
 			break
 		}
+		business.CallRoomsChanged()
 		// The leave is recorded, and the call ends only if nobody is left in
 		// it (business/CallControl's OnLeft). A listing that fails ends
 		// nothing; room_finished remains the backstop.
@@ -231,6 +235,8 @@ func transcriptRefusal(w http.ResponseWriter, err error) bool {
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "transcript_not_kept", "msg": "This call keeps no transcript."})
 	case errors.Is(err, business.ErrNotBrowserMode):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "not_browser_mode", "msg": "This workspace transcribes calls another way."})
+	case errors.Is(err, business.ErrTranscriberDown):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "transcriber_not_running", "msg": "Nothing on this server is transcribing calls right now."})
 	default:
 		return false
 	}

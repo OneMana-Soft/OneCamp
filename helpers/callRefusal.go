@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 )
@@ -45,3 +46,32 @@ func WriteRefusal(w http.ResponseWriter, err error) bool {
 
 // WriteCallRefusal is WriteRefusal, for a join that ran into a CallRefusal.
 func WriteCallRefusal(w http.ResponseWriter, err error) bool { return WriteRefusal(w, err) }
+
+// RefusedUnless answers a check that read the store to decide whether someone
+// may name something (a channel, a project) on a form or through an install.
+// ok and err are what that read answered. It is nil when the read said yes,
+// and refusal itself when it said no or found nothing by that id (ErrNotFound:
+// what isn't there is refused the same way), so a caller's == and errors.Is on
+// refusal still hold.
+//
+// A read that failed is ours, not the person's (V-1281): where names the check,
+// and the cause is logged there. It still refuses (nothing is saved on a read
+// that failed), with an error that reads as refusal does, so a form that
+// answers its error's words says what it always said, but is no Refusal, so an
+// install answers it 500 in its own words, never 400 "choose ...". It keeps
+// no cause to unwrap: the cause is in the log, never in an answer.
+func RefusedUnless(ctx context.Context, where string, ok bool, err error, refusal error) error {
+	switch {
+	case err != nil && !errors.Is(err, ErrNotFound):
+		LogErrorWithContext(ctx, "%s couldn't check, so it refused: %+v", where, err)
+		return &checkFailed{words: refusal.Error()}
+	case ok && err == nil:
+		return nil
+	}
+	return refusal
+}
+
+// checkFailed is a check whose read failed: the refusal's words, not its kind.
+type checkFailed struct{ words string }
+
+func (e *checkFailed) Error() string { return e.words }

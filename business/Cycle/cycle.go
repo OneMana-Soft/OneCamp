@@ -161,7 +161,7 @@ func Create(project uuid.UUID, in CreateInput, by uuid.UUID) (*cycleModel.Cycle,
 	}
 	c, err := cycleModel.Create(project, name, s, e, by)
 	if errors.Is(err, cycleModel.ErrOverlap) {
-		return nil, &CycleError{"That overlaps another cycle. Cycles run one after another."}
+		return nil, &CycleError{"That overlaps another cycle. Cycles run one after another unless the project turns on parallel cycles."}
 	}
 	return c, err
 }
@@ -229,15 +229,20 @@ func Complete(ctx context.Context, c *cycleModel.Cycle, carry bool, by uuid.UUID
 	return res, nil
 }
 
-// nextCycle is the cycle after c, made when there isn't one.
+// nextCycle is where completing c carries its open tasks: the first open
+// cycle after it that shares no days with it, made when there isn't one. A
+// cycle running beside c (parallel cycles) is never it; where cycles run one
+// after another none shares c's days, so it is simply the next. The web names
+// the same cycle before the complete (lib/tasks/cycles carryTarget).
 func nextCycle(c *cycleModel.Cycle, by uuid.UUID) (*cycleModel.Cycle, error) {
 	cycles, err := cycleModel.List(c.ProjectUUID)
 	if err != nil {
 		return nil, err
 	}
 	for i := range cycles {
-		if cycles[i].Number > c.Number && cycles[i].CompletedAt == nil {
-			return &cycles[i], nil
+		x := &cycles[i]
+		if x.Number > c.Number && x.CompletedAt == nil && !(x.StartsAt.Before(c.EndsAt) && c.StartsAt.Before(x.EndsAt)) {
+			return x, nil
 		}
 	}
 	length := c.EndsAt.Sub(c.StartsAt)

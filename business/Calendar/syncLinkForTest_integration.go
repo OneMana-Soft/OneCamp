@@ -16,3 +16,12 @@ import (
 func SyncLinkForTest(ctx context.Context, link *models.SyncLink, provider calendarSyncBusiness.Adapter) error {
 	return stored.syncLink(ctx, link, provider)
 }
+
+// SyncThroughForTest has the sync sink and the sweep send through provider,
+// whatever their link's provider, until the returned func puts the registered
+// adapters back.
+func SyncThroughForTest(provider calendarSyncBusiness.Adapter) (restore func()) {
+	prev := syncProvider
+	syncProvider = func(string) (calendarSyncBusiness.Adapter, bool) { return provider, true }
+	return func() { syncProvider = prev }
+}

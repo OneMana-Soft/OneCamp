@@ -52,6 +52,9 @@ var oldReach = map[string]string{
 	"teams":    `{"terms":{"team_id":["T1"]}}`,
 	"events": `{"bool":{"should":[{"term":{"event_people":"U"}},{"terms":{"event_calendar_id":["K1"]}},
 		{"bool":{"filter":[{"terms":{"event_calendar_id":["K2"]}}],"must_not":[{"term":{"event_private":true}}]}}],"minimum_should_match":1}}`,
+	// The sample's call reach is unread: no conversation, so no line.
+	"transcripts": `{"bool":{"filter":[{"terms":{"transcript_conv_id":[]}}],"must_not":[{"terms":{"transcript_session_key":[]}},
+		{"bool":{"filter":[{"terms":{"transcript_room":[]}}],"must_not":[{"exists":{"field":"transcript_session_key"}}]}}]}}`,
 }
 
 func canon(t *testing.T, v any) any {

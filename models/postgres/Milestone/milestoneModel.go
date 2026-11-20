@@ -125,11 +125,14 @@ func Of(ctx context.Context, task uuid.UUID) (*Milestone, error) {
 // lock holds name for the transaction: a project's milestone list (its count
 // and its order) or one milestone's projects are read and written under it.
 func lock(ctx context.Context, name string) error {
-	_, err := pgexec.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, name)
-	return err
+	return pgexec.LockXact(ctx, name)
 }
 
-func projectLock(project uuid.UUID) string { return "milestones:" + project.String() }
+// ProjectLockKey is the lock of a project's milestone list.
+func ProjectLockKey(project uuid.UUID) string { return "milestones:" + project.String() }
+
+// MilestoneLockKey is the lock of one milestone's projects.
+func MilestoneLockKey(id uuid.UUID) string { return "milestone:" + id.String() }
 
 // shownIn counts the milestones a project shows.
 func shownIn(ctx context.Context, project uuid.UUID) (int, error) {
@@ -150,7 +153,7 @@ func Bounds(ctx context.Context, id uuid.UUID, most int) ([]softDelete.Bound, er
 	}
 	bounds := make([]softDelete.Bound, 0, len(projects))
 	for _, p := range projects {
-		bounds = append(bounds, softDelete.Bound{Lock: projectLock(p), Most: most, Full: ErrFull,
+		bounds = append(bounds, softDelete.Bound{Lock: ProjectLockKey(p), Most: most, Full: ErrFull,
 			Count: func(ctx context.Context) (int, error) { return shownIn(ctx, p) }})
 	}
 	return bounds, nil
@@ -168,7 +171,7 @@ func show(ctx context.Context, project, id uuid.UUID) error {
 func Create(ctx context.Context, project uuid.UUID, name, description string, target *string, by uuid.UUID, most int) (*Milestone, error) {
 	var made *Milestone
 	err := pgexec.InTx(ctx, func(ctx context.Context) error {
-		if err := lock(ctx, projectLock(project)); err != nil {
+		if err := lock(ctx, ProjectLockKey(project)); err != nil {
 			return err
 		}
 		n, err := shownIn(ctx, project)
@@ -212,7 +215,7 @@ func Delete(ctx context.Context, id, by uuid.UUID) error {
 // order after them; an id it doesn't show is passed over.
 func Reorder(ctx context.Context, project uuid.UUID, ids []uuid.UUID) error {
 	return pgexec.InTx(ctx, func(ctx context.Context) error {
-		if err := lock(ctx, projectLock(project)); err != nil {
+		if err := lock(ctx, ProjectLockKey(project)); err != nil {
 			return err
 		}
 		if _, err := pgexec.Exec(ctx, `UPDATE milestone_projects SET position = position + $3
@@ -231,10 +234,10 @@ func Reorder(ctx context.Context, project uuid.UUID, ids []uuid.UUID) error {
 // mostProjects projects (ErrFull). Sharing it again changes nothing.
 func Share(ctx context.Context, id, project uuid.UUID, mostProjects, mostPerProject int) error {
 	return pgexec.InTx(ctx, func(ctx context.Context) error {
-		if err := lock(ctx, projectLock(project)); err != nil {
+		if err := lock(ctx, ProjectLockKey(project)); err != nil {
 			return err
 		}
-		if err := lock(ctx, "milestone:"+id.String()); err != nil {
+		if err := lock(ctx, MilestoneLockKey(id)); err != nil {
 			return err
 		}
 		if err := hold(ctx, id); err != nil {

@@ -20,7 +20,6 @@ import (
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
-	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -248,11 +247,7 @@ func SetTaskType(w http.ResponseWriter, r *http.Request) {
 		writeTypeRefusal(w, r, err, "SetTaskType")
 		return
 	}
-	var answer *dgraphStruct.TaskWorkType
-	if now != nil {
-		answer = &dgraphStruct.TaskWorkType{ID: now.ID.String(), Builtin: now.Builtin, Name: now.Name, Icon: now.Icon}
-	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"task_uuid": task.Uuid, "task_work_type": answer}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"task_uuid": task.Uuid, "task_work_type": now.Shown()}})
 }
 
 // ResolveTask GET /task/resolve/{ref}: the task a key ("Q4-12") or an id

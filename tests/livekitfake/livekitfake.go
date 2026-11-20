@@ -21,15 +21,16 @@ import (
 
 // Fake is the room service a test talks to through the project's LiveKit
 // service. Its rooms change only through its methods and the calls LiveKit
-// would answer (RemoveParticipant).
+// would answer (RemoveParticipant, UpdateRoomMetadata).
 type Fake struct {
 	mu    sync.Mutex
 	rooms map[string]*fakeRoom
 }
 
 type fakeRoom struct {
-	sid    string
-	people []string
+	sid      string
+	people   []string
+	metadata string
 }
 
 // Serve points the project's LiveKit service, for the test's length, at a
@@ -65,6 +66,16 @@ func (f *Fake) Room(room, sid string, participants ...string) {
 	f.rooms[room] = &fakeRoom{sid: sid, people: slices.Clone(participants)}
 }
 
+// Metadata answers a room's metadata, as everyone connected to it reads it.
+func (f *Fake) Metadata(room string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r := f.rooms[room]; r != nil {
+		return r.metadata
+	}
+	return ""
+}
+
 // Leave disconnects identity from room, as their closing the tab does.
 func (f *Fake) Leave(room, identity string) {
 	f.mu.Lock()
@@ -83,9 +94,16 @@ func (f *Fake) answer(method string, body []byte) proto.Message {
 		resp := &livekit.ListRoomsResponse{}
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		for _, name := range req.Names {
+		names := req.Names
+		if len(names) == 0 { // LiveKit lists every room
+			for name := range f.rooms {
+				names = append(names, name)
+			}
+			slices.Sort(names)
+		}
+		for _, name := range names {
 			if r := f.rooms[name]; r != nil {
-				resp.Rooms = append(resp.Rooms, &livekit.Room{Name: name, Sid: r.sid})
+				resp.Rooms = append(resp.Rooms, &livekit.Room{Name: name, Sid: r.sid, Metadata: r.metadata})
 			}
 		}
 		return resp
@@ -106,6 +124,17 @@ func (f *Fake) answer(method string, body []byte) proto.Message {
 		_ = proto.Unmarshal(body, &req)
 		f.Leave(req.Room, req.Identity)
 		return &livekit.RemoveParticipantResponse{}
+	case "UpdateRoomMetadata":
+		var req livekit.UpdateRoomMetadataRequest
+		_ = proto.Unmarshal(body, &req)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		r := f.rooms[req.Room]
+		if r == nil {
+			return &livekit.Room{}
+		}
+		r.metadata = req.Metadata
+		return &livekit.Room{Name: req.Room, Sid: r.sid, Metadata: r.metadata}
 	default:
 		return &livekit.Room{}
 	}

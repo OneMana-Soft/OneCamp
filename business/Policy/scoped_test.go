@@ -250,3 +250,45 @@ func TestPrimingReadsManyScopesAtOnce(t *testing.T) {
 		t.Fatalf("after a failed batch: %s, %d reads of its own", got, single)
 	}
 }
+
+// BoolsIn answers many people's own value at once, in one read, each as
+// asked: their own where they set one, else the workspace's; and a read that
+// fails answers an error, never the workspace's value (a person who hid
+// their busy times stays hidden when their choice can't be read).
+func TestBoolsInAnswersManyScopesInOneReadOrNone(t *testing.T) {
+	sc := scopedStore{}
+	r := withScopes(t, &store{values: map[string]string{}}, sc)
+	hid, kept := uuid.NewString(), strings.ToUpper(uuid.NewString())
+	sc[Scope{Kind: ScopePerson, ID: hid}.cacheKey()] = map[string]string{CalendarFreeBusy.Key: "false"}
+	oldMany, oldR := readScopedMany, readScoped
+	t.Cleanup(func() { readScopedMany, readScoped = oldMany, oldR })
+	reads := 0
+	readScopedMany = func(_ context.Context, kind string, ids []string) (map[string]map[string]string, error) {
+		reads++
+		out := map[string]map[string]string{}
+		for _, id := range ids {
+			if v, ok := sc[kind+":"+strings.ToLower(id)]; ok {
+				out[strings.ToLower(id)] = v
+			}
+		}
+		return out, nil
+	}
+	readScoped = func(context.Context, Scope) (map[string]string, error) {
+		t.Fatal("a scope was read on its own")
+		return nil, nil
+	}
+	got, err := r.BoolsIn(context.Background(), CalendarFreeBusy, ScopePerson, []string{hid, kept})
+	if err != nil || reads != 1 {
+		t.Fatalf("one read: %d (%v)", reads, err)
+	}
+	if got[hid] || got[kept] != CalendarFreeBusy.Default || len(got) != 2 {
+		t.Fatalf("by id as asked: %v", got)
+	}
+	scopedCache.Purge()
+	readScopedMany = func(context.Context, string, []string) (map[string]map[string]string, error) {
+		return nil, errors.New("down")
+	}
+	if got, err := r.BoolsIn(context.Background(), CalendarFreeBusy, ScopePerson, []string{hid}); err == nil {
+		t.Fatalf("a failed read answered %v", got)
+	}
+}

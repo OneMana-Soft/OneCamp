@@ -55,16 +55,12 @@ func Publish(ctx context.Context, room string) {
 
 // stateOf is the payload for a room's latest call, or nil when it has none.
 func stateOf(ctx context.Context, room string) (*mqttStruct.MqttCallState, error) {
-	row, err := model.LatestSessionOf(ctx, room)
-	if err != nil || row == nil {
-		return nil, err
-	}
-	s, err := view(ctx, row)
-	if err != nil {
+	s, err := LatestInRoom(ctx, room)
+	if err != nil || s == nil {
 		return nil, err
 	}
 	if s.Live && s.GoesOnInRooms(time.Now()) {
-		if err := countInRooms(ctx, row.ID, s); err != nil {
+		if err := countInRooms(ctx, s); err != nil {
 			return nil, err
 		}
 	}
@@ -79,7 +75,11 @@ func stateOf(ctx context.Context, room string) (*mqttStruct.MqttCallState, error
 
 // countInRooms counts as in a call everyone in one of its open breakout
 // rooms: from outside, a call is everyone in it, whichever room they are in.
-func countInRooms(ctx context.Context, parent uuid.UUID, s *Session) error {
+func countInRooms(ctx context.Context, s *Session) error {
+	parent, err := uuid.Parse(s.ID)
+	if err != nil {
+		return err
+	}
 	there, err := model.InRooms(ctx, parent)
 	if err != nil {
 		return err

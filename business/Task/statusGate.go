@@ -27,6 +27,41 @@ var StatusGate func(ctx context.Context, task *dgraphStruct.DgraphTask, prev, ne
 // task back; nil leaves requests as they are.
 var WentOn func(ctx context.Context, taskID uuid.UUID, deleted bool)
 
+// moveNoteKey holds one move's moveNote (setStatus).
+type moveNoteKey struct{}
+
+// moveNote is what the status gate read of one move's task, for WentOn after
+// it: whether the task had an open request when the gate read its project's
+// rules (business/Approvals reads both in one round trip).
+type moveNote struct {
+	task       uuid.UUID
+	read, open bool
+}
+
+// withMoveNote is ctx with an empty note for one move of task: setStatus
+// hands it to the gate and to WentOn only, so nothing the move sets going
+// after them sees it.
+func withMoveNote(ctx context.Context, task uuid.UUID) context.Context {
+	return context.WithValue(ctx, moveNoteKey{}, &moveNote{task: task})
+}
+
+// NoteOpenRequest is the gate telling the move of task in ctx whether the
+// task has an open request, read with the rules that decide the move. A
+// context with no move of task (a new task's first status) is told nothing.
+func NoteOpenRequest(ctx context.Context, task uuid.UUID, open bool) {
+	if n, _ := ctx.Value(moveNoteKey{}).(*moveNote); n != nil && n.task == task {
+		n.read, n.open = true, open
+	}
+}
+
+// NoOpenRequest is whether the move of task in ctx was told by the gate that
+// the task had no open request (NoteOpenRequest): WentOn has none to close.
+// False wherever nothing was noted, so WentOn closes as it always did.
+func NoOpenRequest(ctx context.Context, task uuid.UUID) bool {
+	n, _ := ctx.Value(moveNoteKey{}).(*moveNote)
+	return n != nil && n.task == task && n.read && !n.open
+}
+
 // StatusRefusal is a status change the gate didn't make, in words a person
 // reads ("Only the project's admins move tasks to Done"). ApprovalID is set
 // when the move became a request for approval instead: it happens once the

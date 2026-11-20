@@ -23,6 +23,7 @@ import (
 	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
 	linkModel "github.com/akashc777/OneCamp/models/postgres/ProjectLink"
 	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
+	authService "github.com/akashc777/OneCamp/services/Auth"
 	"github.com/google/uuid"
 )
 
@@ -80,13 +81,15 @@ var (
 		return userBusiness.UploadUserFile(ctx, bytes.NewReader(p.Body), int64(len(p.Body)), p.Name, postgresStruct.ATTACHMENT_SRC_PROJECT_LINK, project.String())
 	}
 	room        = linkModel.Room
-	create      = linkModel.Create
+	create      = linkModel.CreateMany
 	setPictures = linkModel.SetPictures
 	list        = linkModel.List
 	get         = linkModel.Get
 	rename      = linkModel.Rename
 	remove      = linkModel.Delete
 	attachment  = attachmentBusiness.GetAttachmentByObjUUID
+	// frontendBase is this workspace's web app address (scheme, host, port).
+	frontendBase = authService.FrontendBaseURL
 )
 
 // List is the project's links, in its order ([] when it has none).
@@ -118,28 +121,82 @@ func Add(ctx context.Context, project, by uuid.UUID, rawURL, title string) (View
 	if err := room(ctx, project, address, MostLinks); err != nil {
 		return View{}, err
 	}
-	card, err := unfurl(ctx, address, budget(ctx, "link", by))
-	if err != nil || !card.Fetched {
-		if err != nil {
-			helpers.LogInfoWithContext(ctx, "business/ProjectLink.Add: %s is kept as a plain link: %v", u.Host, err)
+	// A page of this workspace's own web app is behind sign-in: a read would
+	// see only the sign-in page and keep its words, so it isn't read.
+	var card unfurlBusiness.Card
+	if !onThisApp(u) {
+		card, err = unfurl(ctx, address, budget(ctx, "link", by))
+		if err != nil || !card.Fetched {
+			if err != nil {
+				helpers.LogInfoWithContext(ctx, "business/ProjectLink.Add: %s is kept as a plain link: %v", u.Host, err)
+			}
+			card = unfurlBusiness.Card{}
 		}
-		card = unfurlBusiness.Card{}
 	}
-	l := linkModel.Link{
-		ProjectUUID: project,
-		URL:         address,
-		Description: words(card.Description, descriptionRunes),
-		SiteName:    words(card.SiteName, siteRunes),
-	}
-	l.Title = firstWords(titleRunes, title, card.Title, card.SiteName, unfurlBusiness.SiteHost(u))
-	made, err := create(ctx, l, by, MostLinks)
+	made, err := create(ctx, project, []linkModel.Link{linkTo(project, u, title, card)}, by, MostLinks)
 	if err != nil {
 		return View{}, err
 	}
 	if card.IconURL != "" || card.ImageURL != "" {
-		keepPictures(ctx, made, by, card)
+		keepPictures(ctx, &made[0], by, card)
 	}
-	return viewOf(*made), nil
+	return viewOf(made[0]), nil
+}
+
+// Named is a link whose name its adder knows: its address and its title.
+type Named struct {
+	URL   string
+	Title string
+}
+
+// AddNamed adds links to the project, as by, last in its order in the order
+// given, in one write, and answers them in that order. Their pages aren't
+// read: each is named by its title, else by its host (a template's own
+// tables, on this workspace's web app). All of them are added or none:
+// ErrInvalidURL when one isn't a web page's address, ErrDuplicate when one
+// of the project's links, or another of them, has one's address, ErrFull
+// when the project would hold more than MostLinks.
+func AddNamed(ctx context.Context, project, by uuid.UUID, links []Named) ([]View, error) {
+	rows := make([]linkModel.Link, 0, len(links))
+	for _, n := range links {
+		u, err := unfurlBusiness.Canonical(n.URL)
+		if err != nil {
+			return nil, ErrInvalidURL
+		}
+		rows = append(rows, linkTo(project, u, n.Title, unfurlBusiness.Card{}))
+	}
+	made, err := create(ctx, project, rows, by, MostLinks)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]View, 0, len(made))
+	for _, l := range made {
+		out = append(out, viewOf(l))
+	}
+	return out, nil
+}
+
+// linkTo is the link to u that the project keeps: named by title, else by
+// what its page says (card), else by its site, else by its host.
+func linkTo(project uuid.UUID, u *url.URL, title string, card unfurlBusiness.Card) linkModel.Link {
+	return linkModel.Link{
+		ProjectUUID: project,
+		URL:         u.String(),
+		Title:       firstWords(titleRunes, title, card.Title, card.SiteName, unfurlBusiness.SiteHost(u)),
+		Description: words(card.Description, descriptionRunes),
+		SiteName:    words(card.SiteName, siteRunes),
+	}
+}
+
+// onThisApp is whether u is on this workspace's web app: its configured
+// scheme, host and port exactly. A host that only looks like it, or ends
+// like it, is another site's.
+func onThisApp(u *url.URL) bool {
+	base, err := url.Parse(strings.TrimSpace(frontendBase()))
+	if err != nil || base.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Scheme, base.Scheme) && strings.EqualFold(u.Host, base.Host)
 }
 
 // keepPictures keeps the icon and the picture card points at with the link,

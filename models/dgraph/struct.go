@@ -23,23 +23,48 @@ type DgraphTranscript struct {
 	// removes cross-clock skew between the browser/agent and the LiveKit egress
 	// server. Nil for legacy rows (playback falls back to the subtraction).
 	OffsetMs *int64 `json:"transcript_offset_ms,omitempty"`
+	// OriginalText is the words as they were filed, kept by a line's first
+	// correction and never written again; "" for a line nobody corrected.
+	// Text is always the words as they read now.
+	OriginalText string `json:"transcript_original_text,omitempty"`
+	// CorrectedAt and CorrectedBy are the latest correction's time and who
+	// made it; nil for a line nobody corrected.
+	CorrectedAt *time.Time  `json:"transcript_corrected_at,omitempty"`
+	CorrectedBy *DgraphUser `json:"transcript_corrected_by,omitempty"`
+	// Translations are the line's kept translations as the server wrote them
+	// (domain/Recording's shape): read with the line, never answered to a
+	// client (a transcript read clears it).
+	Translations string `json:"transcript_translations,omitempty"`
+	// Translation is the line in the language a read asked for (?lang=), "" while
+	// it waits. Never stored.
+	Translation string `json:"translation,omitempty"`
+}
+
+// TranscriptTranslation is what a read asked in a language says of it: the
+// language, the model that translated it and how many lines still wait.
+type TranscriptTranslation struct {
+	Language string `json:"language"`
+	Model    string `json:"model"`
+	Pending  int    `json:"pending"`
 }
 
 type DgraphRecording struct {
-	Uid                string              `json:"uid,omitempty"`
-	DType              []string            `json:"dgraph.type,omitempty"`
-	EgressId           string              `json:"recording_egress_id,omitempty"`
-	StartedAt          *time.Time          `json:"recording_stared_at,omitempty"`
-	EndedAt            *time.Time          `json:"recording_ended_at,omitempty"`
-	Duration           float64             `json:"recording_duration,omitempty"`
-	ObjectKey          string              `json:"recording_obj_key,omitempty"`
-	TranscriptCount    uint64              `json:"recording_transcript_count,omitempty"`
-	Transcript         []*DgraphTranscript `json:"recording_transcript,omitempty"`
-	RecordingSize      int64               `json:"recording_size,omitempty"`
-	RecordingStartedBy *DgraphUser         `json:"recording_started_by,omitempty"`
-	Channel            *DgraphChannel      `json:"recording_channel,omitempty"`
-	Dm                 *DgraphDm           `json:"recording_dm,omitempty"`
-	DeletedAt          *time.Time          `json:"recording_deleted_at,omitempty"`
+	Uid             string              `json:"uid,omitempty"`
+	DType           []string            `json:"dgraph.type,omitempty"`
+	EgressId        string              `json:"recording_egress_id,omitempty"`
+	StartedAt       *time.Time          `json:"recording_stared_at,omitempty"`
+	EndedAt         *time.Time          `json:"recording_ended_at,omitempty"`
+	Duration        float64             `json:"recording_duration,omitempty"`
+	ObjectKey       string              `json:"recording_obj_key,omitempty"`
+	TranscriptCount uint64              `json:"recording_transcript_count,omitempty"`
+	Transcript      []*DgraphTranscript `json:"recording_transcript,omitempty"`
+	// Translation says what a read in another language holds (?lang=); never stored.
+	Translation        *TranscriptTranslation `json:"translation,omitempty"`
+	RecordingSize      int64                  `json:"recording_size,omitempty"`
+	RecordingStartedBy *DgraphUser            `json:"recording_started_by,omitempty"`
+	Channel            *DgraphChannel         `json:"recording_channel,omitempty"`
+	Dm                 *DgraphDm              `json:"recording_dm,omitempty"`
+	DeletedAt          *time.Time             `json:"recording_deleted_at,omitempty"`
 	// Event is the calendar event whose call this was (its uuid), for a call
 	// that belongs to an event rather than a conversation (meet-02): the
 	// event's readers find it there, by the calendar's own read rule. Not an
@@ -469,16 +494,31 @@ type DgraphBoard struct {
 	// (MinIO). Large boards keep their blob out of dgraph; State is resolved
 	// from this object at read time. board_state remains only as a legacy
 	// fallback for boards saved before the object-storage migration.
-	StateKey         string           `json:"board_state_key,omitempty"`
-	Snippet          string           `json:"board_snippet,omitempty"`
-	ThumbnailKey     string           `json:"board_thumbnail_key,omitempty"`
-	IsPrivate        *bool            `json:"board_private,omitempty"`
-	MqttTopic        string           `json:"board_mqtt_topic,omitempty"`
-	CanProtect       bool             `json:"board_can_protect,omitempty"` // may the reader protect and lift objects (miro-44); getBoardInfo sets it, never Dgraph
-	CreatedBy        *DgraphUser      `json:"board_created_by,omitempty"`
-	EditingUser      []*DgraphUser    `json:"board_editing_users,omitempty"`
-	ReadingUser      []*DgraphUser    `json:"board_reading_users,omitempty"`
-	CommentingUser   []*DgraphUser    `json:"board_commenting_users,omitempty"`
+	StateKey       string        `json:"board_state_key,omitempty"`
+	Snippet        string        `json:"board_snippet,omitempty"`
+	ThumbnailKey   string        `json:"board_thumbnail_key,omitempty"`
+	IsPrivate      *bool         `json:"board_private,omitempty"`
+	MqttTopic      string        `json:"board_mqtt_topic,omitempty"`
+	CanProtect     bool          `json:"board_can_protect,omitempty"` // may the reader protect and lift objects (miro-44); getBoardInfo sets it, never Dgraph
+	CreatedBy      *DgraphUser   `json:"board_created_by,omitempty"`
+	EditingUser    []*DgraphUser `json:"board_editing_users,omitempty"`
+	ReadingUser    []*DgraphUser `json:"board_reading_users,omitempty"`
+	CommentingUser []*DgraphUser `json:"board_commenting_users,omitempty"`
+	// CoOwners are the board's co-owners (miro-32): each is an editor too, so
+	// every read and edit rule counts them as one; HasOwnerAccess is the
+	// reader's count of them, as HasEditAccess is of the editors.
+	CoOwners       []*DgraphUser `json:"board_owning_users,omitempty"`
+	HasOwnerAccess uint8         `json:"board_owner_access,omitempty"`
+	// EditorsShare is whether the board's editors may share it: invite people
+	// and make guest links. Absent is on (miro-32, the lead's R3).
+	EditorsShare *bool `json:"board_editors_share,omitempty"`
+	// CanShare and CanManage are what getBoardInfo offers the reader
+	// (business/Board MayShare, CanManage); never Dgraph's.
+	CanShare  bool `json:"board_can_share,omitempty"`
+	CanManage bool `json:"board_can_manage,omitempty"`
+	// CanComment is whether getBoardInfo offers the reader the comment box
+	// (business/Board CanComment); never Dgraph's.
+	CanComment       bool             `json:"board_can_comment,omitempty"`
 	HasReadAccess    uint8            `json:"board_read_access,omitempty"`
 	HasEditAccess    uint8            `json:"board_edit_access,omitempty"`
 	HasCommentAccess uint8            `json:"board_comment_access,omitempty"`
@@ -603,6 +643,9 @@ type DgraphTask struct {
 	// in the graph.
 	Key      string        `json:"task_key,omitempty"`
 	WorkType *TaskWorkType `json:"task_work_type,omitempty"`
+	// SLA is where the task's SLA timer stands, laid over a task read for
+	// its project's members (business/SLA); never stored in the graph.
+	SLA *TaskSLA `json:"task_sla,omitempty"`
 	// Hidden marks what a reader who may not see a restricted task is shown
 	// of it where a link to it stays (a parent, a dependency): that a task is
 	// there, and nothing of which, not even its id (models/taskread Stub;
@@ -627,6 +670,14 @@ type DgraphTask struct {
 type TaskWaiting struct {
 	ApprovalID string `json:"approval_id"`
 	ToStatus   string `json:"to_status"`
+}
+
+// TaskSLA is where a task's SLA timer stands as the app shows it: on_track,
+// at_risk, breached or met, when it is due, and from when it is at risk.
+type TaskSLA struct {
+	State  string     `json:"state"`
+	DueAt  *time.Time `json:"due_at,omitempty"`
+	RiskAt *time.Time `json:"risk_at,omitempty"`
 }
 
 // TaskWorkType is a task's type as the app shows it: a built-in one (Builtin
@@ -860,6 +911,10 @@ type DgraphProject struct {
 	// project read for the app (business/TaskKeys LayProjects); never stored
 	// in the graph.
 	Key string `json:"project_key,omitempty"`
+	// Triage is the project's triage as its reader may see it, laid over the
+	// single-project read (business/Triage Lay); never stored in the graph.
+	// None where triage is off or the reader may not read its queue.
+	Triage *ProjectTriage `json:"project_triage,omitempty"`
 }
 
 type DgraphTeam struct {

@@ -11,6 +11,7 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 	"github.com/google/uuid"
 )
@@ -197,7 +198,7 @@ func TestAProjectsCalendarHasAFeedForEachMember(t *testing.T) {
 	}
 	projectsDecide(t, levels, map[string]string{project: "Launch"})
 	ctx := context.Background()
-	cal, err := h.s.ProjectCalendarFor(ctx, jonas, project)
+	cal, err := h.s.projectCalendarFor(ctx, jonas, project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,5 +217,119 @@ func TestAProjectsCalendarHasAFeedForEachMember(t *testing.T) {
 	}
 	if _, err := h.s.MakeFeed(ctx, maya, cal.String(), models.FeedFull); !errors.Is(err, ErrEventNotFound) {
 		t.Fatalf("a feed made of a project's calendar its person can't see: %v", err)
+	}
+}
+
+// Calendar B8 (basecamp-05 H1): a member's link dialog knows the workspace
+// has turned links off before they make one. Every read of a feed, of a
+// calendar or of everything, says whether links are allowed now, whatever
+// their feed is (none, live, stopped); and a link just made says so too.
+func TestEveryFeedReadSaysWhetherTheWorkspaceAllowsLinks(t *testing.T) {
+	h := newHarness(t)
+	maya := h.member("Maya")
+	ctx := context.Background()
+	own, _ := h.store.personalCalendar(ctx, personOf(maya), "UTC")
+	ids := map[string]string{"her calendar's": own.String(), "everything's": WorkspaceFeedID}
+	reads := func(state string) {
+		t.Helper()
+		for _, on := range []bool{false, true} {
+			feedsOn(t, on)
+			for what, id := range ids {
+				v, err := h.s.Feed(ctx, maya, id)
+				if err != nil || v.LinksAllowed != on {
+					t.Errorf("%s feed, %s, links allowed %v: %+v %v", what, state, on, v, err)
+				}
+			}
+		}
+	}
+	reads("with none")
+	feedsOn(t, true)
+	for what, id := range ids {
+		made, err := h.s.MakeFeed(ctx, maya, id, models.FeedFull)
+		if err != nil || !made.Live || !made.LinksAllowed {
+			t.Fatalf("%s feed just made: %+v %v", what, made, err)
+		}
+	}
+	reads("live")
+	feedsOn(t, true)
+	for what, id := range ids {
+		if err := h.s.StopFeed(ctx, maya, id); err != nil {
+			t.Fatalf("stopping %s feed: %v", what, err)
+		}
+	}
+	reads("stopped")
+}
+
+// A link to a project's calendar carries the project's tasks Maya may read,
+// in one read of them and one decision for them all, over a window from a
+// quarter back (so the read's cap goes on what is coming), with her graph
+// uid read once; a busy link, a channel's and her own calendar's read no
+// task at all.
+func TestAProjectLinkReadsItsTasksOnce(t *testing.T) {
+	h := newHarness(t)
+	feedsOn(t, true)
+	maya := h.member("Maya")
+	project, channel, plan := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	projectsDecide(t, map[string]map[string]accessBusiness.Level{personOf(maya).String(): {
+		project: accessBusiness.LevelView, channel: accessBusiness.LevelView, plan: accessBusiness.LevelView}}, map[string]string{project: "Launch"})
+	due := h.clock.AddDate(0, 0, 3)
+	var conds []string
+	projectTasksIn = func(_ context.Context, _ []string, cond string) (map[string][]*dgraphStruct.DgraphTask, error) {
+		conds = append(conds, cond)
+		return map[string][]*dgraphStruct.DgraphTask{project: {{Uuid: plan, Name: "Launch plan", DueDate: &due}}}, nil
+	}
+	decided, decide := 0, resolveAllFn
+	resolveAllFn = func(ctx context.Context, who accessBusiness.Subject, res []accessBusiness.Resource) (map[accessBusiness.Resource]accessBusiness.Decision, error) {
+		for _, r := range res {
+			if r.Kind == sourceTask {
+				decided++
+				break
+			}
+		}
+		return decide(ctx, who, res)
+	}
+	uids := 0
+	uidOf = func(_ context.Context, who accessBusiness.Subject) (string, error) {
+		uids++
+		return "0x" + who.UserUUID[:4], nil
+	}
+	ctx := context.Background()
+	read := func(cal uuid.UUID, scope string) string {
+		t.Helper()
+		made, err := h.s.MakeFeed(ctx, maya, cal.String(), scope)
+		if err != nil {
+			t.Fatalf("Maya's %s link: %v", scope, err)
+		}
+		conds, decided, uids = nil, 0, 0
+		body, err := h.s.FeedICS(ctx, tokenOf(t, made))
+		if err != nil {
+			t.Fatalf("reading Maya's %s link: %v", scope, err)
+		}
+		return string(body)
+	}
+	cal, err := h.s.projectCalendarFor(ctx, maya, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := read(cal, models.FeedFull)
+	if !strings.Contains(body, "SUMMARY:Launch plan") || !strings.Contains(body, "UID:task-"+plan+"@onecamp") || !strings.Contains(body, "DTSTART;VALUE=DATE:20261019") {
+		t.Errorf("the project's link leaves out its task:\n%s", body)
+	}
+	from := h.clock.Truncate(24 * time.Hour).Add(-feedTaskLookback).Format(time.RFC3339Nano)
+	if len(conds) != 1 || decided != 1 || uids != 1 || !strings.Contains(conds[0], from) || strings.Contains(conds[0], "1900-") {
+		t.Errorf("the project's link: %d task reads (want 1) from %q (want %s on), %d task decisions (want 1), %d uid reads (want 1)", len(conds), conds, from, decided, uids)
+	}
+	if body := read(cal, models.FeedBusy); strings.Contains(body, "Launch plan") || len(conds) != 0 || decided != 0 {
+		t.Errorf("the project's busy link: %d task reads, %d decisions (want none):\n%s", len(conds), decided, body)
+	}
+	chat, err := h.s.containerCalendar(ctx, containerChannel, channel, "UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, _ := h.store.personalCalendar(ctx, personOf(maya), "UTC")
+	for name, c := range map[string]uuid.UUID{"a channel's": chat, "her own": own} {
+		if read(c, models.FeedFull); len(conds) != 0 || decided != 0 {
+			t.Errorf("%s calendar's link read tasks: %d reads, %d decisions", name, len(conds), decided)
+		}
 	}
 }

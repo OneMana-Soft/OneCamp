@@ -52,6 +52,7 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	commentDomain "github.com/akashc777/OneCamp/domain/Comment"
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
@@ -262,6 +263,8 @@ func tellMentioned(ctx context.Context, e resourceEventBusiness.Event, doc *dgra
 	n := baseNotice(e, doc, c)
 	n.DedupKey = "doc.mentioned|" + doc.Uuid + "|" + day(e.At)
 	n.Email = notificationBusiness.EventDocMention
+	// Its email is asked again at the send: the doc, as someone it names.
+	n.About = &notificationBusiness.About{Kind: notificationBusiness.AboutDoc, Item: doc.Uuid, Heard: notifylevel.Named}
 	if c.actor != nil {
 		n.Title = c.who() + " mentioned you in " + titleOf(doc)
 	} else {
@@ -459,6 +462,9 @@ func tellReplied(ctx context.Context, e resourceEventBusiness.Event, doc *dgraph
 	// The key a doc-wide comment notice has: one inbox item per comment.
 	n.DedupKey = "comment|" + commentID
 	n.Email = notificationBusiness.EventDocComment
+	// Its email is asked again at the send: the doc, who may read it, and the
+	// reply itself.
+	n.About = &notificationBusiness.About{Kind: notificationBusiness.AboutDoc, Item: doc.Uuid, Reply: commentID, Heard: notifylevel.Thread}
 	n.Title = c.who() + " replied in a thread on " + titleOf(doc)
 	n.Body = helpers.TruncateRunes(helpers.HTMLToPlainText(text), 300)
 	n.Path = "/app/doc/" + doc.Uuid + "/comment"

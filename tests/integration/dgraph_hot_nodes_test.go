@@ -364,7 +364,7 @@ func TestHotNodeTranscriptLinesAtOnce(t *testing.T) {
 			DType: []string{"Transcript"}, From: &dgraphStruct.DgraphUser{Uid: uids[i]},
 			Text: fmt.Sprintf("line %d", i), TimeStamp: &at,
 		})
-		if err == nil && !added {
+		if err == nil && added == "" {
 			err = fmt.Errorf("the line was not added")
 		}
 		return err

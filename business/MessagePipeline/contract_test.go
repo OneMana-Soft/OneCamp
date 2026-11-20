@@ -53,6 +53,11 @@ func TestASendIsTodaysSend(t *testing.T) {
 	if k := onceKey(grp, me); k != "grp:g" {
 		t.Errorf("group once key %q", k)
 	}
+	// A thread's replies are once in their own thread: the same client id in
+	// two threads is two replies (CR-373 F2).
+	if a, b := threadOnce("root-a", me), threadOnce("root-b", me); a != "th:root-a" || b == a {
+		t.Errorf("thread once keys %q %q", a, b)
+	}
 }
 
 // What the routes still decide (edits, deletions, reactions, replies) the

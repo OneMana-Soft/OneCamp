@@ -103,6 +103,11 @@ func GetClientConfig(w http.ResponseWriter, r *http.Request) {
 			// when the admin set none (then each browser uses its person's).
 			"transcription_where":    transcriptionBusiness.Where(),
 			"transcription_language": transcriptionBusiness.STTLanguage(),
+			// Why captions can't run now, as a stable code ("" when they
+			// can): transcription_disabled, or transcriber_not_running in
+			// server mode with nothing on the server transcribing. The words,
+			// and what an admin should do, are the web's.
+			"transcription_off_reason": transcriptionBusiness.CaptionsOffReason(r.Context()),
 			// Which OPTIONAL subsystems this server actually has, so the client can
 			// hide what it cannot reach. A button that calls an endpoint which is not
 			// there is worse than no button, and two situations produce exactly that:

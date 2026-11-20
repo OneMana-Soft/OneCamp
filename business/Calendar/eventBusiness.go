@@ -16,6 +16,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 	"google.golang.org/api/calendar/v3"
@@ -227,16 +228,56 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 	if helpers.CalendarInPostgres() {
 		return stored.legacyUpdate(ctx, eventUUID, eventInfo, userInfo)
 	}
-	currentTime := time.Now()
+	held, err := graphEventToChange(ctx, eventUUID)
+	if err != nil {
+		return err
+	}
+	return held.change(ctx, eventInfo, userInfo)
+}
 
-	existingEvent, err := domain.GetDgraphEventInfoByUUID(ctx, eventUUID.String())
+// changingEvent is an event read once to be changed (UpdateEvent's read), without
+// what GetEvent adds for a reader (answers, names, away, reminders, tasks,
+// calls): a guest's move reads its meeting before the calendars and the
+// page's lock, and changes it under the lock with no second read. ev carries
+// its uuid, times, Google id, title and notes, id its uuid on the graph; on
+// the store, s is the calendar and inst and guests are what its change writes.
+type changingEvent struct {
+	ev     *dgraphStruct.DgraphEvent
+	id     uuid.UUID
+	s      *service
+	inst   instance
+	guests []models.Attendee
+}
+
+// eventToChange is event id read once for who's change of it, from the store
+// UpdateEvent writes to.
+func eventToChange(ctx context.Context, id uuid.UUID, who *model.UserInfo) (*changingEvent, error) {
+	if helpers.CalendarInPostgres() {
+		return stored.toChange(ctx, who, id.String())
+	}
+	return graphEventToChange(ctx, id)
+}
+
+// graphEventToChange is eventToChange from the graph, the calendar's old store.
+func graphEventToChange(ctx context.Context, id uuid.UUID) (*changingEvent, error) {
+	ev, err := domain.GetDgraphEventInfoByUUID(ctx, id.String())
 	if errors.Is(err, domain.ErrEventNotFound) {
-		return ErrEventNotFound
+		return nil, ErrEventNotFound
 	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/UpdateEvent failed to get existing event err: %+v", err)
-		return err
+		return nil, err
 	}
+	return &changingEvent{ev: ev, id: id}, nil
+}
+
+// change is UpdateEvent of the event held: the one update path, the owner's.
+func (h *changingEvent) change(ctx context.Context, eventInfo adapter.CreateOrUpdateEventInput, userInfo *model.UserInfo) error {
+	if h.s != nil {
+		return h.s.legacyChange(ctx, h.inst, h.guests, eventInfo, userInfo)
+	}
+	currentTime := time.Now()
+	existingEvent, eventUUID := h.ev, h.id
 
 	me := userInfo.UserDgraphInfo.Uuid
 	if !isEventCreator(existingEvent, me) {
@@ -534,6 +575,10 @@ func LeaveEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserIn
 // one store had them; a seam for tests.
 var graphEventsOf = domain.GetDgraphEventsByUserId
 
+// fetchGoogleEvents is the reader's own Google calendar between two days; a
+// variable so the integration build can stand a fake Google in for it.
+var fetchGoogleEvents = integrationBusiness.FetchUserGoogleCalendarEvents
+
 // GetEventsList is user's events between startDate and endDate, from the one
 // store or the graph, with their linked Google calendar's.
 func GetEventsList(ctx context.Context, user *model.UserInfo, startDate *time.Time, endDate *time.Time) ([]*dgraphStruct.DgraphEvent, error) {
@@ -554,7 +599,7 @@ func GetEventsList(ctx context.Context, user *model.UserInfo, startDate *time.Ti
 	}
 
 	// Fetch google calendar events
-	gcalEvents, err := integrationBusiness.FetchUserGoogleCalendarEvents(ctx, user, startDate, endDate)
+	gcalEvents, err := fetchGoogleEvents(ctx, user, startDate, endDate)
 	if err != nil {
 		helpers.MessageLogs.ErrorLog.Printf("Error fetching Google Calendar events for user %s: %+v", userIdStr, err)
 	} else if len(gcalEvents) > 0 {
@@ -566,12 +611,21 @@ func GetEventsList(ctx context.Context, user *model.UserInfo, startDate *time.Ti
 			}
 		}
 
-		// Also fetch synced tasks to avoid overlap
-		if userUID, err := uuid.Parse(userIdStr); err == nil {
-			taskGCalIds, _ := taskDomain.GetSyncedTaskGCalIds(ctx, userUID)
-			for _, id := range taskGCalIds {
-				existingGCalIds[id] = true
+		// A task synced to Google is listed as the task, so its copy that
+		// comes back from Google is left out: matched on the ids Google
+		// answered, in one statement, whoever the task is assigned to.
+		fetched := make([]string, 0, len(gcalEvents))
+		for _, item := range gcalEvents {
+			if item != nil && item.Id != "" && !existingGCalIds[item.Id] {
+				fetched = append(fetched, item.Id)
 			}
+		}
+		taskCopies, terr := taskDomain.TaskCopiesAmong(ctx, fetched)
+		if terr != nil {
+			helpers.LogErrorWithContext(ctx, "business/GetEventsList could not read which Google events are task copies: %+v", terr)
+		}
+		for _, id := range taskCopies {
+			existingGCalIds[id] = true
 		}
 
 		for _, item := range gcalEvents {

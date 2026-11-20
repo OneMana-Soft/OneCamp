@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	"github.com/akashc777/OneCamp/helpers"
@@ -154,6 +155,36 @@ func (r *Registry) PrimeScopes(ctx context.Context, kind string, ids []string) {
 	}
 }
 
+// ErrScopesUnread is BoolsIn's answer when the values set for some of the
+// scopes asked couldn't be read.
+var ErrScopesUnread = errors.New("policy: the values set for these couldn't be read")
+
+// BoolsIn answers p for many scopes of one kind at once, by id as asked:
+// each one's own value, else the workspace's, else the default, with one
+// read of the values not already kept (PrimeScopes). Unlike BoolIn, a read
+// that fails answers ErrScopesUnread rather than the workspace's value, so a
+// caller guarding someone's own choice (a person who hides when they're
+// busy) can keep it rather than show it.
+func (r *Registry) BoolsIn(ctx context.Context, p BoolPolicy, kind string, ids []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	r.PrimeScopes(ctx, kind, ids)
+	def := r.Bool(ctx, p)
+	for _, id := range ids {
+		values, ok := scopedCache.Get(Scope{Kind: kind, ID: id}.cacheKey())
+		if !ok {
+			return nil, ErrScopesUnread
+		}
+		out[id] = def
+		if b, err := strconv.ParseBool(values[p.Key]); err == nil {
+			out[id] = b
+		}
+	}
+	return out, nil
+}
+
 func (r *Registry) BoolIn(ctx context.Context, p BoolPolicy, s Scope) bool {
 	if raw, ok := r.scopedValue(ctx, s, p.Key); ok {
 		if b, err := strconv.ParseBool(raw); err == nil {
@@ -185,15 +216,24 @@ func scopedSpec(key string, s Scope) (*spec, error) {
 		if specs[i].key != key {
 			continue
 		}
-		if !slices.Contains(specs[i].scopes, s.Kind) {
-			return nil, ErrNotScoped
-		}
-		if _, err := uuid.Parse(s.ID); err != nil {
-			return nil, ErrNotScoped
+		if err := specs[i].takes(s); err != nil {
+			return nil, err
 		}
 		return &specs[i], nil
 	}
 	return nil, ErrUnknownPolicy
+}
+
+// takes is whether the spec can be set for s: a kind of scope it names, by
+// a real id.
+func (sp spec) takes(s Scope) error {
+	if !slices.Contains(sp.scopes, s.Kind) {
+		return ErrNotScoped
+	}
+	if _, err := uuid.Parse(s.ID); err != nil {
+		return ErrNotScoped
+	}
+	return nil
 }
 
 // InfoIn is a policy as it stands for s: its value there, the workspace's as
@@ -218,6 +258,11 @@ func (r *Registry) infoIn(ctx context.Context, sp spec, s Scope) Info {
 		in.Value = r.IntIn(ctx, IntPolicy{Key: sp.key, Default: sp.def.(int)}, s)
 	case KindChoice:
 		in.Value = r.ChoiceIn(ctx, sp.choice(), s)
+	case KindObject:
+		in.Value = nil
+		if v, ok := r.scopedValue(ctx, s, sp.key); ok {
+			in.Value = json.RawMessage(v)
+		}
 	}
 	return in
 }
@@ -230,6 +275,41 @@ func (r *Registry) SetIn(ctx context.Context, key string, s Scope, value json.Ra
 	if err != nil {
 		return Info{}, err
 	}
+	return r.setScoped(ctx, sp, s, value, by)
+}
+
+// SetObjectIn keeps an object policy's value for s, for its own panel only
+// (owner): SetIn never finds one, so no general route writes around the
+// panel's checks. Checked, recorded and undone as SetIn is.
+func (r *Registry) SetObjectIn(ctx context.Context, owner string, p ObjectPolicy, s Scope, value json.RawMessage, by Changer) error {
+	sp, err := ownedSpec(owner, p.Key)
+	if err != nil {
+		return err
+	}
+	if err := sp.takes(s); err != nil {
+		return err
+	}
+	_, err = r.setScoped(ctx, sp, s, value, by)
+	return err
+}
+
+// ObjectIn reads an object policy's value for s into into; set is false when
+// s keeps none. It comes from s's cached values, the one read every policy of
+// the scope shares (a project's triage switch fills it on arrival).
+func (r *Registry) ObjectIn(ctx context.Context, p ObjectPolicy, s Scope, into any) (set bool, err error) {
+	v, ok := r.scopedValue(ctx, s, p.Key)
+	if !ok {
+		return false, nil
+	}
+	if err := json.Unmarshal([]byte(v), into); err != nil {
+		return false, fmt.Errorf("business/Policy: %s for %s %s: %w", p.Key, s.Kind, s.ID, err)
+	}
+	return true, nil
+}
+
+// setScoped is SetIn for a spec already found.
+func (r *Registry) setScoped(ctx context.Context, sp *spec, s Scope, value json.RawMessage, by Changer) (Info, error) {
+	key := sp.key
 	stored, shown, err := canonical(*sp, value)
 	if err != nil {
 		return Info{}, err
@@ -253,7 +333,38 @@ func (r *Registry) SetIn(ctx context.Context, key string, s Scope, value json.Ra
 		scopedCache.Delete(s.cacheKey())
 		return Info{}, ErrNotRecorded
 	}
+	afterSetIn(ctx, key, s, storedJSON(*sp, stored), by)
 	return r.infoIn(ctx, *sp, s), nil
+}
+
+// SetInHook is what follows a recorded SetIn of a key (OnSetIn): the scope,
+// the value it was set to (JSON) and who set it. Its error is logged; the
+// change stands, as it was recorded.
+type SetInHook func(ctx context.Context, s Scope, value json.RawMessage, by Changer) error
+
+var (
+	setInMu    sync.RWMutex
+	setInHooks = map[string][]SetInHook{}
+)
+
+// OnSetIn calls fn after every recorded SetIn of the key, from an init of the
+// package the key's setting matters to (business/SLA keeps a project's zone
+// from the admin who turns its timers on).
+func OnSetIn(key string, fn SetInHook) {
+	setInMu.Lock()
+	defer setInMu.Unlock()
+	setInHooks[key] = append(setInHooks[key], fn)
+}
+
+func afterSetIn(ctx context.Context, key string, s Scope, value json.RawMessage, by Changer) {
+	setInMu.RLock()
+	hooks := setInHooks[key]
+	setInMu.RUnlock()
+	for _, fn := range hooks {
+		if err := fn(ctx, s, value, by); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/Policy: what follows setting %s for %s %s failed: %+v", key, s.Kind, s.ID, err)
+		}
+	}
 }
 
 // ClearIn takes s's own value away, so the workspace's applies there again,

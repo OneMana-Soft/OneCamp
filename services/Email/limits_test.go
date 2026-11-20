@@ -143,3 +143,70 @@ func TestASendKeepingTheReserveIsRefusedBeforeTheProviderIsAsked(t *testing.T) {
 type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Batched notices stop NoticeReserve short of the day's cap: on the free
+// tier's 100 they stop at 75, and the last 25 stay for reminders, calls,
+// urgent tasks, sign-in and invitations. A small cap keeps a quarter.
+func TestNoticesLeaveAQuarterOfTheDay(t *testing.T) {
+	var c dailyCounter
+	day := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	for i := 0; i < 75; i++ {
+		if err := c.take(day, 100, NoticeReserve); err != nil {
+			t.Fatalf("notice %d: %v", i+1, err)
+		}
+	}
+	err := c.take(day, 100, NoticeReserve)
+	if err == nil {
+		t.Fatal("the 76th notice of a 100 cap went out, want it held for the rest")
+	}
+	if why := Reason(err); strings.Contains(why, "invitation") || !strings.Contains(why, "the last 25 of the day's 100, kept for password resets and what else can't wait") {
+		t.Errorf("a notice held for the reserve is told %q, want what the reserve keeps, not an invitation's words", why)
+	}
+	if err := c.take(day, 100, 0); err != nil {
+		t.Fatalf("a reminder after the notices stopped: %v", err)
+	}
+	if got := kept(20, NoticeReserve); got != 5 {
+		t.Errorf("a cap of 20 keeps %d from notices, want a quarter, 5", got)
+	}
+}
+
+// The public demo emails no notification at all (V-1241): everyone who opens
+// it signs in as one shared visitor, and its addresses are the cast's, its
+// bots' and the few people who run it, so one rule here holds every sender
+// that asks NotificationEmailEnabled (the dispatcher, its worker, guests'
+// calendar mail). Since V-1261 it sends no invitation or reset either
+// (EssentialEmailEnabled), while its key stays set (IsEmailEnabled).
+func TestTheDemoSendsNoNotificationEmail(t *testing.T) {
+	t.Setenv("RESEND_API_KEY", "re_x")
+	t.Setenv("EMAIL_ESSENTIAL_ONLY", "")
+	t.Setenv("DEMO_MODE", "")
+	if !NotificationEmailEnabled() {
+		t.Fatal("off the demo, with a key, notifications are emailed")
+	}
+	t.Setenv("DEMO_MODE", "true")
+	if NotificationEmailEnabled() {
+		t.Error("the demo emails no notification")
+	}
+	if EssentialEmailEnabled() {
+		t.Error("the demo emails no invitation or reset")
+	}
+	if !IsEmailEnabled() {
+		t.Error("the demo's key stays set")
+	}
+}
+
+// The essentials (an invitation, a password reset) go wherever there is a
+// key and this is not the demo, Cloud's essentials-only tier included; with
+// no key nothing goes (V-1261).
+func TestTheEssentialsSkipOnlyTheDemo(t *testing.T) {
+	t.Setenv("DEMO_MODE", "")
+	t.Setenv("EMAIL_ESSENTIAL_ONLY", "true")
+	t.Setenv("RESEND_API_KEY", "re_x")
+	if !EssentialEmailEnabled() {
+		t.Error("essentials-only still sends invitations and resets")
+	}
+	t.Setenv("RESEND_API_KEY", "")
+	if EssentialEmailEnabled() {
+		t.Error("without a key nothing is sent")
+	}
+}

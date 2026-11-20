@@ -50,6 +50,10 @@ type TaskChange struct {
 	Task    *dgraphStruct.DgraphTask
 	Fields  []string
 	Diff    json.RawMessage
+	// By is who made this change when RecordTasks is told of changes by
+	// different people at once (a board drag's status and place); empty, it
+	// is whoever RecordTasks is told.
+	By string
 }
 
 // restrictedTasks is which of the tasks, by lower-case uuid, are kept to a
@@ -81,12 +85,7 @@ var restrictedTasks = func(ctx context.Context, ids []string) map[string]bool {
 // a caller gone before it ends doesn't stop it.
 func RecordTasks(ctx context.Context, by string, changes ...TaskChange) []Entry {
 	ctx = context.WithoutCancel(ctx)
-	if by == "" {
-		by = taskread.ReaderOf(ctx)
-	}
-	if _, err := uuid.Parse(by); err != nil {
-		by = ""
-	}
+	by = actorOf(ctx, by)
 	now, source := time.Now(), sourceOf(ctx)
 	out := make([]Change, 0, len(changes))
 	ids := make([]string, 0, len(changes))
@@ -98,8 +97,12 @@ func RecordTasks(ctx context.Context, by string, changes ...TaskChange) []Entry 
 		if diff == nil {
 			diff = TaskDiff(c.Task, c.Fields...)
 		}
+		actor := by
+		if c.By != "" {
+			actor = personOrNone(c.By)
+		}
 		out = append(out, Change{Kind: c.Kind, ResourceKind: "task", ResourceUUID: c.Task.Uuid, ProjectUUID: c.Project,
-			Diff: diff, Actor: by, Source: source, At: now})
+			Diff: diff, Actor: actor, Source: source, At: now})
 		ids = append(ids, c.Task.Uuid)
 	}
 	if len(out) == 0 {
@@ -114,6 +117,23 @@ func RecordTasks(ctx context.Context, by string, changes ...TaskChange) []Entry 
 		}
 	}
 	return Record(ctx, out...)
+}
+
+// actorOf is who a change is by: by, or, for none, whoever ctx reads as;
+// "" when that isn't a person's id.
+func actorOf(ctx context.Context, by string) string {
+	if by == "" {
+		by = taskread.ReaderOf(ctx)
+	}
+	return personOrNone(by)
+}
+
+// personOrNone is s when it is a person's id, else "".
+func personOrNone(s string) string {
+	if !isUUID(s) {
+		return ""
+	}
+	return s
 }
 
 func isUUID(s string) bool {

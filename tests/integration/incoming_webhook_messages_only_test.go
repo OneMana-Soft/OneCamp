@@ -73,16 +73,18 @@ func TestAnIncomingWebhookOnlyPostsMessages(t *testing.T) {
 		t.Fatalf("the token %q is kept in the clear in %d webhooks", hook.Token, n)
 	}
 
-	// What the old registry read: '[]' on every webhook, and no rows beside it.
-	var notEmpty, registered int
+	// What the old registry read: '[]' on every webhook, and no table beside
+	// it (606 drops webhook_commands while it is empty, as it always was).
+	var notEmpty int
+	var registry *string
 	if err := env.PG.QueryRow(`SELECT count(*) FROM webhooks WHERE commands IS DISTINCT FROM '[]'::jsonb`).Scan(&notEmpty); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.PG.QueryRow(`SELECT count(*) FROM webhook_commands`).Scan(&registered); err != nil {
+	if err := env.PG.QueryRow(`SELECT to_regclass('webhook_commands')::text`).Scan(&registry); err != nil {
 		t.Fatal(err)
 	}
-	if notEmpty != 0 || registered != 0 {
-		t.Fatalf("a webhook holds commands: %d with a list, %d registered rows", notEmpty, registered)
+	if notEmpty != 0 || registry != nil {
+		t.Fatalf("a webhook holds commands: %d with a list; webhook_commands still there: %v", notEmpty, registry != nil)
 	}
 
 	code, out := sendToIncomingWebhook(t, hook.Token, `{"command": "/status", "text": "status please"}`)

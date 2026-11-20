@@ -6,7 +6,9 @@ import (
 	"strings"
 	"time"
 
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
+	userProjectNotificationDomain "github.com/akashc777/OneCamp/domain/UserProjectNotification"
 	"github.com/akashc777/OneCamp/helpers"
 )
 
@@ -124,7 +126,8 @@ func DispatchMemoryDigest(recipientUUID, subject, body string) {
 
 // DispatchProjectUpdate tells a project's members that one of its admins
 // posted an update: where the project stands, and the note. The author is
-// left out.
+// left out, and so is anyone whose setting for the project doesn't let them
+// hear something that names nobody (Hears, Plain): only "Everything" does.
 func DispatchProjectUpdate(authorUUID, authorName, projectUUID, projectName, healthLabel, body, updateID string, members []string) {
 	recipients := make([]string, 0, len(members))
 	for _, m := range members {
@@ -149,6 +152,8 @@ func DispatchProjectUpdate(authorUUID, authorName, projectUUID, projectName, hea
 			CTAText:       "Read the update",
 			DedupKeyParts: []string{"project.update", updateID},
 			Recipients:    recipientsFromStrings(recipients),
+			Hears:         hears(projectLevels(projectUUID), notifylevel.Plain),
+			About:         &About{Kind: AboutProject, Item: updateID, Place: projectUUID, Heard: notifylevel.Plain},
 		})
 	})
 }
@@ -173,6 +178,9 @@ func DispatchCheckIn(checkinID, postUUID, channelUUID, channelName, question str
 			CTAText:       "Answer the check-in",
 			DedupKeyParts: []string{"checkin", checkinID, postUUID},
 			Recipients:    recipientsFromStrings(people),
+			// Asked again at the send: the question's post in its channel, as
+			// someone it asks (their choice about being mentioned).
+			About: &About{Kind: AboutChannel, Item: postUUID, Place: channelUUID, Heard: notifylevel.Named},
 		})
 	})
 }
@@ -229,9 +237,9 @@ func DispatchChatDM(senderUUID, senderName string, senderAvatar string,
 	helpers.GoSafeNamed("business/Notification/wiring:DispatchChatDM", func() {
 		defer recoverDispatch("DispatchChatDM")
 		ctx := context.Background()
-		title := senderName + " sent you a message"
+		title, heard := senderName+" sent you a message", notifylevel.Plain
 		if mentioned {
-			title = senderName + " mentioned you"
+			title, heard = senderName+" mentioned you", notifylevel.Named
 		}
 		Dispatch(ctx, Event{
 			Type:          EventChatDM,
@@ -247,6 +255,7 @@ func DispatchChatDM(senderUUID, senderName string, senderAvatar string,
 			CTAText:       "View conversation",
 			DedupKeyParts: []string{grpId, chatUUID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
+			About:         &About{Kind: AboutChat, Item: chatUUID, Place: grpId, Heard: heard},
 		})
 	})
 }
@@ -280,6 +289,9 @@ func DispatchChannelMention(actorUUID, actorName, actorAvatar string,
 			CTAText:       "View post",
 			DedupKeyParts: []string{channelUUID, postUUID},
 			Recipients:    recipientsFromStrings(mentionUUIDs),
+			// Each is emailed as named (business/Notify emails a channel's
+			// post to whom it mentions or answers).
+			About: &About{Kind: AboutChannel, Item: postUUID, Place: channelUUID, Heard: notifylevel.Named},
 		})
 	})
 }
@@ -289,6 +301,22 @@ func DispatchChannelMention(actorUUID, actorName, actorAvatar string,
 func taskReaders(taskUUID string) func(context.Context, []string) (map[string]bool, error) {
 	return func(ctx context.Context, userIDs []string) (map[string]bool, error) {
 		return taskDomain.Readers(ctx, taskUUID, userIDs)
+	}
+}
+
+// taskLevels reads, once, the settings for a task's project of the people an
+// email about the task would tell (Event.Hears).
+func taskLevels(taskUUID string) func(context.Context, []string) (map[string]string, error) {
+	return func(ctx context.Context, userIDs []string) (map[string]string, error) {
+		return userProjectNotificationDomain.LevelsOnTask(ctx, taskUUID, userIDs)
+	}
+}
+
+// projectLevels reads, once, the settings for a project of the people an
+// email about it would tell (Event.Hears).
+func projectLevels(projectUUID string) func(context.Context, []string) (map[string]string, error) {
+	return func(ctx context.Context, userIDs []string) (map[string]string, error) {
+		return userProjectNotificationDomain.LevelsInProject(ctx, projectUUID, userIDs)
 	}
 }
 
@@ -323,8 +351,10 @@ func DispatchTaskAssignment(actorUUID, actorName, actorAvatar string,
 			CTAURL:        frontendTaskURL(taskUUID),
 			CTAText:       "Open task",
 			DedupKeyParts: []string{"assigned", taskUUID, assigneeUUID},
+			About:         &About{Kind: AboutTask, Item: taskUUID, Heard: notifylevel.Named},
 			Recipients:    recipientsFromStrings([]string{assigneeUUID}),
 			MayRead:       taskReaders(taskUUID),
+			Hears:         hears(taskLevels(taskUUID), notifylevel.Named),
 		})
 	})
 }
@@ -333,7 +363,7 @@ func DispatchTaskAssignment(actorUUID, actorName, actorAvatar string,
 // and its creator when known) that someone else moved it: "Maya moved Set up
 // SSO to QA". Statuses are named as people see them, a project's own by its
 // name. The actor is never told of their own change (Dispatch drops them).
-func DispatchTaskStatusChange(actorUUID, actorName, actorAvatar string,
+func DispatchTaskStatusChange(actorUUID, actorName string, actorAvatar func(ctx context.Context) string,
 	taskUUID, taskName, projectName, fromStatus, toStatus, changeID string,
 	recipientUUIDs []string) {
 	actorName = actorOrSomeone(actorName)
@@ -353,11 +383,17 @@ func DispatchTaskStatusChange(actorUUID, actorName, actorAvatar string,
 		if projectName != "" {
 			body = projectName + " · " + body
 		}
+		// The actor's picture is worked out here, off the request's path
+		// (it reads the picture's attachment): only the notification shows it.
+		avatar := ""
+		if actorAvatar != nil {
+			avatar = actorAvatar(ctx)
+		}
 		Dispatch(ctx, Event{
 			Type:          EventTaskStatus,
 			ActorUUID:     actorUUID,
 			ActorName:     actorName,
-			ActorAvatar:   actorAvatar,
+			ActorAvatar:   avatar,
 			SubjectLine:   subject,
 			Title:         subject,
 			Subtitle:      "Task status",
@@ -365,8 +401,10 @@ func DispatchTaskStatusChange(actorUUID, actorName, actorAvatar string,
 			CTAURL:        frontendTaskURL(taskUUID),
 			CTAText:       "Open task",
 			DedupKeyParts: []string{"status", taskUUID, changeID},
+			About:         &About{Kind: AboutTask, Item: taskUUID, Heard: notifylevel.Named},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
 			MayRead:       taskReaders(taskUUID),
+			Hears:         hears(taskLevels(taskUUID), notifylevel.Named),
 		})
 	})
 }
@@ -397,8 +435,10 @@ func DispatchTaskComment(actorUUID, actorName, actorAvatar string,
 			CTAURL:        frontendTaskURL(taskUUID),
 			CTAText:       "Open task",
 			DedupKeyParts: []string{"task_comment", taskUUID, commentUUID},
+			About:         &About{Kind: AboutTask, Item: taskUUID, Reply: commentUUID, Heard: notifylevel.Thread},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
 			MayRead:       taskReaders(taskUUID),
+			Hears:         hears(taskLevels(taskUUID), notifylevel.Thread),
 		})
 	})
 }
@@ -429,6 +469,8 @@ func DispatchPostComment(actorUUID, actorName, actorAvatar string,
 			CTAText:       "View thread",
 			DedupKeyParts: []string{"post_comment", postUUID, commentUUID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
+			// Its thread's people are emailed (named or in it: one level).
+			About: &About{Kind: AboutChannel, Item: postUUID, Place: channelUUID, Reply: commentUUID, Heard: notifylevel.Thread},
 		})
 	})
 }
@@ -460,6 +502,8 @@ func DispatchDocComment(actorUUID, actorName, actorAvatar string,
 			CTAText:       "View doc",
 			DedupKeyParts: []string{"doc_comment", docUUID, commentUUID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
+			// A guest's comment, asked again at the send as a member's is.
+			About: &About{Kind: AboutDoc, Item: docUUID, Reply: commentUUID, Heard: notifylevel.Thread},
 		})
 	})
 }
@@ -491,6 +535,7 @@ func DispatchChatComment(actorUUID, actorName, actorAvatar string,
 			CTAText:       "View chat",
 			DedupKeyParts: []string{"chat_comment", chatUUID, commentUUID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
+			About:         &About{Kind: AboutChat, Item: chatUUID, Place: grpId, Reply: commentUUID, Heard: notifylevel.Thread},
 		})
 	})
 }

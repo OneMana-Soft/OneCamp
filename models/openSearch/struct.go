@@ -302,6 +302,36 @@ type BulkUpdate struct {
 	Doc interface{} `json:"doc,omitempty"`
 }
 
+// OpenSearchTranscript is one line said in a call, its entry in global
+// search (business/TranscriptSearch): one entry per line, so a snippet is
+// only ever that line's own words. Its recording is the line's home (the
+// recording's egress id, or the call session's key for a call nobody
+// recorded); its conversation is the channel or chat the call was in. Who
+// finds it is read from the graph when a search runs, never from here.
+type OpenSearchTranscript struct {
+	Uuid        string `json:"transcript_id,omitempty"`
+	Text        string `json:"transcript_text,omitempty"`
+	OffsetMs    int64  `json:"transcript_offset_ms"`
+	RecordingID string `json:"transcript_recording_id,omitempty"`
+	// HasMedia is false for a call nobody recorded: its transcript plays
+	// without a video.
+	HasMedia   bool   `json:"transcript_has_media"`
+	SessionKey string `json:"transcript_session_key,omitempty"`
+	Room       string `json:"transcript_room,omitempty"`
+	// ConvID is the channel's uuid or the chat's grouping id; ConvKind is
+	// channel, dm or group.
+	ConvID         string `json:"transcript_conv_id,omitempty"`
+	ConvKind       string `json:"transcript_conv_kind,omitempty"`
+	ByUserUuid     string `json:"transcript_by_user_id,omitempty"`
+	ByUserFullName string `json:"transcript_by_user_full_name,omitempty"`
+	// CallStartedAt is when the call (its recording) started, and CreatedAt
+	// when the line was said, both in seconds.
+	CallStartedAt int64   `json:"transcript_call_started_at,omitempty"`
+	CreatedAt     int64   `json:"created_date,omitempty"`
+	DeletedAt     *int64  `json:"deleted_date"`
+	DeletedBy     *string `json:"deleted_by,omitempty"`
+}
+
 type GlobalSearchOpenSearchResp struct {
 	Type       string                `json:"type,omitempty"`
 	Comment    *OpenSearchComment    `json:"comment,omitempty"`
@@ -316,6 +346,7 @@ type GlobalSearchOpenSearchResp struct {
 	Project    *OpenSearchProject    `json:"project,omitempty"`
 	Team       *OpenSearchTeam       `json:"team,omitempty"`
 	Channel    *OpenSearchChannel    `json:"channel,omitempty"`
+	Transcript *OpenSearchTranscript `json:"transcript,omitempty"`
 	Highlight  map[string][]string   `json:"highlight,omitempty"`
 	// Sort is where the hit sorts (its score, then its time), for the cursor
 	// of the page after it. Kept here, never sent.
@@ -347,4 +378,10 @@ const (
 	POST_TYPE        = "post"
 	CHANNEL_INDEX    = "channels"
 	CHANNEL_TYPE     = "channel"
+	TRANSCRIPT_INDEX = "transcripts"
+	TRANSCRIPT_TYPE  = "transcript"
+	// TRANSCRIPT_RECORDING_FIELD is the field a transcript entry names its
+	// home by (the recording's egress id or the call session's key): a
+	// home's delete, restore and purge reach its entries through it.
+	TRANSCRIPT_RECORDING_FIELD = "transcript_recording_id"
 )

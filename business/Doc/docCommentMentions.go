@@ -4,6 +4,7 @@ import (
 	"context"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -30,11 +31,21 @@ func tellDocCommentMentionsAdded(ctx context.Context, actor *dgraphStruct.Dgraph
 		}
 		return hear, nil
 	}
+	n := docCommentMentionNotice(actor, doc, commentUUID, html)
+	ctx = context.WithoutCancel(ctx)
+	helpers.GoSafeNamed("business/Doc tellDocCommentMentionsAdded", func() {
+		notificationBusiness.TellMentionsAdded(ctx, n, s)
+	})
+}
+
+// docCommentMentionNotice is how a mention an edit adds to a comment
+// (commentUUID) on doc reads. Pure.
+func docCommentMentionNotice(actor *dgraphStruct.DgraphUser, doc *dgraphStruct.DgraphDoc, commentUUID, html string) notificationBusiness.Notice {
 	where := doc.Title
 	if where == "" {
 		where = "a doc"
 	}
-	n := notificationBusiness.Notice{
+	return notificationBusiness.Notice{
 		Kind:          string(resourceEventBusiness.DocMentioned),
 		ResourceKind:  "doc",
 		ResourceUUID:  doc.Uuid,
@@ -45,9 +56,8 @@ func tellDocCommentMentionsAdded(ctx context.Context, actor *dgraphStruct.Dgraph
 		Body:          helpers.HTMLToPlainText(html),
 		Path:          "/app/doc/" + doc.Uuid,
 		Email:         notificationBusiness.EventDocMention,
+		// Its email is asked again at the send: the doc and the comment, as
+		// someone it names.
+		About: &notificationBusiness.About{Kind: notificationBusiness.AboutDoc, Item: doc.Uuid, Reply: commentUUID, Heard: notifylevel.Named},
 	}
-	ctx = context.WithoutCancel(ctx)
-	helpers.GoSafeNamed("business/Doc tellDocCommentMentionsAdded", func() {
-		notificationBusiness.TellMentionsAdded(ctx, n, s)
-	})
 }

@@ -41,6 +41,7 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Calendar"
 	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
+	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
@@ -152,6 +153,7 @@ func TestBookingPages(t *testing.T) {
 		oldClient := emailService.SharedHTTPClient
 		emailService.SharedHTTPClient = &http.Client{Transport: mailbox}
 		t.Cleanup(func() { emailService.SharedHTTPClient = oldClient })
+		emailService.LetReservedNamesThroughForTest(t)
 
 		var pushMu sync.Mutex
 		var pushes []map[string]string
@@ -278,18 +280,18 @@ func TestBookingPages(t *testing.T) {
 		var alex *calendarBusiness.Booked
 		var alexEvent uuid.UUID
 		t.Run("a booking emails its guest an invite, and tells its owner in the app and by push", func(t *testing.T) {
-			alex = book(t, 10, "Alex Kim", "alex.kim@outlook.com")
+			alex = book(t, 10, "Alex Kim", "alex.kim@example.com")
 			alexEvent = eventOf(t, alex)
 			if !alex.Emailed || !alex.OwnerTold || alex.BookingID == "" {
 				t.Fatalf("booked %+v", alex)
 			}
-			sent := mailbox.to("alex.kim@outlook.com")
+			sent := mailbox.to("alex.kim@example.com")
 			if len(sent) != 1 {
 				t.Fatalf("emails to the guest: %d", len(sent))
 			}
 			inv := sent[0].invite()
 			for _, want := range []string{"METHOD:REQUEST", "UID:" + alex.BookingID + "@onecamp", "SEQUENCE:0",
-				"DTSTART:" + at(10).Format("20060102T150405Z"), "STATUS:CONFIRMED", "mailto:alex.kim@outlook.com"} {
+				"DTSTART:" + at(10).Format("20060102T150405Z"), "STATUS:CONFIRMED", "mailto:alex.kim@example.com"} {
 				if !strings.Contains(inv, want) {
 					t.Errorf("the invite has no %q:\n%s", want, inv)
 				}
@@ -321,8 +323,8 @@ func TestBookingPages(t *testing.T) {
 			if v := booking(t, alex); !v.Start.Equal(at(14)) || !v.End.Equal(at(14).Add(30*time.Minute)) || v.Cancelled {
 				t.Errorf("the guest's link shows %+v", v)
 			}
-			bookingEventually(t, "the move's email", func() bool { return len(mailbox.to("alex.kim@outlook.com")) >= 2 })
-			sent := mailbox.to("alex.kim@outlook.com")
+			bookingEventually(t, "the move's email", func() bool { return len(mailbox.to("alex.kim@example.com")) >= 2 })
+			sent := mailbox.to("alex.kim@example.com")
 			if len(sent) != 2 {
 				t.Fatalf("emails to the guest: %d", len(sent))
 			}
@@ -346,13 +348,13 @@ func TestBookingPages(t *testing.T) {
 				t.Fatal(err)
 			}
 			settled()
-			if n := len(mailbox.to("alex.kim@outlook.com")); n != 2 {
+			if n := len(mailbox.to("alex.kim@example.com")); n != 2 {
 				t.Errorf("a retitle emailed the guest: %d emails", n)
 			}
 			if !offered(t, 10) {
 				t.Error("10:00 isn't offered again")
 			}
-			book(t, 10, "Jo Park", "jo.park@outlook.com") // and can be booked again
+			book(t, 10, "Jo Park", "jo.park@example.com") // and can be booked again
 		})
 
 		t.Run("the owner deletes a booked meeting: it's cancelled by its host, the guest is told, the time is free", func(t *testing.T) {
@@ -362,8 +364,8 @@ func TestBookingPages(t *testing.T) {
 			if v := booking(t, alex); !v.Cancelled || !v.CancelledByHost {
 				t.Errorf("the guest's link shows %+v", v)
 			}
-			bookingEventually(t, "the cancel's email", func() bool { return len(mailbox.to("alex.kim@outlook.com")) >= 3 })
-			sent := mailbox.to("alex.kim@outlook.com")
+			bookingEventually(t, "the cancel's email", func() bool { return len(mailbox.to("alex.kim@example.com")) >= 3 })
+			sent := mailbox.to("alex.kim@example.com")
 			if len(sent) != 3 {
 				t.Fatalf("emails to the guest: %d", len(sent))
 			}
@@ -380,17 +382,17 @@ func TestBookingPages(t *testing.T) {
 				t.Fatal(err)
 			}
 			settled()
-			if n := len(mailbox.to("alex.kim@outlook.com")); n != 3 {
+			if n := len(mailbox.to("alex.kim@example.com")); n != 3 {
 				t.Errorf("emails to the guest after cancelling twice: %d", n)
 			}
 			if !offered(t, 14) {
 				t.Error("14:00 isn't offered again")
 			}
-			book(t, 14, "Ravi Shah", "ravi.shah@outlook.com")
+			book(t, 14, "Ravi Shah", "ravi.shah@example.com")
 		})
 
 		t.Run("a guest cancels: the owner is told, and the guest's calendar loses it", func(t *testing.T) {
-			mo := book(t, 16, "Mo Ali", "mo.ali@outlook.com")
+			mo := book(t, 16, "Mo Ali", "mo.ali@example.com")
 			event := eventOf(t, mo)
 			view, err := calendarBusiness.CancelBooking(ctx, mo.CancelToken)
 			if err != nil || !view.Cancelled || !view.OwnerTold || !view.PageLive || view.BookingID != mo.BookingID {
@@ -404,7 +406,7 @@ func TestBookingPages(t *testing.T) {
 			}
 			bookingEventually(t, "a push to Sam", func() bool { return pushedFor("cancelled", event.String()) })
 			settled()
-			sent := mailbox.to("mo.ali@outlook.com")
+			sent := mailbox.to("mo.ali@example.com")
 			if len(sent) != 2 {
 				t.Fatalf("emails to the guest: %d (one booked, one cancelled, never the host's too)", len(sent))
 			}
@@ -419,7 +421,7 @@ func TestBookingPages(t *testing.T) {
 		t.Run("without notification email the owner is still told, and the calendar says the guest won't be", func(t *testing.T) {
 			t.Setenv("RESEND_API_KEY", "")
 			before := mailbox.count()
-			lee := book(t, 18, "Lee Chan", "lee.chan@outlook.com")
+			lee := book(t, 18, "Lee Chan", "lee.chan@example.com")
 			event := eventOf(t, lee)
 			if lee.Emailed || !lee.OwnerTold {
 				t.Errorf("booked %+v", lee)
@@ -440,6 +442,37 @@ func TestBookingPages(t *testing.T) {
 			settled()
 			if n := mailbox.count() - before; n != 0 {
 				t.Errorf("%d emails sent with email off", n)
+			}
+		})
+
+		// The public demo mails nobody outside the workspace: a visitor types
+		// any address into its booking page, so with notification email on the
+		// guest is mailed nothing, booked or cancelled, and the owner is told.
+		// The guest is on a domain that receives mail, as a visitor's would be.
+		t.Run("on the demo a booking mails its guest nothing and the owner is still told", func(t *testing.T) {
+			t.Setenv("DEMO_MODE", "true")
+			before := mailbox.count()
+			vi := book(t, 22, "Vi Tran", "vi.tran@outlook.com")
+			event := eventOf(t, vi)
+			if vi.Emailed || !vi.OwnerTold {
+				t.Errorf("booked on the demo %+v", vi)
+			}
+			if n := ownerNotices("booking.created", event.String()); n != 1 {
+				t.Errorf("Sam's inbox items: %d", n)
+			}
+			if found, b := listed(t, event); !found || b["guest_told"] != false {
+				t.Errorf("Sam's calendar on the demo: listed %v, booking %v; want the guest not told", found, b)
+			}
+			view, err := calendarBusiness.CancelBooking(ctx, vi.CancelToken)
+			if err != nil || !view.Cancelled || !view.OwnerTold {
+				t.Fatalf("cancelled on the demo %+v, %v", view, err)
+			}
+			settled()
+			if n := len(mailbox.to("vi.tran@outlook.com")); n != 0 {
+				t.Errorf("emails to the demo's guest: %d, want none", n)
+			}
+			if n := mailbox.count() - before; n != 0 {
+				t.Errorf("%d emails sent on the demo", n)
 			}
 		})
 
@@ -512,7 +545,7 @@ func TestBookingPages(t *testing.T) {
 				t.Fatal(err)
 			}
 			pat, err := calendarBusiness.Book(ctx, "office-hours", calendarBusiness.BookInput{Start: at(20), Name: "Pat Lee",
-				Email: "pat.lee@outlook.com", TZ: "UTC"}, time.Now())
+				Email: "pat.lee@example.com", TZ: "UTC"}, time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -528,7 +561,7 @@ func TestBookingPages(t *testing.T) {
 				t.Errorf("the deleted page answers %v", err)
 			}
 			if _, err := calendarBusiness.Book(ctx, "office-hours", calendarBusiness.BookInput{Start: at(21), Name: "Kai",
-				Email: "kai@outlook.com", TZ: "UTC"}, time.Now()); !errors.Is(err, calendarBusiness.ErrNoPage) {
+				Email: "kai@example.com", TZ: "UTC"}, time.Now()); !errors.Is(err, calendarBusiness.ErrNoPage) {
 				t.Errorf("booking the deleted page: %v", err)
 			}
 			pages, _ := bookingModel.ListPages(sam)
@@ -575,7 +608,7 @@ func TestBookingPages(t *testing.T) {
 			if err != nil || !view.Cancelled || !view.OwnerTold || view.PageLive {
 				t.Fatalf("cancelled %+v, %v", view, err)
 			}
-			sent := mailbox.to("pat.lee@outlook.com")
+			sent := mailbox.to("pat.lee@example.com")
 			if len(sent) != 2 || !strings.Contains(sent[1].invite(), "METHOD:CANCEL") || strings.Contains(sent[1].HTML, "/book/office-hours") {
 				t.Errorf("emails to the guest: %d", len(sent))
 			}
@@ -603,7 +636,7 @@ func TestBookingPages(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			kim := book(t, 6, "Kim Lee", "kim.lee@outlook.com")
+			kim := book(t, 6, "Kim Lee", "kim.lee@example.com")
 			kimEvent := eventOf(t, kim)
 			m, err := migrate.New("file://"+dir, env.DSN)
 			if err != nil {
@@ -634,7 +667,7 @@ func TestBookingPages(t *testing.T) {
 			lou := strings.ReplaceAll(uuid.NewString()+uuid.NewString(), "-", "")[:48]
 			var louID string
 			if err := env.PG.QueryRow(`INSERT INTO bookings (page_id, guest_name, guest_email, note, starts_at, ends_at, cancel_token, guest_tz)
-				SELECT page_id, 'Lou Park', 'lou.park@outlook.com', '', $2, $3, $4, 'UTC' FROM bookings WHERE id = $1 RETURNING id`,
+				SELECT page_id, 'Lou Park', 'lou.park@example.com', '', $2, $3, $4, 'UTC' FROM bookings WHERE id = $1 RETURNING id`,
 				kim.BookingID, at(8), at(8).Add(30*time.Minute), lou).Scan(&louID); err != nil {
 				t.Fatalf("the old server booking: %v", err)
 			}
@@ -664,13 +697,72 @@ func TestBookingPages(t *testing.T) {
 			}, samInfo); err != nil {
 				t.Fatal(err)
 			}
-			bookingEventually(t, "the move's email", func() bool { return len(mailbox.to("kim.lee@outlook.com")) >= 2 })
-			moved := mailbox.to("kim.lee@outlook.com")[1]
+			bookingEventually(t, "the move's email", func() bool { return len(mailbox.to("kim.lee@example.com")) >= 2 })
+			moved := mailbox.to("kim.lee@example.com")[1]
 			if strings.Contains(moved.HTML, "/booking/") || !strings.Contains(moved.HTML, "with the link you got when you booked") {
 				t.Errorf("the move's email for a link from before:\n%s", moved.HTML)
 			}
 			if v, err := calendarBusiness.CancelBooking(ctx, mailed); err != nil || !v.Cancelled || !v.Start.Equal(at(7)) {
 				t.Errorf("cancelling by the mailed link: %+v, %v", v, err)
+			}
+		})
+
+		t.Run("a page saved with a week and dates of its own offers only their times, and shows neither", func(t *testing.T) {
+			// A Monday a week or more ahead, when Sam has nothing on.
+			mon := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, 7)
+			for mon.Weekday() != time.Monday {
+				mon = mon.AddDate(0, 0, 1)
+			}
+			date := func(days int) string { return mon.AddDate(0, 0, days).Format("2006-01-02") }
+			// Tuesdays 09-12 and Thursdays 14-18; this Tuesday off, this Saturday 10-12.
+			body := fmt.Sprintf(`{"slug":"week-and-dates","title":"Week and dates","duration_minutes":60,"max_days_ahead":30,"active":true,
+				"hours":{"tz":"UTC","week":{"2":[{"start":"09:00","end":"12:00"}],"4":[{"start":"14:00","end":"18:00"}]},
+				"dates":{%q:[],%q:[{"start":"10:00","end":"12:00"}]}}}`, date(1), date(5))
+			asSam := func(w http.ResponseWriter, r *http.Request) {
+				eventController.SaveMyBookingPage(w, r.WithContext(context.WithValue(r.Context(), helpers.UserInfoContextKey, *samInfo)))
+			}
+			rec := publicCall(t, asSam, http.MethodPost, "/event/bookingPages", body, nil)
+			var saved struct {
+				Data struct {
+					Hours calendarBusiness.WorkingHours `json:"hours"`
+				} `json:"data"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &saved)
+			if rec.Code != http.StatusOK || len(saved.Data.Hours.Week) != 2 || !strings.Contains(rec.Body.String(), date(5)) {
+				t.Fatalf("saving the page: %d %s", rec.Code, rec.Body.String())
+			}
+
+			rec = publicCall(t, eventController.GetPublicBookingPage, http.MethodGet,
+				"/public/book/week-and-dates?from="+mon.Format(time.RFC3339), "", map[string]string{"slug": "week-and-dates"})
+			var page struct {
+				Data calendarBusiness.PublicPage `json:"data"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil || rec.Code != http.StatusOK {
+				t.Fatalf("the public page: %d %s", rec.Code, rec.Body.String())
+			}
+			for _, leak := range []string{`"hours"`, `"week"`, `"dates"`} {
+				if strings.Contains(rec.Body.String(), leak) {
+					t.Errorf("the public page shows %s: %s", leak, rec.Body.String())
+				}
+			}
+			var got []string
+			for _, s := range page.Data.Slots {
+				if s.Start.Before(mon.AddDate(0, 0, 14)) {
+					got = append(got, s.Start.UTC().Format("Mon 02 15:04"))
+				}
+			}
+			var want []string
+			span := func(days, from, to int) {
+				for m := from * 60; m+60 <= to*60; m += 30 {
+					want = append(want, mon.AddDate(0, 0, days).Add(time.Duration(m)*time.Minute).Format("Mon 02 15:04"))
+				}
+			}
+			span(3, 14, 18) // this Thursday; this Tuesday is off
+			span(5, 10, 12) // this Saturday, its date's hours
+			span(8, 9, 12)  // next Tuesday
+			span(10, 14, 18)
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("slots:\n got %v\nwant %v", got, want)
 			}
 		})
 

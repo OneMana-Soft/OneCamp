@@ -22,6 +22,7 @@ import (
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
+	triageBusiness "github.com/akashc777/OneCamp/business/Triage"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	githubCommentMappingDomain "github.com/akashc777/OneCamp/domain/GitHubCommentMapping"
@@ -428,8 +429,9 @@ func DisconnectGitHub(ctx context.Context, by uuid.UUID) error {
 		helpers.LogErrorWithContext(ctx, "business/DisconnectGitHub Failed to delete all links err: %+v", err)
 	}
 
-	// 3. Batch-clear ALL GitHub metadata from ALL tasks
-	err = githubLinkModel.BatchClearAllGitHubFields(ctx)
+	// 3. Unlink every task from GitHub: its issue, its pull request and that
+	// pull request's state, in one statement.
+	err = taskDomain.ClearGitHubLinkFromAllTasks(ctx)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/DisconnectGitHub Failed to clear all task fields err: %+v", err)
 	}
@@ -709,16 +711,7 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 			return fmt.Errorf("failed to get project dgraph info: %v", err)
 		}
 
-		// Use automation rule if configured, otherwise fall back to Todo
-		defaultStatus := dgraphStruct.TASK_STATUS_TODO
-		if link.AutomationRules != nil {
-			var rules map[string]string
-			if err := json.Unmarshal([]byte(*link.AutomationRules), &rules); err == nil {
-				if s, ok := rules["issue_opened"]; ok && s != "" && s != "_none" {
-					defaultStatus = s
-				}
-			}
-		}
+		defaultStatus, waits := issueOpened(link)
 
 		createTaskInput := adapter.CreateOrUpdateTaskInput{
 			ProjectUuid:     link.ProjectId.String(),
@@ -738,6 +731,9 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 
 		if err := taskDomain.SetGitHubIssueFieldsOnTask(ctx, taskUUID, event.Issue.Number, event.Issue.HTMLURL); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Failed to set GitHub fields for task %s: %v", taskUUID.String(), err)
+		}
+		if waits {
+			arriveInTriage(ctx, "business/GitHub handleIssueEvent", link.ProjectId, taskUUID, triageBusiness.FromGitHub, issueRequester(event.Sender.Login))
 		}
 
 		dgraphTask := &dgraphStruct.DgraphTask{
@@ -1065,10 +1061,7 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 		namedIn(ctx, owner, repo, textRefs))
 
 	// Determine PR state for tracking
-	prState := event.PullRequest.State
-	if event.PullRequest.Merged {
-		prState = "merged"
-	}
+	prState := pullState(event.PullRequest.State, event.PullRequest.Merged)
 	isDraft := event.PullRequest.Draft
 
 	// emitPRReview fans out an internal event so the AI agent (if enabled) can
@@ -2300,6 +2293,7 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 	var event struct {
 		Action string `json:"action"`
 		Review struct {
+			ID          int64  `json:"id"`
 			State       string `json:"state"`
 			Body        string `json:"body"`
 			HTMLURL     string `json:"html_url"`
@@ -2313,6 +2307,9 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 		PullRequest struct {
 			Number  int    `json:"number"`
 			HTMLURL string `json:"html_url"`
+			State   string `json:"state"`
+			Merged  bool   `json:"merged"`
+			Draft   bool   `json:"draft"`
 			Head    struct {
 				Ref string `json:"ref"`
 			} `json:"head"`
@@ -2330,7 +2327,11 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 		return fmt.Errorf("failed to parse PR review event: %v", err)
 	}
 
-	if event.Action != "submitted" {
+	// A dismissal clears the reviewer's decision (V-986): GitHub sends it as
+	// the review, its state "dismissed". An edit of a review's text changes
+	// no decision.
+	dismissed := event.Action == "dismissed"
+	if event.Action != "submitted" && !dismissed {
 		return nil
 	}
 
@@ -2342,6 +2343,10 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 	if syncing == nil {
 		return nil
 	}
+	state := event.Review.State
+	if dismissed {
+		state = githubPRReviewDomain.Dismissed
+	}
 
 	// Fan out to the workspace event bus so a "PR-follow" agent (an event-trigger
 	// agent subscribed to github.pr.review_submitted) can react when a review
@@ -2349,17 +2354,20 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 	// this package never imports the AI/agent packages (loop-safe: agent writes
 	// are workflow-tagged and never re-enter here). Fires for any review on a
 	// repo some project's link syncs pull requests of, whether or not the PR is
-	// tied to a OneCamp task; the place it names is the first such link's project.
-	webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "github.pr.review_submitted", map[string]interface{}{
-		"owner":        event.Repository.Owner.Login,
-		"repo":         event.Repository.Name,
-		"pr_number":    event.PullRequest.Number,
-		"pr_url":       event.PullRequest.HTMLURL,
-		"review_state": strings.ToUpper(event.Review.State),
-		"reviewer":     event.Review.User.Login,
-		"body":         event.Review.Body,
-		"project_id":   syncing.ProjectId.String(),
-	})
+	// tied to a OneCamp task; the place it names is the first such link's
+	// project. A dismissal submits no review.
+	if !dismissed {
+		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "github.pr.review_submitted", map[string]interface{}{
+			"owner":        event.Repository.Owner.Login,
+			"repo":         event.Repository.Name,
+			"pr_number":    event.PullRequest.Number,
+			"pr_url":       event.PullRequest.HTMLURL,
+			"review_state": strings.ToUpper(event.Review.State),
+			"reviewer":     event.Review.User.Login,
+			"body":         event.Review.Body,
+			"project_id":   syncing.ProjectId.String(),
+		})
+	}
 
 	// The task on the pull request's branch in a project linking this
 	// repository, else the task linked to the pull request.
@@ -2374,27 +2382,43 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 		return nil
 	}
 
-	// Upsert the review record
-	if err := githubPRReviewDomain.UpsertGitHubPRReview(ctx, taskUUID, event.Review.User.Login, event.Review.User.AvatarURL, event.Review.User.HTMLURL, strings.ToUpper(event.Review.State), time.Now()); err != nil {
+	// Record the review, by its id (a dismissal names the review it
+	// dismisses), under the address the task holds when it is the task's own
+	// pull request; the task's read folds the reviewer's reviews as GitHub
+	// decides (a reply never replaces an approval).
+	pull := event.PullRequest
+	prURL, current := reviewedPull(ctx, taskUUID, pull.Number, pull.HTMLURL, pull.Head.Ref, pullState(pull.State, pull.Merged), pull.Draft)
+	if err := githubPRReviewDomain.RecordGitHubPRReview(ctx, taskUUID, prURL, githubPRReviewDomain.Review{
+		ID: event.Review.ID, Login: event.Review.User.Login, AvatarURL: event.Review.User.AvatarURL, HTMLURL: event.Review.User.HTMLURL,
+		State: state, SubmittedAt: reviewTime(event.Review.SubmittedAt),
+	}); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/handlePullRequestReviewEvent Failed to upsert review: %v", err)
 		markInboundSyncFailed(ctx, taskUUID, "GitHub PR review sync failed")
 	}
 
-	// Update aggregate review state on task
-	updateTaskReviewState(ctx, taskUUID)
+	// The task's decision is its own pull request's: a review of another one
+	// (an older pull request from the task's branch) changes no decision and
+	// runs no rule.
+	if current {
+		updateTaskReviewState(ctx, taskUUID)
+	}
 
-	activityType := "pr_review_" + strings.ToLower(event.Review.State)
-	_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, activityType,
-		&event.Review.User.Login, nil, nil, nil, nil, &event.Review.Body)
+	// The task's activity has a line per submitted review (it has no kind for
+	// a dismissal).
+	activityType := "pr_review_" + strings.ToLower(state)
+	if !dismissed {
+		_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, activityType,
+			&event.Review.User.Login, nil, nil, nil, nil, &event.Review.Body)
+	}
 
 	trigger := ""
-	switch strings.ToLower(event.Review.State) {
+	switch strings.ToLower(state) {
 	case "changes_requested":
 		trigger = "changes_requested"
 	case "approved":
 		trigger = "approved"
 	}
-	if trigger != "" {
+	if trigger != "" && current {
 		applyAutomationRules(ctx, link, taskUUIDStr, trigger)
 	}
 
@@ -2402,29 +2426,73 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 	return nil
 }
 
+// reviewedPull is the address a review of pull request number (at htmlURL,
+// from branch, in state and draft) stands under on task, and whether that
+// pull request is the task's own: the one whose decision the task reads. A
+// task holding no pull request takes this one, with its state and draft, as
+// an opened pull request's task does, while it still holds none, in one
+// statement (TakeGitHubPRIfNone: the opened handler may set one meanwhile,
+// and keeps it). A task holding this one, however it spells its address, keeps the
+// review under that address, which its decision's read compares (as the sync
+// does, syncPRDetailsFromGitHub). A task holding another pull request, or an
+// address naming none, or whose read failed, keeps the review under GitHub's
+// address and it isn't the task's own, so no rule runs on a guess.
+func reviewedPull(ctx context.Context, task uuid.UUID, number int, htmlURL, branch, state string, draft bool) (string, bool) {
+	_, held, err := taskDomain.GetTaskGitHubURLs(ctx, task)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/reviewedPull task %s's pull request wasn't read; the review of %s stands under its own address and runs no rule: %v", task, htmlURL, err)
+		return htmlURL, false
+	}
+	if held == nil || strings.TrimSpace(*held) == "" {
+		if _, _, _, err := ExtractGitHubIssueInfo(htmlURL); err != nil {
+			return htmlURL, false // a pull request GitHub gave no address of is no task's
+		}
+		took, err := taskDomain.TakeGitHubPRIfNone(ctx, task, number, htmlURL, branch, state, draft)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "business/reviewedPull task %s didn't take pull request %s; its review runs no rule: %v", task, htmlURL, err)
+			return htmlURL, false
+		}
+		if took {
+			return htmlURL, true
+		}
+		// Another delivery gave the task its pull request first: the review
+		// stands as for that one.
+		if _, held, err = taskDomain.GetTaskGitHubURLs(ctx, task); err != nil || held == nil {
+			return htmlURL, false
+		}
+	}
+	if samePull(*held, htmlURL) {
+		return *held, true
+	}
+	return htmlURL, false
+}
+
+// pullState is a pull request's state as a task keeps it: GitHub's ("open"
+// or "closed"), or "merged" for a merged one.
+func pullState(state string, merged bool) string {
+	if merged {
+		return "merged"
+	}
+	return state
+}
+
+// reviewTime is when GitHub says a review was submitted, else now.
+func reviewTime(submittedAt string) time.Time {
+	if at, err := time.Parse(time.RFC3339, submittedAt); err == nil {
+		return at
+	}
+	return time.Now()
+}
+
+// updateTaskReviewState sets the task's review decision from the reviews of
+// the pull request it has now (githubPRReviewDomain.Decision); none clears it.
 func updateTaskReviewState(ctx context.Context, taskUUID uuid.UUID) {
 	reviews, err := githubPRReviewDomain.GetGitHubPRReviewsByTaskId(ctx, taskUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/updateTaskReviewState Failed to get reviews: %v", err)
 		return
 	}
-	if len(reviews) == 0 {
-		return
-	}
-
-	// Aggregate review state: if any changes_requested, that's the state; else if any approved, approved; else commented
-	aggregateState := "commented"
-	for _, r := range reviews {
-		if r.ReviewState == "CHANGES_REQUESTED" {
-			aggregateState = "changes_requested"
-			break
-		}
-		if r.ReviewState == "APPROVED" {
-			aggregateState = "approved"
-		}
-	}
-
-	if err := taskDomain.UpdateTaskPRState(ctx, taskUUID, "", "", aggregateState, nil); err != nil {
+	if err := taskDomain.SetTaskPRReviewState(ctx, taskUUID, githubPRReviewDomain.Decision(reviews)); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/updateTaskReviewState Failed to update review state: %v", err)
 	}
 }

@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	transcriptionBusiness "github.com/akashc777/OneCamp/business/Transcription"
@@ -37,6 +39,10 @@ var (
 	ErrNotInCall = errors.New("not in this call")
 	// ErrTranscriptionDisabled: the workspace's transcription mode is off.
 	ErrTranscriptionDisabled = errors.New("transcription is turned off for this workspace")
+	// ErrTranscriberDown: server mode, and the server's transcriber isn't
+	// running (transcriptionBusiness.ReasonTranscriberNotRunning), so turning
+	// transcription on would hear nothing; nothing falls through elsewhere.
+	ErrTranscriberDown = errors.New("nothing on this server is transcribing calls")
 	// ErrTranscriptionOff: nobody has turned transcription on in this call.
 	ErrTranscriptionOff = errors.New("transcription is off in this call")
 	// ErrTranscriptNotKept: the call is transcribed for captions only, because
@@ -69,6 +75,11 @@ type TranscriptionSwitch struct {
 	Where string `json:"where,omitempty"`
 	// Kept says whether final lines are stored as the call's transcript.
 	Kept bool `json:"kept"`
+	// Summary says whether a summary of the call (the AI's meeting recap) is
+	// made from what it keeps, so the record confirm and the notices can say
+	// so (V-951). A yes/no the server decides (makesSummary): no setting or
+	// instruction reaches a call screen.
+	Summary bool `json:"summary"`
 }
 
 // callState is the server's copy of a call's switches, for the room session
@@ -137,6 +148,32 @@ func OnEventCallMember(fn func(ctx context.Context, room string, u *dgraphStruct
 	eventCallMember = fn
 }
 
+// recapMade answers whether the workspace makes a summary (the AI's meeting
+// recap) of a call that keeps its transcript: AI on, the recap turned on, a
+// model ready. The AI, which this package can't import (business/AI imports
+// it), says how (OnRecapMade); until it does, as in the edition without AI,
+// none is made.
+var recapMade = func(context.Context) bool { return false }
+
+// OnRecapMade tells this package how to know whether calls are summarised.
+func OnRecapMade(fn func(ctx context.Context) bool) {
+	recapMade = fn
+}
+
+// makesSummary answers whether a summary is made of what a call's switch
+// keeps: of a kept transcript only (an instant meeting's and a breakout
+// room's aren't kept), while the workspace makes them. The one rule every
+// switch is written by (switchRoom); the AI is asked only of a kept one.
+func makesSummary(ctx context.Context, sw *TranscriptionSwitch) bool {
+	return summaryOf(sw, func() bool { return recapMade(ctx) })
+}
+
+// summaryOf is makesSummary's rule with the workspace's answer given: made is
+// asked only of a kept transcript. RefreshSummaries gives one answer per run.
+func summaryOf(sw *TranscriptionSwitch, made func() bool) bool {
+	return sw.Kept && made()
+}
+
 // keepsTranscript reports whether a call in this room has somewhere to keep a
 // transcript: a channel, a DM, a group, or the calendar event whose call it
 // is (meet-02). An instant meeting has none, so it is transcribed for
@@ -200,7 +237,8 @@ func CallSwitches(ctx context.Context, roomName, sid string) (TranscriptionSwitc
 //
 // Anyone connected to the call may turn it either way: it is the call's
 // switch, not the host's, and the notice names whoever did it. Guests have no
-// session and can't reach this. Refused while the workspace's mode is off.
+// session and can't reach this. Refused while the workspace's mode is off, and
+// turning it on while server mode has no transcriber running.
 //
 // A call split into breakout rooms has one switch: a flip in any of its rooms
 // is a flip in every one, so no room transcribes while the call's switch is
@@ -213,6 +251,9 @@ func SetTranscription(ctx context.Context, roomName, identity, byName string, on
 	}
 	if transcriptionBusiness.Mode() == transcriptionBusiness.ModeOff {
 		return nil, ErrTranscriptionDisabled
+	}
+	if on && transcriptionBusiness.CaptionsOffReason(ctx) == transcriptionBusiness.ReasonTranscriberNotRunning {
+		return nil, ErrTranscriberDown
 	}
 
 	if _, err := livekitInit.LiveKitService.GetRoom(ctx, roomName); errors.Is(err, livekitInit.ErrRoomNotFound) {
@@ -255,11 +296,11 @@ func SetTranscription(ctx context.Context, roomName, identity, byName string, on
 	for i, room := range rooms {
 		inRoom := *sw
 		inRoom.Kept = i == 0 && sw.Kept
-		if room == roomName {
-			mine = inRoom
-		}
 		if err := switchRoom(ctx, room, &inRoom); err != nil && failed == nil {
 			failed = err
+		}
+		if room == roomName {
+			mine = inRoom
 		}
 	}
 	if failed != nil {
@@ -311,8 +352,10 @@ func FollowCall(ctx context.Context, roomName string) error {
 // no word is kept after it is turned off. So on: the room first, then the
 // server's copy; off: the server's copy first. A room LiveKit has closed (a
 // call's own room while everyone is in its breakout rooms) has nobody to tell;
-// it takes the switch again when it is made (FollowCall).
+// it takes the switch again when it is made (FollowCall). Whether the call's
+// summary is made is said here, so every writer says it alike.
 func switchRoom(ctx context.Context, roomName string, sw *TranscriptionSwitch) error {
+	sw.Summary = makesSummary(ctx, sw)
 	room, err := livekitInit.LiveKitService.GetRoom(ctx, roomName)
 	if errors.Is(err, livekitInit.ErrRoomNotFound) {
 		return nil
@@ -320,8 +363,14 @@ func switchRoom(ctx context.Context, roomName string, sw *TranscriptionSwitch) e
 	if err != nil {
 		return err
 	}
+	return writeSwitch(ctx, roomName, room.Sid, sw)
+}
+
+// writeSwitch writes a switch whose summary is already said to the room and to
+// the server's copy, in switchRoom's order.
+func writeSwitch(ctx context.Context, roomName, roomSid string, sw *TranscriptionSwitch) error {
 	keep := func() error {
-		return editCallState(ctx, roomName, room.Sid, func(st *callState) { st.Transcription = sw })
+		return editCallState(ctx, roomName, roomSid, func(st *callState) { st.Transcription = sw })
 	}
 	tell := func() error {
 		_, err := livekitInit.LiveKitService.UpdateRoomMetadata(ctx, roomName, map[string]any{metaTranscription: sw})
@@ -336,6 +385,81 @@ func switchRoom(ctx context.Context, roomName string, sw *TranscriptionSwitch) e
 			return err
 		}
 	}
+	return nil
+}
+
+// summaryRefreshWait bounds telling every call again, so an admin's save
+// never waits long on the call server.
+const summaryRefreshWait = 10 * time.Second
+
+// RefreshSummaries tells every call going on whether its summary is made,
+// after something that may change the answer (an admin turned AI, its model or
+// the meeting recap on or off), so the notice everyone has, and the confirm of
+// a recording started after it, say what the call's end will do. A room nobody
+// has switched says nothing yet and is told at its first flip. Best-effort: a
+// room that can't be told is logged, the rest are still told, and the admin's
+// change stands. The workspace is asked once per run, and only when a call
+// keeps its transcript; a run that a newer one has overtaken writes nothing
+// more (refreshSummary).
+func RefreshSummaries(ctx context.Context) {
+	if !livekitInit.LiveKitService.Ready() {
+		return
+	}
+	run := summaryRuns.Add(1)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), summaryRefreshWait)
+	defer cancel()
+	made := sync.OnceValue(func() bool { return recapMade(ctx) })
+	rooms, err := livekitInit.LiveKitService.ListAllRooms(ctx)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/RefreshSummaries could not list the calls going on: %+v", err)
+		return
+	}
+	for _, room := range rooms {
+		if parseRoomMeta(room.Metadata).Transcription == nil {
+			continue
+		}
+		if err := refreshSummary(ctx, room.Name, run, made); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/RefreshSummaries could not tell the call in %s: %+v", room.Name, err)
+		}
+	}
+}
+
+// summaryRuns counts RefreshSummaries' runs, so a run knows when a newer one
+// has begun (after a newer change of the workspace's answer).
+var summaryRuns atomic.Uint64
+
+// refreshSummary writes one room's switch again when what it says of the
+// summary is no longer so. Under the call's switch lock, so a flip at the same
+// moment is neither undone nor overtaken, and only while run is the newest:
+// an older run's answer (recaps turned on, then off, while it was slow) never
+// lands after a newer run's.
+func refreshSummary(ctx context.Context, roomName string, run uint64, made func() bool) error {
+	own := callOwnRoom(roomName)
+	switchLocks.Acquire(own, 0)
+	defer switchLocks.Release(own)
+	if summaryRuns.Load() != run {
+		return nil // a newer run tells this room the newer answer
+	}
+	room, err := livekitInit.LiveKitService.GetRoom(ctx, roomName)
+	if errors.Is(err, livekitInit.ErrRoomNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	sw := parseRoomMeta(room.Metadata).Transcription
+	if sw == nil {
+		return nil
+	}
+	want := summaryOf(sw, made)
+	if sw.Summary == want {
+		return nil
+	}
+	sw.Summary = want
+	if err := writeSwitch(ctx, roomName, room.Sid, sw); err != nil {
+		return err
+	}
+	callChanged(ctx, own)
 	return nil
 }
 

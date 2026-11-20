@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -354,7 +355,11 @@ func TestTheTestsThatApplyMigrationsGetADatabaseMigratedFromBlank(t *testing.T) 
 
 // TestTheTestsPutBackWhatTheyChange: a test that sets another package's
 // variable (a client, a switch, a seam) puts it back in the same function, in
-// a t.Cleanup or a defer. The one exception: the 46 tests that point
+// a t.Cleanup or a defer. So does one that switches a workspace policy
+// (policyBusiness.Admin.Set): the switch outlives the test, and every later
+// test in the package reads it (CR-B84 F4: calendar.freebusy.members left
+// off turned two neighbours red); it is set again, under the same key, in a
+// t.Cleanup or a defer. The one exception: the 46 tests that point
 // opensearchInit.OpenSearchClient at a stub of their own, an httptest server
 // that answers "ok", holds nothing and is closed when the test ends, so what
 // they leave behind refuses every connection, as a fresh binary's would have
@@ -388,6 +393,9 @@ func TestTheTestsPutBackWhatTheyChange(t *testing.T) {
 							}
 						}
 					}
+					if k := policySwitched(m, imports); k != "" {
+						restored[k] = true
+					}
 					return true
 				})
 			}
@@ -405,6 +413,9 @@ func TestTheTestsPutBackWhatTheyChange(t *testing.T) {
 				return true
 			})
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if k := policySwitched(n, imports); k != "" && !restored[k] {
+					left = append(left, fmt.Sprintf("%s: %s", fset.Position(n.Pos()), k))
+				}
 				if as, ok := n.(*ast.AssignStmt); ok && as.Tok == token.ASSIGN {
 					for _, l := range as.Lhs {
 						if s := packageVar(l, imports); s != "" && !restored[s] && !allowed[s] {
@@ -420,6 +431,31 @@ func TestTheTestsPutBackWhatTheyChange(t *testing.T) {
 	for _, l := range left {
 		t.Errorf("set and not put back by its function: %s", l)
 	}
+}
+
+// policySwitched is "pkg.Admin.Set <key>" when n switches a workspace policy
+// through an imported package's Admin registry, the key as written.
+func policySwitched(n ast.Node, imports map[string]bool) string {
+	call, ok := n.(*ast.CallExpr)
+	if !ok || len(call.Args) < 2 {
+		return ""
+	}
+	set, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || set.Sel.Name != "Set" {
+		return ""
+	}
+	admin, ok := set.X.(*ast.SelectorExpr)
+	if !ok || admin.Sel.Name != "Admin" {
+		return ""
+	}
+	if pkg, ok := admin.X.(*ast.Ident); !ok || !imports[pkg.Name] {
+		return ""
+	}
+	var key strings.Builder
+	if err := printer.Fprint(&key, token.NewFileSet(), call.Args[1]); err != nil {
+		return ""
+	}
+	return admin.X.(*ast.Ident).Name + ".Admin.Set " + key.String()
 }
 
 // packageVar is "pkg.Var" when e assigns to an imported package's variable

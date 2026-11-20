@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	tableDomain "github.com/akashc777/OneCamp/domain/DataTable"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
@@ -222,8 +223,7 @@ func PlaceChoices(ctx context.Context, fields []ChoicePlaces) error {
 // LiveFields is a table's live fields as the transaction ctx carries sees
 // them (a type changed in it); ListFields reads them on the pool.
 func LiveFields(ctx context.Context, table uuid.UUID) ([]*Field, error) {
-	return pgexec.Query(ctx, `SELECT `+fieldColumns+` FROM data_table_fields WHERE table_id = $1 AND deleted_at IS NULL ORDER BY position, created_at`,
-		func(r pgexec.Row) (*Field, error) { return scanField(r) }, table)
+	return pgexec.Query(ctx, tableDomain.LiveFieldsSQL, func(r pgexec.Row) (*Field, error) { return scanField(r) }, table)
 }
 
 // RowsForIndex is a table's live rows among ids, read FOR SHARE in the
@@ -314,18 +314,23 @@ func MarkCellIndexStale(ctx context.Context, table uuid.UUID) error {
 // CellIndexState is whether a table's cell index is whole, and the version
 // that made it so (business/RowQuery IndexVersion: what its entries hold).
 func CellIndexState(ctx context.Context, table uuid.UUID) (whole bool, version int, err error) {
-	type state struct {
-		at      sql.NullTime
-		version int
-	}
-	s, found, err := pgexec.QueryOne(ctx, `SELECT cell_index_at, cell_index_version FROM data_tables WHERE id = $1`, func(r pgexec.Row) (s state, err error) {
-		err = r.Scan(&s.at, &s.version)
-		return s, err
-	}, table)
+	s, found, err := pgexec.QueryOne(ctx, tableDomain.CellIndexStateSQL, scanIndexState, table)
 	if err != nil || !found {
 		return false, 0, err
 	}
 	return s.at.Valid, s.version, nil
+}
+
+// indexState is a CellIndexStateSQL row: when the index was made whole, and
+// the version that made it so.
+type indexState struct {
+	at      sql.NullTime
+	version int
+}
+
+func scanIndexState(r pgexec.Row) (s indexState, err error) {
+	err = r.Scan(&s.at, &s.version)
+	return s, err
 }
 
 // VacuumRows vacuums the rows and the cell index, and has the planner count

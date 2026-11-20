@@ -84,15 +84,18 @@ var systemReads = map[string]bool{
 	"business/WorkAccess/restricted.go:hidden":                                           true, // the decision's own read
 	"business/WorkAccess/hiddenAmong.go:HiddenUnassignedAmong":                           true, // the same decision's read, for many readers at once
 	"domain/Task/taskReaders.go:projectReaders":                                          true, // who may read, for others
+	"domain/Task/taskReaders.go:ReadersOfMany":                                           true, // who may read, for others: an email's send
 	"domain/Task/taskDomain.go:GetDgraphTasksWithoutStatusSince":                         true, // a backfill
 	"domain/Project/projectDomain.go:GetDgraphProjectInfoAndTeamAdminFlagAndAttachments": true, // files that go with a project
 	"domain/Project/projectDomain.go:GetDgraphProjectTasksForTemplate":                   true, // copied as nobody's (Nobody)
 	"domain/Task/readAccess.go:GetHistoryTasksFor":                                       true, // a task history's named tasks, read whole only to be judged as the reader (business/Task keepHistorySeen, JudgeTasks); nothing it reads is shown
 	"domain/Team/teamDomain.go:GetDgraphTeamInfoByUUIDForArchivingAndUnarchivingTeam":    true, // a team's archive
 	"business/Comment/commentBusiness.go:sendNewTaskCommentNotification":                 true, // whom a comment is told to, kept to its readers
+	"business/SLA/alerts.go:sweepAlerts":                                                 true, // the tasks of due SLA alerts, each told only to an assignee who may read it (business/Task AssigneeHears)
 	"business/Import/commentSearchRepair.go:RepairTaskCommentSearch":                     true, // a repair: task comments' search entries, which search reads with each reader's rule
 	"business/Task/commentOwnerRepair.go:repairCommentOwners":                            true, // a repair: old task comments re-owned to whom they are addressed (NOTIF-H2)
 	"business/Cycle/scheduler.go:runSchedule":                                            true, // the Cycle Scheduler completes a cycle, restricted tasks and all
+	"business/SLA/sink.go:retime":                                                        true, // a task's SLA timer, restricted tasks too (V-1016): it only writes timer state, reads only what the timer needs, and tells nobody; SLA state is laid per reader (layTimers)
 	"business/Import/orchestrator.go:importContext":                                      true, // an import reads the tasks it makes, restricted ones too, to write the rest (a sub-task's parent, a comment's task), and its rollback takes them all away
 	"business/Import/recheck.go:recheckContext":                                          true, // an old import's re-check narrows the tasks it brought for everyone else, restricted ones too, and an admin's undo or containment of it
 }

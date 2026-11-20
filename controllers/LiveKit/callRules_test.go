@@ -25,6 +25,7 @@ func TestTranscriptRefusalsCarryTheirCode(t *testing.T) {
 		business.ErrNotASpeaker:           {http.StatusForbidden, "not_in_call"},
 		business.ErrTranscriptionDisabled: {http.StatusConflict, "transcription_disabled"},
 		business.ErrTranscriptionOff:      {http.StatusConflict, "transcription_off"},
+		business.ErrTranscriberDown:       {http.StatusConflict, "transcriber_not_running"},
 		business.ErrTranscriptNotKept:     {http.StatusConflict, "transcript_not_kept"},
 		business.ErrNotBrowserMode:        {http.StatusConflict, "not_browser_mode"},
 	} {

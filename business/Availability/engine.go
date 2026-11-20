@@ -41,6 +41,7 @@ var (
 	busyFor      = calendarBusiness.BusyFor
 	hoursOf      = calendarBusiness.HoursOf
 	peopleSeenBy = calendarBusiness.PeopleSeenBy
+	roomsBusy    = calendarBusiness.RoomsBusy
 	peopleOf     = func(ctx context.Context, ids []string) ([]*dgraphStruct.DgraphUser, error) {
 		return userDomain.GetPeopleByUUIDs(ctx, ids)
 	}
@@ -89,11 +90,16 @@ func Suggestions(ctx context.Context, askerUUID string, in calendarBusiness.Find
 	if err != nil {
 		return nil, err
 	}
+	booked, err := roomsBusy(ctx, askerUUID, in.Rooms, from, to)
+	if err != nil {
+		return nil, err
+	}
 	res.Suggestions = Rank(people, Ask{
-		Duration: time.Duration(in.DurationMinutes) * time.Minute,
-		Step:     15 * time.Minute,
-		From:     from,
-		To:       to,
+		RoomsBusy: booked,
+		Duration:  time.Duration(in.DurationMinutes) * time.Minute,
+		Step:      15 * time.Minute,
+		From:      from,
+		To:        to,
 		// From the quarter hour after now, so the first isn't 10:07.
 		Earliest: now.Truncate(15 * time.Minute).Add(15 * time.Minute),
 		Zone:     zone,

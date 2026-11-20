@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -36,7 +37,7 @@ func TestABoardsCallsAreTheOnesItsReaderMaySee(t *testing.T) {
 	defer func(r, c, m, a any) {
 		readableBoards = r.(func(context.Context, []string, string) (map[string]bool, error))
 		callsOfBoard = c.(func(context.Context, uuid.UUID, model.BoardCallsAfter, int) ([]model.BoardCall, error))
-		mayReadCalls = m.(func(context.Context, *userModels.UserInfo, []Ref) (map[Ref]Reading, error))
+		mayReadCalls = m.(func(context.Context, accessBusiness.Subject, []Ref) (map[Ref]Reading, error))
 		callArtefacts = a.(func(context.Context, []recordingDomain.CallWindow) (map[string][]recordingDomain.CallArtefact, error))
 	}(readableBoards, callsOfBoard, mayReadCalls, callArtefacts)
 	readable := true
@@ -54,7 +55,7 @@ func TestABoardsCallsAreTheOnesItsReaderMaySee(t *testing.T) {
 	}
 	reads := 0
 	asked := map[string]int{}
-	mayReadCalls = func(_ context.Context, _ *userModels.UserInfo, refs []Ref) (map[Ref]Reading, error) {
+	mayReadCalls = func(_ context.Context, _ accessBusiness.Subject, refs []Ref) (map[Ref]Reading, error) {
 		reads++
 		out := map[Ref]Reading{}
 		for _, ref := range refs {
@@ -156,7 +157,7 @@ func TestABoardsCallsAreTheLatestItsReaderMayRead(t *testing.T) {
 	defer func(r, c, m, a any) {
 		readableBoards = r.(func(context.Context, []string, string) (map[string]bool, error))
 		callsOfBoard = c.(func(context.Context, uuid.UUID, model.BoardCallsAfter, int) ([]model.BoardCall, error))
-		mayReadCalls = m.(func(context.Context, *userModels.UserInfo, []Ref) (map[Ref]Reading, error))
+		mayReadCalls = m.(func(context.Context, accessBusiness.Subject, []Ref) (map[Ref]Reading, error))
 		callArtefacts = a.(func(context.Context, []recordingDomain.CallWindow) (map[string][]recordingDomain.CallArtefact, error))
 	}(readableBoards, callsOfBoard, mayReadCalls, callArtefacts)
 	readableBoards = func(_ context.Context, ids []string, _ string) (map[string]bool, error) {
@@ -185,7 +186,7 @@ func TestABoardsCallsAreTheLatestItsReaderMayRead(t *testing.T) {
 			var starts []model.BoardCallsAfter
 			callsOfBoard = boardPages(t, c.rows, &starts)
 			reads, asked := 0, map[string]int{}
-			mayReadCalls = func(_ context.Context, _ *userModels.UserInfo, refs []Ref) (map[Ref]Reading, error) {
+			mayReadCalls = func(_ context.Context, _ accessBusiness.Subject, refs []Ref) (map[Ref]Reading, error) {
 				reads++
 				out := map[Ref]Reading{}
 				for _, ref := range refs {
@@ -264,7 +265,7 @@ func TestABoardsCallsReadABoundedNumberOfPages(t *testing.T) {
 	defer func(r, c, m, a any) {
 		readableBoards = r.(func(context.Context, []string, string) (map[string]bool, error))
 		callsOfBoard = c.(func(context.Context, uuid.UUID, model.BoardCallsAfter, int) ([]model.BoardCall, error))
-		mayReadCalls = m.(func(context.Context, *userModels.UserInfo, []Ref) (map[Ref]Reading, error))
+		mayReadCalls = m.(func(context.Context, accessBusiness.Subject, []Ref) (map[Ref]Reading, error))
 		callArtefacts = a.(func(context.Context, []recordingDomain.CallWindow) (map[string][]recordingDomain.CallArtefact, error))
 	}(readableBoards, callsOfBoard, mayReadCalls, callArtefacts)
 	readableBoards = func(_ context.Context, ids []string, _ string) (map[string]bool, error) {
@@ -273,7 +274,7 @@ func TestABoardsCallsReadABoundedNumberOfPages(t *testing.T) {
 	var starts []model.BoardCallsAfter
 	callsOfBoard = boardPages(t, rows, &starts)
 	reads := 0
-	mayReadCalls = func(_ context.Context, _ *userModels.UserInfo, refs []Ref) (map[Ref]Reading, error) {
+	mayReadCalls = func(_ context.Context, _ accessBusiness.Subject, refs []Ref) (map[Ref]Reading, error) {
 		reads++
 		out := map[Ref]Reading{}
 		for _, ref := range refs {

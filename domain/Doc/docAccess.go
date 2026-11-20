@@ -173,9 +173,30 @@ const aclTeam = `@filter(` + liveTeamFilter + `) { uid team_uuid team_name team_
 
 // GetDocACL reads a doc's whole sharing, deleted or not. ErrNotFound for no doc.
 func GetDocACL(ctx context.Context, docUUID string) (*DocACL, error) {
-	q := fmt.Sprintf(`query acl($id: string) {
-		var(func: eq(doc_uuid, $id)) { accSpace as doc_space_uuid }
-		docInfo(func: eq(doc_uuid, $id)) {
+	acls, err := GetDocACLs(ctx, []string{docUUID})
+	if err != nil {
+		return nil, err
+	}
+	acl := acls[strings.ToLower(docUUID)]
+	if acl == nil {
+		return nil, ErrNotFound
+	}
+	return acl, nil
+}
+
+// GetDocACLs reads many docs' whole sharing, deleted or not, in one query, by
+// lower-case doc uuid. A doc that isn't there is left out, and so is any id
+// that isn't a uuid.
+func GetDocACLs(ctx context.Context, docUUIDs []string) (map[string]*DocACL, error) {
+	out := map[string]*DocACL{}
+	quoted := quoteUUIDs(docUUIDs)
+	if len(quoted) == 0 {
+		return out, nil
+	}
+	ids := `[` + strings.Join(quoted, ", ") + `]`
+	q := fmt.Sprintf(`{
+		var(func: eq(doc_uuid, %s)) { accSpace as doc_space_uuid }
+		docInfo(func: eq(doc_uuid, %s)) {
 			uid
 			doc_uuid
 			doc_title%s
@@ -191,21 +212,26 @@ func GetDocACL(ctx context.Context, docUUID string) (*DocACL, error) {
 			doc_team_commenters %s
 			doc_team_viewers %s
 		}`+spaceBlocks("val(accSpace)")+`
-	}`, accessScalars, aclPerson, aclPerson, aclPerson, aclPerson, aclPerson, aclPerson, aclPerson, aclTeam, aclTeam, aclTeam)
-	var out struct {
+	}`, ids, ids, accessScalars, aclPerson, aclPerson, aclPerson, aclPerson, aclPerson, aclPerson, aclPerson, aclTeam, aclTeam, aclTeam)
+	var read struct {
 		DocInfo []*dgraphStruct.DgraphDoc `json:"docInfo"`
 		spaceRead
 	}
-	if err := dgraphInit.ReadInto(ctx, q, map[string]string{"$id": docUUID}, &out); err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetDocACL err: %+v", err)
+	if err := dgraphInit.ReadInto(ctx, q, nil, &read); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetDocACLs err: %+v", err)
 		return nil, err
 	}
-	if len(out.DocInfo) == 0 || out.DocInfo[0] == nil || out.DocInfo[0].Uuid == "" {
-		return nil, ErrNotFound
+	for _, d := range read.DocInfo {
+		if d == nil || d.Uuid == "" {
+			continue
+		}
+		acl := &DocACL{Doc: d}
+		if d.SpaceUUID != "" {
+			acl.SpaceName, acl.SpaceMembers, _ = read.in(d.SpaceKind, d.SpaceUUID)
+		}
+		out[strings.ToLower(d.Uuid)] = acl
 	}
-	acl := &DocACL{Doc: out.DocInfo[0]}
-	acl.SpaceName, acl.SpaceMembers, _ = out.of(acl.Doc.SpaceKind)
-	return acl, nil
+	return out, nil
 }
 
 // TeamMembers reads teams (by uuid, not deleted) with the uuids of their

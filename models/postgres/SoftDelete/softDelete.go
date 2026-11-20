@@ -45,6 +45,7 @@ const (
 	ProjectStatus Kind = "project_status" // one of the workspace's own project statuses (project_statuses)
 	ProjectLabel  Kind = "project_label"  // one of the workspace's project labels (project_labels)
 	Release       Kind = "release"        // a project's release, with its tasks and stages (releases)
+	SLARule       Kind = "sla_rule"       // a project's SLA rule (sla_rules)
 )
 
 // table is a kind's table: its name, whether its rows carry updated_at,
@@ -71,6 +72,7 @@ var tables = map[Kind]table{
 	ProjectStatus: {name: "project_statuses", stamped: true, capped: true},
 	ProjectLabel:  {name: "project_labels", stamped: true, capped: true},
 	Release:       {name: "releases", stamped: true, project: "project_uuid"},
+	SLARule:       {name: "sla_rules", stamped: true, capped: true, project: "project_uuid"},
 }
 
 var (
@@ -107,10 +109,10 @@ func (b Bound) Add(ctx context.Context, add func(context.Context) error) error {
 	return err
 }
 
-// lockOrder is bounds' locks sorted, once each. Every restore takes its locks
+// LockKeys is bounds' locks sorted, once each. Every restore takes its locks
 // in this order, so two restores over the same projects (a milestone shown in
 // several) never wait on each other in a ring.
-func lockOrder(bounds []Bound) []string {
+func LockKeys(bounds []Bound) []string {
 	locks := make([]string, 0, len(bounds))
 	for _, b := range bounds {
 		locks = append(locks, b.Lock)
@@ -192,8 +194,8 @@ func Restore(ctx context.Context, kind Kind, id uuid.UUID, bounds ...Bound) (boo
 	}
 	restored := false
 	err := pgexec.InTx(ctx, func(ctx context.Context) error {
-		for _, lock := range lockOrder(bounds) {
-			if _, err := pgexec.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lock); err != nil {
+		for _, lock := range LockKeys(bounds) {
+			if err := pgexec.LockXact(ctx, lock); err != nil {
 				return err
 			}
 		}

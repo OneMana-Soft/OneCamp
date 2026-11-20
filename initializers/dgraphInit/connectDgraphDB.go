@@ -249,6 +249,10 @@ func createSchema() (err error) {
 		transcript_text: string .
 		transcript_timestamp: int .
 		transcript_offset_ms: int .
+		transcript_original_text: string .
+		transcript_corrected_at: dateTime .
+		transcript_corrected_by: uid .
+		transcript_translations: string .
 
 		recording_egress_id: string @index(exact) .
 		recording_stared_at: dateTime .
@@ -264,8 +268,11 @@ func createSchema() (err error) {
 		recording_transcript_only: bool .
 		recording_status: string .
 		recording_event: string @index(exact) .
-		recording_notes_doc: string .
+		recording_notes_doc: string @index(exact) .
 		recording_recap_chat: string .
+		recording_recap: string .
+		recording_action_items: string .
+		recording_action_tasks: [string] .
 
 		reaction_added_at: dateTime .
 		reaction_emoji_id: string .
@@ -382,6 +389,8 @@ func createSchema() (err error) {
 		board_editing_users: [uid] @reverse .
 		board_reading_users: [uid] @reverse .
 		board_commenting_users: [uid] @reverse .
+		board_owning_users: [uid] @reverse .
+		board_editors_share: bool .
 		board_created_by: uid @reverse .
 		board_created_at: dateTime .
 		board_updated_at: dateTime .
@@ -518,6 +527,10 @@ func createSchema() (err error) {
 			transcript_text
 			transcript_timestamp
 			transcript_offset_ms
+			transcript_original_text
+			transcript_corrected_at
+			transcript_corrected_by: User
+			transcript_translations
 		}
 
 		type Recording {
@@ -536,6 +549,9 @@ func createSchema() (err error) {
 			recording_event
 			recording_notes_doc
 			recording_recap_chat
+			recording_recap
+			recording_action_items
+			recording_action_tasks
 		}
 
 		type Doc {
@@ -609,6 +625,8 @@ func createSchema() (err error) {
 			board_editing_users: [User]
 			board_reading_users: [User]
 			board_commenting_users: [User]
+			board_owning_users: [User]
+			board_editors_share
 			board_created_at
 			board_updated_at
 			board_deleted_at

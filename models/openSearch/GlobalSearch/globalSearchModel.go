@@ -50,9 +50,13 @@ func SearchPage(ctx context.Context, indices []string, body []byte) (SearchAnswe
 		return out, fmt.Errorf("search is not connected")
 	}
 	var resp searchResp
+	// An index an install hasn't made yet (or has lost) fails no search of
+	// the rest: it answers nothing.
+	yes := true
 	if _, err := opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
 		Indices: indices,
 		Body:    bytes.NewReader(body),
+		Params:  opensearchapi.SearchParams{IgnoreUnavailable: &yes, AllowNoIndices: &yes},
 	}, &resp); err != nil {
 		return out, fmt.Errorf("search: %w", err)
 	}
@@ -118,6 +122,9 @@ func decodeHit(index string, source json.RawMessage) (*openSearchStruct.GlobalSe
 	case openSearchStruct.TEAM_INDEX:
 		h.Type, h.Team = openSearchStruct.TEAM_TYPE, &openSearchStruct.OpenSearchTeam{}
 		err = json.Unmarshal(source, h.Team)
+	case openSearchStruct.TRANSCRIPT_INDEX:
+		h.Type, h.Transcript = openSearchStruct.TRANSCRIPT_TYPE, &openSearchStruct.OpenSearchTranscript{}
+		err = json.Unmarshal(source, h.Transcript)
 	default:
 		return nil, nil
 	}

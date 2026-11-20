@@ -24,7 +24,7 @@ type qualityBatch struct {
 }
 
 // RecordCallQuality POST /calls/{session_id}/quality {samples}: a member's
-// own samples of the live call.
+// own samples of a call they are in, or just left.
 func RecordCallQuality(w http.ResponseWriter, r *http.Request) {
 	userInfo, ok := signedIn(w, r)
 	if !ok {

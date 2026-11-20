@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -74,6 +75,11 @@ type Service interface {
 	// SetCallLobby makes the event's invitees knock at its call, or come in by
 	// their own invitation again, for whoever may change the event (meet-02).
 	SetCallLobby(ctx context.Context, who *model.UserInfo, id string, inviteesWait bool) (*dgraphStruct.EventCall, error)
+	// SetRecapToGuests turns the organiser's "Send the recap to guests" on or
+	// off for an event (a series, from any of its instances): its call's
+	// recap is emailed to its guests by email (recap.go). The organiser's
+	// alone.
+	SetRecapToGuests(ctx context.Context, who *model.UserInfo, id string, on bool) (*Event, error)
 	// JoinRoom is the event's call room for whoever may read its details,
 	// made ready for its first join when ready (gcal-15 head B, eventRoom.go).
 	JoinRoom(ctx context.Context, who *model.UserInfo, id string, ready bool) (*Joining, error)
@@ -98,9 +104,10 @@ type Service interface {
 	// provider ("google", "microsoft") into OneCamp, and SyncStatus says where
 	// it stands.
 	MoveFrom(ctx context.Context, who *model.UserInfo, provider string) (*SyncStatus, error)
-	// ProjectCalendarFor is a project's own calendar, made the first time,
-	// for someone who may see the project.
-	ProjectCalendarFor(ctx context.Context, who *model.UserInfo, projectUUID string) (uuid.UUID, error)
+	// ContainerCalendarFor is a project's, a channel's or a team's own
+	// calendar (kind "project", "channel" or "team"), made the first time,
+	// for someone who may see that container.
+	ContainerCalendarFor(ctx context.Context, who *model.UserInfo, kind, containerUUID string) (uuid.UUID, error)
 	// Calendars are the calendars the person may see; CalendarEvents the
 	// events on those of them asked for, between from and to.
 	Calendars(ctx context.Context, who *model.UserInfo) ([]CalendarView, error)
@@ -113,11 +120,16 @@ type Service interface {
 	// UpdateCalendar renames or recolours a calendar the asker manages.
 	UpdateCalendar(ctx context.Context, who *model.UserInfo, id string, p CalendarPatch) error
 	// Secret feeds (calendar B8): whether who has one of a calendar, a new
-	// one (its link given once), none, and the calendar a link names.
+	// one (its link given once), none, and the calendar a link names; id
+	// WorkspaceFeedID is their link to everything they may see.
 	Feed(ctx context.Context, who *model.UserInfo, id string) (*FeedView, error)
 	MakeFeed(ctx context.Context, who *model.UserInfo, id, scope string) (*FeedView, error)
 	StopFeed(ctx context.Context, who *model.UserInfo, id string) error
 	FeedICS(ctx context.Context, token string) ([]byte, error)
+	// A workspace admin's (basecamp-05): every live link, never its address,
+	// and any one stopped by its id, audited.
+	Feeds(ctx context.Context, admin *model.UserInfo) (*FeedList, error)
+	StopAnyFeed(ctx context.Context, admin *model.UserInfo, id string) error
 	// Calendars read from an address (calendar B8): who's, one added (read
 	// once first), one read now, and one removed with everything on it.
 	Subscriptions(ctx context.Context, who *model.UserInfo) ([]SubscriptionView, error)
@@ -125,6 +137,10 @@ type Service interface {
 	RefreshSubscription(ctx context.Context, who *model.UserInfo, calendarID string) (*SubscriptionView, error)
 	Unsubscribe(ctx context.Context, who *model.UserInfo, calendarID string) error
 	SyncStatus(ctx context.Context, who *model.UserInfo, provider string) (*SyncStatus, error)
+	// An admin's ledger of every sync link, and their break of one
+	// (syncLedger.go; the /admin gate is the check).
+	SyncLedger(ctx context.Context, admin *model.UserInfo, q url.Values) (*SyncLedger, error)
+	BreakSyncLink(ctx context.Context, admin *model.UserInfo, id string) error
 }
 
 // DontSendIf is ctx for a write whose writer answered "Tell guests?" with

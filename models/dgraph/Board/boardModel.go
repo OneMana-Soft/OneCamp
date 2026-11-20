@@ -151,6 +151,7 @@ func UpdateBoardPermissions(ctx context.Context, input *adapter.InputUpdateBoard
 		{Predicate: "board_editing_users", Add: input.AddEditors, Remove: input.RemoveEditors},
 		{Predicate: "board_reading_users", Add: input.AddViewers, Remove: input.RemoveViewers},
 		{Predicate: "board_commenting_users", Add: input.AddCommenters, Remove: input.RemoveCommenters},
+		{Predicate: "board_owning_users", Add: input.AddCoOwners, Remove: input.RemoveCoOwners},
 	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

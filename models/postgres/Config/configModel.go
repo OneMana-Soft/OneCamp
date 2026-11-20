@@ -35,7 +35,13 @@ func EmailLogo() string {
 }
 
 func GetConfigByKey(key string) (config *SystemConfig, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	return configByKey(context.Background(), key)
+}
+
+// configByKey is key's config, read on the caller's ctx (within DBTimeout);
+// sql.ErrNoRows while the key is unset.
+func configByKey(ctx context.Context, key string) (config *SystemConfig, err error) {
+	ctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
 	query := `SELECT id, key, value, updated_at FROM system_configs WHERE key = $1`
@@ -96,18 +102,39 @@ func Claim(ctx context.Context, key, value string) (bool, error) {
 	return n == 1, err
 }
 
+// Swap writes key's value as to only while it is from ("" for a key the
+// install has none for yet, as Claim), and answers whether this call wrote
+// it: a write that landed in between stands.
+func Swap(ctx context.Context, key, from, to string) (bool, error) {
+	if from == "" {
+		return Claim(ctx, key, to)
+	}
+	n, err := pgexec.Exec(ctx, `UPDATE system_configs SET value = $3, updated_at = NOW() WHERE key = $1 AND value = $2`, key, from, to)
+	return n == 1, err
+}
+
 // IsDone is whether key records a one-off job as done on this install: a
 // value starting "done", as such a job writes with UpsertConfig once it has
 // finished.
 func IsDone(key string) (bool, error) {
-	cfg, err := GetConfigByKey(key)
+	cfg, err := DoneRecord(context.Background(), key)
+	return cfg != nil, err
+}
+
+// DoneRecord is key's record of a one-off job done on this install (what the
+// job wrote, and when), or nil while it isn't done. One read, on ctx.
+func DoneRecord(ctx context.Context, key string) (*SystemConfig, error) {
+	cfg, err := configByKey(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return strings.HasPrefix(cfg.Value, "done"), nil
+	if !strings.HasPrefix(cfg.Value, "done") {
+		return nil, nil
+	}
+	return cfg, nil
 }
 
 func GetMultipleConfigsByKeys(keys []string) (configs []*SystemConfig, err error) {

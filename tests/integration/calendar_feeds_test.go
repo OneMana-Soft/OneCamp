@@ -105,27 +105,28 @@ func TestCalendarFeeds(t *testing.T) {
 		t.Fatal("a second live feed was kept beside the first")
 	}
 	// Revoked: found by neither its hash nor as live; a new one is. The
-	// revoke gives the scope it stopped (the audit log's row says it), and
-	// nothing once none is live.
-	if stopped, err := models.RevokeFeeds(ctx, cal, sam); err != nil || stopped != models.FeedFull {
-		t.Fatalf("the revoke stopped %q (%v), want the live feed's %q", stopped, err, models.FeedFull)
+	// revoke gives the feed it stopped, its id and scope (the audit log's
+	// row is told under the one and says the other), and nothing once none
+	// is live.
+	if stopped, err := models.RevokeFeeds(ctx, cal, sam, sam); err != nil || stopped == nil || stopped.ID != first.ID || stopped.Scope != models.FeedFull {
+		t.Fatalf("the revoke stopped %+v (%v), want the live feed %s (%q)", stopped, err, first.ID, models.FeedFull)
 	}
-	if again, err := models.RevokeFeeds(ctx, cal, sam); err != nil || again != "" {
-		t.Fatalf("a second revoke stopped %q (%v), want nothing", again, err)
+	if again, err := models.RevokeFeeds(ctx, cal, sam, sam); err != nil || again != nil {
+		t.Fatalf("a second revoke stopped %+v (%v), want nothing", again, err)
 	}
 	if got, err := models.FeedByHash(ctx, helpers.LinkSecretHash("first-secret")); err != nil || got != nil {
 		t.Fatalf("a revoked feed was found: %+v %v", got, err)
 	}
 	second := feed("second-secret", models.FeedBusy)
 	must(models.InsertFeed(ctx, second))
-	live, err := models.LiveFeed(ctx, cal, sam)
-	if err != nil || live == nil || live.ID != second.ID || live.Scope != models.FeedBusy {
+	live, err := models.LatestFeed(ctx, cal, sam)
+	if err != nil || live == nil || live.RevokedAt != nil || live.ID != second.ID || live.Scope != models.FeedBusy {
 		t.Fatalf("live %+v %v", live, err)
 	}
 	// The calendar goes, and its feeds with it.
 	_, err = db.Exec(`DELETE FROM calendars WHERE id = $1`, cal)
 	must(err)
-	if live, _ := models.LiveFeed(ctx, cal, sam); live != nil {
+	if live, _ := models.LatestFeed(ctx, cal, sam); live != nil {
 		t.Fatalf("a deleted calendar's feed: %+v", live)
 	}
 }

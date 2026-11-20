@@ -621,24 +621,30 @@ func (s *LiveKitServiceStruct) RoomHasParticipant(ctx context.Context, roomName,
 //
 // It lists all rooms, then asks each one whether a person is in it (personIn).
 // A room with nobody but the agent, a recorder or a hidden watcher in it is
-// left out.
-func (s *LiveKitServiceStruct) HumanActiveRoomNames(ctx context.Context) (map[string]bool, error) {
+// left out. So is a room whose people couldn't be read, and then the answer
+// isn't complete: right for this read, never to be kept (H3C).
+func (s *LiveKitServiceStruct) HumanActiveRoomNames(ctx context.Context) (active map[string]bool, complete bool, err error) {
 	// No calls server connected: no call is active. The sidebar asks on every
 	// read, and a nil client took the whole read down with it.
 	if s.LiveKitClient == nil {
-		return nil, errors.New("livekit isn't connected")
+		return nil, false, errors.New("livekit isn't connected")
 	}
 	rooms, err := s.ListAllRooms(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	active := make(map[string]bool, len(rooms))
+	active, complete = make(map[string]bool, len(rooms)), true
 	for _, room := range rooms {
-		if s.personIn(ctx, room) {
+		in, err := s.personRead(ctx, room)
+		if err != nil {
+			complete = false
+			continue
+		}
+		if in {
 			active[room.Name] = true
 		}
 	}
-	return active, nil
+	return active, complete, nil
 }
 
 // RoomsHaveHumanParticipants reports whether a person is in any of the rooms
@@ -659,17 +665,24 @@ func (s *LiveKitServiceStruct) RoomsHaveHumanParticipants(ctx context.Context, n
 // with nobody connected can't have a person. A room that can't be read counts
 // as having nobody in it this pass, so one room never fails a whole read.
 func (s *LiveKitServiceStruct) personIn(ctx context.Context, room *livekit.Room) bool {
+	in, _ := s.personRead(ctx, room)
+	return in
+}
+
+// personRead is personIn saying when the room couldn't be read (logged here),
+// for a read that must not be kept with a room missing from it.
+func (s *LiveKitServiceStruct) personRead(ctx context.Context, room *livekit.Room) (bool, error) {
 	if room.NumParticipants == 0 {
-		return false
+		return false, nil
 	}
 	hasHuman, err := s.RoomHasHumanParticipants(ctx, room.Name)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"liveKitInit/personIn Failed to list participants for room %s err: %+v",
 			room.Name, err)
-		return false
+		return false, err
 	}
-	return hasHuman
+	return hasHuman, nil
 }
 
 // isRoomNotFoundErr reports whether a LiveKit API error indicates the room

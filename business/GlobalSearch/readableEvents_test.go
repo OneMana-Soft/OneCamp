@@ -12,6 +12,7 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	querySpec "github.com/akashc777/OneCamp/business/QuerySpec"
+	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	opensearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
 	"github.com/google/uuid"
@@ -30,6 +31,12 @@ func TestMain(m *testing.M) {
 	nextInstances = func(context.Context, []*openSearchStruct.OpenSearchEvent) {}
 	goRepairs = func(repair func()) { repair() }
 	repairEntry = func(kind, id string) {}
+	// Nor does it read the graph or the calls going on for transcripts.
+	callPlacesOf = func(context.Context, string) ([]string, error) { return nil, nil }
+	openCallsOf = func(context.Context) (CallReach, error) { return CallReach{}, nil }
+	transcriptHomesOf = func(context.Context, []string, []string) (map[string]recordingDomain.TranscriptHome, error) {
+		return nil, nil
+	}
 	os.Exit(m.Run())
 }
 

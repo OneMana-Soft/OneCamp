@@ -141,7 +141,8 @@ func TestAGroupThreadReplyIsToldToOneAudience(t *testing.T) {
 	if err := env.PG.QueryRow(`SELECT grp_id FROM users_chat_notification WHERE user_id = $1 LIMIT 1`, people["zed"]).Scan(&grp); err != nil {
 		t.Fatalf("the group's settings: %v", err)
 	}
-	// dee hears nothing of the group unless addressed.
+	// dee set the group to "Nothing": she hears nothing of it, addressed or
+	// not (NOTIF M1, one rule: notifylevel.Lets).
 	exec(`UPDATE users_chat_notification SET notification_type = 'block' WHERE user_id = $1 AND grp_id = $2`, people["dee"], grp)
 
 	// cy replied first; now bo replies, mentioning dee and eve.
@@ -153,8 +154,8 @@ func TestAGroupThreadReplyIsToldToOneAudience(t *testing.T) {
 		t.Fatal("bo's reply has no id")
 	}
 
-	want := []string{"ada", "cy", "dee"}
-	why := "ada wrote the message, cy replied, dee was mentioned (on Nothing, but addressed); never bo (wrote it), zed (in the group, not the thread) or eve (not in the group)"
+	want := []string{"ada", "cy"}
+	why := "ada wrote the message, cy replied; never dee (mentioned, but on Nothing), bo (wrote it), zed (in the group, not the thread) or eve (not in the group)"
 
 	t.Run("push", func(t *testing.T) {
 		var got []string
@@ -232,10 +233,10 @@ func TestAGroupThreadReplyIsToldToOneAudience(t *testing.T) {
 			}
 			return out
 		}
-		waitFor(t, "the reply's Activity items", func() bool { return len(items()) >= 2 })
+		waitFor(t, "the reply's Activity items", func() bool { return len(items()) >= 1 })
 		time.Sleep(500 * time.Millisecond)
-		if got, want := items(), map[string]string{"ada": "COMMENT", "dee": "MENTION"}; fmt.Sprint(got) != fmt.Sprint(want) {
-			t.Errorf("Activity items %v, want %v: the author's reply item and the mention item, from the same audience", got, want)
+		if got, want := items(), map[string]string{"ada": "COMMENT"}; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("Activity items %v, want %v: the author's reply item, and no mention item for dee (on Nothing), from the same audience", got, want)
 		}
 	})
 }

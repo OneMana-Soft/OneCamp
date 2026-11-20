@@ -7,9 +7,11 @@ package Domain
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Task"
 	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
@@ -60,8 +62,18 @@ func readersOf(ctx context.Context, taskUUID string, userUUIDs []string) (*dgrap
 	if err != nil {
 		return task, nil, nil, err
 	}
+	readers, kept, err := restricted(ctx, task, readers, r, map[string]taskread.Filter{})
+	return task, readers, kept, err
+}
+
+// restricted is readers less whoever r, the task's restriction, keeps out,
+// and who that is; with none, readers as they are. A restricted task is read
+// only by its project's admins, its assignee, its creator and the people
+// granted on it (business/WorkAccess LetIn). filters keeps each person's task
+// filter (models/taskread) once decided, by lower-case id, for the next task.
+func restricted(ctx context.Context, task *dgraphStruct.DgraphTask, readers map[string]bool, r restrictionModel.Restriction, filters map[string]taskread.Filter) (map[string]bool, map[string]bool, error) {
 	if !r.Restricted {
-		return task, readers, nil, nil
+		return readers, nil, nil
 	}
 	granted := make(map[string]bool, len(r.Grants))
 	for _, g := range r.Grants {
@@ -78,16 +90,109 @@ func readersOf(ctx context.Context, taskUUID string, userUUIDs []string) (*dgrap
 		}
 		// Anyone else only as one of its project's admins, by the whole rule
 		// (a role row can say less than the graph's admin edge).
-		f, err := taskread.For(ctx, who)
-		if err != nil {
-			return task, nil, nil, err
+		f, decided := filters[key]
+		if !decided {
+			var err error
+			if f, err = taskread.For(ctx, who); err != nil {
+				return nil, nil, err
+			}
+			filters[key] = f
 		}
 		if f.Hides(task.Uuid) {
 			delete(readers, who)
 			kept[who] = true
 		}
 	}
-	return task, readers, kept, nil
+	return readers, kept, nil
+}
+
+// ReadersOfMany is Readers for many tasks at once: by each task's uuid as
+// asked, which of its people (user ids, answered as given) may read it now.
+// A task that isn't there, or is deleted, has none: what an email about it
+// asks at its send (Readers reads a deleted task as it was). One graph read
+// and one of the restrictions for them all; a restricted task's people are
+// asked of their task filters (restricted), each person once.
+func ReadersOfMany(ctx context.Context, people map[string][]string) (map[string]map[string]bool, error) {
+	out := make(map[string]map[string]bool, len(people))
+	asked := make(map[string]string, len(people)) // by lower-case uuid: the task as asked
+	var ids []string
+	for id, who := range people {
+		out[id] = map[string]bool{}
+		if _, err := uuid.Parse(id); err == nil && len(who) > 0 {
+			asked[strings.ToLower(id)] = id
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	list, _ := json.Marshal(ids)
+	query := `{
+				taskInfo(func: eq(task_uuid, ` + string(list) + `)) @filter(` + dgraphquery.Live("task_deleted_at") + `) {` + readersFields + `}
+			}`
+	tasks, err := dgraphModels.QueryDgraphTasks(taskread.WithSystem(ctx), query, nil)
+	if err != nil {
+		return nil, err
+	}
+	found := make(map[uuid.UUID]*dgraphStruct.DgraphTask, len(tasks))
+	var read []uuid.UUID
+	for _, task := range tasks {
+		key, ok := asked[strings.ToLower(task.Uuid)]
+		id, err := uuid.Parse(task.Uuid)
+		if !ok || err != nil {
+			continue
+		}
+		if out[key] = ReadersAmong(task, people[key]); len(out[key]) > 0 {
+			found[id] = task
+			read = append(read, id)
+		}
+	}
+	if len(read) == 0 {
+		return out, nil
+	}
+	rs, err := restrictionModel.OfMany(ctx, read)
+	if err != nil {
+		return nil, err
+	}
+	filters := map[string]taskread.Filter{}
+	for id, task := range found {
+		key := asked[strings.ToLower(task.Uuid)]
+		if out[key], _, err = restricted(ctx, task, out[key], rs[id], filters); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// MemberReaders is which of the people may read the task (Readers) as one of
+// its project's members or admins: whom its project's news is for. Someone
+// taken off the project still reads a task given to them (MayRead: nobody is
+// locked out of their own work), but nothing about the project reaches them.
+// A task in no project has none. One read, as Readers.
+func MemberReaders(ctx context.Context, taskUUID string, userUUIDs []string) (map[string]bool, error) {
+	task, readers, _, err := readersOf(ctx, taskUUID, userUUIDs)
+	if err != nil || task == nil {
+		return map[string]bool{}, err
+	}
+	return onlyMembers(task, readers), nil
+}
+
+// onlyMembers is readers (user ids, as asked) less whoever isn't one of the
+// task's project's members or admins: its assignee and its creator are
+// readers by being them, not by this. Pure.
+func onlyMembers(task *dgraphStruct.DgraphTask, readers map[string]bool) map[string]bool {
+	ids := make([]string, 0, len(readers))
+	for who := range readers {
+		ids = append(ids, who)
+	}
+	people := ReadersAmong(&dgraphStruct.DgraphTask{Project: task.Project}, ids)
+	out := make(map[string]bool, len(people))
+	for who := range readers {
+		if people[who] {
+			out[who] = true
+		}
+	}
+	return out
 }
 
 // InProject is which of the people are the task's project's people, or its
@@ -106,20 +211,8 @@ func projectReaders(ctx context.Context, taskUUID string, userUUIDs []string) (*
 	if len(userUUIDs) == 0 {
 		return nil, map[string]bool{}, nil
 	}
-	// The project's uid and uuid keep its block from reading as no project
-	// when nobody is in it.
 	query := `query TaskReaders($id: string){
-				taskInfo(func: eq(task_uuid, $id)) {
-					task_uuid
-					task_assignee { user_uuid }
-					task_created_by { user_uuid }
-					task_project {
-						uid
-						project_uuid
-						project_members { user_uuid }
-						project_admins { user_uuid }
-					}
-				}
+				taskInfo(func: eq(task_uuid, $id)) {` + readersFields + `}
 			}`
 	// Who may read it is decided for others than the reader of ctx, so the
 	// read itself sees the task whatever ctx's reader may (models/taskread).
@@ -132,6 +225,21 @@ func projectReaders(ctx context.Context, taskUUID string, userUUIDs []string) (*
 	}
 	return task, ReadersAmong(task, userUUIDs), nil
 }
+
+// readersFields is what a task is read with to decide its readers
+// (ReadersAmong). The project's uid and uuid keep its block from reading as
+// no project when nobody is in it.
+const readersFields = `
+					task_uuid
+					task_assignee { user_uuid }
+					task_created_by { user_uuid }
+					task_project {
+						uid
+						project_uuid
+						project_members { user_uuid }
+						project_admins { user_uuid }
+					}
+				`
 
 // TaskReader is how one person stands to a task.
 type TaskReader struct {

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"math"
 	"strconv"
 	"strings"
@@ -690,6 +691,15 @@ func MergeFieldValues(ctx context.Context, tasks []*dgraphStruct.DgraphTask) err
 // their fields are read only then; a formula reading money, directly or
 // through other formulas, is hidden as money is, by the same rule.
 func MergeFieldValuesFor(ctx context.Context, r Reader, tasks []*dgraphStruct.DgraphTask) error {
+	var err error
+	pgexec.Together(ctx, FieldValuesPlanned(ctx, r, tasks, &err))
+	return err
+}
+
+// FieldValuesPlanned is MergeFieldValuesFor for a caller that pipelines its
+// reads with its own (pgexec.Together): the values' read and the formula
+// projects' go in the caller's batch; *failed is the laying's error.
+func FieldValuesPlanned(ctx context.Context, r Reader, tasks []*dgraphStruct.DgraphTask, failed *error) pgexec.Planned {
 	ids := make([]uuid.UUID, 0, len(tasks))
 	for _, t := range tasks {
 		if t == nil {
@@ -700,13 +710,23 @@ func MergeFieldValuesFor(ctx context.Context, r Reader, tasks []*dgraphStruct.Dg
 		}
 	}
 	if len(ids) == 0 {
-		return nil
+		return pgexec.Planned{}
 	}
-	values, money, err := model.ReadValues(ctx, ids)
+	valuesRead, valuesOf := model.ValuesRead(ids)
+	projectsRead, projectsOf := model.FormulaProjectsRead(ids)
+	return pgexec.Planned{Reads: []*pgexec.Read{valuesRead, projectsRead}, Then: func() {
+		*failed = layValues(ctx, r, tasks, valuesOf, projectsOf)
+	}}
+}
+
+// layValues lays the values read (valuesOf) once the batch they were read in
+// has run; the fields of projects with a formula wait on it, so are read here.
+func layValues(ctx context.Context, r Reader, tasks []*dgraphStruct.DgraphTask, valuesOf func() (model.Values, map[string]string, error), projectsOf func() (map[string]string, error)) error {
+	values, money, err := valuesOf()
 	if err != nil {
 		return err
 	}
-	projects, err := model.FormulaProjects(ctx, ids)
+	projects, err := projectsOf()
 	if err != nil {
 		return err
 	}

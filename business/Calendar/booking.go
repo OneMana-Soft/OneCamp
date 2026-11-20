@@ -52,6 +52,19 @@ type PageInput struct {
 	MinNoticeMinutes int          `json:"min_notice_minutes"`
 	MaxDaysAhead     int          `json:"max_days_ahead"`
 	Active           bool         `json:"active"`
+	// Questions are what the page asks whoever books it, in its order.
+	Questions []QuestionInput `json:"questions"`
+	// TeamMode is "solo" (the default) or "collective": the owner and every
+	// host who accepted, booked together. Left blank on an update, it is
+	// the page's own (the web's editor sends none).
+	TeamMode string `json:"team_mode"`
+	// Hosts are the members the owner asks to host the page with them. Left
+	// out (nil, not []) on an update, the page's hosts stay as they are.
+	Hosts []string `json:"hosts"`
+	// Owner is the saving owner as their session holds them, never the
+	// request's: the name a newly invited host's notice gives. Left nil (a
+	// seed, a test), that notice reads the name once.
+	Owner *dgraphStruct.DgraphUser `json:"-"`
 }
 
 var slugJunk = regexp.MustCompile(`[^a-z0-9]+`)
@@ -62,8 +75,9 @@ func NormaliseSlug(s string) string {
 	return strings.Trim(slugJunk.ReplaceAllString(strings.ToLower(strings.TrimSpace(s)), "-"), "-")
 }
 
-// CheckPage validates a page and returns it ready to store. Pure.
-func CheckPage(in PageInput) (bookingModel.Page, error) {
+// CheckPage validates a page and returns it ready to store; now is when,
+// so a date of the page's own already gone by is refused. Pure.
+func CheckPage(in PageInput, now time.Time) (bookingModel.Page, error) {
 	var p bookingModel.Page
 	p.Slug = NormaliseSlug(in.Slug)
 	if n := len(p.Slug); n < 3 || n > 40 {
@@ -89,7 +103,17 @@ func CheckPage(in PageInput) (bookingModel.Page, error) {
 	if in.MaxDaysAhead < 1 || in.MaxDaysAhead > 180 {
 		return p, &AvailabilityError{Msg: "Let people book 1 to 180 days ahead."}
 	}
-	if _, err := in.Hours.Check(); err != nil {
+	loc, err := in.Hours.Check()
+	if err != nil {
+		return p, err
+	}
+	if day, past := in.Hours.PastDate(now.In(loc)); past {
+		return p, &AvailabilityError{Msg: day + " has gone by: take it off the page's dates."}
+	}
+	if p.Questions, p.KeptQuestionIds, err = checkQuestions(in.Questions, in.Id == ""); err != nil {
+		return p, err
+	}
+	if p.TeamMode, p.HostIds, err = checkTeam(in); err != nil {
 		return p, err
 	}
 	hours, _ := json.Marshal(in.Hours)
@@ -106,13 +130,24 @@ func CheckPage(in PageInput) (bookingModel.Page, error) {
 	return p, nil
 }
 
-// SaveBookingPage creates or updates one of the person's pages.
+// SaveBookingPage creates or updates one of the person's pages. An update
+// that leaves out the team mode or the hosts keeps the page's own.
 func SaveBookingPage(ctx context.Context, owner uuid.UUID, in PageInput) (*bookingModel.Page, error) {
-	p, err := CheckPage(in)
+	stored, err := pageKeptFrom(owner, in)
+	if err != nil {
+		return nil, err
+	}
+	if stored != nil && strings.TrimSpace(in.TeamMode) == "" {
+		in.TeamMode = stored.TeamMode
+	}
+	p, err := CheckPage(in, time.Now())
 	if err != nil {
 		return nil, err
 	}
 	p.UserId = owner
+	if err := checkHosts(ctx, owner, p.HostIds); err != nil {
+		return nil, err
+	}
 	if p.Id == uuid.Nil {
 		if n, err := bookingModel.CountPages(owner); err != nil {
 			return nil, err
@@ -127,12 +162,29 @@ func SaveBookingPage(ctx context.Context, owner uuid.UUID, in PageInput) (*booki
 		return nil, helpers.Conflict(fmt.Sprintf("Another booking page already uses the address %q. Pick another.", p.Slug), err)
 	}
 	if err == nil && saved == nil {
+		// The update keeps a question only when it is the page's now: a
+		// kept one that isn't was edited away since the page was opened.
+		if len(p.KeptQuestionIds) > 0 {
+			return nil, &AvailabilityError{Msg: "A question on this page changed since you opened it. Reload the page and try again."}
+		}
 		return nil, &AvailabilityError{Msg: "That isn't one of your pages."}
 	}
-	if err == nil {
-		pageCache.forgetOwner(owner.String())
+	if err != nil {
+		return nil, err
 	}
-	return saved, err
+	if keepsHosts(stored, in.Hosts, p.TeamMode) {
+		pageCache.forgetOwner(owner.String())
+		return saved, nil
+	}
+	// The host list as the owner left it: who is new is invited and told,
+	// who is off it leaves (a solo page has nobody).
+	invited, err := bookingModel.SetHosts(ctx, saved.Id, p.HostIds)
+	pageCache.forgetOwner(owner.String())
+	if err != nil {
+		return nil, err
+	}
+	tellInvited(ctx, saved, in.Owner, invited)
+	return saved, nil
 }
 
 // DeleteBookingPage deletes one of the person's pages, and says how many of
@@ -160,6 +212,10 @@ type PublicPage struct {
 	// BookableUntil is the last moment a slot may end, so the visitor's
 	// date picker stops there.
 	BookableUntil time.Time `json:"bookable_until"`
+	// Questions are what the page asks whoever books it; nobody's answers.
+	Questions bookingModel.Questions `json:"questions"`
+	// HostNames are a team page's accepted hosts, by name alone.
+	HostNames []string `json:"host_names,omitempty"`
 }
 
 // ErrNoPage is a page that doesn't exist or is switched off; both answer
@@ -172,6 +228,8 @@ type livePage struct {
 	loc   *time.Location // the hours' zone
 	owner *model.UserInfo
 	name  string
+	// hosts are a team page's host rows, every state, with their names.
+	hosts []bookingModel.Host
 }
 
 func loadPage(ctx context.Context, slug string) (*livePage, error) {
@@ -179,6 +237,12 @@ func loadPage(ctx context.Context, slug string) (*livePage, error) {
 	if err != nil {
 		return nil, err
 	}
+	return livePageOf(ctx, p)
+}
+
+// livePageOf is page p as it takes bookings, or ErrNoPage: closed, its hours
+// unreadable, or its owner gone from the workspace.
+func livePageOf(ctx context.Context, p *bookingModel.Page) (*livePage, error) {
 	if p == nil || !pageLive(p) {
 		return nil, ErrNoPage
 	}
@@ -199,7 +263,13 @@ func loadPage(ctx context.Context, slug string) (*livePage, error) {
 	if du == nil || helpers.IsSoftDeleted(du.DeletedAt) {
 		return nil, ErrNoPage
 	}
-	return &livePage{page: p, hours: hours, loc: loc, name: bookingOwnerName(du),
+	var hosts []bookingModel.Host
+	if p.TeamMode == teamCollective {
+		if hosts, err = hostsOf(ctx, []uuid.UUID{p.Id}); err != nil {
+			return nil, err
+		}
+	}
+	return &livePage{page: p, hours: hours, loc: loc, name: bookingOwnerName(du), hosts: hosts,
 		owner: &model.UserInfo{UserPostgresInfo: model.User{Id: p.UserId}, UserDgraphInfo: *du}}, nil
 }
 
@@ -220,18 +290,52 @@ func (l *livePage) horizon(now time.Time) time.Time {
 // may already be taken there. The visitor is asked to try again.
 var ErrCalendarUnread = errors.New("the calendar couldn't be checked")
 
-// slots are the free slots between from and to, the calendars read now: what
-// a booking checks, never the cache. Time a calendar couldn't be read for is
-// never free: a booking would land on top of whatever is there.
-func (l *livePage) slots(ctx context.Context, from, to, now time.Time) ([]Interval, error) {
-	busy, err := busyFor(ctx, l.page.UserId.String(), from.Add(-24*time.Hour), to.Add(24*time.Hour))
+// slotTimes is the slot a booking of start takes: start to the minute, for
+// the page's length, or why not: past, inside the page's notice or past its
+// horizon. A booking and a move both ask it before the owner's calendars are
+// read, so a time the page never takes costs no read (V-1194).
+func (l *livePage) slotTimes(start, now time.Time) (time.Time, time.Time, error) {
+	start = start.UTC().Truncate(time.Minute)
+	end := start.Add(time.Duration(l.page.DurationMinutes) * time.Minute)
+	if start.Before(now) {
+		return start, end, &AvailabilityError{Msg: "That time has passed. Pick another."}
+	}
+	if start.Before(l.rules(now).Earliest) {
+		return start, end, &AvailabilityError{Msg: "That time is too soon. Pick a later one."}
+	}
+	if end.After(l.horizon(now)) {
+		return start, end, &AvailabilityError{Msg: "That time is too far ahead. Pick another."}
+	}
+	return start, end, nil
+}
+
+// slotFree is whether start..end is one of the page's free slots, the
+// calendars read now: what a booking or a move checks, never the cache. own
+// is the event a move moves, no clash with itself: it alone is left out of
+// what's busy (nil for a new booking). Time a calendar couldn't be read for
+// is never free: a booking would land on top of whatever is there.
+func (l *livePage) slotFree(ctx context.Context, start, end, now time.Time, own *dgraphStruct.DgraphEvent) error {
+	if slotChecking != nil {
+		slotChecking()
+	}
+	from, to := start.Add(-time.Hour), end.Add(time.Hour)
+	// The owner's calendars and every accepted host's, each leaving the
+	// moved event out.
+	busy, err := teamBusy(ctx, l.people(), func(ctx context.Context, who string) (Busy, error) {
+		return readBusy(ctx, who, from.Add(-24*time.Hour), to.Add(24*time.Hour), BusyOptions{Except: own})
+	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if busy.GoogleUnread {
-		return nil, ErrCalendarUnread
+		return ErrCalendarUnread
 	}
-	return FreeSlots(busy.Intervals, from, to, l.hours, l.rules(now)), nil
+	for _, s := range FreeSlots(busy.Intervals, from, to, l.hours, l.rules(now)) {
+		if s.Start.Equal(start) {
+			return nil
+		}
+	}
+	return &AvailabilityError{Msg: "That time was just taken. Pick another."}
 }
 
 // publicWindow is the window a look at a page from `from` is answered with:
@@ -274,6 +378,26 @@ func pageMissAllowed(ctx context.Context, id string) redisStore.RateLimitResult 
 	return redisStore.AllowFixedWindowOrLocal(rctx, registry.PublicReadRate, []string{"booking-page-miss", id}, bookingPageMissesPerMinute)
 }
 
+// bookingMovesPerDay is how often a guest's link may move its booking in
+// registry.BookingMoveRate's day: each move tells the page's owner (an inbox
+// notice, an email, a push) and mails the guest, so one link can't flood an
+// owner or spend the workspace's email.
+const bookingMovesPerDay = 3
+
+// MovedTooOftenError is a booking its link has moved bookingMovesPerDay times
+// this day: 429, with Limit's wait.
+type MovedTooOftenError struct{ Limit redisStore.RateLimitResult }
+
+func (e *MovedTooOftenError) Error() string { return "booking moved too often" }
+
+// moveAllowed charges one move of booking id (its id, never its link's
+// secret) to its day, counted in this process when Redis can't be asked.
+func moveAllowed(ctx context.Context, id string) redisStore.RateLimitResult {
+	rctx, cancel := context.WithTimeout(ctx, redisStore.LimitAskTimeout)
+	defer cancel()
+	return redisStore.AllowFixedWindowOrLocal(rctx, registry.BookingMoveRate, []string{id}, bookingMovesPerDay)
+}
+
 // GetPublicPage is a page and its free slots from the start of from's day in
 // the owner's zone, for 31 days or to the page's horizon. Answers are kept a
 // minute (bookingCache.go), so looking again, or at another week, reads the
@@ -293,12 +417,12 @@ func GetPublicPage(ctx context.Context, slug string, from, now time.Time) (*Publ
 	if res := pageMissAllowed(ctx, l.page.Id.String()); !res.Allowed {
 		return nil, &PageBusyError{Limit: res}
 	}
-	owner := l.page.UserId.String()
-	gen := pageCache.generation(owner)
+	people := l.people()
+	gen := pageCache.generation(people...)
 	out := &PublicPage{
 		Slug: l.page.Slug, Title: l.page.Title, Description: l.page.Description,
 		DurationMinutes: l.page.DurationMinutes, OwnerName: l.name, OwnerTZ: l.hours.TZ,
-		Slots: []Interval{}, BookableUntil: until,
+		Slots: []Interval{}, BookableUntil: until, Questions: l.page.Questions, HostNames: l.hostNames(),
 	}
 	if to.After(day) {
 		// Everything the page can offer, so every window comes from one read:
@@ -306,7 +430,9 @@ func GetPublicPage(ctx context.Context, slug string, from, now time.Time) (*Publ
 		// horizon's, so a look a moment later asks the same range.
 		lo := helpers.DayStart(now, l.loc).Add(-24 * time.Hour)
 		hi := helpers.DayStart(until, l.loc).AddDate(0, 0, 2)
-		busy, err := pageCache.busyOf(ctx, owner, lo, hi, now)
+		busy, err := teamBusy(ctx, people, func(ctx context.Context, who string) (Busy, error) {
+			return pageCache.busyOf(ctx, who, lo, hi, now)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -317,7 +443,7 @@ func GetPublicPage(ctx context.Context, slug string, from, now time.Time) (*Publ
 			return out, nil // read in part: no answer is kept from it
 		}
 	}
-	pageCache.putAnswer(key, owner, gen, out, now)
+	pageCache.putAnswer(key, people[0], gen, out, now, people[1:]...)
 	return out, nil
 }
 
@@ -329,6 +455,8 @@ type BookInput struct {
 	Note  string    `json:"note"`
 	// TZ is the visitor's zone, to write their confirmation in their time.
 	TZ string `json:"tz"`
+	// Answers are the visitor's to the page's questions.
+	Answers []GuestAnswer `json:"answers"`
 }
 
 // Booked is what the visitor gets back.
@@ -351,18 +479,27 @@ type Booked struct {
 
 // CheckGuest tidies and validates a visitor's details. Pure.
 func CheckGuest(in BookInput) (BookInput, error) {
-	in.Name = strings.Join(strings.Fields(in.Name), " ")
+	if len(in.Answers) > maxQuestions {
+		return in, &AvailabilityError{Msg: fmt.Sprintf("A page asks up to %d questions. Reload the page and try again.", maxQuestions)}
+	}
+	in.Name = oneLine(in.Name)
 	if in.Name == "" || utf8.RuneCountInString(in.Name) > 100 {
 		return in, &AvailabilityError{Msg: "Enter your name."}
+	}
+	if err := refuseHidden(in.Name, "your name"); err != nil {
+		return in, err
 	}
 	addr, err := mail.ParseAddress(strings.TrimSpace(in.Email))
 	if err != nil || len(addr.Address) > 254 || !strings.Contains(addr.Address[strings.LastIndex(addr.Address, "@")+1:], ".") {
 		return in, &AvailabilityError{Msg: "Enter an email address like name@example.com."}
 	}
 	in.Email = addr.Address
-	in.Note = strings.TrimSpace(in.Note)
+	in.Note = strings.TrimSpace(lineBreaks.Replace(in.Note))
 	if utf8.RuneCountInString(in.Note) > 1000 {
 		return in, &AvailabilityError{Msg: "Keep the note under 1,000 characters."}
+	}
+	if err := refuseHidden(in.Note, "your note"); err != nil {
+		return in, err
 	}
 	// The zone the guest reads the booking's times in, kept with the booking:
 	// one Go knows, and never "Local", the server's own and nobody's.
@@ -396,31 +533,23 @@ func Book(ctx context.Context, slug string, in BookInput, now time.Time) (*Booke
 	if err != nil {
 		return nil, err
 	}
+	// Against the page's questions as they are now; kept with their labels.
+	answers, err := CheckAnswers(l.page.Questions, in.Answers)
+	if err != nil {
+		return nil, err
+	}
 	if n, err := bookingModel.CountRecentByEmail(l.page.Id, in.Email, now.Add(-24*time.Hour)); err != nil {
 		return nil, err
 	} else if n >= maxBookingsPerEmail {
 		return nil, &AvailabilityError{Msg: "You've booked this page a few times today. Try again tomorrow."}
 	}
 
-	dur := time.Duration(l.page.DurationMinutes) * time.Minute
-	start := in.Start.UTC().Truncate(time.Minute)
-	end := start.Add(dur)
-	if end.After(l.horizon(now)) {
-		return nil, &AvailabilityError{Msg: "That time is too far ahead. Pick another."}
-	}
-	slots, err := l.slots(ctx, start.Add(-time.Hour), end.Add(time.Hour), now)
+	start, end, err := l.slotTimes(in.Start, now)
 	if err != nil {
 		return nil, err
 	}
-	free := false
-	for _, s := range slots {
-		if s.Start.Equal(start) {
-			free = true
-			break
-		}
-	}
-	if !free {
-		return nil, &AvailabilityError{Msg: "That time was just taken. Pick another."}
+	if err := l.slotFree(ctx, start, end, now, nil); err != nil {
+		return nil, err
 	}
 
 	token, hash, sealed, err := helpers.NewSealedLinkSecret()
@@ -429,7 +558,7 @@ func Book(ctx context.Context, slug string, in BookInput, now time.Time) (*Booke
 	}
 	b, err := bookingModel.Reserve(bookingModel.Booking{
 		PageId: l.page.Id, GuestName: in.Name, GuestEmail: in.Email, Note: in.Note, StartsAt: start, EndsAt: end,
-		GuestTZ: in.TZ, CancelHash: hash, CancelSealed: sealed,
+		GuestTZ: in.TZ, CancelHash: hash, CancelSealed: sealed, Answers: answers,
 	})
 	if errors.Is(err, bookingModel.ErrSlotTaken) {
 		return nil, &AvailabilityError{Msg: "That time was just taken. Pick another."}
@@ -438,16 +567,16 @@ func Book(ctx context.Context, slug string, in BookInput, now time.Time) (*Booke
 		return nil, err
 	}
 
-	desc := fmt.Sprintf("Booked through your page “%s” by %s (%s).", l.page.Title, in.Name, in.Email)
-	if in.Note != "" {
-		desc += "\n\n" + in.Note
-	}
+	desc := bookingDescription(l.page.Title, in.Name, in.Email, in.Note, answers)
+	lines := AnswerLines(answers)
 	ev, err := CreateEvent(ctx, l.owner, adapter.CreateOrUpdateEventInput{
 		Title:                fmt.Sprintf("%s with %s", l.page.Title, in.Name),
 		Description:          desc,
 		StartTime:            start.Format(time.RFC3339),
 		EndTime:              end.Format(time.RFC3339),
 		SyncToGoogleCalendar: true,
+		// A team page's accepted hosts are on the meeting: busy for each.
+		Participants: l.hostIDs(),
 	})
 	if err != nil {
 		// Left behind, the booking would hold the slot with no meeting on it.
@@ -462,11 +591,13 @@ func Book(ctx context.Context, slug string, in BookInput, now time.Time) (*Booke
 		}
 	}
 	pageCache.forgetOwner(l.page.UserId.String())
+	pageCache.forgetBusy(l.hostIDs()...)
+	planGuestReminders(ctx, b, l.page, false, now)
 
 	told := notificationBusiness.TellBookingOwner(ctx, notificationBusiness.BookingNotice{
 		OwnerUUID: l.page.UserId.String(), EventUUID: ev.EventUuid, BookingID: b.Id.String(),
 		GuestName: in.Name, PageTitle: l.page.Title, Start: start, End: end,
-		TZ: l.hours.TZ, When: FormatWhen(start, end, l.hours.TZ),
+		TZ: l.hours.TZ, When: FormatWhen(start, end, l.hours.TZ), Answers: lines, HostUUIDs: l.hostIDs(),
 	})
 	emailed := mailGuest(ctx, guestMail{
 		to: in.Email, name: in.Name,
@@ -499,9 +630,12 @@ type BookingView struct {
 	// CancelledByHost is a booking its host cancelled, by deleting the
 	// meeting: the page says so rather than the guest's own cancel's words.
 	CancelledByHost bool `json:"cancelled_by_host"`
-	// OwnerTold, on a cancel's answer, is whether the owner was told of it:
+	// OwnerTold, on a cancel's or a move's answer, is whether the owner was told of it:
 	// an inbox item, or an email queued.
 	OwnerTold bool `json:"owner_told,omitempty"`
+	// Answers are what the guest answered the page's questions: for the
+	// holder of the booking's link alone.
+	Answers bookingModel.Answers `json:"answers"`
 }
 
 // tokenBooking is a booking found by its guest's link: the booking, its page,
@@ -516,7 +650,8 @@ type tokenBooking struct {
 func (t *tokenBooking) view() *BookingView {
 	return &BookingView{BookingID: t.b.Id.String(), Title: t.p.Title, OwnerName: t.owner, Start: t.b.StartsAt,
 		End: t.b.EndsAt, Cancelled: t.b.CancelledAt != nil, Slug: t.p.Slug, PageLive: t.live,
-		CancelledByHost: t.b.CancelledAt != nil && t.b.CancelledBy != nil && *t.b.CancelledBy == bookingModel.CancelledByHost}
+		CancelledByHost: t.b.CancelledAt != nil && t.b.CancelledBy != nil && *t.b.CancelledBy == bookingModel.CancelledByHost,
+		Answers:         t.b.Answers}
 }
 
 func bookingForToken(ctx context.Context, token string) (*tokenBooking, error) {
@@ -575,6 +710,9 @@ func CancelBooking(ctx context.Context, token string) (*BookingView, error) {
 	if err != nil || !changed {
 		return view, err
 	}
+	// Its reminders here, as its event's deletion below finds the booking
+	// already cancelled and stops (bookingEventDeleted).
+	cancelGuestReminders(ctx, p.UserId, b.Id)
 	if b.EventUUID != nil {
 		du, err := userDomain.GetDgraphUserInfoByUUID(ctx, p.UserId.String())
 		if err == nil && du != nil {
@@ -587,15 +725,7 @@ func CancelBooking(ctx context.Context, token string) (*BookingView, error) {
 	pageCache.forgetOwner(p.UserId.String())
 	var hours WorkingHours
 	_ = json.Unmarshal(p.Hours, &hours)
-	event := ""
-	if b.EventUUID != nil {
-		event = b.EventUUID.String()
-	}
-	view.OwnerTold = notificationBusiness.TellBookingOwner(ctx, notificationBusiness.BookingNotice{
-		OwnerUUID: p.UserId.String(), EventUUID: event, BookingID: b.Id.String(),
-		GuestName: b.GuestName, PageTitle: p.Title, Start: b.StartsAt, End: b.EndsAt,
-		TZ: hours.TZ, When: FormatWhen(b.StartsAt, b.EndsAt, hours.TZ), Cancelled: true,
-	})
+	view.OwnerTold = tellOwner(ctx, p, b, acceptedHostsOf(ctx, p), hours.TZ, b.StartsAt, b.EndsAt, notificationBusiness.BookingCancelled)
 	// The guest added the invite, so the cancel takes it off their calendar.
 	mailGuest(ctx, guestMail{
 		to: b.GuestEmail, name: b.GuestName,
@@ -610,6 +740,162 @@ func CancelBooking(ctx context.Context, token string) (*BookingView, error) {
 	return view, nil
 }
 
+// movable is whether a guest's link may move booking b: one still to come,
+// not cancelled, with its meeting on the owner's calendar to move.
+func movable(b *bookingModel.Booking, now time.Time) bool {
+	return b != nil && b.CancelledAt == nil && b.EventUUID != nil && b.StartsAt.After(now)
+}
+
+// rescheduleHeld runs inside a move's page lock, after its slot check and
+// before the move: nil but in the integration build's lock test.
+var rescheduleHeld func()
+
+// slotChecking runs as a booking's or a move's slot check starts, before the
+// calendars are read: nil but in the integration build's lock test.
+var slotChecking func()
+
+// tellOwner tells page p's owner of a guest's change to booking b, at start
+// to end in the page's zone tz: a cancel, or a move by the booking's link.
+// hosts are the page's accepted hosts, told as its owner is: the caller's,
+// who holds them already (a move) or reads them once (acceptedHostsOf).
+func tellOwner(ctx context.Context, p *bookingModel.Page, b *bookingModel.Booking, hosts []string, tz string, start, end time.Time, change notificationBusiness.BookingChange) bool {
+	event := ""
+	if b.EventUUID != nil {
+		event = b.EventUUID.String()
+	}
+	return notificationBusiness.TellBookingOwner(ctx, notificationBusiness.BookingNotice{
+		OwnerUUID: p.UserId.String(), EventUUID: event, BookingID: b.Id.String(),
+		GuestName: b.GuestName, PageTitle: p.Title, Start: start, End: end,
+		TZ: tz, When: FormatWhen(start, end, tz), Change: change, HostUUIDs: hosts,
+	})
+}
+
+// acceptedHostsOf is team page p's accepted hosts now, told of its guests'
+// changes as its owner is; none for a solo page.
+func acceptedHostsOf(ctx context.Context, p *bookingModel.Page) []string {
+	if p.TeamMode != teamCollective {
+		return nil
+	}
+	hosts, err := bookingModel.HostsOfPages(ctx, []uuid.UUID{p.Id})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Calendar/acceptedHostsOf err: %+v", err)
+	}
+	return (&livePage{page: p, hosts: hosts}).hostIDs()
+}
+
+// guestMoveKey marks a context as a guest's move by their booking's link,
+// with the booking's page: set only by RescheduleBooking around its change,
+// read where bookingEventUpdated writes the guest's mail, so the one mail of
+// a move says whose it was, and the page the move read isn't read again, and
+// where legacyChange writes, so the move changes only the meeting it read.
+type guestMoveKey struct{}
+
+// guestMovePage is the page of the guest's move ctx is, nil for any other
+// change.
+func guestMovePage(ctx context.Context) *bookingModel.Page {
+	p, _ := ctx.Value(guestMoveKey{}).(*bookingModel.Page)
+	return p
+}
+
+// guestMoveOf is the page of the guest's move ctx is when b is a booking of
+// that page, nil for any other change: another page's booking changed under
+// the move reads its own page, as an owner's change does.
+func guestMoveOf(ctx context.Context, b *bookingModel.Booking) *bookingModel.Page {
+	if p := guestMovePage(ctx); p != nil && p.Id == b.PageId {
+		return p
+	}
+	return nil
+}
+
+// RescheduleBooking moves a guest's booking, found by its link, to start: a
+// free slot of its page by the page's rules (hours, notice, horizon, length),
+// its own meeting left out of what's busy. A link that names no booking, a
+// cancelled one or one begun, or one whose page takes no bookings answers
+// ErrNoPage, as a missing booking does, and before any page or slot work but
+// the page's. Its meeting is read once (eventToChange) and the calendars are
+// read before the page's lock, Book's, as Book reads them before Reserve: no
+// lock, nor its connection, waits on Google. Under the lock the page's own
+// bookings are checked again, so nobody books the time meanwhile, and the
+// meeting moves. The move is the page owner's own edit (UpdateEvent's
+// change), marked as the guest's: bookingEventUpdated moves the
+// booking with its meeting and sends the guest the one updated invite, in
+// words of their own move. The page's owner is told as of a booking or a
+// cancel (TellBookingOwner). A move to the time it has already changes
+// nothing and tells nobody. A link moves its booking bookingMovesPerDay times
+// a day (MovedTooOftenError); only a move about to change something counts.
+func RescheduleBooking(ctx context.Context, token string, start, now time.Time) (*BookingView, error) {
+	b, err := bookingModel.BookingByLink(helpers.LinkSecretHash(token))
+	if err != nil {
+		return nil, err
+	}
+	if !movable(b, now) {
+		return nil, ErrNoPage
+	}
+	p, err := bookingModel.PageById(b.PageId)
+	if err != nil {
+		return nil, err
+	}
+	l, err := livePageOf(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	start, end, err := l.slotTimes(start, now)
+	if err != nil {
+		return nil, err
+	}
+	view := (&tokenBooking{b: b, p: p, owner: l.name, live: true}).view()
+	if start.Equal(b.StartsAt) && end.Equal(b.EndsAt) {
+		return view, nil
+	}
+	held, err := eventToChange(ctx, *b.EventUUID, l.owner)
+	if errors.Is(err, ErrEventNotFound) {
+		return nil, ErrNoPage
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := l.slotFree(ctx, start, end, now, held.ev); err != nil {
+		return nil, err
+	}
+	if lim := moveAllowed(ctx, b.Id.String()); !lim.Allowed {
+		return nil, &MovedTooOftenError{Limit: lim}
+	}
+	moved := false
+	err = bookingModel.HoldPage(ctx, p.Id, b.Id, start, end, func() error {
+		if rescheduleHeld != nil {
+			rescheduleHeld()
+		}
+		// The owner's own edit: the meeting keeps its title, notes and people.
+		if err := held.change(context.WithValue(ctx, guestMoveKey{}, p), adapter.CreateOrUpdateEventInput{
+			Title: held.ev.Title, Description: held.ev.Description,
+			StartTime: start.Format(time.RFC3339), EndTime: end.Format(time.RFC3339),
+		}, l.owner); err != nil {
+			return err
+		}
+		moved = true
+		return nil
+	})
+	var stale *StaleError
+	switch {
+	case errors.Is(err, bookingModel.ErrSlotTaken):
+		return nil, &AvailabilityError{Msg: "That time was just taken. Pick another."}
+	case errors.As(err, &stale):
+		// The owner changed the meeting since the move read it: nothing
+		// moved. Only a booking's own link gets here.
+		return nil, &AvailabilityError{Msg: "Your booking just changed. Try again."}
+	}
+	if err != nil && !moved {
+		return nil, err
+	}
+	if err != nil {
+		// Moved, and only letting the lock go failed: the move stands.
+		helpers.LogErrorWithContext(ctx, "business/Calendar/RescheduleBooking unlock err: %+v", err)
+	}
+	view.Start, view.End = start, end
+	view.OwnerTold = tellOwner(ctx, p, b, l.hostIDs(), l.hours.TZ, start, end, notificationBusiness.BookingMoved)
+	return view, nil
+}
+
 // guestMail is an email to a booking's guest. Every one carries the booking's
 // calendar invite (invite.go), so the guest's calendar follows the booking.
 type guestMail struct {
@@ -621,11 +907,12 @@ type guestMail struct {
 	invite                   invite
 }
 
-// mailGuest sends it where the workspace sends notification email (OneCamp
-// Cloud's essentials-only tier doesn't, and the page then shows the same
-// details), and says whether it went.
+// mailGuest sends it where the server emails people outside the workspace
+// (outsidersMailed: never on the public demo, whose visitors type any address
+// into a booking page, nor on OneCamp Cloud's essentials-only tier; the page
+// then shows the same details), and says whether it went.
 func mailGuest(ctx context.Context, m guestMail) bool {
-	if !emailService.NotificationEmailEnabled() {
+	if !outsidersMailed() {
 		return false
 	}
 	htmlBody, text, err := emailService.Render(emailService.TemplateData{
@@ -643,7 +930,7 @@ func mailGuest(ctx context.Context, m guestMail) bool {
 		helpers.LogErrorWithContext(ctx, "business/Calendar/mailGuest render err: %+v", err)
 		return false
 	}
-	_, err = emailService.SendEmailWithOptions(ctx, emailService.SendOptions{
+	err = sendGuestMail(ctx, emailService.SendOptions{
 		From:        emailService.SenderAddress(),
 		To:          m.to,
 		Subject:     m.subject,

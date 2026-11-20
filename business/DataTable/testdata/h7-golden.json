@@ -1,0 +1,1800 @@
+{
+ "guest reads Orders": {
+  "rows": [
+   {
+    "cells": {
+     "field Orders.Amount": 100,
+     "field Orders.Name": "Order 01-01",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 01",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 01-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 107,
+     "field Orders.Name": "Order 01-02",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 01",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 01-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 114,
+     "field Orders.Name": "Order 01-03",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 01",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 01-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 200,
+     "field Orders.Name": "Order 02-01",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 02",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 02-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 207,
+     "field Orders.Name": "Order 02-02",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 02",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 02-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 214,
+     "field Orders.Name": "Order 02-03",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 02",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 02-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 300,
+     "field Orders.Name": "Order 03-01",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 03",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 03-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 307,
+     "field Orders.Name": "Order 03-02",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 03",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 03-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 314,
+     "field Orders.Name": "Order 03-03",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 03",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 03-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 400,
+     "field Orders.Name": "Order 04-01",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 04",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 04-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 407,
+     "field Orders.Name": "Order 04-02",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 04",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 04-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 414,
+     "field Orders.Name": "Order 04-03",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 04",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 04-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 500,
+     "field Orders.Name": "Order 05-01",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 05",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 05-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 507,
+     "field Orders.Name": "Order 05-02",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 05",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 05-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 514,
+     "field Orders.Name": "Order 05-03",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 05",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 05-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 600,
+     "field Orders.Name": "Order 06-01",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 06",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 06-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 607,
+     "field Orders.Name": "Order 06-02",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 06",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 06-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 614,
+     "field Orders.Name": "Order 06-03",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 06",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 06-03"
+   }
+  ]
+ },
+ "guest reads Projects": {
+  "rows": [
+   {
+    "cells": {
+     "field Projects.Doubled": {
+      "error": "{Vendors} doesn't link to a table's rows, so it has no fields to read"
+     },
+     "field Projects.Name": "Project 01",
+     "field Projects.Secret": [
+      {
+       "id": "row Hidden",
+       "label": "Private row",
+       "table_id": "table Secret",
+       "type": "row"
+      }
+     ],
+     "field Projects.Secrets": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Projects.Total spend": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Projects.Vendors": [
+      {
+       "id": "row Vendor 01",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 02",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 03",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Project 01"
+   },
+   {
+    "cells": {
+     "field Projects.Doubled": {
+      "error": "{Vendors} doesn't link to a table's rows, so it has no fields to read"
+     },
+     "field Projects.Name": "Project 02",
+     "field Projects.Secrets": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Projects.Total spend": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Projects.Vendors": [
+      {
+       "id": "row Vendor 04",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 05",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 06",
+       "label": "Private row",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Project 02"
+   }
+  ]
+ },
+ "guest reads Secret": {
+  "rows": [
+   {
+    "cells": {
+     "field Secret.Name": "Hidden"
+    },
+    "row": "row Hidden"
+   }
+  ]
+ },
+ "guest reads Vendors": {
+  "rows": [
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 01",
+     "field Vendors.Open orders": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Order names": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Spend": {
+      "error": "You can't open the table this adds up"
+     }
+    },
+    "row": "row Vendor 01"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 02",
+     "field Vendors.Open orders": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Order names": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 01",
+       "label": "Vendor 01",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": {
+      "error": "You can't open the table this adds up"
+     }
+    },
+    "row": "row Vendor 02"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 03",
+     "field Vendors.Open orders": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Order names": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 02",
+       "label": "Vendor 02",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": {
+      "error": "You can't open the table this adds up"
+     }
+    },
+    "row": "row Vendor 03"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 04",
+     "field Vendors.Open orders": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Order names": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 03",
+       "label": "Vendor 03",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": {
+      "error": "You can't open the table this adds up"
+     }
+    },
+    "row": "row Vendor 04"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 05",
+     "field Vendors.Open orders": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Order names": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 04",
+       "label": "Vendor 04",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": {
+      "error": "You can't open the table this adds up"
+     }
+    },
+    "row": "row Vendor 05"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 06",
+     "field Vendors.Open orders": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Order names": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 05",
+       "label": "Vendor 05",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": {
+      "error": "You can't open the table this adds up"
+     }
+    },
+    "row": "row Vendor 06"
+   }
+  ]
+ },
+ "member reads Orders": {
+  "rows": [
+   {
+    "cells": {
+     "field Orders.Amount": 100,
+     "field Orders.Name": "Order 01-01",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 01",
+       "label": "Vendor 01",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 01-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 107,
+     "field Orders.Name": "Order 01-02",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 01",
+       "label": "Vendor 01",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 01-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 114,
+     "field Orders.Name": "Order 01-03",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 01",
+       "label": "Vendor 01",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 01-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 200,
+     "field Orders.Name": "Order 02-01",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 02",
+       "label": "Vendor 02",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 02-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 207,
+     "field Orders.Name": "Order 02-02",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 02",
+       "label": "Vendor 02",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 02-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 214,
+     "field Orders.Name": "Order 02-03",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 02",
+       "label": "Vendor 02",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 02-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 300,
+     "field Orders.Name": "Order 03-01",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 03",
+       "label": "Vendor 03",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 03-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 307,
+     "field Orders.Name": "Order 03-02",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 03",
+       "label": "Vendor 03",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 03-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 314,
+     "field Orders.Name": "Order 03-03",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 03",
+       "label": "Vendor 03",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 03-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 400,
+     "field Orders.Name": "Order 04-01",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 04",
+       "label": "Vendor 04",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 04-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 407,
+     "field Orders.Name": "Order 04-02",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 04",
+       "label": "Vendor 04",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 04-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 414,
+     "field Orders.Name": "Order 04-03",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 04",
+       "label": "Vendor 04",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 04-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 500,
+     "field Orders.Name": "Order 05-01",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 05",
+       "label": "Vendor 05",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 05-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 507,
+     "field Orders.Name": "Order 05-02",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 05",
+       "label": "Vendor 05",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 05-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 514,
+     "field Orders.Name": "Order 05-03",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 05",
+       "label": "Vendor 05",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 05-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 600,
+     "field Orders.Name": "Order 06-01",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 06",
+       "label": "Vendor 06",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 06-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 607,
+     "field Orders.Name": "Order 06-02",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 06",
+       "label": "Vendor 06",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 06-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 614,
+     "field Orders.Name": "Order 06-03",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 06",
+       "label": "Vendor 06",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 06-03"
+   }
+  ],
+  "total": 18
+ },
+ "member reads Projects": {
+  "rows": [
+   {
+    "cells": {
+     "field Projects.Doubled": 3726,
+     "field Projects.Name": "Project 01",
+     "field Projects.Secret": [
+      {
+       "id": "row Hidden",
+       "label": "Private row",
+       "table_id": "table Secret",
+       "type": "row"
+      }
+     ],
+     "field Projects.Secrets": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Projects.Total spend": 1863,
+     "field Projects.Vendors": [
+      {
+       "id": "row Vendor 01",
+       "label": "Vendor 01",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 02",
+       "label": "Vendor 02",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 03",
+       "label": "Vendor 03",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Project 01"
+   },
+   {
+    "cells": {
+     "field Projects.Doubled": 9126,
+     "field Projects.Name": "Project 02",
+     "field Projects.Secrets": {
+      "error": "You can't open the table this adds up"
+     },
+     "field Projects.Total spend": 4563,
+     "field Projects.Vendors": [
+      {
+       "id": "row Vendor 04",
+       "label": "Vendor 04",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 05",
+       "label": "Vendor 05",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 06",
+       "label": "Vendor 06",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Project 02"
+   }
+  ],
+  "total": 2
+ },
+ "member reads Secret": {
+  "error": "table not found"
+ },
+ "member reads Vendors": {
+  "rows": [
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 01",
+     "field Vendors.Open orders": 2,
+     "field Vendors.Order names": "Order 01-01, Order 01-02, Order 01-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 01-01",
+       "label": "Order 01-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 01-02",
+       "label": "Order 01-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 01-03",
+       "label": "Order 01-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 01",
+       "label": "Project 01",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 321
+    },
+    "row": "row Vendor 01"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 02",
+     "field Vendors.Open orders": 1,
+     "field Vendors.Order names": "Order 02-01, Order 02-02, Order 02-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 02-01",
+       "label": "Order 02-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 02-02",
+       "label": "Order 02-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 02-03",
+       "label": "Order 02-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 01",
+       "label": "Vendor 01",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 01",
+       "label": "Project 01",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 621
+    },
+    "row": "row Vendor 02"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 03",
+     "field Vendors.Open orders": 2,
+     "field Vendors.Order names": "Order 03-01, Order 03-02, Order 03-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 03-01",
+       "label": "Order 03-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 03-02",
+       "label": "Order 03-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 03-03",
+       "label": "Order 03-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 02",
+       "label": "Vendor 02",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 01",
+       "label": "Project 01",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 921
+    },
+    "row": "row Vendor 03"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 04",
+     "field Vendors.Open orders": 1,
+     "field Vendors.Order names": "Order 04-01, Order 04-02, Order 04-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 04-01",
+       "label": "Order 04-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 04-02",
+       "label": "Order 04-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 04-03",
+       "label": "Order 04-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 03",
+       "label": "Vendor 03",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 02",
+       "label": "Project 02",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 1221
+    },
+    "row": "row Vendor 04"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 05",
+     "field Vendors.Open orders": 2,
+     "field Vendors.Order names": "Order 05-01, Order 05-02, Order 05-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 05-01",
+       "label": "Order 05-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 05-02",
+       "label": "Order 05-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 05-03",
+       "label": "Order 05-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 04",
+       "label": "Vendor 04",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 02",
+       "label": "Project 02",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 1521
+    },
+    "row": "row Vendor 05"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 06",
+     "field Vendors.Open orders": 1,
+     "field Vendors.Order names": "Order 06-01, Order 06-02, Order 06-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 06-01",
+       "label": "Order 06-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 06-02",
+       "label": "Order 06-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 06-03",
+       "label": "Order 06-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 05",
+       "label": "Vendor 05",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 02",
+       "label": "Project 02",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 1821
+    },
+    "row": "row Vendor 06"
+   }
+  ],
+  "total": 6
+ },
+ "owner reads Orders": {
+  "rows": [
+   {
+    "cells": {
+     "field Orders.Amount": 100,
+     "field Orders.Name": "Order 01-01",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 01",
+       "label": "Vendor 01",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 01-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 107,
+     "field Orders.Name": "Order 01-02",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 01",
+       "label": "Vendor 01",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 01-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 114,
+     "field Orders.Name": "Order 01-03",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 01",
+       "label": "Vendor 01",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 01-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 200,
+     "field Orders.Name": "Order 02-01",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 02",
+       "label": "Vendor 02",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 02-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 207,
+     "field Orders.Name": "Order 02-02",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 02",
+       "label": "Vendor 02",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 02-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 214,
+     "field Orders.Name": "Order 02-03",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 02",
+       "label": "Vendor 02",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 02-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 300,
+     "field Orders.Name": "Order 03-01",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 03",
+       "label": "Vendor 03",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 03-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 307,
+     "field Orders.Name": "Order 03-02",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 03",
+       "label": "Vendor 03",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 03-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 314,
+     "field Orders.Name": "Order 03-03",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 03",
+       "label": "Vendor 03",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 03-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 400,
+     "field Orders.Name": "Order 04-01",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 04",
+       "label": "Vendor 04",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 04-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 407,
+     "field Orders.Name": "Order 04-02",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 04",
+       "label": "Vendor 04",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 04-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 414,
+     "field Orders.Name": "Order 04-03",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 04",
+       "label": "Vendor 04",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 04-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 500,
+     "field Orders.Name": "Order 05-01",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 05",
+       "label": "Vendor 05",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 05-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 507,
+     "field Orders.Name": "Order 05-02",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 05",
+       "label": "Vendor 05",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 05-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 514,
+     "field Orders.Name": "Order 05-03",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 05",
+       "label": "Vendor 05",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 05-03"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 600,
+     "field Orders.Name": "Order 06-01",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 06",
+       "label": "Vendor 06",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 06-01"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 607,
+     "field Orders.Name": "Order 06-02",
+     "field Orders.Status": "Open",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 06",
+       "label": "Vendor 06",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 06-02"
+   },
+   {
+    "cells": {
+     "field Orders.Amount": 614,
+     "field Orders.Name": "Order 06-03",
+     "field Orders.Status": "Closed",
+     "field Orders.Vendor": [
+      {
+       "id": "row Vendor 06",
+       "label": "Vendor 06",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Order 06-03"
+   }
+  ],
+  "total": 18
+ },
+ "owner reads Projects": {
+  "rows": [
+   {
+    "cells": {
+     "field Projects.Doubled": 3726,
+     "field Projects.Name": "Project 01",
+     "field Projects.Secret": [
+      {
+       "id": "row Hidden",
+       "label": "Hidden",
+       "table_id": "table Secret",
+       "type": "row"
+      }
+     ],
+     "field Projects.Secrets": 1,
+     "field Projects.Total spend": 1863,
+     "field Projects.Vendors": [
+      {
+       "id": "row Vendor 01",
+       "label": "Vendor 01",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 02",
+       "label": "Vendor 02",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 03",
+       "label": "Vendor 03",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Project 01"
+   },
+   {
+    "cells": {
+     "field Projects.Doubled": 9126,
+     "field Projects.Name": "Project 02",
+     "field Projects.Secrets": 0,
+     "field Projects.Total spend": 4563,
+     "field Projects.Vendors": [
+      {
+       "id": "row Vendor 04",
+       "label": "Vendor 04",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 05",
+       "label": "Vendor 05",
+       "table_id": "table Vendors",
+       "type": "row"
+      },
+      {
+       "id": "row Vendor 06",
+       "label": "Vendor 06",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ]
+    },
+    "row": "row Project 02"
+   }
+  ],
+  "total": 2
+ },
+ "owner reads Secret": {
+  "rows": [
+   {
+    "cells": {
+     "field Secret.Name": "Hidden"
+    },
+    "row": "row Hidden"
+   }
+  ],
+  "total": 1
+ },
+ "owner reads Vendors": {
+  "rows": [
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 01",
+     "field Vendors.Open orders": 2,
+     "field Vendors.Order names": "Order 01-01, Order 01-02, Order 01-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 01-01",
+       "label": "Order 01-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 01-02",
+       "label": "Order 01-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 01-03",
+       "label": "Order 01-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 01",
+       "label": "Project 01",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 321
+    },
+    "row": "row Vendor 01"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 02",
+     "field Vendors.Open orders": 1,
+     "field Vendors.Order names": "Order 02-01, Order 02-02, Order 02-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 02-01",
+       "label": "Order 02-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 02-02",
+       "label": "Order 02-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 02-03",
+       "label": "Order 02-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 01",
+       "label": "Vendor 01",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 01",
+       "label": "Project 01",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 621
+    },
+    "row": "row Vendor 02"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 03",
+     "field Vendors.Open orders": 2,
+     "field Vendors.Order names": "Order 03-01, Order 03-02, Order 03-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 03-01",
+       "label": "Order 03-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 03-02",
+       "label": "Order 03-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 03-03",
+       "label": "Order 03-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 02",
+       "label": "Vendor 02",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 01",
+       "label": "Project 01",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 921
+    },
+    "row": "row Vendor 03"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 04",
+     "field Vendors.Open orders": 1,
+     "field Vendors.Order names": "Order 04-01, Order 04-02, Order 04-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 04-01",
+       "label": "Order 04-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 04-02",
+       "label": "Order 04-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 04-03",
+       "label": "Order 04-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 03",
+       "label": "Vendor 03",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 02",
+       "label": "Project 02",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 1221
+    },
+    "row": "row Vendor 04"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 05",
+     "field Vendors.Open orders": 2,
+     "field Vendors.Order names": "Order 05-01, Order 05-02, Order 05-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 05-01",
+       "label": "Order 05-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 05-02",
+       "label": "Order 05-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 05-03",
+       "label": "Order 05-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 04",
+       "label": "Vendor 04",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 02",
+       "label": "Project 02",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 1521
+    },
+    "row": "row Vendor 05"
+   },
+   {
+    "cells": {
+     "field Vendors.Name": "Vendor 06",
+     "field Vendors.Open orders": 1,
+     "field Vendors.Order names": "Order 06-01, Order 06-02, Order 06-03",
+     "field Vendors.Orders": [
+      {
+       "id": "row Order 06-01",
+       "label": "Order 06-01",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 06-02",
+       "label": "Order 06-02",
+       "table_id": "table Orders",
+       "type": "row"
+      },
+      {
+       "id": "row Order 06-03",
+       "label": "Order 06-03",
+       "table_id": "table Orders",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Partner": [
+      {
+       "id": "row Vendor 05",
+       "label": "Vendor 05",
+       "table_id": "table Vendors",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Projects": [
+      {
+       "id": "row Project 02",
+       "label": "Project 02",
+       "table_id": "table Projects",
+       "type": "row"
+      }
+     ],
+     "field Vendors.Spend": 1821
+    },
+    "row": "row Vendor 06"
+   }
+  ],
+  "total": 6
+ }
+}

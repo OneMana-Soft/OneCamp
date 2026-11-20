@@ -329,7 +329,7 @@ func TestADurableChatWhoseWriterDiedIsDecidedByItsNode(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		id, err := outboxBusiness.Add(ctx, tx, outboxBusiness.Entry{Topic: chatBusiness.MessageTopic, Kind: chatBusiness.MessageCreated, Key: "chat:" + chat,
+		id, err := addOneEvent(ctx, tx, outboxBusiness.Entry{Topic: chatBusiness.MessageTopic, Kind: chatBusiness.MessageCreated, Key: "chat:" + chat,
 			Entities: map[string]string{"message": chat, "conversation": grp, "kind": "dm"}, Sinks: sinks})
 		if err != nil {
 			t.Fatal(err)

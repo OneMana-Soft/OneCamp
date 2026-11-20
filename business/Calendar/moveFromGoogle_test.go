@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -35,6 +36,8 @@ type memLedger struct {
 	// keepCalls and dropCalls count the ledger's ref writes; intoCalls its
 	// reads of where calendars come from (origin.go).
 	keepCalls, dropCalls, intoCalls int
+	// pageCalls counts the admin ledger's page reads (syncLedger.go).
+	pageCalls int
 }
 
 // memRefusal is a refusal as calendar_sync_refusals keeps it.
@@ -73,10 +76,47 @@ func (m *memLedger) syncedLinks(_ context.Context, provider string, limit int) (
 	return out, nil
 }
 
-func (m *memLedger) markSynced(context.Context, uuid.UUID) error {
+func (m *memLedger) syncedLinksOf(_ context.Context, person uuid.UUID) ([]*models.SyncLink, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*models.SyncLink
+	for _, l := range m.links {
+		if l.PersonID == person && l.State == models.SyncSynced {
+			c := *l
+			out = append(out, &c)
+		}
+	}
+	slices.SortFunc(out, func(a, b *models.SyncLink) int { return strings.Compare(a.Provider, b.Provider) })
+	return out, nil
+}
+
+func (m *memLedger) refsAmong(ctx context.Context, link uuid.UUID, events []uuid.UUID) (map[uuid.UUID]models.SyncRef, error) {
+	all, err := m.refsOf(ctx, link)
+	out := map[uuid.UUID]models.SyncRef{}
+	for _, id := range events {
+		if r, ok := all[id]; ok {
+			out[id] = r
+		}
+	}
+	return out, err
+}
+
+func (m *memLedger) changedAmong(ctx context.Context, link, person uuid.UUID, calendars, events []uuid.UUID, now time.Time) ([]*models.Event, error) {
+	all, err := m.changedSince(ctx, link, person, calendars, now, math.MaxInt)
+	return slices.DeleteFunc(all, func(e *models.Event) bool { return !slices.Contains(events, e.ID) }), err
+}
+
+func (m *memLedger) markSynced(_ context.Context, id uuid.UUID, readErr string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.synced++
+	if l := m.byID(id); l != nil && l.State == models.SyncSynced {
+		l.Error = readErr
+		if readErr == "" {
+			at := m.now()
+			l.LastSyncedAt = &at
+		}
+	}
 	return nil
 }
 
@@ -171,16 +211,18 @@ func (m *memLedger) refusalsOf(_ context.Context, link uuid.UUID, events []uuid.
 	return out, nil
 }
 
-func (m *memLedger) keepRefusal(_ context.Context, r models.SyncRefusal, now time.Time) error {
+func (m *memLedger) keepRefusal(_ context.Context, r models.SyncRefusal, now time.Time) (bool, error) {
 	at := now
 	if last := m.lastChange(r.EventID); last.After(at) {
 		at = last
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	n := len(m.refusals)
 	m.refusals = slices.DeleteFunc(m.refusals, func(f memRefusal) bool { return f.LinkID == r.LinkID && f.EventID == r.EventID })
+	made := len(m.refusals) == n
 	m.refusals = append(m.refusals, memRefusal{SyncRefusal: r, at: at})
-	return nil
+	return made, nil
 }
 
 func (m *memLedger) breakLink(_ context.Context, id uuid.UUID, why string) error {
@@ -190,6 +232,48 @@ func (m *memLedger) breakLink(_ context.Context, id uuid.UUID, why string) error
 		l.State, l.Error = models.SyncBroken, why
 	}
 	return nil
+}
+
+// ledgerPage is the ledger's page of the links held, oldest id first, with
+// the refusals held for each; no dead sends (the outbox isn't here).
+func (m *memLedger) ledgerPage(_ context.Context, f models.SyncLedgerFilter) ([]models.SyncLedgerRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pageCalls++
+	var out []models.SyncLedgerRow
+	for _, l := range m.links {
+		if (f.State == "" || l.State == f.State) && (f.Provider == "" || l.Provider == f.Provider) && (l.Provider == "google" || l.Provider == "microsoft") {
+			r := models.SyncLedgerRow{Link: *l}
+			for _, x := range m.refusals {
+				if x.LinkID == l.ID {
+					r.Refusals++
+				}
+			}
+			out = append(out, r)
+		}
+	}
+	slices.SortFunc(out, func(a, b models.SyncLedgerRow) int { return strings.Compare(a.Link.ID.String(), b.Link.ID.String()) })
+	if f.Offset >= len(out) {
+		return nil, nil
+	}
+	out = out[f.Offset:]
+	if len(out) > f.Limit {
+		out = out[:f.Limit]
+	}
+	return out, nil
+}
+
+func (m *memLedger) breakByAdmin(_ context.Context, id uuid.UUID, why string) (*models.SyncLink, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l := m.byID(id)
+	if l == nil || (l.Provider != "google" && l.Provider != "microsoft") {
+		return nil, false, nil
+	}
+	again := l.State == models.SyncBroken && l.Error == why
+	l.State, l.Error = models.SyncBroken, why
+	c := *l
+	return &c, again, nil
 }
 
 func (m *memLedger) markReadOnly(_ context.Context, link uuid.UUID, remote string) error {
@@ -267,6 +351,9 @@ func (m *memLedger) finish(_ context.Context, id uuid.UUID, state string, moved,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	l := m.byID(id)
+	if l.State != models.SyncMoving {
+		return nil // as FinishMove: an admin broke it meanwhile
+	}
 	l.State, l.Moved, l.Unchanged, l.Error = state, moved, unchanged, why
 	if state == models.SyncSynced {
 		l.Progress = 100
@@ -407,7 +494,7 @@ type fakeGoogle struct {
 func (*fakeGoogle) Provider() string { return "google" }
 
 func (*fakeGoogle) Calendars(_ context.Context, l calendarSyncBusiness.Link) ([]calendarSyncBusiness.Remote, error) {
-	return []calendarSyncBusiness.Remote{{Link: l, ID: "sam@outlook.com", Name: "sam@outlook.com", Primary: true, Zone: "Europe/London"},
+	return []calendarSyncBusiness.Remote{{Link: l, ID: "sam@example.com", Name: "sam@example.com", Primary: true, Zone: "Europe/London"},
 		{Link: l, ID: "team@group", Name: "Team offsites"}, {Link: l, ID: "broken", Name: "Broken"}}, nil
 }
 
@@ -418,7 +505,7 @@ func (f *fakeGoogle) Pull(_ context.Context, cal calendarSyncBusiness.Remote, cu
 	}
 	start := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
 	switch cal.ID {
-	case "sam@outlook.com":
+	case "sam@example.com":
 		return []calendarSyncBusiness.Change{
 			{ExternalID: "g1", ETag: "e1", Event: ICS.Event{UID: "standup@google.com", Summary: "Standup", Start: start, End: start.Add(15 * time.Minute), Zone: "Europe/London", RRule: "FREQ=DAILY;COUNT=5",
 				Attendees: []ICS.Attendee{{Address: ICS.Address{Email: "maya@example.com"}, PartStat: ICS.Accepted}}}},
@@ -443,7 +530,7 @@ func withGoogle(t *testing.T, h *harness, g *fakeGoogle, linked bool) *memLedger
 	h.s.ledger, h.s.moveNow = ledger, true
 	prevProvider, prevAccount := syncProvider, googleAccountOf
 	syncProvider = func(string) (calendarSyncBusiness.Adapter, bool) { return g, true }
-	googleAccountOf = func(context.Context, *model.UserInfo) (string, bool, error) { return "sam@outlook.com", linked, nil }
+	googleAccountOf = func(context.Context, *model.UserInfo) (string, bool, error) { return "sam@example.com", linked, nil }
 	t.Cleanup(func() { syncProvider, googleAccountOf = prevProvider, prevAccount })
 	return ledger
 }
@@ -488,7 +575,7 @@ func TestMovingFromGoogleBringsEveryCalendar(t *testing.T) {
 		t.Fatalf("again %+v %v", again, err)
 	}
 	read, _ := h.s.SyncStatus(context.Background(), sam, "google")
-	if read.State != models.SyncSynced || read.Account != "sam@outlook.com" {
+	if read.State != models.SyncSynced || read.Account != "sam@example.com" {
 		t.Fatalf("status read %+v", read)
 	}
 }

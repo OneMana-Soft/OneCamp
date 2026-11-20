@@ -120,7 +120,7 @@ func FreeSlots(busy []Interval, from, to time.Time, hours WorkingHours, r SlotRu
 	local := from.In(loc)
 	for day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc); day.Before(to); day = day.AddDate(0, 0, 1) {
 		n := 0
-		for _, span := range hours.SpansOn(day.Weekday()) {
+		for _, span := range hours.SpansFor(day) {
 			if r.PerDay > 0 && n >= r.PerDay {
 				break
 			}
@@ -171,7 +171,8 @@ func BusyFor(ctx context.Context, userUUID string, from, to time.Time) (Busy, er
 }
 
 // PeopleSeenBy splits people into those whose busy times the asker may see,
-// by the calendar's one rule (seesWhenOthersAreBusy), and those kept private
+// by the calendar's one rule (busySeenOf: the workspace's policy, then each
+// person's own choice to keep it to themselves), and those kept private
 // from them, each once and in the order asked. A workspace that keeps when
 // members are busy to themselves (calendar.freebusy.members off) keeps it from
 // everyone else, and someone who is no member now sees no one else's: the
@@ -182,7 +183,7 @@ func BusyFor(ctx context.Context, userUUID string, from, to time.Time) (Busy, er
 func PeopleSeenBy(ctx context.Context, askerUUID string, people []string) (seen, private []string, err error) {
 	// An asker that names no one (uuid.Nil) sees no one else's times.
 	asker, _ := uuid.Parse(askerUUID)
-	shared, err := stored.seesWhenOthersAreBusy(ctx, asker)
+	shown, err := stored.busySeenOf(ctx, asker, people)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -192,7 +193,7 @@ func PeopleSeenBy(ctx context.Context, askerUUID string, people []string) (seen,
 			continue
 		}
 		done[p] = true
-		if p == askerUUID || shared {
+		if p == askerUUID || shown[p] {
 			seen = append(seen, p)
 		} else {
 			private = append(private, p)
@@ -227,6 +228,8 @@ type FindTimeInput struct {
 	From            time.Time    `json:"from"`
 	To              time.Time    `json:"to"`
 	Hours           WorkingHours `json:"hours"`
+	// Rooms are rooms the meeting needs: a time one is booked isn't offered.
+	Rooms []string `json:"rooms,omitempty"`
 }
 
 // FindTimeResult is the suggested slots and, per person, when they're busy.

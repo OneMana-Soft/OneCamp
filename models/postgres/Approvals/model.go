@@ -36,7 +36,10 @@ type StatusRule struct {
 // approvers', the client's, or both.
 func (r *StatusRule) WantsApproval() bool { return len(r.Approvers) > 0 || r.Client }
 
-const ruleColumns = `project_id, status, who, people::text[], required, approvers::text[], approvals_needed, client, updated_by, updated_at`
+// A rule's columns. Its arrays come as their text ({a,b}), which scanRule's
+// pq.StringArray reads however the row is read: in a pgexec.Batch pgx hands
+// it an array in binary, which it can't read, and the read ran again alone.
+const ruleColumns = `project_id, status, who, people::text, required::text, approvers::text, approvals_needed, client, updated_by, updated_at`
 
 func scanRule(s pgexec.Row) (*StatusRule, error) {
 	var r StatusRule
@@ -67,7 +70,27 @@ func ListRules(ctx context.Context, projectID uuid.UUID) ([]*StatusRule, error) 
 // RulesFor is the rules of a project for any of the given statuses (a custom
 // status's id and the built-in key it counts as).
 func RulesFor(ctx context.Context, projectID uuid.UUID, statuses []string) ([]*StatusRule, error) {
-	return pgexec.Query(ctx, `SELECT `+ruleColumns+` FROM status_rules WHERE project_id = $1 AND status = ANY($2) AND `+softDelete.Live(""), scanRule, projectID, pq.Array(statuses))
+	return pgexec.Query(ctx, rulesForSQL, scanRule, projectID, pq.Array(statuses))
+}
+
+// rulesForSQL is RulesFor's text: a project's ($1) rules for any of the
+// statuses ($2).
+var rulesForSQL = `SELECT ` + ruleColumns + ` FROM status_rules WHERE project_id = $1 AND status = ANY($2) AND ` + softDelete.Live("")
+
+// RulesAndOpen is RulesFor and whether the task has an open request
+// (PendingForTasks), read together in one round trip (pgexec.Batch): the
+// status gate's read of a move (business/Approvals gate), whose rules decide
+// it and whose open request is for closing after it. A failed read of the
+// open request is an open one, so a caller closes it as it would unread.
+func RulesAndOpen(ctx context.Context, projectID, taskID uuid.UUID, statuses []string) (rules []*StatusRule, open bool, err error) {
+	var pending []*Approval
+	rulesRead := pgexec.Rows(&rules, scanRule, rulesForSQL, projectID, pq.Array(statuses))
+	openRead := pgexec.Rows(&pending, scanApproval, pendingForTasksSQL, KindTask, pq.Array([]uuid.UUID{taskID}))
+	pgexec.Batch(ctx, rulesRead, openRead)
+	if rulesRead.Err != nil {
+		return nil, false, rulesRead.Err
+	}
+	return rules, openRead.Err != nil || len(pending) > 0, nil
 }
 
 // CountRules is how many rules a project has.
@@ -166,10 +189,11 @@ type Approval struct {
 }
 
 // A request's columns; a task's written by an older API may lack its
-// resource_id, which is its task_id.
+// resource_id, which is its task_id. Its arrays come as their text, as a
+// rule's do (ruleColumns), so a read of them in a pgexec.Batch scans.
 const approvalColumns = `id, resource_kind, COALESCE(resource_id, task_id::text), COALESCE(project_id, '00000000-0000-0000-0000-000000000000'),
-	COALESCE(task_id, '00000000-0000-0000-0000-000000000000'), COALESCE(to_status, ''), ask, due_at, requested_by, approvers::text[], needed,
-	client_grants::text[], state, created_at, decided_at`
+	COALESCE(task_id, '00000000-0000-0000-0000-000000000000'), COALESCE(to_status, ''), ask, due_at, requested_by, approvers::text, needed,
+	client_grants::text, state, created_at, decided_at`
 
 func scanApproval(s pgexec.Row) (*Approval, error) {
 	var a Approval
@@ -284,9 +308,13 @@ func PendingForTasks(ctx context.Context, taskIDs []uuid.UUID) ([]*Approval, err
 	if len(taskIDs) == 0 {
 		return nil, nil
 	}
-	return pgexec.Query(ctx, `SELECT `+approvalColumns+` FROM approvals
-		WHERE resource_kind = $1 AND task_id = ANY($2) AND state = 'pending'`, scanApproval, KindTask, pq.Array(taskIDs))
+	return pgexec.Query(ctx, pendingForTasksSQL, scanApproval, KindTask, pq.Array(taskIDs))
 }
+
+// pendingForTasksSQL is PendingForTasks' text: the open requests of the tasks
+// ($2) of a kind ($1).
+const pendingForTasksSQL = `SELECT ` + approvalColumns + ` FROM approvals
+		WHERE resource_kind = $1 AND task_id = ANY($2) AND state = 'pending'`
 
 // LatestFor is a task's newest request, open or not.
 func LatestFor(ctx context.Context, taskID uuid.UUID) (*Approval, error) {

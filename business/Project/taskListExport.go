@@ -107,20 +107,19 @@ func WriteTaskListCSV(ctx context.Context, x TaskListExport, start func(total, r
 
 // eachListPage hands each a page of the list at a time, in its order, with how
 // many tasks it holds, up to ExportMax: the graph's sorts in one snapshot,
-// and the Manual order (L-1) from its places, read once and ordered here, a
-// page of them read at a time by uid.
+// and the side orders (Manual, L-1; SLA) from its places, read once and
+// ordered here, a page of them read at a time by uid.
 func eachListPage(ctx context.Context, x TaskListExport, each func(total int, tasks []*dgraphStruct.DgraphTask) error) error {
-	if x.Sort != dgraphquery.ManualOrder {
+	if !dgraphquery.SideOrdered(x.Sort) {
 		return domain.EachProjectTaskPage(ctx, x.ProjectUUID, x.ReaderUID, x.Filter, x.Sort, ExportMax, each)
 	}
-	places, err := domain.GetDgraphProjectTaskPlaces(ctx, x.ProjectUUID, x.ReaderUID, x.Filter)
+	places, err := sidePlaces(ctx, x.Sort, x.ProjectUUID, x.ReaderUID, x.Filter)
 	if err != nil {
 		return err
 	}
-	order := manualPage(places, 0, 0, true)
-	order = order[:min(len(order), ExportMax)]
+	order := places[:min(len(places), ExportMax)]
 	for from := 0; from < len(order); from += dgraphquery.ReadAllPage {
-		project, err := manualRows(ctx, x.ProjectUUID, x.ReaderUID, x.Filter, order[from:min(from+dgraphquery.ReadAllPage, len(order))], false)
+		project, err := sideRows(ctx, x.ProjectUUID, x.ReaderUID, x.Filter, order[from:min(from+dgraphquery.ReadAllPage, len(order))], false)
 		if err != nil {
 			return err
 		}

@@ -48,4 +48,23 @@ func TestOneReadOfASpace(t *testing.T) {
 	if _, _, ok := acl.of("channel"); ok {
 		t.Error("a kind that isn't a space was found")
 	}
+
+	// A read of many docs' spaces (GetDocACLs) gives each doc its own, by uuid.
+	var many spaceRead
+	if err := json.Unmarshal([]byte(`{
+		"project": [{"project_uuid": "p1", "project_name": "Launch", "project_members": [{"user_uuid": "ann"}]},
+			{"project_uuid": "P2", "project_name": "Docs", "project_members": [{"user_uuid": "bo"}]}],
+		"team": [{"team_uuid": "t1", "team_name": "Design", "team_admins": [{"user_uuid": "cy"}]}]
+	}`), &many); err != nil {
+		t.Fatal(err)
+	}
+	if name, people, ok := many.in("project", "p2"); !ok || name != "Docs" || !slices.Equal(people, []string{"bo"}) {
+		t.Errorf("project p2: %q %v %v", name, people, ok)
+	}
+	if name, people, ok := many.in("team", "t1"); !ok || name != "Design" || !slices.Equal(people, []string{"cy"}) {
+		t.Errorf("team t1: %q %v %v", name, people, ok)
+	}
+	if _, _, ok := many.in("project", "p3"); ok {
+		t.Error("a project that wasn't read was found")
+	}
 }

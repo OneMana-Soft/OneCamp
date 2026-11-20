@@ -115,10 +115,19 @@ type handedOffEvent struct {
 // (DispatchEvent).
 type handoffOrigin struct {
 	GitHub bool `json:"github,omitempty"`
+	// Action is the action the event is one of (helpers.WithOrigin), so
+	// what the rule runs it sets going tell is told together there too.
+	Action string `json:"action,omitempty"`
 }
 
 func originOf(ctx context.Context) handoffOrigin {
-	return handoffOrigin{GitHub: helpers.IsGitHubOrigin(ctx)}
+	return handoffOrigin{GitHub: helpers.IsGitHubOrigin(ctx), Action: actionOf(ctx)}
+}
+
+// actionOf is the action ctx is one of, or "".
+func actionOf(ctx context.Context) string {
+	id, _ := helpers.OriginOf(ctx)
+	return id
 }
 
 // context is the dispatching context's flags again, on a fresh context.
@@ -127,7 +136,7 @@ func (o handoffOrigin) context() context.Context {
 	if o.GitHub {
 		ctx = helpers.WithGitHubOrigin(ctx)
 	}
-	return ctx
+	return helpers.WithOrigin(ctx, o.Action)
 }
 
 // openTaskOf is the task data names (taskOfEvent) when ctx marks it open, or "".

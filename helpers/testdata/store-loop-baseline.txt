@@ -43,8 +43,8 @@
 # 23 Oct 2026: Jira's sprints are searched a project at a time, before its tasks come (a project
 # makes its cycles first): Jira's API, one search each, with at most one warning a project of each kind. Each project's
 # sprints are kept for the job, so the projects' stage tried again neither searches nor warns about one read before.
-# 24 Oct 2026: a task list's CSV in its Manual order reads its tasks a page of ReadAllPage
-# uids at a time (manualRows), at most ten pages, so a long list is written as it is read and never held whole.
+# 24 Oct 2026: a task list's CSV in its Manual order (and since 14 Nov its SLA order: the side orders) reads its tasks a page
+# of ReadAllPage uids at a time (sideRows), at most ten pages, so a long list is written as it is read and never held whole.
 # 24 Oct 2026, CHAT-LEAD-22: a share reads which files a page of its source conversation's messages
 # holds in one read (= ANY over the page's file ids, keepConversationFiles), once a page of sharePageSize.
 # 24 Oct 2026, CHAT-LEAD-22: the "/" catalog reads each installed app's secret bag at most once (memoised
@@ -102,6 +102,7 @@ business/BulkPostAndChat/bulkPostAndChatBusiness.go :: sendFwdMessageNotificatio
 business/Calendar/access.go :: DecideMany :: bookingModel.PageById
 business/Calendar/access.go :: DecideMany :: domain.GetDgraphEventInfoByUUID
 business/Calendar/availability.go :: BusySeenBy :: BusyFor
+business/Calendar/bookingReminders.go :: planGuestReminders :: schedulerBusiness.Enqueue
 business/Calendar/focus.go :: EndFocus :: endFocusEvent
 business/Calendar/imip.go :: cancelFor :: .calendarFile
 business/Calendar/imip.go :: cancelFor :: .mailGuest
@@ -121,11 +122,12 @@ business/Calendar/move.go :: withdraw :: models.MovedUnchangedAfter
 business/Calendar/move.go :: withdraw :: models.TrashMoved
 business/Calendar/move.go :: write :: models.RefreshMoved
 business/Calendar/move.go :: write :: models.ReplaceMovedAttendees
-business/Calendar/moveFromGoogle.go :: runMove :: .importCalendars
+business/Calendar/moveFromGoogle.go :: runMove :: .importPulled
 business/Calendar/moveFromGoogle.go :: runMove :: .keepCalendar
 business/Calendar/moveFromGoogle.go :: runMove :: .keepRefsOf
 business/Calendar/moveFromGoogle.go :: runMove :: .setProgress
 business/Calendar/notify.go :: notice :: tellNotice
+business/Calendar/recap.go :: mailRecap :: sendGuestMail
 business/Calendar/reminders.go :: planAfter :: .cancelReminders
 business/Calendar/reminders.go :: planAfter :: .planReminder
 business/Calendar/reminders.go :: planUnplanned :: .planReminders
@@ -139,13 +141,16 @@ business/Calendar/subscriptions.go :: retakeSubscribed :: .get
 business/Calendar/subscriptions.go :: retakeSubscribed :: .takeRemoteInstance
 business/Calendar/subscriptions.go :: takeSubscribed :: .retakeSubscribed
 business/Calendar/syncGoogle.go :: applyPulled :: .get
+business/Calendar/syncGoogle.go :: applyPulled :: .roomTakenAtGoogle
 business/Calendar/syncGoogle.go :: applyPulled :: .setDeleted
 business/Calendar/syncGoogle.go :: applyPulled :: .takeRemote
 business/Calendar/syncGoogle.go :: applyPulled :: .takeRemoteInstance
+business/Calendar/syncGoogle.go :: pushChanged :: .pushOne
+business/Calendar/syncGoogle.go :: pushChanged :: .refuse
 business/Calendar/syncGoogle.go :: syncAll :: .syncLink
 business/Calendar/syncGoogle.go :: syncLink :: .applyPulled
 business/Calendar/syncGoogle.go :: syncLink :: .keepCalendar
-business/Calendar/syncGoogle.go :: syncLink :: .pushOne
+business/Calendar/syncOutbox.go :: runSyncSink :: .pushEventTo
 business/CallControl/act.go :: Act :: tellAttrs
 business/CallControl/act.go :: mute :: livekitInit.LiveKitService.MuteTrack
 business/CallControl/act.go :: muteAll :: mute
@@ -184,14 +189,11 @@ business/CallState/rooms.go :: BelongsHere :: userDomain.GetUserByUUID
 business/Channel/defaultChannels.go :: JoinDefaultChannels :: joinAsNewMember
 business/Channel/defaultChannels.go :: addMemberRetrying :: AddChannelMemberEdge
 business/Chat/chatBusiness.go :: notifyChatThreadReply :: publishActivityTo
-business/Chat/chatBusiness.go :: notifyNewChat :: activityBusiness.PublishActivityToUser
+business/Chat/chatBusiness.go :: notifyNewChat :: publishActivityTo
 business/Chat/chatReactions.go :: tellChatCommentReactionsGone :: mqttBusiness.PublishChatCommentReaction
 business/Chat/chatReactions.go :: tellChatReactionsGone :: mqttBusiness.PublishChatReaction
 business/Chat/dmList.go :: runDMOrder :: stampUnstampedDMs
-business/Chat/durable.go :: releaseChatEvents :: deliverEvent
-business/Chat/durable.go :: releaseChatEvents :: releaseEvent
 business/Chat/durable.go :: takeBackChat :: outboxBusiness.Cancel
-business/Chat/durable.go :: writeChatRowsIn :: outboxBusiness.Add
 business/Chat/groupingRepair.go :: RepairChatGroupings :: chatGroupingIDs
 business/Chat/groupingRepair.go :: RepairChatGroupings :: repairChatGroupingPage
 business/Chat/groupingRepair.go :: repairChatGroupingPage :: moveGrouping
@@ -213,7 +215,6 @@ business/Command/marketplace.go :: ReconcileInstalledApps :: slashModel.GetAppBy
 business/Command/marketplace.go :: ReconcileInstalledApps :: slashModel.UpdateApp
 business/Command/seed.go :: SeedBuiltinCommands :: slashModel.UpsertCommand
 business/Comment/threadReply.go :: NotifyThreadReply :: publishToUser
-business/Connector/connectorBusiness.go :: ConnectedProviderNames :: IsConnected
 business/Connector/gmailClient.go :: GmailSearch :: .Do
 business/Connector/gmailInbox.go :: GmailInbox :: .Do
 business/ContentIO/assets.go :: uploadImages :: .uploadFileBlock
@@ -237,7 +238,6 @@ business/ContentIO/workspaceExport.go :: writeWorkspaceZip :: loadDoc
 business/Conversation/access.go :: DecideMany :: channelOf
 business/Conversation/access.go :: DecideMany :: chatBusiness.GetDgraphChatBasicByUUID
 business/Conversation/access.go :: DecideMany :: chatBusiness.GetDgraphDmBasicInfoFromDgraph
-business/Conversation/access.go :: DecideMany :: indexChannels
 business/Conversation/access.go :: DecideMany :: indexPlace
 business/Conversation/access.go :: DecideMany :: postBusiness.GetDgraphPostByUUID
 business/Conversation/access.go :: DecideMany :: userBusiness.GetDgraphUserInfoByUUID
@@ -265,8 +265,8 @@ business/DataSubject/inventory.go :: Inventory :: countRowsFor
 business/DataTable/aggregate.go :: scanRowsForQuery :: model.ListRows
 business/DataTable/aggregate.go :: scanRowsForQuery :: model.ListRowsFiltered
 business/DataTable/aggregate.go :: scanRowsForQuery :: withComputedFor
-business/DataTable/computed.go :: countLinks :: model.CountLinks
-business/DataTable/computed.go :: load :: model.CellsOf
+business/DataTable/computed.go :: countLinks :: model.CountLinksMany
+business/DataTable/computed.go :: load :: .firstBatch
 business/DataTable/computed.go :: loadLinked :: .load
 # 29 Oct 2026, TABLES-LEAD-63 (airtable-02 head 2, rollups of rollups): planComputedFor's per-field loop moved into planUnder, which
 # each level of a rollup chain runs once per linked table (planDeeper), at most 3 levels deep; rollupChainProblem walks a chain one table
@@ -277,8 +277,6 @@ business/DataTable/computed.go :: planUnder :: .target
 # 3 Nov 2026: rollupChainProblem's line went when its parameter fieldsOf, which shared the package's fieldsOf (model.ListFields),
 # became tableFields. The guard can't see through that function value; it is the caller's read, which reads each table once.
 business/DataTable/computed.go :: planLinkedReads :: .checkRollup
-business/DataTable/computed.go :: readLinks :: .countLinks
-business/DataTable/computed.go :: readLinks :: model.LinksOf
 business/DataTable/dataTableBusiness.go :: CreateTableFromTemplate :: model.CreateView
 business/DataTable/importBase.go :: addOptions :: UpdateField
 business/DataTable/importBase.go :: dropOptions :: UpdateField
@@ -301,7 +299,6 @@ business/DataTable/importBase.go :: takeBack :: .dropOptions
 business/DataTable/importBase.go :: takeBack :: DeleteTable
 business/DataTable/importBase.go :: takeBack :: Undo
 business/DataTable/itemLinks.go :: RepairItemLinks :: model.StripItemLinks
-business/DataTable/ledgerRows.go :: Batch :: takeLinks
 business/DataTable/ledgerRows.go :: RestoreFromTrash :: restoreField
 business/DataTable/ledgerRows.go :: RowHistory :: model.RowHistory
 business/DataTable/ledgerRows.go :: restoreField :: model.MarkCellIndexStale
@@ -325,9 +322,6 @@ business/DataTable/transformRows.go :: patches :: .worked
 business/DataTable/transformRows.go :: patches :: transformBatch
 business/DataTable/transformRows.go :: write :: .deletes
 business/DataTable/transformRows.go :: write :: .patches
-business/DemoSeed/demoSeed.go :: Run :: channelBusiness.CheckIfChannelExist
-business/DemoSeed/demoSeed.go :: Run :: channelBusiness.CreateChannel
-business/DemoSeed/demoSeed.go :: Run :: writeConversation
 business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.CheckIfChannelExist
 business/DemoSeed/demoSeed.go :: archiveByName :: channelDomain.GetChannelByName
 business/DemoSeed/demoSeed.go :: retireByName :: channelBusiness.CheckIfChannelExist
@@ -337,7 +331,7 @@ business/DemoSeed/demoSeed.go :: retireByName :: channelDomain.GetChannelByName
 business/DemoSeed/demoSeed.go :: writeConversation :: channelBusiness.AddChannelMemberEdge
 business/DemoSeed/demoSeed.go :: writeConversation :: channelBusiness.GetBasicDgraphChannelInfoByUUID
 business/DemoSeed/demoSeed.go :: writeConversation :: postBusiness.CreatePost
-business/Departed/departed.go :: HandOver :: recoverDoc
+business/Departed/departed.go :: HandOver :: recoverOne
 business/Departed/sweep.go :: TellAdmins :: tell
 business/Doc/docAccessApply.go :: AccessChanged :: RepairAccessIndexes
 business/Doc/docAccessApply.go :: ReauthLater :: Reauth
@@ -349,6 +343,7 @@ business/Doc/docEvents.go :: emitUpdated :: actorFrom
 business/Doc/docReactions.go :: tellDocCommentReactionsGone :: mqttBusiness.PublishDocCommentReaction
 business/Doc/docReaders.go :: withEndedGrants :: DecidePeople
 business/Doc/docReaders.go :: withoutEnded :: .After
+business/Doc/docReaders.go :: ReadersOfMany :: withoutEnded
 business/Doc/docRepair.go :: latestGoodSnapshotBody :: getDocSnapshotObject
 business/Doc/docRepair.go :: repairDocs :: domain.GetCollabDocByUUID
 business/Doc/docRepair.go :: repairDocs :: domain.GetDocBodyPage
@@ -392,6 +387,7 @@ business/GitHub/githubImport.go :: importWorkerLoop :: reapStaleImports
 business/GitHub/githubSync.go :: StartGitHubSyncWorker :: processSyncQueue
 business/GitHub/githubSync.go :: StartGitHubSyncWorker :: reapStaleSyncItems
 business/GitHub/githubSync.go :: fetchGitHubIssueComments :: .Do
+business/GitHub/githubSync.go :: fetchGitHubPRReviews :: fetchGitHubPRReviewPage
 business/GitHub/githubSync.go :: getGitHubBotLogin :: .Do
 business/GitHub/githubSync.go :: processSyncQueue :: executeGitHubSync
 business/GitHub/githubSync.go :: processSyncQueue :: githubSyncQueueDomain.MarkGitHubSyncQueueCompleted
@@ -568,14 +564,13 @@ business/Mqtt/brokerAdmin.go :: recheck :: .clients
 business/Mqtt/brokerAdmin.go :: recheck :: .subscribersOf
 business/Mqtt/brokerAdmin.go :: recheck :: .unsubscribe
 business/Mqtt/brokerAdmin.go :: subscribersOf :: .call
-business/Mqtt/mqttBusiness.go :: PublishToTopics :: .Publish
+business/Mqtt/mqttBusiness.go :: publishTo :: .Publish
 business/Notice/notice.go :: Dismiss :: markSeen
-business/Notification/deliver.go :: deliver :: firebaseInit.FirebaseApp.MultiCastPush
-business/Notification/deliver.go :: deliver :: mqttBusiness.PublishMessageToUser
+business/Notification/deliver.go :: deliverHalves :: firebaseInit.FirebaseApp.MultiCastPush
+business/Notification/deliver.go :: deliverHalves :: mqttBusiness.PublishMessageToUser
 business/Notification/dispatcher.go :: Dispatch :: dispatchPrepared
 business/Notification/notices.go :: Tell :: noticeLive
 business/Notification/worker.go :: cleanupLoop :: runCleanup
-business/Notification/worker.go :: processBatch :: deliverItem
 business/Notification/worker.go :: workerLoop :: processBatch
 business/Notification/worker.go :: workerLoop :: reapStale
 business/Outbox/outbox.go :: DeliverMany :: deliverBatch
@@ -591,10 +586,7 @@ business/Pin/pin.go :: readInto :: readMsgs
 business/Places/places.go :: Add :: model.Put
 business/Policy/registry.go :: ListAll :: .info
 business/Policy/scoped.go :: PrimeScopes :: .Set
-business/Post/durable.go :: CreatePostDurably :: deliver
-business/Post/durable.go :: CreatePostDurably :: release
 business/Post/durable.go :: takeBackPost :: outboxBusiness.Cancel
-business/Post/durable.go :: writePostRows :: outboxBusiness.Add
 business/Post/postBusiness.go :: notifyNewPost :: activityBusiness.PublishActivityToUser
 business/Post/postReactions.go :: CreateOrUpdatePostCommentReaction :: activityBusiness.PublishActivityToUser
 business/Post/postReactions.go :: tellPostCommentReactionsGone :: mqttBusiness.PublishPostCommentReaction
@@ -603,7 +595,7 @@ business/Project/roles.go :: SettleRoles :: projectsPage
 business/Project/roles.go :: SettleRoles :: rowsOfMany
 business/Project/roles.go :: SettleRoles :: settleProjectWith
 business/Project/roles.go :: settleProjectWith :: dropAdminEdge
-business/Project/taskListExport.go :: eachListPage :: manualRows
+business/Project/taskListExport.go :: eachListPage :: sideRows
 business/Project/workload.go :: SetCapacity :: domain.SetDgraphCapacity
 business/ProjectTemplate/apply.go :: Apply :: taskFieldBusiness.Create
 business/ProjectTemplate/apply.go :: Apply :: taskStatusBusiness.Create
@@ -641,6 +633,7 @@ business/RowQuery/computedStore.go :: fillKept :: inKeptBatch
 business/RowQuery/computedStore.go :: fillKept :: model.RowIDsAfter
 business/RowQuery/walks.go :: runWalks :: groupHolds
 business/RowQuery/walks.go :: runWalks :: model.QueryRowWalk
+business/SLA/alerts.go :: sweepAlerts :: alert
 business/Scheduler/schedulerBusiness.go :: DrainDueJobs :: jobModel.ClaimDueJobs
 business/Scheduler/schedulerBusiness.go :: DrainDueJobs :: runJob
 business/Scheduler/schedulerBusiness.go :: StartWorker :: DrainDueJobs
@@ -733,6 +726,7 @@ business/Task/threadTaskSync.go :: reconcileThreadTasks :: setTaskDone
 business/Task/threadTaskSync.go :: reconcileThreadTasks :: settleThread
 business/Task/threadTaskSync.go :: reconcileThreadTasks :: taskNow
 business/Task/threadTaskSync.go :: taskToThreads :: settleThread
+business/Task/urgent.go :: urgentByWho :: urgentHears
 business/TaskKeys/sweep.go :: sweep :: Ensure
 business/TaskKeys/sweep.go :: sweep :: numberProject
 business/TaskWriter/contract.go :: Apply :: deleteTask
@@ -800,7 +794,8 @@ domain/Post/postDomain.go :: BulkRestorePostsInDgraph :: dgraphModels.BulkSoftDe
 domain/Recording/recordingDomian.go :: setRecordingsDeletedAt :: dgraphModels.SetDgraphRecordingsDeletedAt
 domain/Task/taskDomain.go :: BulkArchiveTasksInDgraph :: dgraphModels.BulkSoftDeleteDgraphTasks
 domain/Task/taskDomain.go :: BulkRestoreTasksInDgraph :: dgraphModels.BulkSoftDeleteDgraphTasks
-domain/Task/taskReaders.go :: readersOf :: taskread.For
+domain/Task/taskReaders.go :: restricted :: taskread.For
+domain/Task/taskReaders.go :: ReadersOfMany :: restricted
 domain/User/searchName.go :: BackfillSearchNames :: .Mutate
 domain/User/searchName.go :: BackfillSearchNames :: dgexec.InTxn
 domain/User/userDomian.go :: forgetProfile :: redisStore.Delete
@@ -928,6 +923,8 @@ business/LiveKit/callState.go :: FollowCall :: CallSwitches
 business/LiveKit/callState.go :: FollowCall :: livekitInit.LiveKitService.GetRoom
 business/LiveKit/callState.go :: FollowCall :: switchRoom
 business/LiveKit/callState.go :: SetTranscription :: switchRoom
+# 12 Nov 2026, CALLS-LEAD-148 (V-951 F1, CR-271): per live call with a switch, one LiveKit GetRoom + metadata write, re-read under its switch lock; LiveKit has no bulk metadata update; runs only on an admin's AI change.
+business/LiveKit/callState.go :: RefreshSummaries :: refreshSummary
 # 27 Oct 2026, CAL-LEAD-13 (calendar A3, ranked times): a person's busy times are one person's read (ReadBusy: their
 # OneCamp events, then their Google calendar), so the engine reads the people a request names side by side, eight at
 # a time (errgroup), for at most 20 people (maxPeople), as BusySeenBy reads Find a time's.
@@ -950,6 +947,10 @@ business/Calendar/searchEntries.go :: writeEverySearchEntry :: .seriesAfter
 business/Calendar/searchEntries.go :: writeEverySearchEntry :: .writeSearchEntries
 business/Calendar/ooo.go :: declineAll :: .answer
 business/Calendar/ooo.go :: declineAll :: .tell
+# 14 Nov 2026, CAL-LEAD-82 (gcal-6 rooms, CR-335 F4): holdRoomsIn reads every head's held rooms and locks every room once, then
+# makes one clash pass per room-holding head: a single write has at most 2 (the row and, for "this and following", its split
+# series); a batch has one per room-holding row in it (a Google sync privacy flip: at most one sync page of rows).
+business/Calendar/rooms.go :: holdRoomsIn :: holdRooms
 business/ContentIO/boardFile.go :: embedPictures :: readStored
 business/ContentIO/workspaceExport.go :: exportableBoards :: boardUUIDPage
 business/ContentIO/workspaceExport.go :: exportableBoards :: readableBoardsOf
@@ -1016,7 +1017,7 @@ business/GitHub/taskRepoLink.go :: onBranch :: botReads
 # 6 Nov 2026, CHAT41-BE (NOTIF-H2/H3, head A): dropToldMentions builds each mention item's notice key with
 # followModels.MentionKey, a pure string builder that lives in models/ (no store call; the keys are then read
 # in ONE query). The task-comment owner repair reads the graph a page (500) at a time, resumably: one read per page.
-business/Activity/toldMentions.go :: dropToldMentions :: toldMentionKey
+business/Activity/pageSettings.go :: toldAndHeard :: toldMentionKey
 business/Task/commentOwnerRepair.go :: eachCommentOwnersPage :: commentOwnersPage
 business/GitHub/releases.go :: tagCommit :: githubGet
 business/GitHub/releases.go :: tasksNamed :: codeTask
@@ -1030,12 +1031,70 @@ business/Release/git.go :: ShipTag :: shipTask
 business/LiveKit/transcriptReaders.go :: NewestTranscriptOpenTo :: .Kept
 # 10 Nov 2026, CALLS140-BE2 (V-860 F1): presence in that call is asked of LiveKit, uncached, once per room of the same handful
 # (connectedNow, never the 60 s grant), stopping at the first room the person is in; asks and tool calls are rare.
-business/LiveKit/transcriptReaders.go :: NewestTranscriptOpenTo :: connectedNow
+# 16 Nov 2026, CALLS164-Z05AG: the same loop, moved into connectedToAny, which NewestTranscriptOpenTo and
+# TranscriptOpenTo share; one entry still.
+business/LiveKit/transcriptReaders.go :: connectedToAny :: connectedNow
 # 10 Nov 2026, CHAT-LEAD-58 (V-843 F1): RetractMentionNotices builds each kind's notice key with followModels.MentionKey,
 # the same pure string builder as dropToldMentions (no store call); the keys are then retracted in ONE statement.
 business/Notification/mentionsAdded.go :: RetractMentionNotices :: followModels.MentionKey
+# 11 Nov 2026, CHAT71-H4 (A4 H4): deliver's two loops (a publish per person, a push call per 500 devices) moved, unchanged,
+# into deliverHalves, which sends one half or both. A pass of notify.push.wait sends its due pushes once per EVENT (every
+# person's payload of an event is the same; the event's people in one call), at most 200 rows a pass; its claim, payloads
+# (one MGET), holds (one read), drops and forgets are one statement each. The read check stays per row: it is each
+# person's own marker read with their own access (business/ReadState Position), and a pass meets few.
+business/Notify/pushWait.go :: sendWaitingPushes :: deliverHalf
+# 13 Nov 2026, PROJ232-L21B (linear-21 H1 triage): CreateTasksFromProposals' loop already makes each proposed task
+# through CreateTask (createProposedTask, above); triage's Arrive for each made task is a count and an insert, in a
+# loop bounded by one conversation's chosen action items. waitingNow reads every project's triage switch once
+# (PrimeScopes) before its loop, so triageOn there reads the primed cache. ProjectPolicies loops over a fixed list of
+# three policies (projects.edit.who, projects.triage, projects.triage.priority), not over data.
+business/Triage/triage.go :: waitingNow :: triageOn
+controllers/Project/roleController.go :: ProjectPolicies :: policyBusiness.Admin.InfoIn
+# 14 Nov 2026, PROJ236-L24J (linear-24 H3): the demo seed times two of the launch project's tasks (showcaseSLAs over
+# demoSLATasks), once per seed: two upserts by task over a fixed list, not over data.
+# 13 Nov 2026, CALLS155-Z13G4 (zoom-13 H1 transcript search): Backfill is a paged sweep, not a call per item: each
+# turn reads ONE page of 50 transcript homes after a uid cursor (homesPage) and writes that whole page's lines in ONE
+# bulk write (writeEntries), so its reads and writes are per page. bulkWrite sends one _bulk request per 500 entries
+# (writeBatch); a line written as it is said is one entry, one request.
+business/TranscriptSearch/transcriptSearch.go :: Backfill :: homesPage
+business/TranscriptSearch/transcriptSearch.go :: Backfill :: writeEntries
+business/TranscriptSearch/transcriptSearch.go :: bulkWrite :: bulkModel.BulkIndexChecked
+# 16 Nov 2026, calendar lane (bc05 H3): EntityLink.ReadMany now reads a person named by uuid alone
+# by their graph uid once per call; WorkGraph decide calls it once per reader, and there are one or two.
+business/WorkGraph/workGraph.go :: decide :: readMany
+# 17 Nov 2026, PROJ250-L21MAIL (linear-21 mail door, MAIN ruling (a)): HoldAll is one gate and one insert for a door's batch;
+# arrived() is the per-task "task arrived" workflow event (the rules engine runs per task), as Hold always sent one. N <= 20 (mail), 1 (every other door).
+business/Triage/triage.go :: HoldAll :: arrived
+# 17 Nov 2026, PROJ250-L21MAIL: the mail poll. PollDue polls each leased mailbox (at most 10 a pass, 4 at once): each is its own
+# IMAP session and its own project, so there is nothing to batch across them. files stores a message's attachments (<= 5) in the
+# object store (MinIO, AV-scanned, one object each), which takes one object a call; MinIO puts are external (MAIN 16:0x, condition 4).
+business/TriageMail/poll.go :: PollDue :: pollOne
+business/TriageMail/poll.go :: files :: storeFile
+# 17 Nov 2026, PROJ250-L21MAIL: one task per new message, N <= 20 a poll (PerPoll). business/TaskWriter has a bulk create (createMany),
+# but MAIN kept N MakeTask here for each task's attachments (MAIN 16:0x condition 4: N MakeTask is the door contract). files: the
+# message's attachments (MinIO, external, accepted). The loop stops at the first task that fails; nothing in it pauses.
+business/TriageMail/poll.go :: pollOne :: files
+business/TriageMail/poll.go :: pollOne :: makeTask
+# 18 Nov 2026, CALLS172-V1209G (V-1209 B, the notes doc backfill, once per install): backfillNotesDocs writes
+# ONE conditional upsert per page of 100 calls (linkNotesDocs: every link of the page in one request), never one
+# per call. dgexec.Var in linkNotesDocsUpsert's loop only spells uid(n<i>) for that one request: no round trip.
+business/Recording/notesDocBackfill.go :: backfillNotesDocs :: linkNotesDocs
+domain/Recording/notesDocBackfill.go :: linkNotesDocsUpsert :: dgexec.Var
+# 18 Nov 2026, CHAT118-M3 (NOTIF M3): the email worker's per-row send (processBatch :: deliverItem) is now one send per
+# person's email (settle :: deliverGroup), a person's batched rows as one: a send is per recipient by nature. Its rows'
+# UPDATE and its log row follow that send at once, so a crash after it can't send it twice. What the batch reads (the
+# suppression list, the sender, the logo) is read once before the loop, and every no-longer-told or ask-later row is
+# closed in one UPDATE.
+business/Notification/worker.go :: settle :: deliverGroup
+# 18 Nov 2026, chat lane (NOTIF M11): the nudge pass is one statement per step for everyone now (its per-person
+# read, write and supersede, and its per-person counts, are gone: five lines above). What stays per person is the
+# live event itself, one MQTT publish to each owner's own activity topic (a topic is a person; there is no
+# many-person publish), after ONE CountOpenForUsers for them all.
 # RELEASE-LINE ONLY (main and without-ai, from v2.75.0; again for v2.76.0): the release lines carry
 # the old demo seeder (business/DemoSeed as the line has it), never beta's; its loops are recorded as they are.
+business/DemoSeed/demoSeed.go :: Run :: channelBusiness.CheckIfChannelExist
+business/DemoSeed/demoSeed.go :: Run :: channelBusiness.CreateChannel
+business/DemoSeed/demoSeed.go :: Run :: writeConversation
 business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.GetBasicDgraphChannelInfoByUUID
 business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.UpdateChannelInfo
 business/DemoSeed/demoSeed.go :: cast :: userDomain.GetDgraphUserInfoByUUID

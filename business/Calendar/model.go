@@ -159,28 +159,35 @@ type Event struct {
 	// (eventFiles.go): read where its notes are, each only by a reader who
 	// may open it (nothing of the rest), and never with a title, which each
 	// reader's own chip read gives.
-	Files              []FileRef `json:"files"`
-	Location           string    `json:"location"`
-	CallRoom           string    `json:"call_room,omitempty"`
-	Start              When      `json:"start"`
-	End                When      `json:"end"`
-	AllDay             bool      `json:"all_day"`
-	Transparency       string    `json:"transparency"`
-	Visibility         string    `json:"visibility"`
-	Hue                string    `json:"hue,omitempty"`
-	Status             string    `json:"status"`
-	GuestsCanModify    bool      `json:"guests_can_modify"`
-	GuestsCanInvite    bool      `json:"guests_can_invite"`
-	GuestsCanSeeGuests bool      `json:"guests_can_see_guests"`
+	Files []FileRef `json:"files"`
+	Rooms []Room    `json:"rooms"`
+	// RoomsLetGo is the rooms a restore gave up: booked by another event
+	// while this one was in the trash (only on a restore's answer).
+	RoomsLetGo         []Room `json:"rooms_let_go,omitempty"`
+	Location           string `json:"location"`
+	CallRoom           string `json:"call_room,omitempty"`
+	Start              When   `json:"start"`
+	End                When   `json:"end"`
+	AllDay             bool   `json:"all_day"`
+	Transparency       string `json:"transparency"`
+	Visibility         string `json:"visibility"`
+	Hue                string `json:"hue,omitempty"`
+	Status             string `json:"status"`
+	GuestsCanModify    bool   `json:"guests_can_modify"`
+	GuestsCanInvite    bool   `json:"guests_can_invite"`
+	GuestsCanSeeGuests bool   `json:"guests_can_see_guests"`
 	// EmailOnAnswers is the organiser's "Email me when guests answer",
 	// said to the organiser alone.
-	EmailOnAnswers bool                       `json:"email_on_answers,omitempty"`
-	Organiser      Person                     `json:"organiser"`
-	Attendees      []Attendee                 `json:"attendees"`
-	Sequence       int                        `json:"sequence"`
-	ICalUID        string                     `json:"ical_uid"`
-	GoogleEventID  string                     `json:"google_event_id,omitempty"`
-	Booking        *dgraphStruct.EventBooking `json:"booking,omitempty"`
+	EmailOnAnswers bool `json:"email_on_answers,omitempty"`
+	// RecapToGuests is the organiser's "Send the recap to guests" (recap.go),
+	// said to the organiser alone.
+	RecapToGuests bool                       `json:"recap_to_guests,omitempty"`
+	Organiser     Person                     `json:"organiser"`
+	Attendees     []Attendee                 `json:"attendees"`
+	Sequence      int                        `json:"sequence"`
+	ICalUID       string                     `json:"ical_uid"`
+	GoogleEventID string                     `json:"google_event_id,omitempty"`
+	Booking       *dgraphStruct.EventBooking `json:"booking,omitempty"`
 	// Task is a task block's task: its uuid, and its name, where it stands
 	// and its project when the reader may read it.
 	Task *dgraphStruct.EventTask `json:"task,omitempty"`
@@ -195,6 +202,9 @@ type Event struct {
 	// OutOfOffice is an out-of-office event's decline rule, read by its
 	// owner alone (head 5b).
 	OutOfOffice *OOOView `json:"out_of_office,omitempty"`
+	// Source is a derived entry's source (derived.go): what a container's
+	// calendar shows that nobody made on it, read only, linked to it.
+	Source *EventSource `json:"source,omitempty"`
 	// OwnTimeRefused says, to whoever may change the event, each kind of own
 	// time it can't be made by a save that keeps its guests, in the words the
 	// save would be refused with (keepOwnTime's own answer; CR-113 S1). The
@@ -251,6 +261,8 @@ type EventInput struct {
 	// (a duplicate's, or those the form picked before it was saved): each
 	// one the writer may open, at most maxEventFiles (eventFiles.go).
 	Files []FileRef `json:"files"`
+	// Rooms are the rooms the event books (rooms.go).
+	Rooms []string `json:"rooms"`
 }
 
 // EventPatch is a change to an event (CAL2): a field left out stays as it
@@ -270,6 +282,7 @@ type EventPatch struct {
 	Visibility         *string       `json:"visibility"`
 	Hue                *string       `json:"hue"`
 	Attendees          *[]GuestInput `json:"attendees"`
+	Rooms              *[]string     `json:"rooms"`
 	GuestsCanModify    *bool         `json:"guests_can_modify"`
 	GuestsCanInvite    *bool         `json:"guests_can_invite"`
 	GuestsCanSeeGuests *bool         `json:"guests_can_see_guests"`

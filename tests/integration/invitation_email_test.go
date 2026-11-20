@@ -66,6 +66,7 @@ func TestAnInvitationSaysWhetherItsEmailWent(t *testing.T) {
 	oldClient := emailService.SharedHTTPClient
 	emailService.SharedHTTPClient = &http.Client{Transport: resend}
 	t.Cleanup(func() { emailService.SharedHTTPClient = oldClient })
+	emailService.LetReservedNamesThroughForTest(t)
 	if left, capped := emailService.InvitationsLeftToday(); !capped || left != 3 {
 		t.Fatalf("today's allowance is %d (capped %v); this test needs a day nothing has been sent on", left, capped)
 	}
@@ -112,16 +113,16 @@ func TestAnInvitationSaysWhetherItsEmailWent(t *testing.T) {
 	if left := room(); left == nil || *left != 3 {
 		t.Fatalf("the offer's allowance: %v, want 3", left)
 	}
-	if sent, why := invite("ada@outlook.com"); !sent || why != "" {
+	if sent, why := invite("ada@example.com"); !sent || why != "" {
 		t.Errorf("an email the provider accepted: sent %v, %q", sent, why)
 	}
-	if sent, why := invite("bo@outlook.com"); sent || !strings.Contains(why, "had a problem") {
+	if sent, why := invite("bo@example.com"); sent || !strings.Contains(why, "had a problem") {
 		t.Errorf("an email the provider refused: sent %v, %q", sent, why)
 	}
-	if sent, why := invite("cy@outlook.com"); !sent || why != "" {
+	if sent, why := invite("cy@example.com"); !sent || why != "" {
 		t.Errorf("the third, within the allowance: sent %v, %q", sent, why)
 	}
-	if sent, why := invite("dee@outlook.com"); sent || !strings.Contains(why, "kept for password resets") {
+	if sent, why := invite("dee@example.com"); sent || !strings.Contains(why, "kept for password resets") {
 		t.Errorf("an invitation past the allowance: sent %v, %q", sent, why)
 	}
 	if resend.calls != 3 {

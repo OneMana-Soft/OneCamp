@@ -53,7 +53,7 @@ func guestAttachment(kind, srcKey, name string) http.HandlerFunc {
 			notAvailable(w)
 			return
 		}
-		resource, page, err := guestScope(ctx, chi.URLParam(r, "token"), kind)
+		resource, page, err := guestScope(ctx, chi.URLParam(r, "token"), kind, r.URL.Query().Get("k"))
 		if err != nil {
 			guestReadFailed(w, r, name, err, "")
 			return
@@ -94,7 +94,7 @@ func guestAttachment(kind, srcKey, name string) http.HandlerFunc {
 // seconds, as a guest page does; members hear the board's topic.
 func GuestBoardPolls(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	board, _, err := guestScope(ctx, chi.URLParam(r, "token"), guestModel.ResourceBoard)
+	board, _, err := guestScope(ctx, chi.URLParam(r, "token"), guestModel.ResourceBoard, r.URL.Query().Get("k"))
 	if err != nil {
 		guestReadFailed(w, r, "GuestBoardPolls", err, "")
 		return
@@ -110,7 +110,7 @@ func GuestBoardPolls(w http.ResponseWriter, r *http.Request) {
 // guestScope is the resource a guest's token opens now, and whether it is
 // served as the server's page alone: a share link's grant, or for a board, a
 // call's board token (the board on the stage of the call its guest is in).
-func guestScope(ctx context.Context, token, kind string) (resource string, page bool, err error) {
+func guestScope(ctx context.Context, token, kind, unlock string) (resource string, page bool, err error) {
 	if kind == guestModel.ResourceBoard {
 		board, err := guestCallBoard(ctx, token)
 		if !errors.Is(err, guestBusiness.ErrNotCallToken) {
@@ -120,6 +120,10 @@ func guestScope(ctx context.Context, token, kind string) (resource string, page 
 	grant, err := guestGrant(ctx, token, kind)
 	if err != nil {
 		return "", false, err
+	}
+	// A password link's reads carry its unlock (miro-33; ?k=, as a page's).
+	if !guestBusiness.ServedAsPage(grant) && !guestBusiness.Unlocked(grant, unlock) {
+		return "", false, guestBusiness.ErrInvalidGrant
 	}
 	return grant.ResourceID, guestBusiness.ServedAsPage(grant), nil
 }

@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -180,7 +181,7 @@ func TestACancelledBookingSaysSo(t *testing.T) {
 	w := &bookingWays{}
 	withBookingSeams(t, w)
 	n := aBooking(uuid.NewString())
-	n.Cancelled = true
+	n.Change = BookingCancelled
 	if !TellBookingOwner(context.Background(), n) {
 		t.Fatal("not told")
 	}
@@ -192,6 +193,41 @@ func TestACancelledBookingSaysSo(t *testing.T) {
 	}
 	if e := w.emails[0]; e.Title != "Booking cancelled" || e.SubjectLine != "Alex Kim cancelled Intro call" {
 		t.Errorf("email %+v", e)
+	}
+}
+
+// gcal-7 H2: a guest who moves their booking by its link tells the page's
+// owner through the same telling as a booking and a cancel, of its own kind,
+// with the new time. Each move is its own change: moved again, even back to a
+// time it had, the owner is told again.
+func TestAMovedBookingSaysWhereTo(t *testing.T) {
+	w := &bookingWays{}
+	withBookingSeams(t, w)
+	n := aBooking(uuid.NewString())
+	n.Change = BookingMoved
+	if !TellBookingOwner(context.Background(), n) {
+		t.Fatal("not told")
+	}
+	if len(w.notices) != 1 || w.notices[0].Kind != NoticeBookingMoved || NoticeBookingMoved != "booking.moved" ||
+		w.notices[0].Data["starts_at"] != n.Start.UTC().Format(time.RFC3339) {
+		t.Fatalf("notices %+v", w.notices)
+	}
+	if p := w.push(t); p[firebaseInit.FIREBASE_PUSH_DATA_TITLE] != "Alex Kim moved Intro call" {
+		t.Errorf("push %v", p)
+	}
+	if e := w.emails[0]; e.Title != "Booking moved" || e.SubjectLine != "Alex Kim moved Intro call" ||
+		e.Body != "To "+n.When || e.Type != EventCalendarBooking {
+		t.Errorf("email %+v", e)
+	}
+	if want := NoticeBookingMoved + "|" + n.BookingID + "|"; len(w.noticeIDs) != 1 || !strings.HasPrefix(w.noticeIDs[0], want) {
+		t.Errorf("the push was noticed as %v, want a key under %q", w.noticeIDs, want)
+	}
+	if !TellBookingOwner(context.Background(), n) {
+		t.Error("a second move wasn't told")
+	}
+	w.push(t)
+	if len(w.notices) != 2 || len(w.emails) != 2 {
+		t.Errorf("two moves: notices %d, emails %d", len(w.notices), len(w.emails))
 	}
 }
 
@@ -238,5 +274,37 @@ func TestOwnerToldSaysWhatHappened(t *testing.T) {
 
 	if TellBookingOwner(context.Background(), aBooking("not-a-person")) {
 		t.Error("told nobody")
+	}
+}
+
+// gcal-7 H3: what the guest answered reaches the page's owner by mail, as
+// plain text under the time; the inbox and the push keep to the time alone.
+func TestABookingsAnswersReachItsOwnersMail(t *testing.T) {
+	w := &bookingWays{}
+	withBookingSeams(t, w)
+	n := aBooking(uuid.NewString())
+	n.Answers = "Company: Acme\nTopic: Sales"
+	if !TellBookingOwner(context.Background(), n) {
+		t.Fatal("not told")
+	}
+	if len(w.emails) != 1 || w.emails[0].Body != n.When+"\n\n"+n.Answers {
+		t.Fatalf("emails %+v", w.emails)
+	}
+	if len(w.notices) != 1 {
+		t.Fatalf("notices %+v", w.notices)
+	}
+	for k, v := range w.notices[0].Data {
+		if strings.Contains(v, "Acme") {
+			t.Errorf("the inbox carries the answers in %s: %q", k, v)
+		}
+	}
+	// The notice's title and body are the push's: neither carries them.
+	pushed := w.push(t)
+	for _, answer := range []string{"Acme", "Topic"} {
+		for k, v := range pushed {
+			if strings.Contains(v, answer) {
+				t.Errorf("the push carries the answers in %s: %q", k, v)
+			}
+		}
 	}
 }

@@ -45,7 +45,7 @@ func typeChangeProblem(was *model.Field, to string) error {
 		return fmt.Errorf("A link to another table can't become another kind of field; delete it instead")
 	}
 	if _, isItems := itemsOf(was); isItems {
-		return fmt.Errorf("A link to docs, tasks, boards, projects or people can't become another kind of field; delete it instead")
+		return fmt.Errorf("A link to %s can't become another kind of field; delete it instead", fieldTypes.EveryItemKind)
 	}
 	return nil
 }

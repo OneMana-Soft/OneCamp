@@ -1,0 +1,27 @@
+route	sync_pg	sync_dg	sync_os	sync_redis	sync_mqtt	target_total	note
+createPost	1	1	0	2	0	6	
+dm createChat	1	2	0	1	0	-	
+group createChat	1	2	0	1	0	-	
+createComment	2	2	0	1	0	-	on a live #general post
+latestPosts	0	1	0	2	0	-	
+dm latestChat	1	1	0	1	0	3	
+group latestChat	1	1	0	1	0	-	
+sidebarNav	15	4	0	1	0	9	
+activity/unread	9	2	0	1	0	-	
+activity/unified	4	1	0	1	0	-	
+chat-threads/unread	1	0	0	1	0	-	
+search	5	1	1	1	0	8	cold: its before moves ReachWrites (UpdateCalendar on uuid.Nil), so the calendar reach is read
+search, again	2	1	1	1	0	-	warm: measured straight after search; the calendar reach is kept (A1-11)
+v1/unread	19	4	0	6	0	6	API token; the target also asks 0 LiveKit calls, which no tap counts
+ai/ask	3	0	0	4	0	14	stub model on OLLAMA_HOST (askable); the AI index holds only the #general post and the board task (askCorpus)
+moveTask	11	3	0	1	3	17	to inReview (todo) and back, the move back unmeasured
+project list	1	1	0	1	0	5	pageSize=500 pageIndex=0, the web task table's page
+project board	4	3	0	1	0	7	
+dm olderChats	0	1	0	1	0	-	
+group olderChats	0	1	0	1	0	-	
+chat thread	0	1	0	1	0	-	
+doc open	0	1	0	1	0	-	no grant due: the ended-grant read does not run (A2-2)
+doc open, grant due	2	2	0	1	0	-	a grant end has passed: the ended-grant read runs once (A2-2)
+table rows page	8	0	0	1	0	-	
+table paste	28	0	0	3	1	-	
+table cell edit	23	0	0	2	1	-	

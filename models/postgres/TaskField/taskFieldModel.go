@@ -374,67 +374,63 @@ func dropOptionValues(c context.Context, tx *sql.Tx, fieldID uuid.UUID, removed 
 // Values is each task's values: task id, then field id, then the value.
 type Values map[string]map[string]json.RawMessage
 
-// ReadValues reads the values of the tasks listed and, in the same read, the
-// money fields among those they hold: field id, then its project's id, so a
-// reader can keep money from whoever may not read it (business/TaskField).
-func ReadValues(ctx context.Context, taskIDs []uuid.UUID) (Values, map[string]string, error) {
-	out, money := Values{}, map[string]string{}
-	if len(taskIDs) == 0 {
+// ValuesRead reads the values of the tasks listed and, in the same statement,
+// the money fields among those they hold: field id, then its project's id, so a
+// reader can keep money from whoever may not read it (business/TaskField). It
+// is a read a caller pipelines with others (pgexec.Batch); values is what it
+// read, once the batch has run.
+func ValuesRead(taskIDs []uuid.UUID) (read *pgexec.Read, values func() (Values, map[string]string, error)) {
+	type row struct {
+		task, field, project uuid.UUID
+		value                []byte
+		isMoney              bool
+	}
+	var rows []row
+	read = pgexec.Rows(&rows, func(r pgexec.Row) (row, error) {
+		var v row
+		return v, r.Scan(&v.task, &v.field, &v.value, &v.isMoney, &v.project)
+	}, `SELECT v.task_uuid, v.field_id, v.value, f.type = $2, f.project_id FROM task_field_values v JOIN task_fields f ON f.id = v.field_id AND `+softDelete.Live("f")+`
+		WHERE v.task_uuid = ANY($1)`, pq.Array(taskIDs), TypeMoney)
+	return read, func() (Values, map[string]string, error) {
+		if read.Err != nil {
+			return nil, nil, read.Err
+		}
+		out, money := Values{}, map[string]string{}
+		for _, v := range rows {
+			t := v.task.String()
+			if out[t] == nil {
+				out[t] = map[string]json.RawMessage{}
+			}
+			out[t][v.field.String()] = v.value
+			if v.isMoney {
+				money[v.field.String()] = v.project.String()
+			}
+		}
 		return out, money, nil
 	}
-	c, cancel := withTimeout(ctx)
-	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
-		`SELECT v.task_uuid, v.field_id, v.value, f.type = $2, f.project_id FROM task_field_values v JOIN task_fields f ON f.id = v.field_id AND `+softDelete.Live("f")+`
-		WHERE v.task_uuid = ANY($1)`, pq.Array(taskIDs), TypeMoney)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/TaskField ReadValues err: %+v", err)
-		return nil, nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var task, field, project uuid.UUID
-		var value []byte
-		var isMoney bool
-		if err := rows.Scan(&task, &field, &value, &isMoney, &project); err != nil {
-			return nil, nil, err
-		}
-		t := task.String()
-		if out[t] == nil {
-			out[t] = map[string]json.RawMessage{}
-		}
-		out[t][field.String()] = value
-		if isMoney {
-			money[field.String()] = project.String()
-		}
-	}
-	return out, money, rows.Err()
 }
 
-// FormulaProjects is, of the tasks listed, those whose project has a live
-// formula field: task id, then its project's id. None, in one cheap read,
-// for a project without one.
-func FormulaProjects(ctx context.Context, taskIDs []uuid.UUID) (map[string]string, error) {
-	out := map[string]string{}
-	if len(taskIDs) == 0 {
+// FormulaProjectsRead is, of the tasks listed, those whose project has a live
+// formula field: task id, then its project's id (none for a project without
+// one). It is a read a caller pipelines with others (pgexec.Batch); projects is
+// what it read, once the batch has run.
+func FormulaProjectsRead(taskIDs []uuid.UUID) (read *pgexec.Read, projects func() (map[string]string, error)) {
+	var pairs [][2]uuid.UUID
+	read = pgexec.Rows(&pairs, func(r pgexec.Row) ([2]uuid.UUID, error) {
+		var pair [2]uuid.UUID
+		return pair, r.Scan(&pair[0], &pair[1])
+	}, `SELECT t.id, t.project_id FROM tasks t WHERE t.id = ANY($1) AND EXISTS (
+			SELECT 1 FROM task_fields f WHERE f.project_id = t.project_id AND f.type = $2 AND `+softDelete.Live("f")+`)`, pq.Array(taskIDs), TypeFormula)
+	return read, func() (map[string]string, error) {
+		if read.Err != nil {
+			return nil, read.Err
+		}
+		out := make(map[string]string, len(pairs))
+		for _, pair := range pairs {
+			out[pair[0].String()] = pair[1].String()
+		}
 		return out, nil
 	}
-	pairs, err := pgexec.Query(ctx,
-		`SELECT t.id, t.project_id FROM tasks t WHERE t.id = ANY($1) AND EXISTS (
-			SELECT 1 FROM task_fields f WHERE f.project_id = t.project_id AND f.type = $2 AND `+softDelete.Live("f")+`)`,
-		func(r pgexec.Row) ([2]uuid.UUID, error) {
-			var pair [2]uuid.UUID
-			return pair, r.Scan(&pair[0], &pair[1])
-		},
-		pq.Array(taskIDs), TypeFormula)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/TaskField FormulaProjects err: %+v", err)
-		return nil, err
-	}
-	for _, pair := range pairs {
-		out[pair[0].String()] = pair[1].String()
-	}
-	return out, nil
 }
 
 // ValueOf is a task's value of a field, or nil when it has none.

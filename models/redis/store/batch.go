@@ -6,7 +6,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/akashc777/OneCamp/helpers"
 	redisInit "github.com/akashc777/OneCamp/initializers/redis"
@@ -57,6 +59,34 @@ func GetInt64Many(ctx context.Context, keys []CounterKey) ([]int64, []bool, erro
 		}
 	}
 	return vals, found, nil
+}
+
+// GetJSONMany is GetJSON for several keys in one MGET: keys[i]'s value is
+// decoded into dests[i] (each a non-nil pointer), and found[i] says whether
+// it was there. A miss, or a value that won't decode, is not found: the
+// caller loads that key its own way, as after a GetJSON miss. All misses when
+// Redis is unavailable.
+func GetJSONMany(ctx context.Context, keys []CounterKey, dests []interface{}) ([]bool, error) {
+	found := make([]bool, len(keys))
+	if len(dests) != len(keys) {
+		return found, fmt.Errorf("redis store: GetJSONMany has %d keys and %d targets", len(keys), len(dests))
+	}
+	res, err := mget(ctx, "GetJSONMany", keys)
+	if err != nil {
+		return found, err
+	}
+	for i, r := range res {
+		s, ok := r.(string)
+		if !ok {
+			continue
+		}
+		if err := json.Unmarshal([]byte(s), dests[i]); err != nil {
+			helpers.LogErrorWithContext(ctx, "redis store: GetJSONMany unmarshal failed key=%s err=%+v", keys[i].Spec.Build(keys[i].Args...), err)
+			continue
+		}
+		found[i] = true
+	}
+	return found, nil
 }
 
 // GetStringMany is GetString for several keys in one MGET: each value, and

@@ -77,6 +77,7 @@ const commentFields = `
 			user_full_name
 			user_email_id
 			user_profile_object_key
+			is_bot
 		}
 		comment_created_at
 		comment_updated_at`

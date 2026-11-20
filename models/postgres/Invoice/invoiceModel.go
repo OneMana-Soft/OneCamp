@@ -233,7 +233,8 @@ func Update(ctx context.Context, inv *Invoice) (*Invoice, error) {
 
 // SetStatus moves an invoice to a state, keeping when it was first sent and
 // when it was paid: a paid invoice taken back to sent is unpaid again; one
-// taken back to draft was never sent. A void invoice stays void.
+// taken back to draft was never sent. Void comes only from sent (ADMIN-17),
+// and a void invoice stays void.
 func SetStatus(ctx context.Context, projectID, id uuid.UUID, status string) (*Invoice, error) {
 	c, cancel := withTimeout(ctx)
 	defer cancel()
@@ -243,7 +244,7 @@ func SetStatus(ctx context.Context, projectID, id uuid.UUID, status string) (*In
 			paid_at = CASE WHEN $3::text = 'paid' THEN COALESCE(paid_at, NOW()) WHEN $3::text = 'void' THEN paid_at ELSE NULL END,
 			first_sent_at = CASE WHEN $3::text IN ('sent', 'paid') THEN COALESCE(first_sent_at, NOW()) ELSE first_sent_at END,
 			updated_at = NOW()
-		WHERE id = $1 AND project_id = $2 AND status <> 'void' AND `+softDelete.Live("")+`
+		WHERE id = $1 AND project_id = $2 AND status <> 'void' AND ($3::text <> 'void' OR status = 'sent') AND `+softDelete.Live("")+`
 		RETURNING `+columns, id, projectID, status))
 }
 

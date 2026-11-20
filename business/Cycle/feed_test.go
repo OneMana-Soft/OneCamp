@@ -180,3 +180,31 @@ func TestMakeFeedKeepsOnlyTheHashAndGivesTheLinkOnce(t *testing.T) {
 		t.Fatalf("kept %+v for the link %s", kept, raw)
 	}
 }
+
+// A member's link dialog knows the workspace has turned links off before
+// they make one: the read of their link to a project's cycles says whether
+// links are allowed now, with a link and without, and a link just made says so.
+func TestFeedSaysWhetherTheWorkspaceAllowsLinks(t *testing.T) {
+	saved, savedLive, savedMake := feedsAllowed, liveFeed, makeFeed
+	defer func() { feedsAllowed, liveFeed, makeFeed = saved, savedLive, savedMake }()
+	makeFeed = func(context.Context, cycleModel.Feed) error { return nil }
+	for _, live := range []bool{false, true} {
+		liveFeed = func(context.Context, uuid.UUID, uuid.UUID) (*cycleModel.Feed, error) {
+			if !live {
+				return nil, nil
+			}
+			return &cycleModel.Feed{CreatedAt: time.Now()}, nil
+		}
+		for _, on := range []bool{false, true} {
+			feedsAllowed = func(context.Context) bool { return on }
+			v, err := Feed(context.Background(), uuid.New(), uuid.New())
+			if err != nil || v.Live != live || v.LinksAllowed != on {
+				t.Errorf("live %v, links allowed %v: %+v %v", live, on, v, err)
+			}
+		}
+	}
+	feedsAllowed = func(context.Context) bool { return true }
+	if v, err := MakeFeed(context.Background(), uuid.New(), uuid.New()); err != nil || !v.LinksAllowed {
+		t.Fatalf("a link just made: %+v %v", v, err)
+	}
+}

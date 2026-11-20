@@ -19,6 +19,8 @@ package Calendar
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +43,12 @@ var (
 // movedKey records in the system config that the move into the one store has
 // finished on this install, after which the old stores are never read again.
 const movedKey = "calendar_store_moved"
+
+// movedRecord is the move's record (movedKey): what it moved and when it
+// finished, or nil before it has. Swapped in tests.
+var movedRecord = func(ctx context.Context) (*configModel.SystemConfig, error) {
+	return configModel.DoneRecord(ctx, movedKey)
+}
 
 // Timings of the move.
 const (
@@ -210,6 +218,13 @@ func init() {
 	// Every reader asks the one latch, read through moves when it is asked
 	// (a test puts its own in).
 	helpers.SetCalendarMoved(func() bool { return moves.movedNow() })
+	helpers.RegisterSystemCheck(helpers.SystemCheck{
+		Name: "calendar store",
+		Kind: helpers.CheckKindBehaviour,
+		Describe: "Says which store the calendar's events are kept and read in (the Event Model, or the graph it " +
+			"replaces), and when this install's events were moved into the Event Model. It moves nothing itself.",
+		Probe: storeProbe,
+	})
 	// So the move starts on the switch even when nobody opens the calendar:
 	// the push gate reads the store directly.
 	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "calendar.move", Every: time.Minute, Run: func(ctx context.Context) error {
@@ -221,4 +236,37 @@ func init() {
 		}
 		return nil
 	}})
+}
+
+// storeProbe is the "calendar store" system check: which store the events
+// are in, and the move's record, read once. Reads come from the Event Model
+// when it is on and the move is recorded (helpers.CalendarReadsFromStore's
+// rule), told here from the one record rather than asked again. Every answer
+// is a note: an install still in the graph, or still moving, is a choice or a
+// step, not a fault. Only a record that can't be read fails.
+func storeProbe(ctx context.Context) error {
+	rec, err := movedRecord(ctx)
+	if err != nil {
+		return fmt.Errorf("the calendar's move record couldn't be read: %w", err)
+	}
+	return helpers.SystemCheckNote(storeNote(helpers.CalendarInPostgres(), rec))
+}
+
+// storeNote says where the events are kept (inStore: the Event Model) and
+// when this install's were moved into it (rec, nil when they haven't been).
+// Pure.
+func storeNote(inStore bool, rec *configModel.SystemConfig) string {
+	moved := "they have not been moved into the Event Model"
+	if rec != nil {
+		moved = "they were moved into it on " + rec.UpdatedAt.UTC().Format("2 Jan 2006 15:04 UTC") + ": " +
+			strings.TrimSpace(strings.TrimPrefix(rec.Value, "done:"))
+	}
+	switch {
+	case !inStore:
+		return "Events are kept in the graph (" + helpers.CalendarStoreEnv + "=" + helpers.CalendarOldStores + "), and " + moved + "."
+	case rec == nil:
+		return "Events are kept in the Event Model, but reads still come from the graph: they have not been moved into it yet. " +
+			"The move is tried every minute, and writes wait for it."
+	}
+	return "Events are kept in the Event Model and read from it; " + moved + "."
 }

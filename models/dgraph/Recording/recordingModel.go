@@ -184,10 +184,10 @@ func SetFoundRecordingsFields(ctx context.Context, query string, variables map[s
 }
 
 // AddTranscriptToFound adds a transcript line to the one recording that query
-// collects into the variable named found, and answers whether it did. When it
-// collects none, nothing is written: uid() of an empty variable in a mutation
-// would make a new node.
-func AddTranscriptToFound(ctx context.Context, query string, variables map[string]string, found string, line *dgraphStruct.DgraphTranscript) (bool, error) {
+// collects into the variable named found, and answers the new line's uid
+// ("" when it added none). When it collects none, nothing is written: uid()
+// of an empty variable in a mutation would make a new node.
+func AddTranscriptToFound(ctx context.Context, query string, variables map[string]string, found string, line *dgraphStruct.DgraphTranscript) (string, error) {
 	named := *line
 	named.Uid = "_:line"
 	pb, err := json.Marshal(map[string]interface{}{
@@ -195,7 +195,7 @@ func AddTranscriptToFound(ctx context.Context, query string, variables map[strin
 		"recording_transcript": []*dgraphStruct.DgraphTranscript{&named},
 	})
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	resp, err := dgraphInit.DoCommitNow(ctx, &api.Request{
 		Query: query,
@@ -207,10 +207,9 @@ func AddTranscriptToFound(ctx context.Context, query string, variables map[strin
 	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/AddTranscriptToFound failed: %v", err)
-		return false, err
+		return "", err
 	}
-	_, added := resp.GetUids()["line"]
-	return added, nil
+	return resp.GetUids()["line"], nil
 }
 
 // QueryRecordingsJSON runs a read-only recordings query and answers its JSON,

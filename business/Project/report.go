@@ -11,12 +11,14 @@ package business
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"sort"
 	"strings"
 	"time"
 
 	estimateScale "github.com/akashc777/OneCamp/business/EstimateScale"
+	slaBusiness "github.com/akashc777/OneCamp/business/SLA"
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
@@ -423,7 +425,7 @@ func getReport(ctx context.Context, readerUID string, now time.Time, loc *time.L
 	}
 	taskKeys.Lay(ctx, tasks...)
 	in := insightIn{own: own, first: first, now: now, today: dayStart(now, loc), only: keep, statuses: statuses,
-		cycles: reportCycles(ctx, ids), scales: reportScales(ctx, ids)}
+		cycles: reportCycles(ctx, ids), scales: reportScales(ctx, ids), sla: reportSLA(ctx, ids)}
 	var capped bool
 	in.fields, capped = reportFields(ctx, readerUID, a, ids, projects, tasks)
 	r.Insights = buildInsights(projects, in)
@@ -440,6 +442,17 @@ func reportCycles(ctx context.Context, projects []uuid.UUID) map[string]cycleMod
 		helpers.LogErrorWithContext(ctx, "business/GetReport cycles err: %+v", err)
 	}
 	return cycles
+}
+
+// reportSLA is which of the projects the reader reads SLA state in: one
+// read. A guest reads none; a failed read costs the SLA slices, not the
+// report (fails closed).
+func reportSLA(ctx context.Context, projects []uuid.UUID) map[string]bool {
+	reads, err := slaBusiness.ReadsIn(ctx, projects)
+	if refused := (*slaBusiness.Refused)(nil); err != nil && !errors.As(err, &refused) {
+		helpers.LogErrorWithContext(ctx, "business/GetReport SLA err: %+v", err)
+	}
+	return reads
 }
 
 // reportScales is the estimate scale of each of the projects that has one,

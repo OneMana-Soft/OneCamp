@@ -66,12 +66,13 @@ var unsearchedKinds = []string{string(EventTaskBlock), string(EventWorkingLocati
 
 func init() {
 	outboxBusiness.Sinks.Register(outboxBusiness.Sink{Topic: searchTopic, Name: searchSink, Run: runSearchSink})
+	outboxBusiness.Sinks.Register(outboxBusiness.Sink{Topic: syncTopic, Name: syncSink, Run: func(ctx context.Context, ev outboxBusiness.Event) error {
+		return stored.runSyncSink(ctx, ev)
+	}})
 	resourceEventBusiness.Sinks.Register(resourceEventBusiness.Sink{
-		Name:  "calendar.search",
-		Wants: func(e resourceEventBusiness.Event) bool { return e.ResourceKind == KindEvent },
-		Run: func(ctx context.Context, e resourceEventBusiness.Event) {
-			SearchEntriesChanged(ctx, []string{e.ResourceUUID})
-		},
+		Name:   "calendar.search",
+		Wants:  func(e resourceEventBusiness.Event) bool { return e.ResourceKind == KindEvent },
+		Run:    eventChangedSink,
 		InBulk: true,
 	})
 	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "calendar.search", Every: 24 * time.Hour, RunAtStart: true, Run: WriteEverySearchEntry})
@@ -95,12 +96,39 @@ var (
 // removes events asks in its own transaction instead (searchEntriesChangedIn).
 func SearchEntriesChanged(ctx context.Context, ids []string) {
 	keys := searchKeys(ids)
+	enqueueEntries(ctx, keys, searchEntriesFor(keys))
+}
+
+// eventsChanged is SearchEntriesChanged for a change made here (an edit, an
+// import) by or for people: with each event's sync entry (syncEntriesFor) in
+// the same write when one of them has a two-way link in step (anyLinked), so
+// the owner's linked calendars have it at once. A change read from a
+// provider or an address asks for search alone: it came from there.
+func eventsChanged(ctx context.Context, ids, people []string) {
+	keys := searchKeys(ids)
 	es := searchEntriesFor(keys)
+	if anyLinked(people) {
+		es = append(es, syncEntriesFor(keys)...)
+	}
+	enqueueEntries(ctx, keys, es)
+}
+
+// eventChangedSink is the calendar.search resource-event sink: an event's
+// change asks for its entries; the people it names (its actor, its
+// subjects: the owner among them when it is theirs) decide its sync entry.
+func eventChangedSink(ctx context.Context, e resourceEventBusiness.Event) {
+	eventsChanged(ctx, []string{e.ResourceUUID}, append([]string{e.Actor.UserUUID}, e.Subjects...))
+}
+
+// enqueueEntries asks for es, the entries of the events keys name, in one
+// write; it never fails the caller (tonight's pass writes the search
+// entries, the minute's sweep sends the changes).
+func enqueueEntries(ctx context.Context, keys []string, es []outboxBusiness.Entry) {
 	if len(es) == 0 {
 		return
 	}
 	if err := enqueueSearch(ctx, es...); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Calendar: the search entries of %d events weren't asked for, so tonight's pass writes them: %v", len(keys), err)
+		helpers.LogErrorWithContext(ctx, "business/Calendar: the entries of %d events weren't asked for, so tonight's pass writes their search and the minute's sweep sends them: %v", len(keys), err)
 	}
 }
 
@@ -110,9 +138,12 @@ func SearchEntriesChanged(ctx context.Context, ids []string) {
 // can't be removed with its entry left behind because the process stopped
 // between the two. The entry of an event that is gone is deleted when the
 // sink runs (writeSearchEntries). The caller hands the answered events to
-// searchEntriesAsked once its transaction has committed.
+// searchEntriesAsked once its transaction has committed. It asks for no sync
+// entry: its one caller (purgeRemovable) deletes the events, so a delivery
+// would find nothing to send.
 func searchEntriesChangedIn(ctx context.Context, ids []string) ([]int64, error) {
-	es := searchEntriesFor(searchKeys(ids))
+	keys := searchKeys(ids)
+	es := searchEntriesFor(keys)
 	if len(es) == 0 {
 		return nil, nil
 	}
@@ -361,7 +392,8 @@ func searchEntryOf(e *models.Event, guests []models.Attendee, cal models.Calenda
 // their own and their invitations, as the grid shows them (hiddenFrom): every
 // event on those they may change (all), and the events that aren't private on
 // those they only see (open). None while the calendar isn't read from its
-// store.
+// store. Its rows are kept between searches (searchReach); who may see each
+// container's is asked every time.
 func SearchCalendars(ctx context.Context, who accessBusiness.Subject) (all, open []string, err error) {
 	if !helpers.CalendarReadsFromStore() {
 		return nil, nil, nil
@@ -377,7 +409,11 @@ func (s *service) searchCalendars(ctx context.Context, who accessBusiness.Subjec
 	if err := s.ready(ctx); err != nil {
 		return nil, nil, err
 	}
-	seen, decided, err := s.seenCalendars(ctx, who, me)
+	mine, containers, err := s.searchReach(ctx, me)
+	if err != nil {
+		return nil, nil, err
+	}
+	seen, decided, err := s.seenOf(ctx, who, mine, containers)
 	if err != nil {
 		return nil, nil, err
 	}

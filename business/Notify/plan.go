@@ -6,6 +6,8 @@ import (
 	"slices"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 )
 
@@ -40,24 +42,40 @@ func deliveriesOf(c Cause) []Delivery {
 	return []Delivery{ToInbox, ToBadge, ToPush, ToDesktop, ToSound}
 }
 
+// GroupEmailMost is the most people, its author too, a group's message is
+// emailed to each of as a DM is: in a bigger group, as in a channel, only
+// those it names or answers are emailed, while everyone still hears it in
+// the app. The people are counted, whatever the place says it is (a DM is
+// two): those the message is to, or every member of the conversation now,
+// a bot member too; a removed member isn't, and the author counts once.
+const GroupEmailMost = 9
+
+// peopleIn is how many people ids are with actor, who may be among them. Pure.
+func peopleIn(ids []string, actor string) int {
+	if slices.ContainsFunc(ids, func(id string) bool { return key(id) == key(actor) }) {
+		return len(ids)
+	}
+	return len(ids) + 1
+}
+
 // holdable is what a hold keeps back: email until it ends, the rest for good.
 func holdable(d Delivery) bool {
 	return d == ToPush || d == ToDesktop || d == ToSound || d == ToEmail
 }
 
-// levelLets is whether a setting for the place lets a cause through:
-// "Everything" all of them, "Mentions and threads" all but a DM's or a
-// channel's plain message and a call, "Nothing" (muted) none. Pure. It is
-// the one copy of the rule: the database's eligibility query that restated
-// it went with A4 H2, when every chat site came to ask Plan.
-func levelLets(level string, c Cause) bool {
-	switch level {
-	case "all":
-		return true
-	case "mention":
-		return c != CauseAllPosts && c != CauseDM && c != CauseCall
+// heardOf is what a cause is to the person it would tell, for the one level
+// rule (business/NotifyLevel Lets): a DM's or a channel's plain message and
+// a call are for everyone there; a mention and a reply to their message are
+// for them; the rest (a thread they are in, a broadcast, a team, a keyword,
+// a reaction) is something they are in. Pure.
+func heardOf(c Cause) notifylevel.Heard {
+	switch c {
+	case CauseAllPosts, CauseDM, CauseCall:
+		return notifylevel.Plain
+	case CauseMention, CauseReplyToYou:
+		return notifylevel.Named
 	}
-	return false
+	return notifylevel.Thread
 }
 
 var errNoAsker = errors.New("business/Notify Explain: nobody asked")
@@ -120,7 +138,9 @@ func (r router) plan(ctx context.Context, ev Event, only string) ([]Decision, Tr
 		return ds, tr, err
 	}
 
-	// 1. The audience, by cause.
+	// 1. The audience, by cause. bigGroup is a DM's or a group's message to
+	// more people than GroupEmailMost.
+	var bigGroup bool
 	byID := map[string]*candidate{}
 	var order []*candidate
 	add := func(ids []string, c Cause) {
@@ -143,6 +163,16 @@ func (r router) plan(ctx context.Context, ev Event, only string) ([]Decision, Tr
 	p := ev.Place
 	inThread := p.ThreadRootID != ""
 	var follows notificationBusiness.Follows
+	// held is the levels the place's people came with (Members), by
+	// lower-case id: access reads only those of the rest.
+	held := map[string]string{}
+	members := func() ([]string, error) {
+		ids, levels, err := r.in.Members(ctx, p)
+		for id, level := range levels {
+			held[key(id)] = level
+		}
+		return ids, err
+	}
 	switch {
 	case ev.Cause == CauseReaction:
 		add([]string{ev.Author}, CauseReaction)
@@ -151,26 +181,28 @@ func (r router) plan(ctx context.Context, ev Event, only string) ([]Decision, Tr
 		// (TellAddedMentions).
 		add(ev.Mentions, CauseMention)
 	case ev.Cause == CauseCall:
-		// A call rings those who hear everything where it started.
-		ids, err := r.in.Members(ctx, p)
+		// A call rings the people where it started who hear everything
+		// there (the preference step's Lets).
+		ids, err := members()
 		if err != nil {
 			return nil, tr, err
 		}
 		add(ids, CauseCall)
 	default:
 		// A DM's or a group's message is to its people: as the site has
-		// them, or those who hear everything there (one on "Mentions and
-		// threads" hears only what names them). Its thread's replies are
-		// the thread's people's.
+		// them, or everyone in it (the preference step keeps those who hear
+		// everything there; one on "Mentions and threads" hears only what
+		// names them). Its thread's replies are the thread's people's.
 		if (p.Kind == PlaceDM || p.Kind == PlaceGroup) && !inThread {
 			ids := ev.Audience
 			if len(ids) == 0 {
 				var err error
-				if ids, err = r.in.Members(ctx, p); err != nil {
+				if ids, err = members(); err != nil {
 					return nil, tr, err
 				}
 			}
 			add(ids, CauseDM)
+			bigGroup = peopleIn(ids, ev.Actor) > GroupEmailMost
 		}
 		add(ev.Mentions, CauseMention)
 		add([]string{ev.Author}, CauseReplyToYou)
@@ -206,7 +238,7 @@ func (r router) plan(ctx context.Context, ev Event, only string) ([]Decision, Tr
 			add(ids, CauseKeyword)
 		}
 		if p.Kind == PlaceChannel && !inThread {
-			ids, err := r.in.Members(ctx, p)
+			ids, err := members()
 			if err != nil {
 				return nil, tr, err
 			}
@@ -219,15 +251,24 @@ func (r router) plan(ctx context.Context, ev Event, only string) ([]Decision, Tr
 	}
 	note("audience", "in", order[0].causes...)
 
-	// 2. Access: one read of everyone's setting for the place, which only
-	// those in it now have.
-	ids := make([]string, len(order))
-	for i, c := range order {
-		ids[i] = c.id
+	// 2. Access: everyone's setting for the place, which only those in it
+	// now have: the place's people came with theirs, and the rest are read
+	// in one read, when there are any.
+	var ids []string
+	for _, c := range order {
+		if _, ok := held[key(c.id)]; !ok {
+			ids = append(ids, c.id)
+		}
 	}
-	levels, err := r.in.Levels(ctx, p, ids)
-	if err != nil {
-		return nil, tr, err
+	levels := held
+	if len(ids) > 0 {
+		read, err := r.in.Levels(ctx, p, ids)
+		if err != nil {
+			return nil, tr, err
+		}
+		for id, level := range read {
+			levels[key(id)] = level
+		}
 	}
 	var ds []Decision
 	var kept []*candidate
@@ -242,8 +283,15 @@ func (r router) plan(ctx context.Context, ev Event, only string) ([]Decision, Tr
 		}
 		note("access", "in_place")
 		c.level = level
-		// 3. One cause a person: the strongest.
-		c.cause = strongest(c.causes)
+		// 3. One cause a person: the strongest their level lets them hear
+		// (NotifyLevel Lets), so a group's message that names someone on
+		// "Mentions" reaches them as the mention; when it lets none, the
+		// strongest, which the preference step refuses by their level.
+		if c.cause = strongest(slices.DeleteFunc(slices.Clone(c.causes), func(k Cause) bool {
+			return !notifylevel.Lets(level, heardOf(k))
+		})); c.cause == "" {
+			c.cause = strongest(c.causes)
+		}
 		note("cause", "chosen", c.cause)
 		kept = append(kept, c)
 	}
@@ -270,20 +318,26 @@ func (r router) plan(ctx context.Context, ev Event, only string) ([]Decision, Tr
 			if !told[key(c.id)] {
 				verdict = "thread_setting"
 			}
-		case !levelLets(c.level, c.cause):
+		case !notifylevel.Lets(c.level, heardOf(c.cause)):
 			verdict = "level_" + c.level
 		}
 		note("preference", verdict)
 		if verdict == "kept" {
-			heard = append(heard, Decision{UserID: c.id, Cause: c.cause, To: deliveriesOf(c.cause)})
+			to := deliveriesOf(c.cause)
+			if bigGroup && !slices.Contains(c.causes, CauseMention) && !slices.Contains(c.causes, CauseReplyToYou) {
+				to = slices.DeleteFunc(to, func(d Delivery) bool { return d == ToEmail })
+			}
+			heard = append(heard, Decision{UserID: c.id, Cause: c.cause, To: to})
 		}
 	}
 
 	// 5. The hold.
-	heard, err = r.hold(ctx, ev, heard, note)
+	heard, err := r.hold(ctx, ev, heard, note)
 	if err != nil {
 		return nil, tr, err
 	}
+	// 6. The wait.
+	heard = r.wait(ctx, ev, heard, note)
 	return append(heard, ds...), tr, nil
 }
 
@@ -354,6 +408,55 @@ func (r router) hold(ctx context.Context, ev Event, ds []Decision, note func(str
 		}
 	}
 	return ds, nil
+}
+
+// wait is step 6 (A4 H4, "the phone waits while you're in OneCamp"): a chat
+// push to someone in OneCamp waits their push delay, so it isn't sent when
+// they read the message first, while the desktop notice, inbox, badge, sound
+// and email go as decided. A hold beats a wait (a held push is never sent),
+// and Notify anyway, a delay of 0, someone not in OneCamp and a thread reply
+// (threads have no read marker yet, so nothing could cancel its wait) push
+// now; a site's event never comes here. One read of who waits how long, for
+// those whose push could wait alone. A read that fails pushes now, logged: a
+// wait is never worth a notice.
+func (r router) wait(ctx context.Context, ev Event, ds []Decision, note func(string, string, ...Cause)) []Decision {
+	if ev.Place.Kind == "" || ev.Place.ThreadRootID != "" {
+		return ds
+	}
+	anyway := map[string]bool{}
+	for _, id := range ev.Anyway {
+		anyway[key(id)] = true
+	}
+	mayWait := func(d Decision) bool {
+		return len(d.Held) == 0 && !anyway[key(d.UserID)] && slices.Contains(d.To, ToPush)
+	}
+	var ask []string
+	for _, d := range ds {
+		if mayWait(d) {
+			ask = append(ask, d.UserID)
+		}
+	}
+	if len(ask) == 0 {
+		return ds
+	}
+	waits, err := r.in.Waits(ctx, ask)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Notify Plan %s: could not read who is in OneCamp, pushing now: %+v", ev.ID, err)
+		return ds
+	}
+	now := r.now()
+	for i := range ds {
+		d := &ds[i]
+		w := waits[key(d.UserID)]
+		if !mayWait(*d) || !w.Here || w.Delay <= 0 {
+			continue
+		}
+		till := now.Add(w.Delay)
+		d.To = slices.DeleteFunc(slices.Clone(d.To), func(x Delivery) bool { return x == ToPush })
+		d.Waiting, d.WaitTill = []Delivery{ToPush}, &till
+		note("wait", "in_onecamp")
+	}
+	return ds
 }
 
 // sitePlan is an event whose site decided who hears (the calendar's): those

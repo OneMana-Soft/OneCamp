@@ -8,6 +8,7 @@ package business
 import (
 	"context"
 	"strings"
+	"sync"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
@@ -29,9 +30,56 @@ var (
 )
 
 // logChange reports changes to tasks to the Work Change Log: once per
-// write, after it is stored. by nil takes the request's reader.
+// write, after it is stored. by nil takes the request's reader. Inside a
+// heldChanges (MoveTask) they wait to be logged with the rest of it, once.
 func logChange(ctx context.Context, by *dgraphStruct.DgraphUser, changes ...workFeed.TaskChange) {
+	if h, ok := ctx.Value(heldChangesKey{}).(*heldChanges); ok && h.hold(userUUIDOf(by), changes) {
+		return
+	}
 	recordTasks(ctx, userUUIDOf(by), changes...)
+}
+
+type heldChangesKey struct{}
+
+// heldChanges is the changes one act makes in several writes (a board drag:
+// its status, then its place), logged together in one Record, in the order
+// they were made, each by whoever made it: the same entries as one log each.
+type heldChanges struct {
+	mu      sync.Mutex
+	changes []workFeed.TaskChange
+	done    bool
+}
+
+// holdChanges is ctx holding the changes logged through it until log, which
+// logs them once; a change logged after (what the act set going) is logged
+// at once, as it always was.
+func holdChanges(ctx context.Context) (held context.Context, log func()) {
+	h := &heldChanges{}
+	return context.WithValue(ctx, heldChangesKey{}, h), func() {
+		h.mu.Lock()
+		changes := h.changes
+		h.changes, h.done = nil, true
+		h.mu.Unlock()
+		if len(changes) > 0 {
+			recordTasks(ctx, "", changes...)
+		}
+	}
+}
+
+// hold keeps changes by by, unless the changes were already logged.
+func (h *heldChanges) hold(by string, changes []workFeed.TaskChange) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.done {
+		return false
+	}
+	for _, c := range changes {
+		if c.By == "" {
+			c.By = by
+		}
+		h.changes = append(h.changes, c)
+	}
+	return true
 }
 
 // changeSight is which rows who may see, by number: a task's change when

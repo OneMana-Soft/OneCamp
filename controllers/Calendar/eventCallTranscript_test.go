@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"testing"
+	"time"
 
 	business "github.com/akashc777/OneCamp/business/Calendar"
 	"github.com/akashc777/OneCamp/helpers"
@@ -25,8 +26,9 @@ import (
 // another event is not found; a graph that doesn't answer is "try again".
 func TestOnlyWhoMayReadAnEventReadsItsCallsTranscript(t *testing.T) {
 	ev, maya, sam := uuid.New(), uuid.New(), uuid.New()
-	wasEvents, wasTranscript := business.Events, eventTranscript
-	t.Cleanup(func() { business.Events, eventTranscript = wasEvents, wasTranscript })
+	wasEvents, wasTranscript, wasOpen := business.Events, eventTranscript, transcriptOpenTo
+	t.Cleanup(func() { business.Events, eventTranscript, transcriptOpenTo = wasEvents, wasTranscript, wasOpen })
+	transcriptOpenTo = func(context.Context, string, string, string, *time.Time) bool { return true }
 	business.Events = artefactKeysOnly{keys: func(who *model.UserInfo, id string) (business.CallKeys, error) {
 		if id != "e1" || who.UserPostgresInfo.Id != maya {
 			return business.CallKeys{}, business.ErrEventNotFound

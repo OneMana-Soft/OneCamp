@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
+	messageDomain "github.com/akashc777/OneCamp/domain/Message"
 	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
 	"time"
 
@@ -63,12 +64,30 @@ func resolveReplyParentPost(ctx context.Context, replyToUUID string, channelUUID
 }
 
 func CreatePost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostInfo, userInfo *userModels.UserInfo, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel) (createdPostInfo *adapter.OutputCreatePostForPost, err error) {
+	createdPostInfo, _, err = createPost(ctx, postInfo, userInfo, mentionsDgraphUsersList, dgraphChannelInfo, false)
+	return
+}
+
+// CreatePostReadBySender is CreatePost for its author writing in the channel
+// (Send's ChannelPost.Commit): the post's row and the author's read mark up to
+// now go in one statement, and it says whether the mark was written. One that
+// fails is tried again as the row alone, and the caller marks as before.
+func CreatePostReadBySender(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostInfo, userInfo *userModels.UserInfo, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel) (createdPostInfo *adapter.OutputCreatePostForPost, marked bool, err error) {
+	return createPost(ctx, postInfo, userInfo, mentionsDgraphUsersList, dgraphChannelInfo, true)
+}
+
+func createPost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostInfo, userInfo *userModels.UserInfo, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel, readBySender bool) (createdPostInfo *adapter.OutputCreatePostForPost, marked bool, err error) {
 
 	// create channel uuid
 	postUUID := uuid.New()
 
 	// create channel in postgres
-	err = domain.CreatePost(ctx, postUUID, userInfo.UserPostgresInfo.Id, postInfo.ChannelUUID)
+	if readBySender {
+		marked = domain.CreatePostReadBySender(ctx, postUUID, userInfo.UserPostgresInfo.Id, postInfo.ChannelUUID, time.Now()) == nil
+	}
+	if !marked {
+		err = domain.CreatePost(ctx, postUUID, userInfo.UserPostgresInfo.Id, postInfo.ChannelUUID)
+	}
 
 	// CreateTimeOrNow honours the import-time backdating override when
 	// it's in effect (Slack import) so Postgres + Dgraph + OpenSearch
@@ -188,8 +207,9 @@ func fanOutCreatedPost(ctx context.Context, postUUID uuid.UUID, postInfo *adapte
 		if replyParentPost != nil && replyParentPost.PostBy != nil {
 			replyToAuthorUUID = replyParentPost.PostBy.Uuid
 		}
+		notifyCtx := helpers.ImportTimeOnly(ctx) // a seeded or imported post is told of as of its time
 		helpers.GoSafeNamed("post.notify", func() {
-			notifyPost(context.Background(), pushTitle, plainText, postInfo.HTMLText, postInfo.ChannelUuid, mentionsDgraphUsersList, dgraphChannelInfo, postUUID.String(), &userInfo.UserDgraphInfo, replyToAuthorUUID, nil)
+			notifyPost(notifyCtx, pushTitle, plainText, postInfo.HTMLText, postInfo.ChannelUuid, mentionsDgraphUsersList, dgraphChannelInfo, postUUID.String(), &userInfo.UserDgraphInfo, replyToAuthorUUID, nil)
 		})
 
 		// Dispatch the workspace event (outgoing webhooks + in-process
@@ -602,7 +622,7 @@ func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 		// Push, email and the live Activity items, to one audience: the
 		// thread's people who are in the channel now. A bulk import, which
 		// writes years of replies, tells nobody.
-		go commentBusiness.NotifyThreadReply(commentBusiness.ThreadReply{
+		go commentBusiness.NotifyThreadReply(helpers.ImportTimeOnly(ctx), commentBusiness.ThreadReply{
 			By:          &userInfo.UserDgraphInfo,
 			Post:        dgraphPostInfo,
 			CommentUUID: commentUUID.String(),
@@ -777,7 +797,7 @@ func DeletePost(ctx context.Context, rawDgraphPost *dgraphStruct.DgraphPost, cha
 // GetOldPosts is the page of a channel's posts before edge (helpers.PageEdge).
 func GetOldPosts(ctx context.Context, channelId string, edge helpers.PageEdge) (posts PostPagination, err error) {
 
-	dgraphPosts, err := domain.GetDgraphOldPostFromDgraph(ctx, channelId, edge.Before())
+	dgraphPosts, err := domain.PostPage(ctx, channelId, messageDomain.Older, edge.Before())
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -795,7 +815,7 @@ func GetOldPosts(ctx context.Context, channelId string, edge helpers.PageEdge) (
 func postUUIDOf(p *dgraphStruct.DgraphPost) string { return p.Uuid }
 
 func GetDgraphNewPostIncludiongPostFromDgraph(ctx context.Context, channelUUID string, lastPostTime *time.Time) (posts PostPagination, err error) {
-	dgraphPosts, err := domain.GetDgraphNewPostIncludiongPostFromDgraph(ctx, channelUUID, lastPostTime)
+	dgraphPosts, err := domain.PostPage(ctx, channelUUID, messageDomain.NewerFrom, *lastPostTime)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -833,7 +853,7 @@ func GetDgraphPostOnlyTextDgraph(ctx context.Context, postUUID string) (dgraphPo
 // GetNewPosts is the page of a channel's posts after edge (helpers.PageEdge).
 func GetNewPosts(ctx context.Context, channelId string, edge helpers.PageEdge) (posts PostPagination, err error) {
 
-	dgraphPosts, err := domain.GetDgraphNewPostFromDgraph(ctx, channelId, edge.After())
+	dgraphPosts, err := domain.PostPage(ctx, channelId, messageDomain.Newer, edge.After())
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -853,7 +873,7 @@ func GetNewPosts(ctx context.Context, channelId string, edge helpers.PageEdge) (
 // said there was none, and a long channel looked as if it began at its tenth
 // newest post.
 func GetLatestPosts(ctx context.Context, channelId string) (posts PostPagination, err error) {
-	dgraphPosts, err := domain.GetDgraphLatestPostFromDgraph(ctx, channelId)
+	dgraphPosts, err := domain.PostPage(ctx, channelId, messageDomain.Latest, time.Time{})
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

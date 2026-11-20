@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/akashc777/OneCamp/models/taskread"
+	taskReadGeneration "github.com/akashc777/OneCamp/models/taskread/generation"
 	"github.com/google/uuid"
 	"golang.org/x/net/context"
 )
@@ -24,6 +25,12 @@ func RequestIDMiddleware(next http.Handler) http.Handler {
 		// tasks are worked out once however many reads it makes
 		// (models/taskread).
 		ctx = taskread.Install(ctx)
+		// Only a read may be decided from the kept rows (H2); every other
+		// method decides who may see a task from the rows themselves, so a
+		// write is never let in by a stale entry (models/taskread/generation).
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			ctx = taskReadGeneration.Cacheable(ctx)
+		}
 
 		// Call the next handler in the chain.
 		next.ServeHTTP(w, r.WithContext(ctx))

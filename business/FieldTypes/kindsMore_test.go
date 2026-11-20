@@ -286,3 +286,13 @@ func TestATickIsReadAsPeopleWriteIt(t *testing.T) {
 		}
 	}
 }
+
+// EveryItemKind, the one list a refusal of many kinds of item names, names
+// each kind a relation can link to (CR-374 NB4: channels and calls were missing).
+func TestEveryItemKindNamesEachKind(t *testing.T) {
+	for kind, label := range ItemKinds {
+		if !strings.Contains(EveryItemKind, label) {
+			t.Errorf("EveryItemKind %q doesn't name %s (%s)", EveryItemKind, label, kind)
+		}
+	}
+}

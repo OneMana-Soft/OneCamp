@@ -34,11 +34,13 @@ import (
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	customMiddleware "github.com/akashc777/OneCamp/middleware"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
 func TestNotFoundOrFault(t *testing.T) {
+	t.Setenv("JWT_SECRET", "not-found-or-fault-integration-secret")
 	ctx := context.Background()
 	env := integration.SetupEnv(t)
 	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
@@ -131,9 +133,37 @@ func TestNotFoundOrFault(t *testing.T) {
 		t.Errorf("the collaboration service reading a doc that doesn't exist: %d %s, want 404", code, body)
 	}
 
+	// A session refresh asks Postgres who its token names (V-1125): sam's
+	// passes, and a token naming nobody is refused.
+	refresh := func(id uuid.UUID) int {
+		t.Helper()
+		token, err := helpers.SignSessionToken(id.String(), helpers.TokenTypeRefresh, time.Now().Add(5*time.Minute).Unix())
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/refreshToken", nil)
+		req.AddCookie(&http.Cookie{Name: "RefreshToken", Value: token})
+		rec := httptest.NewRecorder()
+		customMiddleware.VerifyRefreshToken(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})).ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if code := refresh(sam); code != http.StatusOK {
+		t.Fatalf("the fixture is wrong: sam's refresh is refused (%d), so the fault below proves nothing", code)
+	}
+	if code := refresh(uuid.New()); code != http.StatusUnauthorized {
+		t.Errorf("a refresh naming nobody: %d, want 401", code)
+	}
+
 	// Postgres stops answering: the message isn't "deleted".
 	if err := postgresInit.DBConn.SqlDB.Close(); err != nil {
 		t.Fatal(err)
+	}
+	// Nor is the session refused: the web signs a device out on a refresh's
+	// 401, so a fault answers 503 and the refresh is tried again.
+	if code := refresh(sam); code != http.StatusServiceUnavailable {
+		t.Errorf("a session refresh while Postgres doesn't answer: %d, want 503 (a 401 signs the device out)", code)
 	}
 	if code, body := editPost(); code != http.StatusInternalServerError {
 		t.Errorf("editing a message while Postgres doesn't answer: %d %s, want 500", code, body)

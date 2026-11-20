@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -27,13 +28,13 @@ func TestAManualPage(t *testing.T) {
 		}
 		return strings.Join(out, ",")
 	}
-	if got := uidsOf(manualPage(places, 2, 1, false)); got != "0x4,0x3" {
+	if got := uidsOf(sidePage(dgraphquery.ManualOrder, places, nil, 2, 1, false)); got != "0x4,0x3" {
 		t.Fatalf("page 2 is %v", got)
 	}
-	if got := uidsOf(manualPage(places, 2, 0, true)); got != "0x2,0x1,0x4,0x3" {
+	if got := uidsOf(sidePage(dgraphquery.ManualOrder, places, nil, 2, 0, true)); got != "0x2,0x1,0x4,0x3" {
 		t.Fatalf("all is %v", got)
 	}
-	if past := manualPage(places, 2, 5, false); len(past) != 0 {
+	if past := sidePage(dgraphquery.ManualOrder, places, nil, 2, 5, false); len(past) != 0 {
 		t.Fatalf("past the end is %v", past)
 	}
 	if f := uidFilter("eq(task_status, \"todo\")", []string{"0x4", "0x3"}); f != `eq(task_status, "todo") AND uid(0x4, 0x3)` {

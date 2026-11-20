@@ -26,12 +26,21 @@ import (
 // back. The words are shown with the task's sync state.
 var errOutsideProject = errors.New("this task's GitHub link is in a repository its project isn't linked to, so nothing was sent or read")
 
-// The two reads that tell which link reaches a task: the project the task is
-// in, and the repositories that project links. Package variables, so a test
-// can count them.
+// errNothingToSend is a task's GitHub link to a repository its own project
+// links offline (githubLinkModel.Online: no installation, no webhook secret,
+// no sync, the demo's fixture link, V-841): there is nothing to reach GitHub
+// with, so a sync of the task sends nothing, reads nothing and is done. Its
+// callers answer nil for it and leave the task's sync state as it was.
+var errNothingToSend = errors.New("this task's GitHub link is in a repository its project links offline, so there is nothing to send")
+
+// The reads that tell which link reaches a task: the project the task is in,
+// and the repositories that project links, online (every reader's), or
+// offline ones too (syncReach's, and the start's repair's). Package
+// variables, so a test can count them.
 var (
-	readTaskProject  = taskDomain.GetTaskProjectID
-	readProjectLinks = GetLinkedRepos
+	readTaskProject     = taskDomain.GetTaskProjectID
+	readProjectLinks    = GetLinkedRepos
+	readAllProjectLinks = githubLinkModel.GetLinksForRepair
 )
 
 // eventReads is what one GitHub event has read of the tasks it names: the
@@ -259,23 +268,57 @@ func repoLink(links []*githubLinkModel.GitHubLink, owner, name string) *githubLi
 	return nil
 }
 
-// syncAllowed is nil when owner/name is a repository the task's own project
-// linked, so its sync may send there or read from there. Otherwise it marks
-// the task's sync failed, saying why, and answers errOutsideProject, or the
-// read's error when that can't be told.
+// syncReach is where a sync of the task may go in owner/name: nil when the
+// task's own project, as projectOf reads it, links the repository online, so
+// the sync may send there and read from there; errNothingToSend when the
+// project's link there is offline; errOutsideProject when the project links
+// nothing there (another project's link, online or offline, is not its
+// project's, nor is anything a task in no project names); or a read's error.
+// The task's project is read once, and its offline links only when its online
+// ones have no link there.
+func syncReach(ctx context.Context, projectOf func(context.Context, uuid.UUID) (uuid.UUID, error), taskID uuid.UUID, owner, name string) error {
+	projectID, err := projectOf(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if projectID == uuid.Nil {
+		return errOutsideProject
+	}
+	links, err := projectLinks(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if repoLink(links, owner, name) != nil {
+		return nil
+	}
+	links, err = readAllProjectLinks(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if repoLink(links, owner, name) != nil {
+		return errNothingToSend
+	}
+	return errOutsideProject
+}
+
+// syncAllowed is syncReach for the task's project, a deleted task's
+// included: nil when its sync may send to owner/name or read from there, and
+// errNothingToSend, touching nothing, when the project's link there is
+// offline. Otherwise it marks the task's sync failed, saying why, and
+// answers errOutsideProject, or the read's error when that can't be told.
 //
 // A deleted task's project is its project still: deleting a task sends its
 // issue the task's last change, closing it as not planned. Read as live
 // tasks are, a deleted one was refused as outside its project, and its
 // issue stayed open.
 func syncAllowed(ctx context.Context, taskID uuid.UUID, owner, name string) error {
-	link, err := projectRepoLink(ctx, taskDomain.GetTaskProjectIDDeletedToo, taskID, owner, name)
-	if err == nil && link != nil {
-		return nil
+	err := syncReach(ctx, taskDomain.GetTaskProjectIDDeletedToo, taskID, owner, name)
+	if err == nil || errors.Is(err, errNothingToSend) {
+		return err
 	}
 	reason := "couldn't check the task's project"
-	if err == nil {
-		err, reason = errOutsideProject, errOutsideProject.Error()
+	if errors.Is(err, errOutsideProject) {
+		reason = errOutsideProject.Error()
 	}
 	_ = taskDomain.SetGitHubSyncStatus(ctx, taskID, "failed", &reason, 1)
 	return err

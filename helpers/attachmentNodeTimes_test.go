@@ -134,6 +134,7 @@ type guardedUpdate struct{ by, text, why string }
 // notNodes make a DgraphAttachment that is never written as a node.
 var notNodes = map[string]string{
 	"business/Thread/docResource.go::clientFields": "the files a doc comment shows, sent as JSON with its thread",
+	"business/TriageMail/poll.go::files":           "a message's attachments, handed to business/TaskWriter as the form's are, whose task write runs OwnFiles and NewAttachments",
 	"business/Form/files.go::claimFiles":           "a form's uploads, handed to business/TaskWriter, whose task write runs OwnFiles and NewAttachments",
 }
 

@@ -38,7 +38,7 @@ func TestEachCallKeepsItsSessionThenItsRecordingsOnce(t *testing.T) {
 		"d1": [{"dm_recording": [{"recording_egress_id": "EG_dm", "recording_stared_at": "2026-11-06T09:05:00Z"}]}],
 		"s2": [], "c2": [{}], "d2": []
 	}`)
-	got, err := parseCallArtefacts(raw, calls)
+	got, err := parseCallArtefacts(t.Context(), raw, calls)
 	if err != nil {
 		t.Fatal(err)
 	}

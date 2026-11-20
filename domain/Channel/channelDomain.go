@@ -161,38 +161,106 @@ func UpdateChannelInfo(ctx context.Context, channelName string, channelPrivate b
 	return
 }
 
-// SetChannelPostPolicy updates a channel's posting policy in Postgres + Dgraph
-// and invalidates the basic-info cache so the change takes effect immediately.
-func SetChannelPostPolicy(ctx context.Context, channelUUID uuid.UUID, policy string) (err error) {
-	affected, err := models.SetChannelPostPolicy(channelUUID, policy)
-	if err != nil {
+// postPolicySet changes a live channel's post policy and answers the policy it
+// replaced, in one statement: the CTE locks the row and reads its policy before
+// the UPDATE writes. FOR NO KEY UPDATE is the lock the UPDATE takes anyway: it
+// orders two changes to one channel's row, while a new post in the channel
+// (whose foreign key takes FOR KEY SHARE) goes on during the graph write below.
+const postPolicySet = `
+	WITH prior AS (
+		SELECT id, post_policy FROM channels WHERE id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE
+	)
+	UPDATE channels SET post_policy = $1, updated_at = NOW()
+	FROM prior WHERE channels.id = prior.id
+	RETURNING prior.post_policy`
+
+// postPolicyGraphTimeout bounds the graph write SetChannelPostPolicy makes while
+// it holds the channel's row, so the lock is never held longer. One upsert
+// answers in milliseconds; 3 s is what one Postgres statement gets
+// (postgresInit's dbTimeout), and it keeps a second change to the channel,
+// which waits for the row and then makes its own graph write, inside
+// pgexec.TxTimeout.
+const postPolicyGraphTimeout = 3 * time.Second
+
+// SetChannelPostPolicy updates a channel's posting policy in Postgres and its
+// graph node, and drops the basic-info cache so the change takes effect at once.
+//
+// The check made when someone posts reads the graph (GetBasicDgraphChannelInfoByUUID)
+// and other paths read Postgres, so the two must not disagree. Both are written
+// in one Postgres transaction that holds the channel's row while the graph is
+// written: a graph error rolls Postgres back and the caller gets it, and two
+// changes to one channel reach both stores in the same order. The cache is
+// dropped once the transaction commits. When the graph took the change and the
+// commit then fails, the graph is put back to the prior policy.
+//
+// Postgres is the source: a change counts once it commits there, and the graph
+// is made to follow it. Two cases aren't repaired here and are left to E-7's
+// outbox (an outbox row in the transaction plus an idempotent graph sink): a
+// crash between the graph write and the commit, and a graph put-back that
+// fails too (logged as DIVERGES).
+func SetChannelPostPolicy(ctx context.Context, channelUUID uuid.UUID, policy string) error {
+	var prior string
+	wrote := false
+	err := pgexec.InTx(ctx, func(tctx context.Context) error {
+		p, found, err := pgexec.QueryOne(tctx, postPolicySet, pgexec.Text, policy, channelUUID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errPostPolicyNoChannel
+		}
+		prior = p
+		gctx, cancel := context.WithTimeout(ctx, postPolicyGraphTimeout)
+		defer cancel()
+		if err := writePostPolicyNode(gctx, channelUUID, policy); err != nil {
+			return err
+		}
+		wrote = true
+		pgexec.AfterCommit(tctx, func(actx context.Context) {
+			InvalidateChannelBasicInfo(actx, channelUUID.String())
+		})
+		return nil
+	})
+	if err == nil || errors.Is(err, errPostPolicyNoChannel) {
 		return err
 	}
-	if affected == 0 {
-		return fmt.Errorf("channel not found")
+	helpers.LogErrorWithContext(ctx, "domain/SetChannelPostPolicy channel %s failed: %+v", channelUUID, err)
+	if !wrote {
+		return err
 	}
+	// The graph took the change and Postgres didn't commit: put the graph back.
+	if uerr := helpers.CompensateOnFailure(ctx, "post policy graph write for channel "+channelUUID.String(),
+		func(uctx context.Context) error {
+			if err := writePostPolicyNode(uctx, channelUUID, prior); err != nil {
+				return err
+			}
+			InvalidateChannelBasicInfo(uctx, channelUUID.String())
+			return nil
+		}); uerr != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/SetChannelPostPolicy channel %s now DIVERGES between postgres and dgraph: "+
+				"postgres holds post_policy %q, the graph %q: %v",
+			channelUUID, prior, policy, uerr)
+	}
+	return err
+}
 
-	// Mirror to Dgraph so the post-time read (GetBasicDgraphChannelInfoByUUID)
-	// sees the new policy without a Postgres round-trip on the hot path.
+// errPostPolicyNoChannel answers a policy change for a channel that is gone.
+var errPostPolicyNoChannel = errors.New("channel not found")
+
+// writePostPolicyNode writes policy to the channel's graph node. It leaves the
+// cache alone: its caller drops it once Postgres agrees.
+func writePostPolicyNode(ctx context.Context, channelUUID uuid.UUID, policy string) error {
 	// Uid MUST be "uid(ch)" so the upsert binds to the existing channel node
-	// (the var(func: eq(ch_uuid,...)) defined in CreateOrUpdateDgraphChannel).
+	// (the var(func: eq(ch_uuid,...)) defined in writeDgraphChannel).
 	// Without it, Dgraph creates a blank node and rejects the txn with
 	// "Some variables are defined but not used Defined:[ch] Used:".
-	dgraphChannel := &dgraphStruct.DgraphChannel{
+	_, err := writeDgraphChannel(ctx, &dgraphStruct.DgraphChannel{
 		Uid:        "uid(ch)",
 		Uuid:       channelUUID.String(),
 		PostPolicy: policy,
-	}
-	if _, derr := CreateOrUpdateDgraphChannel(ctx, dgraphChannel); derr != nil {
-		helpers.LogErrorWithContext(ctx, "domain/SetChannelPostPolicy dgraph mirror failed: %+v", derr)
-		// Non-fatal: Postgres is source of truth; cache invalidation + a
-		// subsequent read will reconcile. But return the error so the caller
-		// can surface a partial-failure warning.
-		return derr
-	}
-
-	InvalidateChannelBasicInfo(ctx, channelUUID.String())
-	return nil
+	})
+	return err
 }
 
 // GetChannelAITokenCap returns a channel's per-day AI token cap (0 = no cap).
@@ -238,6 +306,19 @@ func SetChannelAITokenCap(ctx context.Context, channelUUID uuid.UUID, cap int) e
 }
 
 func CreateOrUpdateDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruct.DgraphChannel) (channelUid string, err error) {
+	channelUid, err = writeDgraphChannel(ctx, dgraphChannel)
+	if err != nil {
+		return
+	}
+
+	InvalidateChannelBasicInfo(ctx, dgraphChannel.Uuid)
+
+	return
+}
+
+// writeDgraphChannel upserts the channel's graph node, found by its uuid, and
+// leaves the cache to its caller.
+func writeDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruct.DgraphChannel) (channelUid string, err error) {
 	dgraphChannel.DType = []string{"Channel"}
 	query := fmt.Sprintf(`query {
 									  ch as var(func: eq(ch_uuid, "%+v"))
@@ -250,11 +331,7 @@ func CreateOrUpdateDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruc
 			"domain/CreateOrUpdateDgraphChannel Failed to create channel in dgraph err: %+v",
 			err,
 		)
-		return
 	}
-
-	InvalidateChannelBasicInfo(ctx, dgraphChannel.Uuid)
-
 	return
 }
 
@@ -457,13 +534,19 @@ func GetChannelRecordingTranscript(ctx context.Context, channelUUID string, user
 
 	transcriptParams := fmt.Sprintf("(orderasc: transcript_timestamp, first: %v, offset: %v)", firstVal, offsetVal)
 
+	// recUID is bound only under the channel when the asker is in it, so a
+	// non-member's read takes no recording and no line before the route's
+	// 403 (V-1126 FIX): one round trip either way.
 	query := fmt.Sprintf(`query ChannelInfo($id: string, $userId: string, $egressId: string){
-		var(func: eq(recording_egress_id, $egressId)) {
-			recUID as uid
+		var(func: eq(ch_uuid, $id)) @filter(uid_in(ch_members, $userId)) {
+			ch_recording @filter(eq(recording_egress_id, $egressId)) {
+				recUID as uid
+			}
 		}
 		channelInfo(func: eq(ch_uuid, $id)) {
 			uid
 			ch_uuid
+			ch_name
 			ch_is_member: count(ch_members @filter(uid($userId)))
 			ch_recording @filter( uid(recUID) AND gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z")) {
 				recording_egress_id
@@ -473,11 +556,17 @@ func GetChannelRecordingTranscript(ctx context.Context, channelUUID string, user
 				recording_obj_key
 				recording_transcript_count: count(recording_transcript)
 				recording_transcript %s {
+					uid
 					transcript_text
 					transcript_timestamp
 					transcript_offset_ms
+					transcript_original_text
+					transcript_corrected_at
+					transcript_translations
+					transcript_corrected_by { user_uuid user_full_name }
 					transcript_from {
 						user_name
+						user_full_name
 						user_uuid
 						user_profile_object_key
 					}
@@ -506,6 +595,14 @@ func GetChannelRecordingTranscript(ctx context.Context, channelUUID string, user
 
 }
 
+// channelRecordingListRead is GetChannelAllRecordingList's one read (a seam
+// for its tests).
+var channelRecordingListRead = dgraphModels.GetDgraphChannelInfoByUUID
+
+// GetChannelAllRecordingList is a page of the channel's recordings as
+// userDgraphUUID reads it: only a channel they are in, so for anyone else the
+// read finds no channel (ErrNotFound) and takes no recording, in the one round
+// trip (V-1163).
 func GetChannelAllRecordingList(ctx context.Context, channelUUID string, userDgraphUUID string, startDate string, endDate string, pageIndex int, pageSize int) (dgraphUser *dgraphStruct.DgraphChannel, err error) {
 
 	offset := pageIndex * pageSize
@@ -529,7 +626,7 @@ func GetChannelAllRecordingList(ctx context.Context, channelUUID string, userDgr
 	}
 
 	query := fmt.Sprintf(`query ChannelInfo(%s){
-		channelInfo(func: eq(ch_uuid, $id)) {
+		channelInfo(func: eq(ch_uuid, $id)) @filter(uid_in(ch_members, $userId)) {
 			uid
 			ch_uuid
 			ch_is_member: count(ch_members @filter(uid($userId)))
@@ -554,18 +651,7 @@ func GetChannelAllRecordingList(ctx context.Context, channelUUID string, userDgr
 		}
 	}`, dataVars, recFilter)
 
-	dgraphUser, err = dgraphModels.GetDgraphChannelInfoByUUID(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetChannelAllRecordingList Failed to get channel in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-
+	return channelRecordingListRead(ctx, query, variables)
 }
 
 func GetDgraphChannelInfoByUUID(ctx context.Context, channelUUID string, userDgraphUUID string) (dgraphUser *dgraphStruct.DgraphChannel, err error) {

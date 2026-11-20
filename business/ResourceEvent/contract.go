@@ -131,11 +131,17 @@ const (
 	CalendarUnsubscribed Kind = "calendar.unsubscribed"
 	CalendarFeedMade     Kind = "calendar.feed.made"
 	CalendarFeedStopped  Kind = "calendar.feed.stopped"
-	BookingCreated       Kind = "booking.created"
-	BookingCancelled     Kind = "booking.cancelled"
-	BookingRescheduled   Kind = "booking.rescheduled"
-	BookingRequested     Kind = "booking.requested"
-	CalendarSyncFailed   Kind = "sync.failed"
+	CalendarRoomAdded    Kind = "calendar.room.added"
+	CalendarRoomChanged  Kind = "calendar.room.changed"
+	CalendarRoomRetired  Kind = "calendar.room.retired"
+	// CalendarSyncLinkBroken is an admin's break of a person's Google or
+	// Outlook sync link (gcal-8 H1): its resource is the link.
+	CalendarSyncLinkBroken Kind = "calendar.sync.link.broken"
+	BookingCreated         Kind = "booking.created"
+	BookingCancelled       Kind = "booking.cancelled"
+	BookingRescheduled     Kind = "booking.rescheduled"
+	BookingRequested       Kind = "booking.requested"
+	CalendarSyncFailed     Kind = "sync.failed"
 
 	// Tables (design/tables-vs-airtable/PROGRAM.md §5), declared at its day 0
 	// and emitted by the packages that build them (A2 rows, trash and fields,

@@ -22,12 +22,15 @@ import (
 // cause it is the audience of, and each a batch, one read for the whole
 // event, never one a person. Maps are keyed by lower-case user id.
 type Inputs interface {
-	// Members is who in a place hears everything there now (its people on
-	// "all", every one of them: all_posts', a DM's and a call's audience).
-	Members(ctx context.Context, p Place) ([]string, error)
+	// Members is everyone in a place now, whatever their level (all_posts', a
+	// DM's and a call's candidates), and each one's level, as Levels would
+	// read it, from the same read: whether each hears is the preference
+	// step's, by the one rule (NotifyLevel Lets).
+	Members(ctx context.Context, p Place) (ids []string, levels map[string]string, err error)
 	// Levels is each of ids' setting for the place: "all", "mention" or
 	// "block" ("Nothing", muted). Someone with none isn't in the place now:
-	// it is the access step's read as much as the preference step's.
+	// it is the access step's read as much as the preference step's. Plan
+	// asks it only of those Members didn't answer for.
 	Levels(ctx context.Context, p Place, ids []string) (map[string]string, error)
 	// Follows is who turned the thread's following on and off.
 	Follows(ctx context.Context, p Place) (notificationBusiness.Follows, error)
@@ -43,6 +46,17 @@ type Inputs interface {
 	// Held is who of ids is held at now (paused, outside their schedule, in
 	// focus time), and until when; anyone not held is left out.
 	Held(ctx context.Context, ids []string, now time.Time) (map[string]notificationBusiness.HeldStatus, error)
+	// Waits is, for each of ids, whether they are in OneCamp now and their
+	// push delay (A4 H4): one read of who is here, one of their delays.
+	Waits(ctx context.Context, ids []string) (map[string]Wait, error)
+}
+
+// Wait is how someone's push may wait: Here is whether they are in OneCamp
+// (business/Presence Here: a device of theirs connected, not set offline),
+// Delay their notify.push_delay.
+type Wait struct {
+	Here  bool
+	Delay time.Duration
 }
 
 // keywordReach is business/Post's keyword reach (keywordReach.go), which Post
@@ -57,14 +71,14 @@ func ReachKeywordsWith(reach func(ctx context.Context, channelID, text, writer s
 // liveInputs are the inputs as the sites read them today.
 type liveInputs struct{}
 
-func (liveInputs) Members(ctx context.Context, p Place) ([]string, error) {
+func (liveInputs) Members(ctx context.Context, p Place) ([]string, map[string]string, error) {
 	switch p.Kind {
 	case PlaceChannel:
-		return channelLevels.MembersOnAll(ctx, p.ID)
+		return channelLevels.Members(ctx, p.ID, 0)
 	case PlaceDM, PlaceGroup:
-		return chatLevels.MembersOnAll(ctx, p.ID)
+		return chatLevels.Members(ctx, p.ID)
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func (liveInputs) Levels(ctx context.Context, p Place, ids []string) (map[string]string, error) {
@@ -163,6 +177,33 @@ func (liveInputs) Held(ctx context.Context, ids []string, now time.Time) (map[st
 			st.Reason = "held"
 		}
 		out[key(u.String())] = st
+	}
+	return out, nil
+}
+
+// Waits is Reach's one read of who is here (Presence Here) and
+// Notification's one read of their push delays.
+func (liveInputs) Waits(ctx context.Context, ids []string) (map[string]Wait, error) {
+	here, err := reachBusiness.HereOf(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	var in []string
+	for _, id := range ids {
+		if here[key(id)] {
+			in = append(in, id)
+		}
+	}
+	out := make(map[string]Wait, len(in))
+	if len(in) == 0 {
+		return out, nil
+	}
+	delays, err := notificationBusiness.PushDelays(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range in {
+		out[key(id)] = Wait{Here: true, Delay: delays[id]}
 	}
 	return out, nil
 }

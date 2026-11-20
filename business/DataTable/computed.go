@@ -27,6 +27,7 @@ import (
 	formula "github.com/akashc777/OneCamp/business/Formula"
 	rowQuery "github.com/akashc777/OneCamp/business/RowQuery"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -125,6 +126,22 @@ type reach struct {
 	tables                   map[uuid.UUID]*opened
 }
 
+// firstBatch is the first batch's rows as loadLinked read them, or batch's
+// read now.
+func (t *target) firstBatch(ctx context.Context, batch []uuid.UUID, keys []string) ([]*model.Row, error) {
+	if f := t.first; f != nil {
+		t.first = nil
+		return f.rows, f.err
+	}
+	return model.CellsOf(ctx, t.table.Id, batch, keys)
+}
+
+// firstCells is a target's first batch of linked rows, as CellsOf reads it.
+type firstCells struct {
+	rows []*model.Row
+	err  error
+}
+
 // pageLinks is a table link's links for a page.
 type pageLinks struct {
 	// count is how many links each row has: at most maxCounted+1, which is
@@ -180,6 +197,9 @@ type target struct {
 	rows   map[uuid.UUID]*linkedRow
 	// skipped is the linked rows left out, past what one read works out.
 	skipped map[uuid.UUID]bool
+	// first is the first loadBatch of its linked rows, read with every
+	// other table's in loadLinked; load uses it rather than reading them.
+	first *firstCells
 	// conds is the rollups' conditions here, each checked once a linked
 	// row (linkedRow.passes).
 	conds []*rollupCond
@@ -234,9 +254,17 @@ func planComputedFor(ctx context.Context, fields []*model.Field, keep map[string
 	return planUnder(ctx, fields, keep, nil)
 }
 
+// planAlong is planComputed with other reads, also, run in the round trip
+// that opens the tables its fields link to (or on their own when they link
+// to none): a rows page reads its rows there (QueryRows).
+func planAlong(ctx context.Context, fields []*model.Field, also ...pgexec.Planned) *computed {
+	return planUnder(ctx, fields, nil, nil, also...)
+}
+
 // planUnder is planComputedFor one level under the read above, on its
-// budget and reach, or for a read of its own when above is nil.
-func planUnder(ctx context.Context, fields []*model.Field, keep map[string]bool, above *computed) *computed {
+// budget and reach, or for a read of its own when above is nil; also runs
+// beside its tables' opening (planAlong).
+func planUnder(ctx context.Context, fields []*model.Field, keep map[string]bool, above *computed, also ...pgexec.Planned) *computed {
 	fields = liveOnly(fields)
 	c := &computed{
 		fields:   fields,
@@ -260,6 +288,13 @@ func planUnder(ctx context.Context, fields []*model.Field, keep map[string]bool,
 		byID[f.Id.String()] = f
 	}
 	kept := func(f *model.Field) bool { return keep == nil || keep[f.Id.String()] }
+	var linked []uuid.UUID
+	for _, f := range fields {
+		if l, ok := linkOf(f); ok && kept(f) {
+			linked = append(linked, l.table)
+		}
+	}
+	c.openAll(ctx, linked, also...)
 	for _, f := range fields {
 		if l, ok := linkOf(f); ok && kept(f) {
 			c.links = append(c.links, l)
@@ -508,6 +543,49 @@ func (c *computed) open(ctx context.Context, id uuid.UUID) *opened {
 	return o
 }
 
+// openAll opens, in one read, each of ids this read hasn't opened yet, as
+// open would one by one, with also's reads in the same round trip.
+func (c *computed) openAll(ctx context.Context, ids []uuid.UUID, also ...pgexec.Planned) {
+	var want, fieldsOf []uuid.UUID
+	for _, id := range ids {
+		if _, ok := c.tables[id]; ok || slices.Contains(want, id) {
+			continue
+		}
+		want = append(want, id)
+		if id != c.own {
+			fieldsOf = append(fieldsOf, id)
+		}
+	}
+	if len(want) == 0 {
+		pgexec.Together(ctx, also...)
+		return
+	}
+	open := model.PlanOpenTables(want, fieldsOf, func(tables map[uuid.UUID]*model.DataTable, fields map[uuid.UUID][]*model.Field, err error) {
+		c.opened(ctx, want, tables, fields, err)
+	})
+	pgexec.Together(ctx, append([]pgexec.Planned{open}, also...)...)
+}
+
+// opened keeps what openAll read of want: each table and, when the reader
+// may open it, its fields and the field that labels its rows.
+func (c *computed) opened(ctx context.Context, want []uuid.UUID, tables map[uuid.UUID]*model.DataTable, fields map[uuid.UUID][]*model.Field, err error) {
+	for _, id := range want {
+		o := &opened{}
+		c.tables[id] = o
+		if err != nil || tables[id] == nil {
+			continue
+		}
+		o.table, o.visible = tables[id], mayOpen(ctx, tables[id], c.own)
+		if !o.visible {
+			continue
+		}
+		if o.fields = fields[id]; id == c.own {
+			o.fields = c.fields
+		}
+		o.label = labelField(o.fields)
+	}
+}
+
 // fieldsOf is a table's fields as the read's reader may read them: none
 // for one they can't open.
 func (c *computed) fieldsOf(ctx context.Context) func(uuid.UUID) []*model.Field {
@@ -631,7 +709,7 @@ func rollupProblem(how string, of *model.Field, fields []*model.Field) string {
 		return "A rollup can't add up links to another table"
 	}
 	if _, isItems := itemsOf(of); isItems || stampNamesPeople(of) {
-		return "A rollup can't add up links to docs, tasks, boards, projects or people"
+		return "A rollup can't add up links to " + fieldTypes.EveryItemKind
 	}
 	if of.Type == model.FieldFormula && readsComputed(of, fields) {
 		return "A rollup can't add up a formula that reads links or rollups"
@@ -800,40 +878,35 @@ func (c *computed) apply(ctx context.Context, rows []*model.Row) {
 // links one read counts or fetches has its cells say so.
 func (c *computed) readLinks(ctx context.Context, ids []uuid.UUID) {
 	var read []tableLink
+	var pls []*pageLinks
+	var all [][]uuid.UUID
 	for _, l := range c.links {
 		t := c.targets[l.table]
-		field, ok := l.linkField()
-		// Links from a table the reader can't open aren't shown at all.
+		_, ok := l.linkField()
 		if t.table == nil || !ok || (l.inverseOf != "" && !t.visible) {
 			continue
 		}
 		pl := &pageLinks{count: make(map[uuid.UUID]int, len(ids)), uncounted: map[uuid.UUID]bool{}}
-		if err := c.countLinks(ctx, field, l.inverseOf != "", ids, maxLinks+1, pl); err != nil {
-			c.linked[l.field.Id.String()] = &pageLinks{failed: true}
-			continue
-		}
 		c.linked[l.field.Id.String()] = pl
-		read = append(read, l)
+		read, pls, all = append(read, l), append(pls, pl), append(all, ids)
 	}
-	// Rows with more links than a cell can make are counted further once
-	// every field has its first counts. If that fails, as when there are a
-	// great many to count, the rest are left uncounted.
-	for _, l := range read {
-		pl := c.linked[l.field.Id.String()]
-		var more []uuid.UUID
+	for i := range c.countLinks(ctx, read, all, maxLinks+1, pls) {
+		c.linked[read[i].field.Id.String()] = &pageLinks{failed: true}
+	}
+	read = slices.DeleteFunc(read, func(l tableLink) bool { return c.linked[l.field.Id.String()].failed })
+	// The rows at maxLinks+1 are counted again, up to maxCounted+1.
+	more, pls := make([][]uuid.UUID, len(read)), make([]*pageLinks, len(read))
+	for i, l := range read {
+		pls[i] = c.linked[l.field.Id.String()]
 		for _, id := range ids {
-			if pl.count[id] == maxLinks+1 && !pl.uncounted[id] {
-				more = append(more, id)
+			if pls[i].count[id] == maxLinks+1 && !pls[i].uncounted[id] {
+				more[i] = append(more[i], id)
 			}
 		}
-		field, _ := l.linkField()
-		if c.countLinks(ctx, field, l.inverseOf != "", more, maxCounted+1, pl) != nil {
-			c.counted = maxReadCounted
-		}
 	}
-	// How many of each row's links to fetch: first those each cell shows, a
-	// row at a time across the fields, then, for the fields rollups add up,
-	// the rest of each row's, as far as what one read fetches goes.
+	if len(c.countLinks(ctx, read, more, maxCounted+1, pls)) > 0 {
+		c.counted = maxReadCounted
+	}
 	limits := make(map[string][]int, len(read))
 	for _, l := range read {
 		limits[l.field.Id.String()] = make([]int, len(ids))
@@ -858,52 +931,76 @@ func (c *computed) readLinks(ctx context.Context, ids []uuid.UUID) {
 			}
 		}
 	}
-	for _, l := range read {
-		fid := l.field.Id.String()
-		var rows []uuid.UUID
-		var ks []int
-		for i, k := range limits[fid] {
+	asks := make([]model.LinkRead, len(read))
+	for i, l := range read {
+		field, _ := l.linkField()
+		asks[i] = model.LinkRead{Field: field, To: l.inverseOf != ""}
+		for j, k := range limits[l.field.Id.String()] {
 			if k > 0 {
-				rows, ks = append(rows, ids[i]), append(ks, k)
+				asks[i].Rows, asks[i].Limits = append(asks[i].Rows, ids[j]), append(asks[i].Limits, k)
 			}
 		}
-		field, _ := l.linkField()
-		of, err := model.LinksOf(ctx, field, rows, ks, l.inverseOf != "")
+	}
+	of, err := model.LinksOfMany(ctx, asks)
+	for i, l := range read {
 		if err != nil {
-			c.linked[fid] = &pageLinks{failed: true}
+			c.linked[l.field.Id.String()] = &pageLinks{failed: true}
 			continue
 		}
-		c.linked[fid].of = of
+		c.linked[l.field.Id.String()].of = of[i]
 	}
 }
 
-// countLinks counts a field's links from rows ids (to them, when to is set)
-// into pl, at most upTo a row: as many rows a query as it can count in full
-// within maxCountQuery and what's left of what one read counts. Rows past
-// that, or in a query that fails, are left uncounted (with the count they
-// had).
-func (c *computed) countLinks(ctx context.Context, field uuid.UUID, to bool, ids []uuid.UUID, upTo int, pl *pageLinks) error {
-	for len(ids) > 0 {
+// countLinks counts, up to upTo, the links of ids[i] on reads[i]'s field
+// into pls[i]: one statement a chunk for every field together, each
+// counting at most maxCountQuery links and the read at most maxReadCounted.
+// A row left out (the budget is spent) is uncounted. It returns the reads
+// whose count failed: their rows not yet counted are uncounted too.
+func (c *computed) countLinks(ctx context.Context, reads []tableLink, ids [][]uuid.UUID, upTo int, pls []*pageLinks) (failed map[int]bool) {
+	at := make([]int, len(reads))
+	for {
 		n := min(maxCountQuery, maxReadCounted-c.counted) / upTo
-		chunk := ids[:min(max(n, 0), len(ids))]
-		var got map[uuid.UUID]int
-		var err error
-		if len(chunk) > 0 {
-			got, err = model.CountLinks(ctx, field, chunk, upTo, to)
-		}
-		if len(chunk) == 0 || err != nil {
-			for _, id := range ids {
-				pl.uncounted[id] = true
+		var asks []model.LinkRead
+		var of []int
+		for i, l := range reads {
+			left := ids[i][at[i]:]
+			if n <= 0 || len(left) == 0 {
+				continue
 			}
-			return err
+			chunk := left[:min(n, len(left))]
+			n -= len(chunk)
+			field, _ := l.linkField()
+			asks, of = append(asks, model.LinkRead{Field: field, To: l.inverseOf != "", Rows: chunk}), append(of, i)
 		}
-		for _, id := range chunk {
-			pl.count[id] = got[id]
-			c.counted += got[id]
+		var got []map[uuid.UUID]int
+		var err error
+		if len(asks) > 0 {
+			got, err = model.CountLinksMany(ctx, asks, upTo)
 		}
-		ids = ids[len(chunk):]
+		if len(asks) == 0 || err != nil {
+			if err != nil {
+				failed = map[int]bool{}
+			}
+			for i := range reads {
+				if left := ids[i][at[i]:]; len(left) > 0 {
+					if err != nil {
+						failed[i] = true
+					}
+					for _, id := range left {
+						pls[i].uncounted[id] = true
+					}
+				}
+			}
+			return failed
+		}
+		for k, i := range of {
+			for _, id := range asks[k].Rows {
+				pls[i].count[id] = got[k][id]
+				c.counted += got[k][id]
+			}
+			at[i] += len(asks[k].Rows)
+		}
 	}
-	return nil
 }
 
 // loadLinked reads the linked rows a page needs, up to maxLinkedRows a read:
@@ -937,6 +1034,22 @@ func (c *computed) loadLinked(ctx context.Context, ids []uuid.UUID, now time.Tim
 					wanted[l.table] = append(wanted[l.table], other)
 				}
 			}
+		}
+	}
+	var asks []model.CellsRead
+	var to []*target
+	for _, id := range c.order {
+		if t := c.targets[id]; t.table != nil && t.visible && len(wanted[id]) > 0 {
+			keys, _ := t.needs()
+			asks = append(asks, model.CellsRead{Table: id, IDs: wanted[id][:min(loadBatch, len(wanted[id]))], Keys: keys})
+			to = append(to, t)
+		}
+	}
+	cells, err := model.CellsOfMany(ctx, asks)
+	for i, t := range to {
+		t.first = &firstCells{err: err}
+		if err == nil {
+			t.first.rows = cells[i]
 		}
 	}
 	for _, id := range c.order {
@@ -1048,7 +1161,7 @@ func (c *computed) load(ctx context.Context, t *target, ids []uuid.UUID, now tim
 	for len(ids) > 0 {
 		batch := ids[:min(loadBatch, len(ids))]
 		ids = ids[len(batch):]
-		rows, err := model.CellsOf(ctx, t.table.Id, batch, keys)
+		rows, err := t.firstBatch(ctx, batch, keys)
 		if err != nil {
 			for _, left := range [][]uuid.UUID{batch, ids} {
 				for _, id := range left {

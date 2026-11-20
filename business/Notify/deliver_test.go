@@ -27,6 +27,20 @@ type fakeRows struct {
 	told []string
 	// notices is each notice take-back: the message and whose.
 	notices []string
+	// settled is each row moved from one state to another: "<user> <delivery>
+	// <from>><to>".
+	settled []string
+	// dropped are the rows a retract drops, beside told's.
+	dropped []deliveryModels.Row
+}
+
+func (f *fakeRows) settle(_ context.Context, rows []deliveryModels.Row, from, to string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range rows {
+		f.settled = append(f.settled, key(r.UserID)+" "+r.Delivery+" "+from+">"+to)
+	}
+	return int64(len(rows)), nil
 }
 
 func (f *fakeRows) record(_ context.Context, rows []deliveryModels.Row) ([]deliveryModels.Row, error) {
@@ -50,14 +64,18 @@ func (f *fakeRows) record(_ context.Context, rows []deliveryModels.Row) ([]deliv
 	return fresh, nil
 }
 
-func (f *fakeRows) retract(_ context.Context, messageID string) ([]string, error) {
+func (f *fakeRows) retract(_ context.Context, messageID string) ([]deliveryModels.Row, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.retracted = append(f.retracted, messageID)
 	if f.fail != nil {
 		return nil, f.fail
 	}
-	return f.told, nil
+	var out []deliveryModels.Row
+	for _, u := range f.told {
+		out = append(out, deliveryModels.Row{UserID: u, Delivery: "inbox", State: "retracted"})
+	}
+	return append(out, f.dropped...), nil
 }
 
 func (f *fakeRows) retractNotices(_ context.Context, messageID string, people []string) error {
@@ -275,5 +293,31 @@ func TestRetractTakesTheInboxNoticesBackFromWhomItTold(t *testing.T) {
 	routerOn(&fakeInputs{}).Retract(context.Background(), msgID)
 	if want := []string{msgID + " sam,ada"}; !reflect.DeepEqual(rows.notices, want) {
 		t.Errorf("notices taken back %v, want %v", rows.notices, want)
+	}
+}
+
+// ByOf splits who is told by a delivery by how they heard, in order: those
+// held or waiting for it count, and those told only some other way don't.
+func TestByOfSplitsWhoIsToldByHowTheyHeard(t *testing.T) {
+	ds := []Decision{
+		{UserID: "bo", Cause: CauseMention, To: []Delivery{ToEmail, ToPush}},
+		{UserID: "cy", Cause: CauseDM, To: []Delivery{ToEmail}},
+		{UserID: "di", Cause: CauseReplyToYou, Held: []Delivery{ToEmail}},
+		{UserID: "eve", Cause: CauseMention, To: []Delivery{ToPush}},
+		{UserID: "gus", Cause: CauseDM, Waiting: []Delivery{ToEmail}},
+		{UserID: "hal", Cause: CauseMention},
+	}
+	of, rest := ByOf(ds, ToEmail, CauseMention, CauseReplyToYou)
+	if want := []string{"bo", "di"}; !reflect.DeepEqual(of, want) {
+		t.Errorf("of %v, want %v", of, want)
+	}
+	if want := []string{"cy", "gus"}; !reflect.DeepEqual(rest, want) {
+		t.Errorf("rest %v, want %v", rest, want)
+	}
+	if all := append(slices.Clone(of), rest...); !reflect.DeepEqual(sorted(all), sorted(By(ds, ToEmail))) {
+		t.Errorf("of and rest %v, want By's %v", all, By(ds, ToEmail))
+	}
+	if of, rest := ByOf(nil, ToEmail, CauseMention); of != nil || rest != nil {
+		t.Errorf("nobody decided: of %v rest %v, want none", of, rest)
 	}
 }

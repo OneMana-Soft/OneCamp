@@ -52,6 +52,26 @@ func GetIntegration(ctx context.Context, entityType string, entityId uuid.UUID, 
 	return integration, nil
 }
 
+// GetIntegrations is the live integrations of one entity with any of the
+// providers, in one statement: what GetIntegration answers per provider.
+func GetIntegrations(ctx context.Context, entityType string, entityId uuid.UUID, providers []string) ([]*models.Integration, error) {
+	if len(providers) == 0 {
+		return nil, nil
+	}
+	query := `
+		SELECT id, entity_type, entity_id, provider, access_token, refresh_token, sync_token, webhook_url, metadata, expires_at, task_sync_enabled, created_at, updated_at
+		FROM integrations
+		WHERE entity_type = $1 AND entity_id = $2 AND provider = ANY($3) AND ` + softDelete.Live("") + `
+	`
+	// providers goes as it is: the pgx driver sends a []string as text[].
+	rows, err := pgexec.Query(ctx, query, func(r pgexec.Row) (*models.Integration, error) { return models.ScanIntegration(r) }, entityType, entityId, providers)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetIntegrations failed to get integrations err: %+v", err)
+		return nil, err
+	}
+	return rows, nil
+}
+
 // DeleteIntegration disconnects an integration: its row is kept, marked by
 // who disconnected it (by) and when, and its credentials go: both tokens, the
 // sync token, the webhook address and the token's expiry. Its metadata stays

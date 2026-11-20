@@ -1,8 +1,11 @@
 package business
 
 import (
+	"reflect"
 	"testing"
 
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -20,5 +23,19 @@ func TestEmailGoesToThePeopleAPostNames(t *testing.T) {
 	}
 	if got := namedIn("", []*dgraphStruct.DgraphUser{jonas}); len(got) != 0 {
 		t.Errorf("no words named %v", got)
+	}
+}
+
+// A mention an edit adds to a channel's message, or to a reply in its thread,
+// is asked again at its send (business/Notification verdicts): the post in
+// its channel, the reply when there is one, as someone it names.
+func TestAnEditsChannelMentionIsAskedAgainAtTheSend(t *testing.T) {
+	ada := &dgraphStruct.DgraphUser{Uuid: "a", UserName: "Ada"}
+	for _, reply := range []string{"", "c1"} {
+		got := postMentionNotice(ada, "ch1", "#launch", "p1", reply, "<p>@Bo</p>").About
+		want := &notificationBusiness.About{Kind: notificationBusiness.AboutChannel, Item: "p1", Place: "ch1", Reply: reply, Heard: notifylevel.Named}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("reply %q: asked again as %+v, want %+v", reply, got, want)
+		}
 	}
 }

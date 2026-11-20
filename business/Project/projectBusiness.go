@@ -3,6 +3,8 @@ package business
 import (
 	"context"
 	"errors"
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"sort"
 	"strings"
 	"time"
@@ -30,6 +32,7 @@ import (
 	roleModel "github.com/akashc777/OneCamp/models/postgres/ProjectRole"
 	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	taskStatusModel "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
+	mailModel "github.com/akashc777/OneCamp/models/postgres/TriageMail"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/services/collab"
 	"github.com/dgraph-io/dgo/v230"
@@ -324,7 +327,14 @@ func ArchiveProjectByProjectUUID(ctx context.Context, projectUUID uuid.UUID, dgr
 
 	currentTime := time.Now()
 
-	err = domain.UpdateProjectDeletedTimeByUUID(ctx, projectUUID, &currentTime, &currentTime)
+	// Its mailbox stops in the same transaction (business/TriageMail): a
+	// deleted project's mail is never read, and its sealed password is wiped.
+	err = pgexec.InTx(ctx, func(ctx context.Context) error {
+		if err := domain.UpdateProjectDeletedTimeByUUID(ctx, projectUUID, &currentTime, &currentTime); err != nil {
+			return err
+		}
+		return mailModel.StopForProject(ctx, projectUUID)
+	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/ArchiveProjectByProjectUUID failed to update delete time err: %+v", err)
 		return
@@ -547,8 +557,42 @@ func GetDgraphProjectListByAdminDgraphUID(ctx context.Context, userDgraphUID str
 }
 
 func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, sortQuery string, pageSize int, pageIndex int, getAll bool) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	if sortQuery == dgraphquery.ManualOrder {
-		dgraphProject, err = manualTaskList(ctx, projectUUID, userDgraphUID, filterQuery, pageSize, pageIndex, getAll)
+	return taskList(ctx, projectUUID, userDgraphUID, filterQuery, sortQuery, pageSize, pageIndex, getAll, false)
+}
+
+// GetDgraphProjectTaskListWithFields is GetDgraphProjectTaskList with each
+// task's field values as the reader may read them (TaskField), read in the
+// same batch as its other facts: the task list's own answer.
+func GetDgraphProjectTaskListWithFields(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, sortQuery string, pageSize int, pageIndex int, getAll bool) (*dgraphStruct.DgraphProject, error) {
+	return taskList(ctx, projectUUID, userDgraphUID, filterQuery, sortQuery, pageSize, pageIndex, getAll, true)
+}
+
+// ListReadsInOne is whether a task list is read with its project in one
+// graph query (OpenProjectTaskPage): a page in the graph's own order.
+func ListReadsInOne(sortQuery string, pageSize int, getAll bool) bool {
+	return !getAll && pageSize > 0 && !dgraphquery.SideOrdered(sortQuery)
+}
+
+// OpenProjectTaskPage reads, in one graph query, the project as
+// GetBasicDgraphProjectInfo reads it with the reader's place in it (gate),
+// and a page of its task list (ListReadsInOne says which lists can be), laid
+// as GetDgraphProjectTaskListWithFields lays it. The caller decides access
+// from gate before it hands out page: the same answer, never a second read.
+func OpenProjectTaskPage(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, sortQuery string, pageSize int, pageIndex int) (gate *dgraphStruct.DgraphProject, page *dgraphStruct.DgraphProject, err error) {
+	gate, page, err = domain.GetDgraphProjectTaskPageGated(ctx, projectUUID, userDgraphUID, filterQuery, sortQuery, dgraphquery.Page{First: pageSize, Offset: pageIndex * pageSize})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/OpenProjectTaskPage failed to read the project and its task list from dgraph err: %+v", err)
+		return nil, nil, err
+	}
+	if gate.ReaderIsIn() {
+		layListed(ctx, page.Tasks, true)
+	}
+	return gate, page, nil
+}
+
+func taskList(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, sortQuery string, pageSize int, pageIndex int, getAll bool, withFields bool) (dgraphProject *dgraphStruct.DgraphProject, err error) {
+	if dgraphquery.SideOrdered(sortQuery) {
+		dgraphProject, err = sideTaskList(ctx, sortQuery, projectUUID, userDgraphUID, filterQuery, pageSize, pageIndex, getAll)
 	} else {
 		dgraphProject, err = domain.GetDgraphProjectTaskList(ctx, projectUUID, userDgraphUID, filterQuery, sortQuery, pageSize, pageIndex, getAll)
 	}
@@ -558,11 +602,30 @@ func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgrap
 	}
 
 	if dgraphProject != nil {
-		_ = taskBusiness.MergeGitHubMetaIntoTasks(ctx, dgraphProject.Tasks)
-		taskKeys.Lay(ctx, dgraphProject.Tasks...)
+		layListed(ctx, dgraphProject.Tasks, withFields)
 	}
 
 	return
+}
+
+// layListed lays on the tasks a list or board shows what the graph doesn't
+// hold: GitHub's facts, keys and types and the layers (SLA), and, withFields,
+// the field values their reader may read. The reads that don't wait on one
+// another go to Postgres in one round trip (pgexec.Together); a failure is
+// logged and the answer still goes, as each one's own did.
+func layListed(ctx context.Context, tasks []*dgraphStruct.DgraphTask, withFields bool) {
+	if len(tasks) == 0 {
+		return
+	}
+	var github, fields error
+	plans := []pgexec.Planned{taskBusiness.GitHubMetaPlanned(ctx, tasks, &github), taskKeys.Planned(ctx, tasks...)}
+	if withFields {
+		plans = append(plans, taskFieldBusiness.FieldValuesPlanned(ctx, taskFieldBusiness.ReaderOf(ctx), tasks, &fields))
+	}
+	pgexec.Together(ctx, plans...)
+	if fields != nil {
+		helpers.LogErrorWithContext(ctx, "business/layListed couldn't lay %d tasks' field values err: %+v", len(tasks), fields)
+	}
 }
 
 // GetDgraphProjectTaskListForKanban is a project's board: each open column's
@@ -571,7 +634,18 @@ func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgrap
 // every column holds (ColumnCounts). It reads the columns' places, picks the
 // cards, then reads those cards, in one snapshot; Dgraph's own sorted read
 // stopped at 1,000 a column without saying so.
-func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, openLimit int, closedLimit int) (dgraphProject *dgraphStruct.DgraphProject, err error) {
+func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, openLimit int, closedLimit int) (*dgraphStruct.DgraphProject, error) {
+	return board(ctx, projectUUID, userDgraphUID, filterQuery, openLimit, closedLimit, false)
+}
+
+// BoardWithFields is GetDgraphProjectTaskListForKanban with each card's field
+// values as the reader may read them (TaskField), read in the same batch as
+// its other facts: the board's own answer.
+func BoardWithFields(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, openLimit int, closedLimit int) (*dgraphStruct.DgraphProject, error) {
+	return board(ctx, projectUUID, userDgraphUID, filterQuery, openLimit, closedLimit, true)
+}
+
+func board(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, openLimit int, closedLimit int, withFields bool) (dgraphProject *dgraphStruct.DgraphProject, err error) {
 	// The project's own statuses each have a column of their own.
 	var known []string
 	isKnown := map[string]bool{}
@@ -621,8 +695,7 @@ func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, 
 	for _, c := range dgraphStruct.BoardColumns {
 		allTasks = append(allTasks, *dgraphProject.Column(c.Key)...)
 	}
-	_ = taskBusiness.MergeGitHubMetaIntoTasks(ctx, allTasks)
-	taskKeys.Lay(ctx, allTasks...)
+	layListed(ctx, allTasks, withFields)
 
 	return
 }

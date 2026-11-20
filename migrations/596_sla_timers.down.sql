@@ -1,0 +1,11 @@
+ALTER TABLE project_settings DROP COLUMN IF EXISTS "work_zone";
+ALTER TABLE project_settings DROP COLUMN IF EXISTS "work_hours";
+DROP INDEX IF EXISTS idx_fk_task_slas_rule;
+DROP INDEX IF EXISTS idx_fk_task_slas_project;
+DROP INDEX IF EXISTS idx_task_slas_running;
+DROP TABLE IF EXISTS task_slas;
+DROP INDEX IF EXISTS idx_fk_sla_rules_deleted_by;
+DROP INDEX IF EXISTS idx_fk_sla_rules_updated_by;
+DROP INDEX IF EXISTS idx_fk_sla_rules_created_by;
+DROP INDEX IF EXISTS idx_sla_rules_project;
+DROP TABLE IF EXISTS sla_rules;

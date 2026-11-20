@@ -34,6 +34,26 @@ func TestHandoffKeepsWhereAnEventCameFrom(t *testing.T) {
 	}
 }
 
+// The action an event is one of (helpers.WithOrigin: a bulk change) crosses
+// to the workers, so the rule runs its events set going there are still told
+// together (business/Task's Urgent window); an event of no action gains none.
+func TestHandoffKeepsTheActionAnEventIsOneOf(t *testing.T) {
+	b, err := json.Marshal(handedOffEvent{V: 1, Kind: "task.status_changed", Origin: originOf(helpers.WithOrigin(context.Background(), "bulk-1"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back handedOffEvent
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := helpers.OriginOf(back.Origin.context()); !ok || id != "bulk-1" {
+		t.Fatalf("the action came back as %q %v from %s", id, ok, b)
+	}
+	if _, ok := helpers.OriginOf(originOf(context.Background()).context()); ok {
+		t.Fatal("an event of no action gained one on the way")
+	}
+}
+
 // A follow-up to the A4 cost fix (CR-9): the mark on a task a batch just made
 // (helpers.WithOpenTasks) didn't cross, so a split install's workers read each
 // created task's restriction twice. The event's own task's mark crosses, and

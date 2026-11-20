@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	"regexp"
 	"strings"
 	"time"
@@ -122,7 +123,7 @@ func UpdateProjectDeletedTimeByUUID(ctx context.Context, projectUUID uuid.UUID, 
         UPDATE projects
         SET deleted_at = $1, updated_at = $2
 		WHERE id = $3`
-	err = models.UpdateProjectDeletedTimeByUUID(query, projectUUID, deleteTime, updateTime)
+	err = models.UpdateProjectDeletedTimeByUUID(ctx, query, projectUUID, deleteTime, updateTime)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/UpdateProjectDeletedTimeByUUID Failed to update project delete time by project uuid err: %+v",
@@ -415,7 +416,40 @@ func EachProjectTaskPage(ctx context.Context, projectUUID, userDgraphUID, filter
 // query gives the window's tasks in order (the sort made total by task_uuid),
 // with how many the list holds. Restricted tasks the reader may not see leave
 // the count and the pages alike (models/taskread).
+// taskListQuery is the task list's query: a page of it at a time (query),
+// and the variables it reads.
 func taskListQuery(ctx context.Context, projectUUID, userDgraphUID, filterQuery, sortQuery string) (query func(dgraphquery.Page) string, variables map[string]string, err error) {
+	return taskListQueryGated(ctx, false, projectUUID, userDgraphUID, filterQuery, sortQuery)
+}
+
+// GetDgraphProjectTaskPageGated reads a page of the project's task list
+// (GetDgraphProjectTaskList's) and, in the same query, the project as
+// GetBasicDgraphProjectInfo reads it with the reader's place in it (gate),
+// so access is decided on the answer the page came in. A project there is
+// none of is ErrNotFound, as GetBasicDgraphProjectInfo says it.
+func GetDgraphProjectTaskPageGated(ctx context.Context, projectUUID, userDgraphUID, filterQuery, sortQuery string, page dgraphquery.Page) (gate, list *dgraphStruct.DgraphProject, err error) {
+	query, variables, err := taskListQueryGated(ctx, true, projectUUID, userDgraphUID, filterQuery, sortQuery)
+	if err != nil {
+		return nil, nil, err
+	}
+	got, err := dgexec.Read[struct {
+		Gate []dgraphStruct.DgraphProject `json:"projectGate"`
+		List []dgraphStruct.DgraphProject `json:"projectInfo"`
+	}](ctx, query(page), variables)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(got.Gate) == 0 || len(got.List) == 0 {
+		return nil, nil, dgraphModels.ErrNotFound
+	}
+	list = &got.List[0]
+	if err := taskread.KeepIn(ctx, list); err != nil {
+		return nil, nil, err
+	}
+	return &got.Gate[0], list, nil
+}
+
+func taskListQueryGated(ctx context.Context, gated bool, projectUUID, userDgraphUID, filterQuery, sortQuery string) (query func(dgraphquery.Page) string, variables map[string]string, err error) {
 	if len(filterQuery) > 0 {
 		filterQuery = "AND " + filterQuery
 	}
@@ -425,8 +459,13 @@ func taskListQuery(ctx context.Context, projectUUID, userDgraphUID, filterQuery,
 	if err != nil {
 		return nil, nil, err
 	}
+	gate := ""
+	if gated {
+		gate = `
+				projectGate(func: eq(project_uuid, $id)) {` + projectGateFields("$userDgraphUID") + `}`
+	}
 	query = func(page dgraphquery.Page) string {
-		return tr.Fill(fmt.Sprintf(`query ProjectInfo($id: string, $userDgraphUID: string){`+dgraphStruct.ReaderProjectsVar(taskread.ReaderOf(ctx))+`
+		return tr.Fill(fmt.Sprintf(`query ProjectInfo($id: string, $userDgraphUID: string){`+dgraphStruct.ReaderProjectsVar(taskread.ReaderOf(ctx))+gate+`
 				projectInfo(func: eq(project_uuid, $id)) {
 					project_uuid
 					project_name
@@ -750,30 +789,38 @@ func GetBasicDgraphProjectInfoWithTaskUUID(ctx context.Context, projectUUID stri
 	return
 }
 
-func GetBasicDgraphProjectInfo(ctx context.Context, projectUUID string, userDgraphUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	variables := make(map[string]string)
-	variables["$id"] = projectUUID
-	variables["$userUid"] = userDgraphUID
-	query := `query ProjectInfo($id: string, $userUid: string){
-				projectInfo(func: eq(project_uuid, $id)) {
+// projectGateFields is what an access decision reads of a project and of
+// the reader (the graph variable reader) in it: GetBasicDgraphProjectInfo's
+// block, and the gate of a list read with its project in one query
+// (GetDgraphProjectTaskPageGated).
+func projectGateFields(reader string) string {
+	return `
 					uid
 					project_uuid
 					project_name
 					project_status
 					project_deleted_at
-					project_is_member: count(project_members @filter(uid($userUid)))
-					project_is_admin: count(project_admins @filter(uid($userUid)))
+					project_is_member: count(project_members @filter(uid(` + reader + `)))
+					project_is_admin: count(project_admins @filter(uid(` + reader + `)))
 					project_team {
 						uid
 						team_uuid
 						team_name
-						team_is_admin: count(team_admins @filter(uid($userUid)))
+						team_is_admin: count(team_admins @filter(uid(` + reader + `)))
 					}
 					project_created_by {
 						user_uuid
 						user_name
 					}
-				}
+				`
+}
+
+func GetBasicDgraphProjectInfo(ctx context.Context, projectUUID string, userDgraphUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
+	variables := make(map[string]string)
+	variables["$id"] = projectUUID
+	variables["$userUid"] = userDgraphUID
+	query := `query ProjectInfo($id: string, $userUid: string){
+				projectInfo(func: eq(project_uuid, $id)) {` + projectGateFields("$userUid") + `}
 			}`
 
 	dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, variables)

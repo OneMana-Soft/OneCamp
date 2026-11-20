@@ -17,7 +17,6 @@ import (
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	workTaxonomy "github.com/akashc777/OneCamp/business/WorkTaxonomy"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
-	taskFieldModel "github.com/akashc777/OneCamp/models/postgres/TaskField"
 	"github.com/google/uuid"
 )
 
@@ -85,7 +84,7 @@ func TestImportedMilestones(t *testing.T) {
 	for _, f := range fields {
 		if f.Name == "Milestone" && f.Type == taskField.TypeSelect && len(f.Options) == 1 && f.Options[0].Label == "Alpha" {
 			alpha = f.Options[0].ID
-			values, _, err := taskFieldModel.ReadValues(ctx, []uuid.UUID{issue})
+			values, err := readValues(ctx, issue)
 			if err != nil {
 				t.Fatal(err)
 			}

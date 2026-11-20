@@ -1,7 +1,9 @@
 package business
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -41,5 +43,24 @@ func TestNextOpenLooksOnlySoFar(t *testing.T) {
 	var refused *Refused
 	if _, err := broken.Check(); !errors.As(err, &refused) || refused.Msg != "Each range has to end after it starts." {
 		t.Errorf("check: %v", err)
+	}
+}
+
+// Windows follow dates as FreeSlots does: a weekday off, a Saturday open (a
+// project's SLA week may carry them as a booking page's does).
+func TestWindowsFollowDates(t *testing.T) {
+	var hours Hours
+	if err := json.Unmarshal([]byte(`{"days":[1,2,3,4,5],"start":"09:00","end":"17:00","tz":"UTC",
+		"dates":{"2026-11-23":[],"2026-11-28":[{"start":"10:00","end":"11:00"}]}}`), &hours); err != nil {
+		t.Fatal(err)
+	}
+	from := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
+	var got []string
+	for _, w := range Windows(hours, from, from.AddDate(0, 0, 7)) {
+		got = append(got, w.Start.Format("Mon 15:04")+"-"+w.End.Format("15:04"))
+	}
+	want := "[Tue 09:00-17:00 Wed 09:00-17:00 Thu 09:00-17:00 Fri 09:00-17:00 Sat 10:00-11:00]"
+	if fmt.Sprint(got) != want {
+		t.Errorf("windows:\n got %v\nwant %s", got, want)
 	}
 }

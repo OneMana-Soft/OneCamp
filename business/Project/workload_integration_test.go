@@ -360,6 +360,21 @@ func workloadAway(t *testing.T) {
 		}
 	}
 
+	// Whose busy times show is the calendar's one rule (its own tests);
+	// here everyone's does, then Alice keeps hers to herself.
+	prevSeen := peopleSeenBy
+	t.Cleanup(func() { peopleSeenBy = prevSeen })
+	hidden := map[string]bool{}
+	peopleSeenBy = func(_ context.Context, _ string, people []string) (seen, private []string, err error) {
+		for _, p := range people {
+			if hidden[p] {
+				private = append(private, p)
+			} else {
+				seen = append(seen, p)
+			}
+		}
+		return seen, private, nil
+	}
 	from, until := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
 	w, err := GetWorkload(ctx, uids["me"], me, false, from, until)
 	if err != nil {
@@ -367,6 +382,10 @@ func workloadAway(t *testing.T) {
 	}
 	if len(w.Away) != 1 || w.Away[0].UserUUID != alice || w.Away[0].Start.Day() != 12 || w.Away[0].End.Day() != 15 {
 		t.Fatalf("only Alice's live time off in the weeks shown: %+v", w.Away)
+	}
+	hidden[alice] = true
+	if w, err = GetWorkload(ctx, uids["me"], me, false, from, until); err != nil || len(w.Away) != 0 {
+		t.Fatalf("Alice keeps when she's busy to herself, yet her time off shows: %+v (%v)", w.Away, err)
 	}
 }
 

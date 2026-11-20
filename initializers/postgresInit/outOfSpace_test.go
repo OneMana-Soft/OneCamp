@@ -114,3 +114,43 @@ func TestEverySessionNamesStatementsRefusedForSpace(t *testing.T) {
 		t.Errorf("%d refusals counted for statements not refused for space; want none", n)
 	}
 }
+
+// countingTracer counts the statements a session traced, start and end.
+type countingTracer struct{ starts, ends int }
+
+func (c *countingTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.starts++
+	return ctx
+}
+
+func (c *countingTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) { c.ends++ }
+
+// A test's tracer runs next to spaceTracer, never instead of it, and only on
+// the pools opened while it is set; unset, a session's tracer is spaceTracer
+// alone (above).
+func TestATestTracerRunsNextToSpaceTracer(t *testing.T) {
+	test := &countingTracer{}
+	testTracer = test
+	cfg, err := sessionConfig("postgres://u@localhost:5432/db")
+	testTracer = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	both, ok := cfg.Tracer.(bothTracers)
+	if !ok || both.own != (spaceTracer{}) {
+		t.Fatalf("a traced session's tracer is %#v; want spaceTracer, then the test's", cfg.Tracer)
+	}
+	ctx := context.Background()
+	before := refusedForSpace.total.Load()
+	ctx = cfg.Tracer.TraceQueryStart(ctx, nil, pgx.TraceQueryStartData{SQL: "SELECT 1"})
+	cfg.Tracer.TraceQueryEnd(ctx, nil, pgx.TraceQueryEndData{Err: &pgconn.PgError{Code: "53100", Message: "could not extend file: No space left on device"}})
+	if test.starts != 1 || test.ends != 1 {
+		t.Errorf("the test's tracer saw %d starts and %d ends; want 1 and 1", test.starts, test.ends)
+	}
+	if n := refusedForSpace.total.Load() - before; n != 1 {
+		t.Errorf("spaceTracer counted %d refusals for space behind a test's tracer; want 1", n)
+	}
+	if cfg, _ := sessionConfig("postgres://u@localhost:5432/db"); cfg.Tracer != (spaceTracer{}) {
+		t.Errorf("a session opened after the test's tracer was unset traces with %T; want spaceTracer alone", cfg.Tracer)
+	}
+}

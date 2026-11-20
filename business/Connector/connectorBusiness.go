@@ -31,6 +31,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	integrationModels "github.com/akashc777/OneCamp/models/postgres/Integration"
 	"strings"
 	"time"
 
@@ -201,6 +202,12 @@ func loadUserToken(ctx context.Context, userUUID uuid.UUID, provider string) (*s
 	if err != nil {
 		return nil, err
 	}
+	return tokenOf(rec)
+}
+
+// tokenOf is a stored integration's tokens, decrypted; nil when it holds no
+// access token (not connected).
+func tokenOf(rec *integrationModels.Integration) (*storedToken, error) {
 	if rec == nil || rec.AccessToken == nil || *rec.AccessToken == "" {
 		return nil, nil
 	}
@@ -236,9 +243,25 @@ func ConnectedProviderNames(ctx context.Context, userUUIDStr string) []string {
 	if err != nil {
 		return nil
 	}
+	providers := Providers()
+	ids := make([]string, len(providers))
+	for i, p := range providers {
+		ids[i] = p.ID
+	}
+	recs, err := integrationDomain.GetIntegrations(ctx, entityTypeUser, userUUID, ids)
+	if err != nil {
+		return nil
+	}
+	connected := make(map[string]bool, len(recs))
+	for _, rec := range recs {
+		if rec != nil {
+			tok, err := tokenOf(rec)
+			connected[rec.Provider] = err == nil && tok != nil
+		}
+	}
 	var names []string
-	for _, p := range Providers() {
-		if IsConnected(ctx, userUUID, p.ID) {
+	for _, p := range providers {
+		if connected[p.ID] {
 			names = append(names, p.Name)
 		}
 	}

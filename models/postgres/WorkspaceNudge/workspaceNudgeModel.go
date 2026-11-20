@@ -11,7 +11,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -261,30 +260,6 @@ func DismissAllForUser(ctx context.Context, userID uuid.UUID) (int64, error) {
 	return n, nil
 }
 
-// SupersedeStaleForUser marks open nudges whose dedup_key is NOT in keep as
-// superseded for a user — used at the end of an engine pass so signals that no
-// longer hold (e.g. a commitment that got resolved) stop showing. keep may be
-// empty (supersede all of the user's open nudges). Returns the ids it closed,
-// so the person's tabs are told which.
-func SupersedeStaleForUser(ctx context.Context, userID uuid.UUID, keep []string) ([]uuid.UUID, error) {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	// Build a NOT IN (...) guard. With no keys, supersede all open rows.
-	args := []any{userID}
-	q := `UPDATE workspace_nudges SET status = 'superseded', updated_at = NOW()
-	      WHERE user_id = $1 AND status = 'open'`
-	if len(keep) > 0 {
-		ph := make([]string, len(keep))
-		for i, k := range keep {
-			ph[i] = fmt.Sprintf("$%d", i+2)
-			args = append(args, k)
-		}
-		q += " AND dedup_key NOT IN (" + strings.Join(ph, ",") + ")"
-	}
-	return pgexec.Query(cctx, q+" RETURNING id", func(r pgexec.Row) (id uuid.UUID, err error) { err = r.Scan(&id); return }, args...)
-}
-
 // SupersedeOpenByDedupKey marks the OPEN nudge for a single logical signal
 // (identified by dedup_key) as superseded, returning the owning user id so the
 // caller can push a live badge update. Used to close the loop the instant the
@@ -307,33 +282,6 @@ func SupersedeOpenByDedupKey(ctx context.Context, dedupKey string) (userID, nudg
 		return uuid.Nil, uuid.Nil, err
 	}
 	return userID, nudgeID, nil
-}
-
-// UsersWithOpenNudges returns the distinct user ids that currently have at
-// least one OPEN nudge. The engine uses this to reconcile users whose signals
-// ALL resolved between passes (and who therefore produce no candidates this
-// run): they won't appear in the per-owner candidate map, so their now-stale
-// open nudges must be superseded explicitly or they'd linger forever.
-func UsersWithOpenNudges(ctx context.Context) ([]uuid.UUID, error) {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(cctx,
-		`SELECT DISTINCT user_id FROM workspace_nudges WHERE status = 'open'`)
-	if err != nil {
-		helpers.LogErrorWithContext(cctx, "models/workspaceNudge UsersWithOpenNudges failed: %+v", err)
-		return nil, err
-	}
-	defer rows.Close()
-	var out []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
 }
 
 // PurgeOldTerminal deletes terminal (dismissed/acted/superseded) nudges older

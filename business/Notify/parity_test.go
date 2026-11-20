@@ -18,7 +18,7 @@ import (
 
 // today is the rule the sites asked the database before H2
 // (GetEligibleUsersFor{Channel,Chat}Activity's SQL, gone with H2 so that
-// levelLets is the one copy): of those in the place, never the writer,
+// business/NotifyLevel Lets is the one copy): of those in the place, never the writer,
 // everyone on "all" (or, limited to mentions, only those mentioned) and those
 // on "mention" who are mentioned. "block" (Nothing) hears nothing. Pure.
 func today(levels map[string]string, writer string, mentions []string, limitToMentions bool) []string {

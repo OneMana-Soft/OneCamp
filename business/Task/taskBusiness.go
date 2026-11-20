@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"errors"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"slices"
 	"strconv"
 	"strings"
@@ -903,8 +904,13 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 	}
 
 	// 1. Who hears of it by their setting for the project, of those who may
-	// read it now (newTaskHearers).
-	eligibleUserIDs := newTaskHearers(ctx, projectId, taskUUID, userDgraph.Uuid, mentionsUUIDList)
+	// read it now (newTaskHearers): whom it is given to hears it as one it
+	// names, so a project they muted tells them nothing of it either.
+	named := mentionsUUIDList
+	if assigneeDrgraph != nil && assigneeDrgraph.Uuid != "" {
+		named = append(slices.Clone(mentionsUUIDList), assigneeDrgraph.Uuid)
+	}
+	eligibleUserIDs := newTaskHearers(ctx, projectId, taskUUID, userDgraph.Uuid, named)
 
 	// 2. Whom it mentions who hear of it: told in the inbox, by push and by
 	// email, once (task.mentioned). The graph's feed lists no mention in a
@@ -925,14 +931,10 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 	}
 
 	// 3. The push, and the desktop app's notice, to those of them the push
-	// gate lets through (business/Notification Deliver), and to whoever it
-	// was given to, unless that is the person who made it: them too when
-	// nobody's setting tells anyone else of it, which used to tell nobody at
-	// all, nor email them.
+	// gate lets through (business/Notification Deliver), whoever it was given
+	// to among them unless that is the person who made it (newTaskHearers
+	// never answers its maker).
 	// Nobody told of their mention is pushed of it twice.
-	if assigneeDrgraph != nil && assigneeDrgraph.Uuid != "" && assigneeDrgraph.Uuid != userDgraph.Uuid {
-		eligibleUserIDs = append(eligibleUserIDs, assigneeDrgraph.Uuid)
-	}
 	eligibleUserIDs = slices.DeleteFunc(eligibleUserIDs, func(id string) bool { return told[id] })
 
 	if len(eligibleUserIDs) > 0 {
@@ -975,7 +977,7 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 func newTaskHearers(ctx context.Context, projectID, taskUUID, makerUUID string, mentioned []string) []string {
 	hearers, err := taskHearers(ctx, projectID, taskUUID, makerUUID, mentioned, false)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/sendNewTaskNotification could not read who hears of task %s, telling only whom it's given to: %+v", taskUUID, err)
+		helpers.LogErrorWithContext(ctx, "business/sendNewTaskNotification could not read who hears of task %s, telling nobody of it by setting: %+v", taskUUID, err)
 		return nil
 	}
 	return hearers
@@ -986,11 +988,16 @@ func newTaskHearers(ctx context.Context, projectID, taskUUID, makerUUID string, 
 // task now; with onlyMentioned, of the mentioned alone (a mention a save
 // adds, tellTaskMentionsAdded).
 func taskHearers(ctx context.Context, projectID, taskUUID, actorUUID string, mentioned []string, onlyMentioned bool) ([]string, error) {
+	return hearersBy(ctx, newTaskReaders, projectID, taskUUID, actorUUID, mentioned, onlyMentioned)
+}
+
+// hearersBy is taskHearers with who may read the task decided by readers.
+func hearersBy(ctx context.Context, readersOf func(context.Context, string, []string) (map[string]bool, error), projectID, taskUUID, actorUUID string, mentioned []string, onlyMentioned bool) ([]string, error) {
 	eligible, err := newTaskEligible(ctx, projectID, actorUUID, mentioned, onlyMentioned)
 	if err != nil || len(eligible) == 0 {
 		return nil, err
 	}
-	readers, err := newTaskReaders(ctx, taskUUID, eligible)
+	readers, err := readersOf(ctx, taskUUID, eligible)
 	if err != nil {
 		return nil, err
 	}
@@ -1218,14 +1225,15 @@ func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAs
 	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
 
 	if userUUIDOf(dgraphTaskInfo.Assignee) != userUUIDOf(newAssigneeDgraphInfo) {
+		aiAssignee(ctx, taskUUID.String(), userUUIDOf(newAssigneeDgraphInfo))
 		logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectOf(dgraphTaskInfo),
 			Task: &dgraphStruct.DgraphTask{Uuid: taskUUID.String(), Assignee: newAssigneeDgraphInfo}, Fields: []string{"task_assignee"}})
 	}
-	if newAssigneeDgraphInfo != nil {
-		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), newAssigneeDgraphInfo.Uuid)
-	}
-	if dgraphTaskInfo.Assignee != nil && dgraphTaskInfo.Assignee.Uuid != "" && (newAssigneeDgraphInfo == nil || dgraphTaskInfo.Assignee.Uuid != newAssigneeDgraphInfo.Uuid) {
-		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), dgraphTaskInfo.Assignee.Uuid)
+	// The Google copies follow the hand-over in one ordered call: out of the
+	// previous assignee's calendar first, then into the new assignee's.
+	if from, to := userUUIDOf(dgraphTaskInfo.Assignee), userUUIDOf(newAssigneeDgraphInfo); from != "" || to != "" {
+		task := taskUUID.String()
+		integrationBusiness.MoveTaskGoogleCopy(pgexec.Detached(ctx), task, from, to) // its place in the task's line is taken here, in request order
 	}
 
 	assigneeUUID := ""
@@ -1463,12 +1471,29 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 	if err != nil {
 		return err
 	}
+	return setStatus(ctx, taskUUID, next, dgraphTaskInfo, userInfo)
+}
+
+// setStatus is UpdateTaskStatusByTaskUUID once the status is resolved: a
+// caller that resolved it already (MoveTask) doesn't resolve it again.
+func setStatus(ctx context.Context, taskUUID uuid.UUID, next taskStatusBusiness.Resolved, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
+	// A deleted task stays deleted (UpdateTaskStatusByTaskUUID).
+	if dgraphTaskInfo != nil && helpers.IsSoftDeleted(dgraphTaskInfo.DeletedAt) {
+		return ErrTaskDeleted
+	}
+	projectID := ""
+	if dgraphTaskInfo.Project != nil {
+		projectID = dgraphTaskInfo.Project.Uuid
+	}
 	prev := taskStatusBusiness.Of(dgraphTaskInfo)
 	if prev.Category == next.Category && prev.CustomID == next.CustomID {
 		return nil
 	}
+	// The gate notes whether the task has an open request for WentOn to
+	// close after the move (moveNote); only those two see the note.
+	moveCtx := withMoveNote(ctx, taskUUID)
 	if StatusGate != nil {
-		if err := StatusGate(ctx, dgraphTaskInfo, prev, next, userInfo); err != nil {
+		if err := StatusGate(moveCtx, dgraphTaskInfo, prev, next, userInfo); err != nil {
 			return err
 		}
 	}
@@ -1476,11 +1501,21 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 	currentTime := time.Now()
 	zeroUnixTime := time.Time{}
 
-	err = domain.UpdateTaskByTaskUUID(ctx, taskUUID, currentTime)
+	// The write says, fresh, whether the task links GitHub and whether its
+	// project runs cycles on a schedule, so a change of a task or project
+	// with neither reads neither again (H4W).
+	project := uuid.NullUUID{}
+	if p, perr := uuid.Parse(projectID); perr == nil {
+		project = uuid.NullUUID{UUID: p, Valid: true}
+	}
+	touch, err := domain.TouchForStatus(ctx, taskUUID, project, currentTime)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/UpdateTaskStatusByTaskUUID failed to update task in postgres err: %+v", err)
 		return
+	}
+	if touch.Found && !touch.Scheduled && project.Valid {
+		ctx = helpers.WithNoCycleSchedule(ctx, project.UUID)
 	}
 
 	// The activity names statuses as they read: a built-in key the app turns
@@ -1519,7 +1554,7 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 	logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectID, Task: dgraphTask,
 		Fields: []string{"task_status", "task_custom_status", "task_custom_status_name", "task_status_since"}})
 	if WentOn != nil {
-		WentOn(ctx, taskUUID, false)
+		WentOn(moveCtx, taskUUID, false)
 	}
 
 	taskOpenSearch := &openSearchStruct.OpenSearchTask{
@@ -1530,8 +1565,9 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 
 	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
 
-	// GitHub knows open and closed, which the category decides.
-	if prev.Category != next.Category {
+	// GitHub knows open and closed, which the category decides. A task the
+	// write found linking no issue or pull request has nothing to sync.
+	if prev.Category != next.Category && touch.Linked {
 		go syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "status", map[string]interface{}{"status": next.Category})
 	}
 
@@ -1548,8 +1584,10 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 		projectName = dgraphTaskInfo.Project.Name
 	}
 	if !helpers.Quiet(ctx) { // a move of data tells nobody (QuietMove)
+		// The mover's picture is only for the notification: worked out there.
+		profileKey := userInfo.ProfileKey
 		notificationBusiness.DispatchTaskStatusChange(userInfo.Uuid, userInfo.DisplayName(),
-			userBusiness.GetSignedProfileURL(ctx, userInfo.ProfileKey),
+			func(ctx context.Context) string { return userBusiness.GetSignedProfileURL(ctx, profileKey) },
 			taskUUID.String(), dgraphTaskInfo.Name, projectName, prev.Display(), next.Display(),
 			change.Uuid, people)
 	}
@@ -1645,6 +1683,10 @@ func UpdateTaskPriorityByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskP
 		domain.UpdateTasksInOpenSearch([]*openSearchStruct.OpenSearchTask{taskOpenSearch}, clear...)
 	})
 	dispatchTaskChanged(ctx, dgraphTaskInfo, FieldPriority, dgraphTaskInfo.Priority, taskPriority, userInfo)
+	// Made Urgent, its assignee is told at once (urgent.go).
+	if becameUrgent(dgraphTaskInfo.Priority, taskPriority) {
+		noteUrgent(ctx, urgentChange{task: dgraphTaskInfo, change: activityUUID.String(), by: userInfo})
+	}
 	if dgraphTaskInfo.Priority != taskPriority {
 		logChange(ctx, userInfo, workFeed.TaskChange{Kind: workFeed.KindUpdated, Project: projectOf(dgraphTaskInfo),
 			Task: &dgraphStruct.DgraphTask{Uuid: taskUUID.String(), Priority: taskPriority}, Fields: []string{"task_priority"}})
@@ -1799,7 +1841,8 @@ func ArchiveTaskByTaskUUID(ctx context.Context, taskUUID uuid.UUID, dgraphTaskIn
 	taskSearchCascades.Go(taskID, "task.search-delete", func() { taskInSearch(taskID, archivedAt, currentTime.Unix(), attachments) })
 
 	if dgraphTaskInfo.Assignee != nil && dgraphTaskInfo.Assignee.Uuid != "" {
-		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), dgraphTaskInfo.Assignee.Uuid)
+		// Out of the assignee's calendar, whatever their task sync says (V-1119).
+		integrationBusiness.ArchiveTaskGoogleCopy(pgexec.Detached(ctx), taskUUID.String()) // its place in the task's line is taken here, in request order
 	}
 
 	// Its entry is its task.deleted too, through the Outbox (taskWebhooks.go),
@@ -2054,9 +2097,14 @@ func MergeGitHubMetaIntoTask(ctx context.Context, taskUUID uuid.UUID, task *dgra
 
 // MergeGitHubMetaIntoTasks batch-fetches GitHub metadata and overlays it onto multiple Dgraph tasks.
 func MergeGitHubMetaIntoTasks(ctx context.Context, tasks []*dgraphStruct.DgraphTask) error {
-	if len(tasks) == 0 {
-		return nil
-	}
+	var err error
+	pgexec.Together(ctx, GitHubMetaPlanned(ctx, tasks, &err))
+	return err
+}
+
+// GitHubMetaPlanned is MergeGitHubMetaIntoTasks for a caller that pipelines
+// its read with its own (pgexec.Together); *failed is the read's error.
+func GitHubMetaPlanned(ctx context.Context, tasks []*dgraphStruct.DgraphTask, failed *error) pgexec.Planned {
 	var taskUUIDs []uuid.UUID
 	for _, t := range tasks {
 		uid, err := uuid.Parse(t.Uuid)
@@ -2066,29 +2114,33 @@ func MergeGitHubMetaIntoTasks(ctx context.Context, tasks []*dgraphStruct.DgraphT
 		taskUUIDs = append(taskUUIDs, uid)
 	}
 	if len(taskUUIDs) == 0 {
-		return nil
+		return pgexec.Planned{}
 	}
-	metaMap, err := domain.GetGitHubMetaForTasks(ctx, taskUUIDs)
-	if err != nil {
-		return err
-	}
-	for _, t := range tasks {
-		uid, _ := uuid.Parse(t.Uuid)
-		meta, ok := metaMap[uid]
-		if !ok {
-			continue
+	read, metaOf := domain.GitHubMetaRead(taskUUIDs)
+	return pgexec.Planned{Reads: []*pgexec.Read{read}, Then: func() {
+		metaMap, err := metaOf()
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "business/GitHubMetaPlanned couldn't read %d tasks' GitHub facts err: %+v", len(taskUUIDs), err)
+			*failed = err
+			return
 		}
-		t.GitHubIssueNumber = meta.IssueNumber
-		t.GitHubIssueURL = meta.IssueURL
-		t.GitHubPRNumber = meta.PRNumber
-		t.GitHubPRURL = meta.PRURL
-		t.GitHubBranch = meta.Branch
-		t.GitHubPRState = meta.PRState
-		t.GitHubPRCheckStatus = meta.PRCheckStatus
-		t.GitHubPRReviewState = meta.PRReviewState
-		t.GitHubPRIsDraft = meta.PRIsDraft
-	}
-	return nil
+		for _, t := range tasks {
+			uid, _ := uuid.Parse(t.Uuid)
+			meta, ok := metaMap[uid]
+			if !ok {
+				continue
+			}
+			t.GitHubIssueNumber = meta.IssueNumber
+			t.GitHubIssueURL = meta.IssueURL
+			t.GitHubPRNumber = meta.PRNumber
+			t.GitHubPRURL = meta.PRURL
+			t.GitHubBranch = meta.Branch
+			t.GitHubPRState = meta.PRState
+			t.GitHubPRCheckStatus = meta.PRCheckStatus
+			t.GitHubPRReviewState = meta.PRReviewState
+			t.GitHubPRIsDraft = meta.PRIsDraft
+		}
+	}}
 }
 
 func GetDgraphBasicTaskInfo(ctx context.Context, teamUUID string, userDgraphUID string) (dgraphTask *dgraphStruct.DgraphTask, err error) {

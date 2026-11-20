@@ -17,7 +17,7 @@ type RowHome struct {
 // RowHomes is, for the rows among ids, deleted ones too, which table each is
 // in: what a decision about rows by id alone (a thread on a row, a notice
 // about one) reads first. A row that isn't there is left out. The ids go to
-// pgx as they are (CellsOf says why).
+// pgx as they are (CellsOfMany says why).
 func RowHomes(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]RowHome, error) {
 	out := make(map[uuid.UUID]RowHome, len(ids))
 	if len(ids) == 0 {

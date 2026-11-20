@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	formula "github.com/akashc777/OneCamp/business/Formula"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
@@ -360,6 +361,21 @@ func TestRollupChains(t *testing.T) {
 // A rollup can't add up a formula that reads links or rollups, through other
 // formulas too: a read of the linked table doesn't work those out. It can add
 // up another rollup, by what that rollup gives (airtable-02).
+// A rollup's refusal of a field of item links names every kind of item a
+// relation can link to, so a new kind can't go missing from it (CR-374 NB4:
+// channels and calls did).
+func TestRollupRefusalNamesEveryItemKind(t *testing.T) {
+	for kind := range fieldTypes.ItemKinds {
+		f := &model.Field{Id: uuid.New(), Name: kind, Type: model.FieldRelation, Config: fmt.Sprintf(`{"relation_target":%q}`, kind)}
+		got := rollupProblem("count", f, []*model.Field{f})
+		for _, want := range fieldTypes.ItemKinds {
+			if !strings.Contains(got, want) {
+				t.Errorf("a rollup of %s links is refused with %q; it doesn't name %s", kind, got, want)
+			}
+		}
+	}
+}
+
 func TestRollupProblems(t *testing.T) {
 	field := func(name, typ, cfg string) *model.Field {
 		return &model.Field{Id: uuid.New(), Name: name, Type: typ, Config: cfg}
@@ -376,7 +392,7 @@ func TestRollupProblems(t *testing.T) {
 	fields := []*model.Field{vendor, docs, cost, spend, names, direct, through, docNames, plain}
 	for f, want := range map[*model.Field]string{
 		vendor:   "A rollup can't add up links to another table",
-		docs:     "A rollup can't add up links to docs, tasks, boards, projects or people",
+		docs:     "A rollup can't add up links to docs, tasks, boards, projects, channels, calls or people",
 		spend:    "",
 		names:    "That way of adding up doesn't fit this field",
 		direct:   "A rollup can't add up a formula that reads links or rollups",

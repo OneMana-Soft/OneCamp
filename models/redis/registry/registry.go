@@ -251,6 +251,31 @@ var PublicReadRate = withArity(Spec{
 	Description: "Public page reads per (surface, address or page). Fixed one-minute window.",
 }, 2) // (surface, ip or a hash of the page)
 
+// BookingMoveRate counts a guest's moves of one booking by its link, per
+// booking (its id, never the link's secret), in a fixed 24-hour window: each
+// move tells the page's owner (inbox, email, push) and mails the guest, so a
+// link moves its booking only a few times a day.
+var BookingMoveRate = withArity(Spec{
+	Namespace:   "booking:move:rate",
+	TTL:         24 * time.Hour,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "A guest's moves of one booking by its link, per booking id. Fixed 24-hour window.",
+}, 1) // (booking id)
+
+// BookingGuestReminderSent is a booking guest's reminder, claimed by the one
+// firing that mails it: per booking (its id, never the link's secret), the
+// start it was planned for and its lead, so a retry, a second worker or a job
+// left from a move away and back sends nothing. A limit of one in a 48-hour
+// window, longer than any reminder's lead.
+var BookingGuestReminderSent = withArity(Spec{
+	Namespace:   "booking:guest_reminder:sent",
+	TTL:         48 * time.Hour,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "A booking guest's reminder mailed, per (booking id, planned start, lead). One per 48-hour window.",
+}, 3) // (booking id, start unix seconds, lead minutes)
+
 // SSO ------------------------------------------------------------------------
 
 // SSOState is the one-shot OAuth/OIDC state nonce; stores the
@@ -295,6 +320,21 @@ var UserDgraphProfile = withArity(Spec{
 	Category:    CategoryUser,
 	Description: "JSON-encoded Dgraph user profile. Invalidated on profile update.",
 }, 1) // (userUUID)
+
+// TaskReadGeneration is the generation of what decides which tasks a reader
+// may see (models/taskread): the rows of task_restrictions,
+// task_restriction_grants and triage_items. Every write to them bumps it
+// after its commit, and a process keeps those rows only while the
+// generation it read with the request's profiles is still this one. Read
+// with the profiles, in VerifyAuth's one MGET. Its first value is random,
+// so a key that expired never comes back at a value a cache still holds.
+var TaskReadGeneration = withArity(Spec{
+	Namespace:   "taskread:gen",
+	TTL:         30 * 24 * time.Hour,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryProject,
+	Description: "Generation of the task-read decision's rows. Bumped after every committed write to task restrictions, their grants and triage items.",
+}, 0) // global (no args)
 
 // UserSidebar caches the user's sidebar nav payload.
 var UserSidebar = withArity(Spec{
@@ -485,6 +525,18 @@ var AIRecapLock = withArity(Spec{
 	Description: "Per-call one-shot lock for the meeting recap agent (idempotency).",
 }, 1) // (callSessionKey)
 
+// AIActionTaskClaim is one "Make task" at a time for one action item of a
+// call's recap (gcal-new-event-notes): the claim's token is the request's,
+// let go when its task is made and noted on the item, or after 2 minutes, so
+// a double click or two people at once never make the item two tasks.
+var AIActionTaskClaim = withArity(Spec{
+	Namespace:   "ai:recap:task",
+	TTL:         2 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryAI,
+	Description: "One Make task at a time for one action item of a call's recap (SET NX by a request's token, let go when its task is noted).",
+}, 2) // (callKey, itemIndex)
+
 // CallAttendees is everyone who joined ONE call, so its notes reach the people
 // who attended rather than only the ones who spoke.
 //
@@ -590,6 +642,19 @@ var RecordingStageTicket = withArity(Spec{
 	Category:    CategoryCall,
 	Description: "A room's latest stage recording's ticket nonce, for its recorder alone. Claimed once with DeleteIfHeld.",
 }, 1) // (roomName)
+
+// CallConsentSeen is a person's answer to a call's recording or transcript
+// notice, claimed once (business/CallControl consent.go): one admin audit row
+// per person, per what was on, per choice, across every API instance. A day
+// outlasts any call; without Redis the claim fails open, so a rare second row
+// can be written, never a missing one.
+var CallConsentSeen = withArity(Spec{
+	Namespace:   "call:consent",
+	TTL:         24 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategoryCall,
+	Description: "One call-consent audit row per (session, participant, what was on, choice); a day, fails open.",
+}, 4) // (sessionID, identity, state, choice)
 
 // The short TTL is the security boundary. Someone who leaves the call can keep
 // posting for at most this long, and the lines they could post in that window

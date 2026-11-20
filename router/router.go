@@ -336,9 +336,10 @@ func routes() *chi.Mux {
 	// An app's answer at its command's response URL: the token is the credential.
 	router.With(customMiddleware.IPRateLimit("command-respond", 600, "Too many answers from here. Try again later.")).With(customMiddleware.BodyLimit(256<<10)).Post("/command-responses/{token}", commandController.Respond)
 	router.With(customMiddleware.BookingPageReadLimit()).Get("/public/book/{slug}", eventController.GetPublicBookingPage)
-	router.With(customMiddleware.IPRateLimit("booking", 10, "Too many bookings from here. Try again later.")).With(customMiddleware.BodyLimit(8<<10)).Post("/public/book/{slug}", eventController.BookPublicSlot)
+	router.With(customMiddleware.IPRateLimit("booking", 10, "Too many bookings from here. Try again later.")).With(customMiddleware.BodyLimit(eventController.BookBodyLimit)).Post("/public/book/{slug}", eventController.BookPublicSlot)
 	router.With(customMiddleware.BookingLinkReadLimit()).Get("/public/booking/{token}", eventController.GetPublicBooking)
 	router.With(customMiddleware.LoginRateLimit("booking-cancel")).Post("/public/booking/{token}/cancel", eventController.CancelPublicBooking)
+	router.With(customMiddleware.IPRateLimit("booking", 10, "Too many bookings from here. Try again later.")).With(customMiddleware.LoginRateLimit("booking-reschedule")).With(customMiddleware.BodyLimit(8<<10)).Post("/public/booking/{token}/reschedule", eventController.ReschedulePublicBooking)
 	// Someone invited to an event by email reads their invitation and answers
 	// it from their link, with no account (calendar A2). Reading is limited per
 	// address, every GET counted; answering per address too. Every "not
@@ -372,6 +373,8 @@ func routes() *chi.Mux {
 	router.With(customMiddleware.IPRateLimit("call-activities", 240, "Too many requests from here. Wait a few minutes and try again.")).With(customMiddleware.BodyLimit(1<<12)).Post("/guest/calls/activities", callsController.GuestDoCallActivity)
 	router.With(customMiddleware.IPRateLimit("call-thread", 120, "Too many messages from here. Wait a few minutes and try again.")).With(customMiddleware.BodyLimit(1<<15)).Post("/guest/calls/thread", callsController.GuestReplyInCallThread)
 	router.With(customMiddleware.IPRateLimit("call-quality", 120, "Too many requests from here. Wait a few minutes and try again.")).With(customMiddleware.BodyLimit(1<<13)).Post("/guest/calls/quality", callsController.GuestRecordCallQuality)
+	// A guest's own OK or Leave on a recorded call's notice (zoom-09), proved by their call token.
+	router.With(customMiddleware.IPRateLimit("call-consent", 60, "Too many requests from here. Wait a few minutes and try again.")).With(customMiddleware.BodyLimit(1<<10)).Post("/guest/calls/consent", callsController.GuestRecordCallConsent)
 	// A guest waiting in a meeting's lobby (calls CALLS-2): each ask waits up to
 	// 25 s for an answer, so a waiting page asks about twice a minute.
 	router.With(customMiddleware.IPRateLimit("knock", 120, "Too many requests from here. Wait a few minutes and try again.")).Get("/guest/meet/{token}/knock/{ticket}", guestController.GuestKnockAnswer)
@@ -397,6 +400,8 @@ func routes() *chi.Mux {
 	router.With(customMiddleware.FileReadLimit("guest-board")).Get("/guest/board-attachment/{token}/{obj_uuid}", guestController.GuestBoardAttachment)
 	// A board's polls for its link's guest (miro-28 polls on a slide): questions and tallies, read only.
 	router.With(customMiddleware.LinkReadLimit("guest-board-polls")).Get("/guest/board-polls/{token}", guestController.GuestBoardPolls)
+	// A board link's guest comments as its live token names them (miro-33): comment and edit roles.
+	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestDocComment)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/board-comment", guestController.GuestBoardComment)
 	// The same for a picture or file in a doc shared through a guest link (B4).
 	mountGuestDocAttachment(router)
 	// Docs published to the web (C6, D-25): public, each route protected in
@@ -1048,6 +1053,8 @@ func routes() *chi.Mux {
 		r.Post("/guest/links", guestController.CreateResourceGuestLink)
 		r.Get("/guest/links", guestController.ListResourceGuestLinks)
 		r.Post("/guest/links/{id}/revoke", guestController.RevokeResourceGuestLink)
+		// A board link's role, password and end, changed by its managers (miro-33).
+		r.Patch("/guest/links/{id}", guestController.ChangeResourceGuestLink)
 
 	})
 
@@ -1065,6 +1072,8 @@ func routes() *chi.Mux {
 		r.Get("/", dataTableController.ListTables)
 		r.Post("/", dataTableController.CreateTable)
 		r.Post("/generate", dataTableController.GenerateTable)
+		// Every table the reader can open as one workbook, a sheet each.
+		r.Post("/export", dataTableController.ExportTables)
 		r.Get("/{id}", dataTableController.GetTable)
 		r.Post("/{id}/update", dataTableController.UpdateTable)
 		r.Post("/{id}/delete", dataTableController.DeleteTable)
@@ -1645,6 +1654,8 @@ func routes() *chi.Mux {
 		r.Post("/{project_uuid}/cycles/{cycle_id}/complete", cycleController.CompleteCycle)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/start", cycleController.StartCycle)
 		r.Post("/{project_uuid}/cycles/schedule", cycleController.SetCycleSchedule)
+		// Parallel cycles, on or off (jira-04 head C): the project's admins.
+		r.Post("/{project_uuid}/cycles/parallel", cycleController.SetParallelCycles)
 		// The caller's own calendar link to the project's cycles (linear-12 part 4).
 		r.Get("/{project_uuid}/cycles/feed", cycleController.CycleFeed)
 		r.Post("/{project_uuid}/cycles/feed", cycleController.MakeCycleFeed)
@@ -1948,6 +1959,8 @@ func routes() *chi.Mux {
 		r.Post("/updateBoardPermissions", boardController.UpdateBoardPermissions)
 		r.Get("/getBoardPermissions", boardController.GetBoardPermissions)
 		r.Post("/searchUsers", boardController.SearchUsersForBoard)
+		// A comment written by the server (miro-32 Can comment): owners, co-owners, editors and commenters.
+		r.Post("/comment", boardController.CommentOnBoard)
 		r.Post("/commentMention", boardController.BoardCommentMention)
 		r.Post("/commentDelete", boardController.BoardCommentDelete)
 		r.Get("/getBoardSnapshots", boardController.GetBoardSnapshots)
@@ -1984,6 +1997,9 @@ func routes() *chi.Mux {
 		r.Get("/bookingPages", eventController.GetMyBookingPages)
 		r.Post("/bookingPages", eventController.SaveMyBookingPage)
 		r.Post("/bookingPages/delete", eventController.DeleteMyBookingPage)
+		r.Get("/bookingPages/hosting", eventController.GetHostingBookingPages)
+		r.Post("/bookingPages/hosting/accept", eventController.AcceptBookingHost)
+		r.Post("/bookingPages/hosting/leave", eventController.LeaveBookingHost)
 	})
 
 	integrationRouter.Group(func(r chi.Router) {
@@ -2023,6 +2039,8 @@ func routes() *chi.Mux {
 		r.Get("/unified", activityController.GetUnifiedActivity)
 		// The Inbox marks the feed seen by asking; reading it marks nothing.
 		r.Post("/seen", activityController.MarkActivitySeen)
+		// The person takes items out of their own Priority, or puts them back.
+		r.Post("/dismiss", activityController.DismissFromPriority)
 		// The Inbox badge alone, for the app to read again.
 		r.Get("/unread", activityController.GetActivityUnread)
 	})

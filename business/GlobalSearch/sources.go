@@ -13,6 +13,7 @@ package business
 // readableBoards.go, readableEvents.go, readableFiles.go, liveHits.go).
 
 import (
+	"sort"
 	"strings"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
@@ -35,6 +36,20 @@ type Reach struct {
 	// own and their invitations, read once a search looks at events (nil
 	// until then).
 	Calendars *EventCalendars
+	// Calls are the conversations whose calls' words the asker finds, read
+	// once a search looks at transcripts (nil until then).
+	Calls *CallReach
+}
+
+// CallReach is whose calls' words someone finds: the conversations they are
+// in now (Places), less every call still going on (by its session key, or by
+// its room for a line that has none), and less every line said in a
+// conversation since the call going on there started (RunningSince: the
+// conversation's id to that start, in epoch seconds), whether or not the
+// line names its call.
+type CallReach struct {
+	Places, RunningKeys, RunningRooms []string
+	RunningSince                      map[string]int64
 }
 
 // EventCalendars are the calendars whose events someone finds: every event on
@@ -57,6 +72,8 @@ const (
 	KindBoard   = "board"
 	KindEvent   = "event"
 	KindTeam    = "team"
+	// KindTranscript is a line said in a call.
+	KindTranscript = "transcript"
 )
 
 // source is one index as the engine reads it.
@@ -322,6 +339,50 @@ var sources = []source{
 		title: []string{"user_name", "user_full_name"},
 		dates: map[string]string{"created": "created_date", "updated": updatedQueried},
 	},
+	{
+		index: openSearchStruct.TRANSCRIPT_INDEX, kind: KindTranscript,
+		// The conversations the asker is in now, read from the graph when
+		// the search runs (never the sign-in's channel list), less every
+		// call still going on.
+		reach: callReachQuery,
+		// A line's own words, and its speaker's name (matched, never marked:
+		// the highlight marks transcript_text alone).
+		text:   fixed("transcript_text^3", "transcript_by_user_full_name"),
+		fields: map[string][]string{fieldFrom: {"transcript_by_user_id"}, inChannel: {"transcript_conv_id"}, inDM: {"transcript_conv_id"}},
+		dates:  map[string]string{"created": "created_date"},
+	},
+}
+
+// callReachQuery is who finds a call's lines: an entry of a conversation in
+// r.Calls.Places, and of no call going on. No Calls (not read, or a read
+// that failed) reaches none.
+func callReachQuery(r Reach) map[string]any {
+	var c CallReach
+	if r.Calls != nil {
+		c = *r.Calls
+	}
+	notRunning := []map[string]any{
+		terms("transcript_session_key", c.RunningKeys),
+		{"bool": map[string]any{
+			"filter":   []map[string]any{terms("transcript_room", c.RunningRooms)},
+			"must_not": []map[string]any{{"exists": map[string]any{"field": "transcript_session_key"}}},
+		}},
+	}
+	convs := make([]string, 0, len(c.RunningSince))
+	for conv := range c.RunningSince {
+		convs = append(convs, conv)
+	}
+	sort.Strings(convs)
+	for _, conv := range convs {
+		notRunning = append(notRunning, map[string]any{"bool": map[string]any{"filter": []map[string]any{
+			term("transcript_conv_id", conv),
+			{"range": map[string]any{"created_date": map[string]any{"gte": c.RunningSince[conv]}}},
+		}}})
+	}
+	return map[string]any{"bool": map[string]any{
+		"filter":   []map[string]any{terms("transcript_conv_id", c.Places)},
+		"must_not": notRunning,
+	}}
 }
 
 // fuzzyNames are the sources whose names a misspelling still finds, as the

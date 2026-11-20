@@ -11,8 +11,10 @@ import (
 	"time"
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
+	chatLevels "github.com/akashc777/OneCamp/domain/UserChatNotification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	urgentModels "github.com/akashc777/OneCamp/models/postgres/UrgentPing"
@@ -146,6 +148,17 @@ func NotifyAnyway(ctx context.Context, sender *userModels.UserInfo, recipient uu
 	}
 	if !inDM {
 		return &UrgentError{"Message them first, then notify them if it's urgent."}
+	}
+	// Their own setting for the DM, by the one level rule (NotifyLevel Hears):
+	// an urgent ping is for them (Named), so "Nothing" refuses it as it
+	// silences everything else there, and "Mentions" or no setting lets it
+	// through. One read, of the recipient alone.
+	levels, err := chatLevels.GetLevelsInConversation(ctx, grp, []string{recipient.String()})
+	if err != nil {
+		return err
+	}
+	if !notifylevel.Hears(levels, strings.ToLower(recipient.String()), notifylevel.Named) {
+		return &UrgentError{"They've turned off notifications for this conversation."}
 	}
 	if claimed, err := urgentModels.Claim(ctx, sender.UserPostgresInfo.Id, recipient, now.Add(-24*time.Hour), urgentPerDay); err != nil {
 		return err

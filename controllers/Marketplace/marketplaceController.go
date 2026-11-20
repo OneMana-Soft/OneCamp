@@ -8,6 +8,8 @@ package controllers
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
@@ -18,20 +20,57 @@ import (
 	"github.com/google/uuid"
 )
 
+// installTemplate is business.Install: a seam, so how a failed install is
+// answered is tested without the stores.
+var installTemplate = business.Install
+
 func currentUser(r *http.Request) userModels.UserInfo {
 	userInfo, _ := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	return userInfo
 }
 
+// mapErr answers a failed browse, publish or unpublish: a refusal, a
+// template they may not touch and one that isn't there in their words
+// (answered); anything else is a 400 with err's text (publish's checks are
+// plain errors in the person's words).
 func mapErr(w http.ResponseWriter, err error) {
+	if answered(w, err) {
+		return
+	}
+	helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+}
+
+// answered writes a refusal (its status and words), a template they may not
+// install or change here (403) and one that isn't there (404), and says
+// whether it did.
+func answered(w http.ResponseWriter, err error) bool {
+	refusal, refused := business.AsRefusal(err)
 	switch {
+	case refused:
+		helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
 	case business.IsForbidden(err):
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "you don't have permission to install this here"})
 	case business.IsNotFound(err):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "template not found"})
 	default:
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		return false
 	}
+	return true
+}
+
+// installFailed answers a failed install. A refusal (the install's own, or
+// what the kind's create refused: business.AsRefusal), a forbidden and a
+// missing template keep their status and words (answered); anything else failed on our
+// side (a store's error, which the around wraps: "couldn't make the project:
+// <driver text>"), so it is logged and answered 500 in words, never with the
+// store's own text, which names constraints and tables (CR-444 F2; the
+// project's own create answers the same way).
+func installFailed(w http.ResponseWriter, r *http.Request, err error) {
+	if answered(w, err) {
+		return
+	}
+	helpers.LogErrorWithContext(r.Context(), "controllers/InstallTemplate couldn't install the template err: %+v", err)
+	helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't install the template. Please try again."})
 }
 
 // ListTemplates GET /marketplace/templates?kind=
@@ -100,13 +139,24 @@ func InstallTemplate(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid template id"})
 		return
 	}
-	userInfo := currentUser(r)
-	res, ierr := business.Install(r.Context(), id, &userInfo)
-	if ierr != nil {
-		mapErr(w, ierr)
+	// The body is optional: none, or {}, installs as it always has; a table
+	// template's project_team_uuid also makes its project and channel.
+	var opts business.InstallOptions
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&opts); err != nil && !errors.Is(err, io.EOF) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid install options"})
 		return
 	}
+	userInfo := currentUser(r)
+	res, ierr := installTemplate(r.Context(), id, &userInfo, opts)
+	if ierr != nil {
+		installFailed(w, r, ierr)
+		return
+	}
+	details := map[string]interface{}{"template_id": id.String(), "kind": res.Kind, "entity_id": res.EntityID}
+	if res.ProjectID != "" {
+		details["project_id"], details["channel_id"] = res.ProjectID, res.ChannelID
+	}
 	auditBusiness.Record(r, "marketplace.install", auditBusiness.CategoryApp,
-		"Installed template: "+res.Name, map[string]interface{}{"template_id": id.String(), "kind": res.Kind, "entity_id": res.EntityID})
+		"Installed template: "+res.Name, details)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": res})
 }

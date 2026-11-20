@@ -90,6 +90,8 @@ func publishFailed(w http.ResponseWriter, r *http.Request, where string, err err
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Only a doc's view-only link can be published. A published page is read-only."})
 	case errors.Is(err, guestBusiness.ErrSlugTaken):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "Another page has that address. Try another one.", "status": "slug_taken"})
+	case errors.Is(err, guestBusiness.ErrNotOnTheWeb):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That link isn't on the web."})
 	case errors.Is(err, guestBusiness.ErrInvalidGrant), errors.Is(err, guestBusiness.ErrNotFound):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That link isn't here any more."})
 	default:

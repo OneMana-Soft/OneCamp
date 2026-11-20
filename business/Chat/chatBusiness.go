@@ -115,7 +115,7 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 		}
 	}
 
-	err = createChatRow(ctx, chatUUID, userInfo.UserPostgresInfo.Id, chatInfo.GrpUuid)
+	marked, err := createChatRow(ctx, chatUUID, userInfo.UserPostgresInfo.Id, chatInfo.GrpUuid, currentTime)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -156,7 +156,9 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 	if len(dmUID) != 0 {
 		startNewGroup(ctx, userInfo, chatInfo.GrpUuid, userUUIDs, currentTime)
 	}
-	markRead(ctx, "business/CreateChatForGroup", chatInfo.GrpUuid, userInfo, currentTime)
+	if !marked {
+		markRead(ctx, "business/CreateChatForGroup", chatInfo.GrpUuid, userInfo, currentTime)
+	}
 
 	createdChatInfo = &adapter.OutputCreateChatForChat{
 		Uuid:        chatUUID.String(),
@@ -182,7 +184,7 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 // The steps today's writers take before their fan-out, seams for tests
 // (golden_test.go), shared with the durable writes (durable.go).
 var (
-	createChatRow = domain.CreateChat
+	createChatRow = writeChatRowRead
 	writeDM       = writeDMNode
 	writeGroup    = writeGroupNode
 	startNewDM    = startDM
@@ -294,6 +296,18 @@ func startGroup(ctx context.Context, userInfo *userModels.UserInfo, grpID string
 	chatNotificationBusiness.BulkCreateChatNotification(ctx, people, grpID, postgressStruct.NOTIFICATION_TYPE_ALL, currentTime)
 }
 
+// writeChatRowRead writes a message's row and its sender's read mark up to at
+// in one statement, and says whether the mark was written. A statement that
+// fails is tried again as the row alone, and the caller marks it as before
+// (markRead): a mark that can't be written never stops a send
+// (TestADMStoredIsSentEvenWhenItsReadMarksCantBeWritten).
+func writeChatRowRead(ctx context.Context, chatUUID, sender uuid.UUID, grp string, at time.Time) (marked bool, err error) {
+	if err = domain.CreateChatReadBySender(ctx, chatUUID, sender, grp, at); err == nil {
+		return true, nil
+	}
+	return false, domain.CreateChat(ctx, chatUUID, sender, grp)
+}
+
 // markSentRead marks the conversation read for the sender up to their
 // message; one that can't be written is logged, and the send goes on.
 func markSentRead(ctx context.Context, where, grpID string, userInfo *userModels.UserInfo, currentTime time.Time) {
@@ -316,7 +330,7 @@ func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userM
 	groupingId := helpers.GetGroupingId(userInfo.UserPostgresInfo.Id.String(), chatInfo.ToUuid)
 
 	// create chat in postgres
-	err = createChatRow(ctx, chatUUID, userInfo.UserPostgresInfo.Id, groupingId)
+	marked, err := createChatRow(ctx, chatUUID, userInfo.UserPostgresInfo.Id, groupingId, currentTime)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -351,7 +365,9 @@ func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userM
 		startNewDM(ctx, userInfo, sendToDgraph, toUUID, groupingId, currentTime)
 	}
 
-	markRead(ctx, "business/CreateChat", groupingId, userInfo, currentTime)
+	if !marked {
+		markRead(ctx, "business/CreateChat", groupingId, userInfo, currentTime)
+	}
 
 	createdChatInfo = &adapter.OutputCreateChatForChat{
 		Uuid:        chatUUID.String(),
@@ -606,8 +622,9 @@ func fanOutCreatedChat(ctx context.Context, c createdChat) {
 	entry := c.searchEntry()
 	if !bulk {
 		replyTo := replyParentChatAuthorUUID(c.replyTo)
+		notifyCtx := helpers.ImportTimeOnly(ctx) // a seeded or imported message is told of as of its time
 		helpers.GoSafeNamed("chat.notify", func() {
-			notifyChat(context.Background(), c.pushTitle(), entry.ChatBody, c.author.Uuid, c.grp, c.mentions, c.id, c.author.DisplayName(), c.author.ProfileKey, replyTo, nil)
+			notifyChat(notifyCtx, c.pushTitle(), entry.ChatBody, c.author.Uuid, c.grp, c.mentions, c.id, c.author.DisplayName(), c.author.ProfileKey, replyTo, nil)
 		})
 	}
 	helpers.GoSafeNamed("chat.search", func() { createChatEntry(entry, c.files) })
@@ -652,8 +669,7 @@ func chatMentionNodeIDs(mentions []*dgraphStruct.DgraphUser) []string {
 // each Plan emails. tell, when set, lets through only those not told yet (the
 // outbox's sink); nil tells everyone, as today's writers do.
 func notifyNewChat(ctx context.Context, title string, body string, userId string, grpId string, mentions []*dgraphStruct.DgraphUser, chatUUID string, username string, profileKey *string, replyToAuthorUUID string, tell outboxBusiness.Told) {
-	replyPing := replyToAuthorUUID != "" && replyToAuthorUUID != userId
-	told := notifyBusiness.Tell(ctx, notifyBusiness.Event{
+	told := tellChat(ctx, notifyBusiness.Event{
 		ID:        "chat:" + grpId + ":" + chatUUID,
 		Cause:     notifyBusiness.CauseMessage,
 		Actor:     userId,
@@ -676,7 +692,7 @@ func notifyNewChat(ctx context.Context, title string, body string, userId string
 	}
 
 	// The live Activity item, to those it mentions or replies to.
-	for _, recipientID := range tell.Only("activity", notifyBusiness.Of(told, notifyBusiness.CauseMention, notifyBusiness.CauseReplyToYou)) {
+	for _, recipientID := range tell.Only("activity", notifyBusiness.Of(told, heardNamed...)) {
 		activityItem := &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
@@ -696,22 +712,24 @@ func notifyNewChat(ctx context.Context, title string, body string, userId string
 				CreatedAt: helpers.TimePointer(time.Now()),
 			},
 		}
-		activityBusiness.PublishActivityToUser(recipientID, activityItem)
+		publishActivityTo(recipientID, activityItem)
 	}
 
 	// Email stays the site's (no-op when RESEND_API_KEY is unset): to those
-	// Plan emails; the dispatcher applies its own per-recipient gates.
-	notificationBusiness.DispatchChatDM(
-		userId,
-		username,
-		userBusiness.GetSignedProfileURL(ctx, profileKey),
-		grpId,
-		chatUUID,
-		body,
-		tell.Only("email", notifyBusiness.By(told, notifyBusiness.ToEmail)),
-		len(mentions) > 0 || replyPing,
-	)
+	// Plan emails, each by how they heard it, as the Activity line reads it:
+	// the named or answered are told so, the rest get the message. The
+	// dispatcher applies its own per-recipient gates, and sends nothing to
+	// nobody.
+	named, rest := notifyBusiness.ByOf(told, notifyBusiness.ToEmail, heardNamed...)
+	avatar := userBusiness.GetSignedProfileURL(ctx, profileKey)
+	emailChatDM(userId, username, avatar, grpId, chatUUID, body, tell.Only("email", named), true)
+	emailChatDM(userId, username, avatar, grpId, chatUUID, body, tell.Only("email", rest), false)
 }
+
+// heardNamed are the causes by which a new message names someone: it
+// mentions them or answers them. Its Activity line and its "mentioned you"
+// email go to them.
+var heardNamed = []notifyBusiness.Cause{notifyBusiness.CauseMention, notifyBusiness.CauseReplyToYou}
 
 func UpdateChat(ctx context.Context, chatInfo *adapter.ChatInfo, chatUUID uuid.UUID, grpId string, chatCreatedBy string, mentions []*dgraphStruct.DgraphUser) (err error) {
 
@@ -982,78 +1000,6 @@ func GetUserChatListWithLatestChat(ctx context.Context, userUUID uuid.UUID) (dgr
 	return
 }
 
-// GetDgraphOldGroupChatFromDgraph is the page of a group's messages before
-// edge (helpers.PageEdge).
-func GetDgraphOldGroupChatFromDgraph(ctx context.Context, edge helpers.PageEdge, grpID string) (chats ChatPagination, err error) {
-	dgraphChats, err := domain.GetDgraphOldChatFromDgraph(ctx, grpID, edge.Before())
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphOldGroupChatFromDgraph Failed to get old chats from dgraph err: %+v",
-			err)
-
-		return
-	}
-
-	chats.Chats, chats.HasMore = helpers.PageFrom(dgraphChats, chatUUIDOf, edge, domain.CHAT_COUNT)
-
-	return
-}
-
-// GetDgraphOldChatFromDgraph is the page of a DM's messages before edge.
-func GetDgraphOldChatFromDgraph(ctx context.Context, edge helpers.PageEdge, firstUserUUID string, secondUserUUID string) (chats ChatPagination, err error) {
-	groupingId := helpers.GetGroupingId(firstUserUUID, secondUserUUID)
-	dgraphChats, err := domain.GetDgraphOldChatFromDgraph(ctx, groupingId, edge.Before())
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphOldChatFromDgraph Failed to get old chats from dgraph err: %+v",
-			err)
-
-		return
-	}
-
-	chats.Chats, chats.HasMore = helpers.PageFrom(dgraphChats, chatUUIDOf, edge, domain.CHAT_COUNT)
-
-	return
-}
-
-// GetDgraphNewGroupChatFromDgraph is the page of a group's messages after
-// edge.
-func GetDgraphNewGroupChatFromDgraph(ctx context.Context, edge helpers.PageEdge, grpId string) (chats ChatPagination, err error) {
-	dgraphChats, err := domain.GetDgraphNewChatFromDgraph(ctx, grpId, edge.After())
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphNewGroupChatFromDgraph Failed to get new chats from dgraph err: %+v",
-			err)
-
-		return
-	}
-
-	chats.Chats, chats.HasMore = helpers.PageFrom(dgraphChats, chatUUIDOf, edge, domain.CHAT_COUNT)
-
-	return
-}
-
-// GetDgraphNewChatFromDgraph is the page of a DM's messages after edge.
-func GetDgraphNewChatFromDgraph(ctx context.Context, edge helpers.PageEdge, fromUserId string, toUserId string) (chats ChatPagination, err error) {
-	groupingId := helpers.GetGroupingId(fromUserId, toUserId)
-	dgraphChats, err := domain.GetDgraphNewChatFromDgraph(ctx, groupingId, edge.After())
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphNewChatFromDgraph Failed to get new chats from dgraph err: %+v",
-			err)
-
-		return
-	}
-
-	chats.Chats, chats.HasMore = helpers.PageFrom(dgraphChats, chatUUIDOf, edge, domain.CHAT_COUNT)
-
-	return
-}
-
 func chatUUIDOf(c *dgraphStruct.DgraphChat) string { return c.Uuid }
 
 func GetDgraphDmBasicInfoFromDgraph(ctx context.Context, userId string, groupingId string) (dgraphDm *dgraphStruct.DgraphDm, err error) {
@@ -1138,126 +1084,8 @@ func GetDgraphDmRecordingListFromDgraph(ctx context.Context, userId string, grou
 	return
 }
 
-func GetDgraphNewGroupChatIncludingChatFromDgraph(ctx context.Context, lastChatTime time.Time, groupingId string) (chats ChatPagination, err error) {
-	dgraphChats, err := domain.GetDgraphNewChatIncludingChatFromDgraph(ctx, groupingId, lastChatTime)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphNewGroupChatIncludingChatFromDgraph Failed to get new chats from dgraph err: %+v",
-			err)
-
-		return
-	}
-
-	if len(dgraphChats) > domain.CHAT_COUNT {
-		chats.Chats = dgraphChats[:domain.CHAT_COUNT]
-	} else {
-		chats.Chats = dgraphChats
-	}
-
-	chats.HasMore = len(dgraphChats) > domain.CHAT_COUNT
-
-	return
-}
-
-func GetDgraphNewChatIncludingChatFromDgraph(ctx context.Context, lastChatTime time.Time, fromUserId string, toUserId string) (chats ChatPagination, err error) {
-	groupingId := helpers.GetGroupingId(fromUserId, toUserId)
-	dgraphChats, err := domain.GetDgraphNewChatIncludingChatFromDgraph(ctx, groupingId, lastChatTime)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphNewChatIncludingChatFromDgraph Failed to get new chats from dgraph err: %+v",
-			err)
-
-		return
-	}
-
-	if len(dgraphChats) > domain.CHAT_COUNT {
-		chats.Chats = dgraphChats[:domain.CHAT_COUNT]
-	} else {
-		chats.Chats = dgraphChats
-	}
-
-	chats.HasMore = len(dgraphChats) > domain.CHAT_COUNT
-
-	return
-}
-
-func GetDgraphLatestGroupChatFromDgraph(ctx context.Context, requestedUserUUID uuid.UUID, groupingId string) (chats ChatPagination, err error) {
-
-	dgraphChats, err := domain.GetDgraphLatestChatFromDgraph(ctx, groupingId)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphLatestGroupChatFromDgraph Failed to get chats from dgraph err: %+v",
-			err)
-
-		return
-	}
-
-	// What was unread, read before this read marks it read (chat B27).
-	unread := unreadAsOpened(ctx, requestedUserUUID, groupingId)
-	currentTime := time.Now()
-
-	err = lastseenBusiness.CreateOrUpdateLastSeenChat(ctx, groupingId, requestedUserUUID, currentTime)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphLatestGroupChatFromDgraph Failed to update chat last seen err: %+v",
-			err)
-
-		return
-	}
-	chats.Unread = unread
-
-	if len(dgraphChats) > domain.CHAT_COUNT {
-		chats.Chats = dgraphChats[:domain.CHAT_COUNT]
-	} else {
-		chats.Chats = dgraphChats
-	}
-
-	chats.HasMore = len(dgraphChats) > domain.CHAT_COUNT
-
-	return
-}
-
-func GetDgraphLatestChatFromDgraph(ctx context.Context, requestedUserUUID uuid.UUID, otherUserUUID string) (chats ChatPagination, err error) {
-	groupingId := helpers.GetGroupingId(requestedUserUUID.String(), otherUserUUID)
-
-	dgraphChats, err := domain.GetDgraphLatestChatFromDgraph(ctx, groupingId)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphLatestChatFromDgraph Failed to get chats from dgraph err: %+v",
-			err)
-
-		return
-	}
-
-	// What was unread, read before this read marks it read (chat B27).
-	unread := unreadAsOpened(ctx, requestedUserUUID, groupingId)
-	currentTime := time.Now()
-
-	err = lastseenBusiness.CreateOrUpdateLastSeenChat(ctx, groupingId, requestedUserUUID, currentTime)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphLatestChatFromDgraph Failed to update chat last seen err: %+v",
-			err)
-
-		return
-	}
-	chats.Unread = unread
-
-	if len(dgraphChats) > domain.CHAT_COUNT {
-		chats.Chats = dgraphChats[:domain.CHAT_COUNT]
-	} else {
-		chats.Chats = dgraphChats
-	}
-
-	chats.HasMore = len(dgraphChats) > domain.CHAT_COUNT
-
-	return
-}
-
 func GetDgraphChatByUUIDWithAllComments(ctx context.Context, chatUUID string) (dgraphChat *dgraphStruct.DgraphChat, err error) {
-	dgraphChat, err = domain.GetDgraphChatByUUIDWithAllComments(ctx, chatUUID)
+	dgraphChat, err = domain.GetDgraphChatByUUIDWithAllComments(ctx, chatUUID, "")
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/CreateOrUpdateChatReaction Failed to create/update reaction in chat err: %+v",
@@ -1468,6 +1296,13 @@ func EditChatCommentAsBot(ctx context.Context, botInfo *userModels.UserInfo, cha
 	}
 	return UpdateChatComment(ctx, commentUUID, commentInfo, nil, dgraphChat, rawComment)
 }
+
+// How a new message in a DM or group is told (notifyNewChat): seams for its
+// test.
+var (
+	tellChat    = notifyBusiness.Tell
+	emailChatDM = notificationBusiness.DispatchChatDM
+)
 
 // Who a reply in a DM or group thread is told to, the ways it is told, and
 // the thread's index (business/ThreadIndex, chat P2): seams for its test.

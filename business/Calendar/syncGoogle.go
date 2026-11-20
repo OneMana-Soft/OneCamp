@@ -26,10 +26,13 @@ package Calendar
 import (
 	"context"
 	"errors"
+	"net"
 	"slices"
+	"sync"
 	"time"
 
 	calendarSyncBusiness "github.com/akashc777/OneCamp/business/CalendarSync"
+	connectorBusiness "github.com/akashc777/OneCamp/business/Connector"
 	ICS "github.com/akashc777/OneCamp/business/ICS"
 	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	workGraph "github.com/akashc777/OneCamp/domain/WorkGraph"
@@ -46,6 +49,14 @@ const (
 	syncPushPerLink   = 200
 	syncEvery         = time.Minute
 )
+
+// syncStaleAfter is how long a synced link may go without a pass that read
+// all of its calendars before its status says it stopped following the
+// provider (SyncStatus.StaleSince): thirty sweeps. A provider's passing
+// trouble (a rate limit's wait, a few 5xx) clears within a few, and a
+// sweep reaches syncLinksPerSweep links per provider, so up to 1,500 links
+// a provider each come round well inside it.
+const syncStaleAfter = 30 * syncEvery
 
 // syncRetries is how long a change Google didn't take waits before it is
 // sent again, by how many times it has failed (helpers.ScheduleWait, with
@@ -103,9 +114,12 @@ func (s *service) syncAll(ctx context.Context) error {
 
 // syncLink brings Google's changes in, then sends OneCamp's out. When Google
 // no longer answers for the account, the link breaks and its pass ends.
+// last_synced_at moves when the reads worked, even if what was read couldn't
+// all land here (applyPulled holds that calendar for the next pass).
 func (s *service) syncLink(ctx context.Context, link *models.SyncLink, provider calendarSyncBusiness.Adapter) error {
 	who := &model.UserInfo{UserPostgresInfo: model.User{Id: link.PersonID}, UserDgraphInfo: dgraphStruct.DgraphUser{Uuid: link.PersonID.String()}}
-	l := calendarSyncBusiness.Link{ID: link.ID, PersonUUID: link.PersonID.String(), Provider: link.Provider, Account: link.Account}
+	markLinked(link.PersonID, true) // a sweep's link is in step (R384-N1)
+	l := adapterLink(link)
 	cals, err := s.ledger.calendarsOf(ctx, link.ID)
 	if err != nil {
 		return err
@@ -126,9 +140,10 @@ func (s *service) syncLink(ctx context.Context, link *models.SyncLink, provider 
 	// the provider's, and it keeps no cursor, so the next sweep reads it
 	// whole again.
 	held := map[string]bool{}
+	readErr := "" // why a calendar couldn't be read on this pass, the first's
 	for _, c := range cals {
 		remote := remoteOf(l, c)
-		whole := c.Cursor == ""
+		whole := unread(c)
 		changes, cursor, err := provider.Pull(ctx, remote, c.Cursor)
 		if errors.Is(err, calendarSyncBusiness.ErrFullPull) {
 			changes, cursor, err = provider.Pull(ctx, remote, "")
@@ -138,6 +153,9 @@ func (s *service) syncLink(ctx context.Context, link *models.SyncLink, provider 
 		}
 		if err != nil {
 			held[c.RemoteID] = whole
+			if readErr == "" {
+				readErr = syncReadError(err)
+			}
 			helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't read %q: %v", c.RemoteID, err)
 			continue
 		}
@@ -151,6 +169,52 @@ func (s *service) syncLink(ctx context.Context, link *models.SyncLink, provider 
 		}
 	}
 	// Then what changed here.
+	remotes, calendars := s.remotesOf(link, cals, held, s.personalOf(ctx, link.PersonID))
+	// A sink sending to the link now (runSyncSink) leaves its changes to
+	// the next pass: two pushes at once would both create a new event.
+	if pushing.Acquire(link.ID.String(), 1) {
+		changed, err := s.ledger.changedSince(ctx, link.ID, link.PersonID, calendars, s.now(), syncPushPerLink)
+		if err == nil {
+			err = s.pushChanged(ctx, provider, link, remotes, refs, changed, false)
+		}
+		pushing.Release(link.ID.String())
+		switch {
+		case errors.Is(err, calendarSyncBusiness.ErrRevoked):
+			return s.breakLink(ctx, link, err)
+		case err != nil:
+			return err
+		}
+	}
+	return s.ledger.markSynced(ctx, link.ID, readErr)
+}
+
+// sendWaits is a change a passing failure kept from the provider (the
+// network, a 5xx, a 429): it is sent again, by the sweep after its wait or by
+// the outbox after its backoff. It reads as its cause, and is one.
+type sendWaits struct{ cause error }
+
+func (w sendWaits) Error() string { return w.cause.Error() }
+func (w sendWaits) Unwrap() error { return w.cause }
+
+// unread is whether c hasn't been read whole here yet (no cursor: a new
+// link, or a move that asked for a whole read). Until that read has worked,
+// nothing is sent to it: the sweep holds it on a pass whose read failed, and
+// the sink (which doesn't read) always. Pure.
+func unread(c models.SyncCalendar) bool { return c.Cursor == "" }
+
+// adapterLink is a link as its adapter takes it. Pure.
+func adapterLink(link *models.SyncLink) calendarSyncBusiness.Link {
+	return calendarSyncBusiness.Link{ID: link.ID, PersonUUID: link.PersonID.String(), Provider: link.Provider, Account: link.Account}
+}
+
+// remotesOf is where each of the person's calendars is sent at the link's
+// provider: its linked calendars, but those held on this pass (held, by
+// remote id), and the personal calendar to the primary one when it isn't
+// linked itself; and those calendars, the ones whose changes are sent.
+// personal reads the person's own calendar (personalOf), once however many
+// links ask.
+func (s *service) remotesOf(link *models.SyncLink, cals []models.SyncCalendar, held map[string]bool, personal func() (uuid.UUID, error)) (map[uuid.UUID]calendarSyncBusiness.Remote, []uuid.UUID) {
+	l := adapterLink(link)
 	remotes := map[uuid.UUID]calendarSyncBusiness.Remote{}
 	var calendars []uuid.UUID
 	for _, c := range cals {
@@ -160,7 +224,7 @@ func (s *service) syncLink(ctx context.Context, link *models.SyncLink, provider 
 		}
 	}
 	// What the person makes in their own calendar goes to their own at Google.
-	if personal, err := s.store.personalCalendar(ctx, link.PersonID, s.zoneOf(ctx, link.PersonID)); err == nil {
+	if personal, err := personal(); err == nil {
 		if _, ok := remotes[personal]; !ok {
 			for _, c := range cals {
 				if c.Primary && !held[c.RemoteID] {
@@ -170,31 +234,92 @@ func (s *service) syncLink(ctx context.Context, link *models.SyncLink, provider 
 			}
 		}
 	}
-	changed, err := s.ledger.changedSince(ctx, link.ID, link.PersonID, calendars, s.now(), syncPushPerLink)
+	return remotes, calendars
+}
+
+// personalOf reads person's own calendar, in their zone, at its first call
+// only: a delivery's links share it (runSyncSink); the sweep's links are each
+// a different person's.
+func (s *service) personalOf(ctx context.Context, person uuid.UUID) func() (uuid.UUID, error) {
+	return sync.OnceValues(func() (uuid.UUID, error) {
+		return s.store.personalCalendar(ctx, person, s.zoneOf(ctx, person))
+	})
+}
+
+// pushChanged sends each changed event through pushOne, oldest change first,
+// to its calendar's remote at the link's provider. A revoked account ends it
+// (calendarSyncBusiness.ErrRevoked, the caller's to break the link on). A
+// change a passing failure kept (sendWaits) doesn't hold back the ones after
+// it: on both paths it is kept in the one refusal ledger to wait its turn
+// (syncRetries), as a refusal is, so a later run sends it though a ref was
+// kept before it failed (an instance after its series); with answer (the
+// outbox sink) the first is answered too, for the outbox's backoff.
+func (s *service) pushChanged(ctx context.Context, provider calendarSyncBusiness.Adapter, link *models.SyncLink, remotes map[uuid.UUID]calendarSyncBusiness.Remote, refs map[uuid.UUID]models.SyncRef, changed []*models.Event, answer bool) error {
+	if len(changed) == 0 {
+		return nil
+	}
+	evs, err := s.icsOf(ctx, link.PersonID, changed)
 	if err != nil {
 		return err
 	}
-	if len(changed) > 0 {
-		evs, err := s.icsOf(ctx, link.PersonID, changed)
-		if err != nil {
+	ids := make([]uuid.UUID, len(changed))
+	for i, e := range changed {
+		ids[i] = e.ID
+	}
+	refused, err := s.ledger.refusalsOf(ctx, link.ID, ids)
+	if err != nil {
+		return err
+	}
+	var waits error
+	for i, e := range changed {
+		ref, has := refs[e.ID]
+		tries := refused[e.ID].Tries
+		switch err := s.pushOne(ctx, provider, remotes[e.CalendarID], link.ID, e, evs[i], ref, has, tries); {
+		case errors.Is(err, calendarSyncBusiness.ErrRevoked):
 			return err
-		}
-		ids := make([]uuid.UUID, len(changed))
-		for i, e := range changed {
-			ids[i] = e.ID
-		}
-		refused, err := s.ledger.refusalsOf(ctx, link.ID, ids)
-		if err != nil {
-			return err
-		}
-		for i, e := range changed {
-			ref, has := refs[e.ID]
-			if err := s.pushOne(ctx, provider, remotes[e.CalendarID], link.ID, e, evs[i], ref, has, refused[e.ID].Tries); err != nil {
-				return s.breakLink(ctx, link, err)
+		case err != nil:
+			s.refuse(ctx, link.ID, e.ID, tries, err)
+			if answer && waits == nil {
+				waits = err
 			}
 		}
 	}
-	return s.ledger.markSynced(ctx, link.ID)
+	return waits
+}
+
+// Why a provider couldn't be read for now, as a synced link keeps it (its
+// error) and the person's status says it (SyncStatus.ReadError): a class,
+// never the provider's own words, address or token.
+const (
+	readUnreachable   = "unreachable"
+	readRateLimited   = "rate_limited"
+	readProviderError = "provider_error"
+)
+
+// syncReadError is a provider's answer to a read as its class, "" for none.
+// Google's and Microsoft's are sorted alike: a network that didn't get there
+// is unreachable; a calendar the provider refuses for good (deleted or
+// unshared there: a 404 or 403, as each adapter's syncErr tells it,
+// ErrRefused or ErrReadOnly) is none of the link's, skipped as it was before
+// a read said why, so it never holds the link's other calendars back from
+// being in step; a rate or quota spent is rate_limited, as
+// connectorBusiness.ClassifyAPIError tells it for every connected account;
+// anything else the provider answered (a 5xx) is provider_error. The network
+// is asked first, as its error carries the address, which may hold anything.
+// Pure.
+func syncReadError(err error) string {
+	var netErr net.Error
+	switch {
+	case err == nil:
+		return ""
+	case errors.As(err, &netErr), errors.Is(err, context.DeadlineExceeded):
+		return readUnreachable
+	case errors.Is(err, calendarSyncBusiness.ErrRefused), errors.Is(err, calendarSyncBusiness.ErrReadOnly):
+		return ""
+	case connectorBusiness.ClassifyAPIError(err) == connectorBusiness.ProblemRateLimited:
+		return readRateLimited
+	}
+	return readProviderError
 }
 
 // remoteOf is one of a link's calendars as its adapter takes it. Pure.
@@ -212,10 +337,11 @@ func (s *service) breakLink(ctx context.Context, link *models.SyncLink, why erro
 
 // pushOne sends one event (a series with its changed instances) to Google,
 // and keeps where it is there. An event on a calendar the person may only
-// read isn't sent; a change Google didn't take waits (refuse), and a 403
-// for the calendar's access marks it read-only. tries is how many times
-// this change has failed already. It answers an error only when Google no
-// longer answers for the account (calendarSyncBusiness.ErrRevoked).
+// read isn't sent; a change Google refused waits (refuse), and a 403 for
+// the calendar's access marks it read-only. tries is how many times this
+// change has failed already. It answers an error when Google no longer
+// answers for the account (calendarSyncBusiness.ErrRevoked), or a passing
+// failure (sendWaits: the network, a 5xx, a 429), for its caller to wait on.
 func (s *service) pushOne(ctx context.Context, provider calendarSyncBusiness.Adapter, remote calendarSyncBusiness.Remote, link uuid.UUID, e *models.Event, evs []ICS.Event, ref models.SyncRef, has bool, tries int) error {
 	if remote.ID == "" || len(evs) == 0 {
 		return nil
@@ -229,6 +355,9 @@ func (s *service) pushOne(ctx context.Context, provider calendarSyncBusiness.Ada
 			return err
 		}
 		helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't %s %s: %v", what, e.ID, err)
+		if !errors.Is(err, calendarSyncBusiness.ErrRefused) {
+			return sendWaits{err} // passing: its caller says how it waits (pushChanged)
+		}
 		if errors.Is(err, calendarSyncBusiness.ErrReadOnly) {
 			_ = s.ledger.markReadOnly(ctx, link, remote.ID)
 		}
@@ -288,9 +417,32 @@ func (s *service) refuse(ctx context.Context, link, event uuid.UUID, tries int, 
 		at := now.Add(helpers.ScheduleWait(syncRetries, r.Tries, syncRetryJitter))
 		r.RetryAt = &at
 	}
-	if err := s.ledger.keepRefusal(ctx, r, now); err != nil {
+	if _, err := s.ledger.keepRefusal(ctx, r, now); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't keep that %s wasn't taken: %v", event, err)
 	}
+}
+
+// roomTakenAtGoogle is whether err refused Google's change to e as it moves
+// e onto a time its room is booked (*RoomTakenError). OneCamp keeps its own
+// version and the refusal (it waits, unsent, until e changes here), and tells
+// e's organiser only when the refusal is first kept: a later poll that meets
+// the same change tells nobody again. The ledger keeps one refusal per
+// (link, event), so one already kept for another reason (a push backing
+// off) answers made false and that rare room refusal tells nobody.
+func (s *service) roomTakenAtGoogle(ctx context.Context, link uuid.UUID, e *models.Event, err error) bool {
+	var taken *RoomTakenError
+	if !errors.As(err, &taken) {
+		return false
+	}
+	made, kerr := s.ledger.keepRefusal(ctx, models.SyncRefusal{LinkID: link, EventID: e.ID, Why: taken.Error()}, s.now())
+	if kerr != nil {
+		helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't keep that %s's room was booked: %v", e.ID, kerr)
+		return true
+	}
+	if made {
+		tellRoomTakenAtGoogle(ctx, e, taken)
+	}
+	return true
 }
 
 // applyPulled writes Google's changes to one calendar here: a new event
@@ -377,7 +529,11 @@ func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uui
 			}
 			continue
 		}
-		changed := s.takeRemote(ctx, e, ev)
+		changed, err := s.takeRemote(ctx, e, ev)
+		// Google moved it onto a time its room is booked: OneCamp keeps its
+		// own version, its ref stays (so the change isn't taken as in step,
+		// which would end the refusal), and its organiser is told once.
+		roomTaken := s.roomTakenAtGoogle(ctx, link, e, err)
 		if changed {
 			touched = append(touched, e.ID.String())
 		}
@@ -393,11 +549,13 @@ func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uui
 		if private && !changed && e.Visibility != visibilityPrivate {
 			madePrivate = append(madePrivate, privateNow(e, now))
 			touched = append(touched, e.ID.String())
-			ref.ETag = ch.ETag
-			inStepOnce = append(inStepOnce, ref)
+			if !roomTaken {
+				ref.ETag = ch.ETag
+				inStepOnce = append(inStepOnce, ref)
+			}
 			continue
 		}
-		if changed || ref.ETag != ch.ETag {
+		if !roomTaken && (changed || ref.ETag != ch.ETag) {
 			ref.ETag = ch.ETag
 			keepRef(ref)
 		}
@@ -428,7 +586,7 @@ func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uui
 				cal.Events = append(cal.Events, ch.Event)
 			}
 		}
-		made, err := s.importCalendars(ctx, who, []ICS.Calendar{cal}, func(int, int) {})
+		made, err := s.importPulled(ctx, who, []ICS.Calendar{cal}, func(int, int) {})
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't bring in new events: %v", err)
 		} else {
@@ -448,7 +606,7 @@ func (s *service) applyPulled(ctx context.Context, who *model.UserInfo, link uui
 		if err != nil || series == nil || series.RRule == "" || series.DeletedAt != nil {
 			continue
 		}
-		switch s.takeRemoteInstance(ctx, series, ch.Event, now, whole) {
+		switch s.takeRemoteInstance(ctx, link, series, ch.Event, now, whole) {
 		case instanceInStep:
 			// In step with Google now: nothing of this to send back.
 			if newer, ok := kept[ref.RemoteID+"\x00"+ref.ExternalID]; ok {
@@ -496,11 +654,12 @@ func privateNow(e *models.Event, now time.Time) rowUpdate {
 
 // takeRemote writes Google's version of an event onto its row, and says
 // whether anything changed: an event already as Google has it is left
-// alone, so what was just sent never comes back as a change.
-func (s *service) takeRemote(ctx context.Context, e *models.Event, ev ICS.Event) bool {
+// alone, so what was just sent never comes back as a change. err is why the
+// write was refused (logged), as a room booked then (*RoomTakenError).
+func (s *service) takeRemote(ctx context.Context, e *models.Event, ev ICS.Event) (changed bool, err error) {
 	row, why := importedRow(ev, e.TZ)
 	if why != "" {
-		return false
+		return false, nil
 	}
 	next := cloneEvent(e)
 	next.Title, next.Notes, next.Location, next.Transparency, next.Visibility = row.Title, row.Notes, row.Location, row.Transparency, row.Visibility
@@ -510,23 +669,23 @@ func (s *service) takeRemote(ctx context.Context, e *models.Event, ev ICS.Event)
 	next.StartAt, next.EndAt, next.StartDate, next.EndDate, next.TZ, next.EndTZ = row.StartAt, row.EndAt, row.StartDate, row.EndDate, row.TZ, row.EndTZ
 	if next.RRule != "" || ev.RRule != "" {
 		if err := setRule(next, ev.RRule); err != nil {
-			return false
+			return false, nil
 		}
 		next.Exdates = append([]time.Time{}, ev.ExDates...)
 		next.Rdates = append([]time.Time{}, ev.RDates...)
 	}
 	if len(changesOf(e, next)) == 0 && next.RRule == e.RRule && slices.EqualFunc(next.Exdates, e.Exdates, time.Time.Equal) && slices.EqualFunc(next.Rdates, e.Rdates, time.Time.Equal) {
-		return false
+		return false, nil
 	}
 	next.UpdatedAt = s.now()
 	if err := check(next); err != nil {
-		return false
+		return false, nil
 	}
 	if _, err := s.store.update(ctx, next, nil, guestWrites{}); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't write %s: %v", e.ID, err)
-		return false
+		return false, err
 	}
-	return true
+	return true, nil
 }
 
 // instanceTake is what takeRemoteInstance did with Google's version of an
@@ -551,7 +710,12 @@ const (
 // and is sent so when Google's isn't: private wins both ways, as for a
 // whole event (applyPulled). One with no override here yet comes in as an
 // import's does (overrideFromRemote): private when it or its series is.
-func (s *service) takeRemoteInstance(ctx context.Context, series *models.Event, ev ICS.Event, now time.Time, whole bool) instanceTake {
+//
+// Moved onto a time its room is booked, it is refused as a whole event is
+// (roomTakenAtGoogle on link: OneCamp keeps its version, its organiser is
+// told once), keyed on the instance's own row here or, with none yet, on
+// its series. A subscription passes no link: it holds no rooms.
+func (s *service) takeRemoteInstance(ctx context.Context, link uuid.UUID, series *models.Event, ev ICS.Event, now time.Time, whole bool) instanceTake {
 	rid := ev.RecurrenceID.UTC()
 	if series.AllDay() {
 		rid = time.Date(rid.Year(), rid.Month(), rid.Day(), 0, 0, 0, 0, time.UTC)
@@ -595,6 +759,9 @@ func (s *service) takeRemoteInstance(ctx context.Context, series *models.Event, 
 		next.Changed = changesOf(inst.Event, next)
 		next.UpdatedAt = now
 		if _, err := s.store.update(ctx, next, nil, guestWrites{}); err != nil {
+			if link != uuid.Nil && s.roomTakenAtGoogle(ctx, link, next, err) {
+				return instanceAsIs
+			}
 			helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't change an instance of %s: %v", series.ID, err)
 			if whole && row.Visibility == visibilityPrivate {
 				return instanceFailed
@@ -610,6 +777,9 @@ func (s *service) takeRemoteInstance(ctx context.Context, series *models.Event, 
 		return instanceAsIs
 	}
 	if err := s.store.apply(ctx, batch{inserts: []*models.Event{row}, now: now, by: &series.CreatedBy}); err != nil {
+		if link != uuid.Nil && s.roomTakenAtGoogle(ctx, link, series, err) {
+			return instanceAsIs
+		}
 		helpers.LogErrorWithContext(ctx, "business/Calendar: calendar sync couldn't add an instance of %s: %v", series.ID, err)
 		return instanceAsIs
 	}

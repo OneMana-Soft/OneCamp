@@ -32,9 +32,12 @@ type UserNotificationPreference struct {
 	// person choose: invitations (a booking of their time is one), changes
 	// (a cancellation is one), and replies to events they organise. A
 	// reminder by email has no switch here: the person asked for it.
-	EmailCalendarInvites bool    `json:"email_calendar_invites"`
-	EmailCalendarChanges bool    `json:"email_calendar_changes"`
-	EmailCalendarAnswers bool    `json:"email_calendar_answers"`
+	EmailCalendarInvites bool `json:"email_calendar_invites"`
+	EmailCalendarChanges bool `json:"email_calendar_changes"`
+	EmailCalendarAnswers bool `json:"email_calendar_answers"`
+	// EmailCalendarRecaps is the recap of an event's call they're on
+	// (migration 594): on unless they turn it off.
+	EmailCalendarRecaps  bool    `json:"email_calendar_recaps"`
 	EmailChannelInvites  bool    `json:"email_channel_invites"`
 	EmailOnlyWhenOffline bool    `json:"email_only_when_offline"`
 	EmailDigestFrequency string  `json:"email_digest_frequency"`
@@ -65,12 +68,12 @@ type UserNotificationPreference struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
-// allColumns is every column a read returns, in scanRow's order. Built on
+// AllColumns is every column a read returns, in Scan's order. Built on
 // each call, as focus_until reads whichever calendar store is on.
-func allColumns() string {
+func AllColumns() string {
 	return `id, user_id, email_enabled, email_mentions, email_dms, email_task_assigned,
 		email_task_status, email_comments, email_calls, email_calendar_invites,
-		email_calendar_changes, email_calendar_answers, email_channel_invites,
+		email_calendar_changes, email_calendar_answers, email_calendar_recaps, email_channel_invites,
 		email_only_when_offline, email_digest_frequency, quiet_hours_enabled,
 		quiet_hours_start, quiet_hours_end, quiet_hours_tz, unsubscribe_token,
 		created_at, updated_at, notifications_paused_until, read_receipts, record_views, ` +
@@ -163,19 +166,16 @@ func RunningFocusEvents(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, err
 	return ids, err
 }
 
-// rowScanner is a *sql.Row or *sql.Rows.
-type rowScanner interface{ Scan(dest ...any) error }
-
-// scanRow reads one row of allColumns. Every reader uses it: a second,
+// Scan reads one row of AllColumns. Every reader uses it: a second,
 // hand-copied scanner once fell out of step with the column list (21 targets
 // for 20 columns), and every batched email lookup failed.
-func scanRow(row rowScanner) (*UserNotificationPreference, error) {
+func Scan(row pgexec.Row) (*UserNotificationPreference, error) {
 	var p UserNotificationPreference
 	var schedule []byte
 	err := row.Scan(
 		&p.ID, &p.UserID, &p.EmailEnabled, &p.EmailMentions, &p.EmailDMs,
 		&p.EmailTaskAssigned, &p.EmailTaskStatus, &p.EmailComments, &p.EmailCalls,
-		&p.EmailCalendarInvites, &p.EmailCalendarChanges, &p.EmailCalendarAnswers,
+		&p.EmailCalendarInvites, &p.EmailCalendarChanges, &p.EmailCalendarAnswers, &p.EmailCalendarRecaps,
 		&p.EmailChannelInvites, &p.EmailOnlyWhenOffline, &p.EmailDigestFrequency,
 		&p.QuietHoursEnabled, &p.QuietHoursStart, &p.QuietHoursEnd, &p.QuietHoursTZ,
 		&p.UnsubscribeToken, &p.CreatedAt, &p.UpdatedAt, &p.NotificationsPausedUntil,
@@ -194,9 +194,9 @@ func GetByUserID(userID uuid.UUID) (*UserNotificationPreference, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	query := `SELECT ` + allColumns() + ` FROM users_notification_preferences WHERE user_id = $1`
+	query := `SELECT ` + AllColumns() + ` FROM users_notification_preferences WHERE user_id = $1`
 	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, userID)
-	pref, err := scanRow(row)
+	pref, err := Scan(row)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			helpers.LogErrorWithContext(ctx,
@@ -207,41 +207,21 @@ func GetByUserID(userID uuid.UUID) (*UserNotificationPreference, error) {
 	return pref, nil
 }
 
-// GetByUnsubscribeToken returns the preference row for a one-click unsubscribe.
+// GetByUnsubscribeToken returns the preference row for a one-click
+// unsubscribe, or nil, nil when no row has the token.
 func GetByUnsubscribeToken(token string) (*UserNotificationPreference, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	query := `SELECT ` + allColumns() + ` FROM users_notification_preferences WHERE unsubscribe_token = $1`
+	query := `SELECT ` + AllColumns() + ` FROM users_notification_preferences WHERE unsubscribe_token = $1`
 	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, token)
-	pref, err := scanRow(row)
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			helpers.LogErrorWithContext(ctx,
-				"models/UserNotificationPreference/GetByUnsubscribeToken failed err: %+v", err)
-		}
-		return nil, err
+	pref, err := Scan(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	return pref, nil
-}
-
-// EnsureForUser inserts a preference row with defaults if one does not exist
-// and returns the resulting row. Idempotent.
-func EnsureForUser(userID uuid.UUID, unsubToken string) (*UserNotificationPreference, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	query := `
-		INSERT INTO users_notification_preferences (user_id, unsubscribe_token)
-		VALUES ($1, $2)
-		ON CONFLICT (user_id) DO UPDATE
-		    SET unsubscribe_token = users_notification_preferences.unsubscribe_token
-		RETURNING ` + allColumns()
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, userID, unsubToken)
-	pref, err := scanRow(row)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"models/UserNotificationPreference/EnsureForUser failed err: %+v", err)
+			"models/UserNotificationPreference/GetByUnsubscribeToken failed err: %+v", err)
 		return nil, err
 	}
 	return pref, nil
@@ -260,6 +240,7 @@ type UpdatePreferenceInput struct {
 	EmailCalendarInvites *bool   `json:"email_calendar_invites,omitempty"`
 	EmailCalendarChanges *bool   `json:"email_calendar_changes,omitempty"`
 	EmailCalendarAnswers *bool   `json:"email_calendar_answers,omitempty"`
+	EmailCalendarRecaps  *bool   `json:"email_calendar_recaps,omitempty"`
 	EmailChannelInvites  *bool   `json:"email_channel_invites,omitempty"`
 	EmailOnlyWhenOffline *bool   `json:"email_only_when_offline,omitempty"`
 	EmailDigestFrequency *string `json:"email_digest_frequency,omitempty"`
@@ -272,7 +253,7 @@ type UpdatePreferenceInput struct {
 }
 
 // Update writes the supplied changes to the database. The row must already
-// exist (callers should call EnsureForUser first).
+// exist (domain LoadOrCreate makes it).
 func Update(userID uuid.UUID, in UpdatePreferenceInput) error {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -316,6 +297,9 @@ func Update(userID uuid.UUID, in UpdatePreferenceInput) error {
 	}
 	if in.EmailCalendarAnswers != nil {
 		add("email_calendar_answers", *in.EmailCalendarAnswers)
+	}
+	if in.EmailCalendarRecaps != nil {
+		add("email_calendar_recaps", *in.EmailCalendarRecaps)
 	}
 	if in.EmailChannelInvites != nil {
 		add("email_channel_invites", *in.EmailChannelInvites)
@@ -399,7 +383,7 @@ func GetByUserIDs(userIDs []uuid.UUID) (map[uuid.UUID]*UserNotificationPreferenc
 	}
 
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx,
-		`SELECT `+allColumns()+` FROM users_notification_preferences WHERE user_id = ANY($1::uuid[])`,
+		`SELECT `+AllColumns()+` FROM users_notification_preferences WHERE user_id = ANY($1::uuid[])`,
 		"{"+strings.Join(ids, ",")+"}")
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -410,7 +394,7 @@ func GetByUserIDs(userIDs []uuid.UUID) (map[uuid.UUID]*UserNotificationPreferenc
 
 	out := make(map[uuid.UUID]*UserNotificationPreference, len(userIDs))
 	for rows.Next() {
-		p, err := scanRow(rows)
+		p, err := Scan(rows)
 		if err != nil {
 			return nil, err
 		}

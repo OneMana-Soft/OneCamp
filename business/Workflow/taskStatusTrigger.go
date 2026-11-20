@@ -2,7 +2,6 @@ package business
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"strings"
 
@@ -36,7 +35,7 @@ func normalizeTaskStatusTrigger(ctx context.Context, in *WorkflowInput) error {
 	}
 	for _, a := range in.Actions {
 		if a.Type == ActionReply && strings.TrimSpace(in.ChannelID) == "" {
-			return fmt.Errorf("choose the channel its reply posts in")
+			return workflowRefused("choose the channel its reply posts in")
 		}
 	}
 	cfg := map[string]interface{}{}
@@ -102,6 +101,7 @@ func taskEventVars(data map[string]interface{}) map[string]string {
 		"task":    firstOf(str("task_name"), str("name")),
 		"status":  str("new_status_name"),
 		"from":    str("old_status_name"),
+		"source":  str("source"),
 		"project": str("project_name"),
 		"by":      firstOf(str("updated_by_name"), str("assigned_by_name")),
 		"link":    authService.FrontendBaseURL() + "/app/task/" + taskID,

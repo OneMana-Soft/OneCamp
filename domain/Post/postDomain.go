@@ -24,19 +24,43 @@ import (
 
 const POST_COUNT = 10
 
+// insertPost writes a post's row: $1 id, $2 channel, $3 author, $4 an
+// imported post's original time (helpers.WithImportTimestamp) or NULL.
+const insertPost = `
+		INSERT INTO posts (id, post_channel, created_by, created_at, updated_at)
+		VALUES ($1, $2, $3, COALESCE($4, NOW()), COALESCE($4, NOW()))`
+
 func CreatePost(ctx context.Context, postUUID uuid.UUID, userUUID uuid.UUID, channelUUID uuid.UUID) (err error) {
 	// An imported post keeps its original time (helpers.WithImportTimestamp);
 	// the import set it afterwards in a second statement.
-	_, err = pgexec.Exec(ctx, `
-		INSERT INTO posts (id, post_channel, created_by, created_at, updated_at)
-		VALUES ($1, $2, $3, COALESCE($4, NOW()), COALESCE($4, NOW()))`,
-		postUUID, channelUUID, userUUID, helpers.GetImportTimestamp(ctx))
+	_, err = pgexec.Exec(ctx, insertPost, postUUID, channelUUID, userUUID, helpers.GetImportTimestamp(ctx))
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/CreatePost Failed to create new post err: %+v",
 			err)
 		return
+	}
+	return
+}
+
+// CreatePostReadBySender is CreatePost with its author's read mark of the
+// channel set to readAt in the same statement, as
+// LastSeenChannel.CreateOrUpdateLastSeenChannel sets it: a sent post's two
+// writes in one round trip, in ctx's transaction if it has one.
+func CreatePostReadBySender(ctx context.Context, postUUID uuid.UUID, userUUID uuid.UUID, channelUUID uuid.UUID, readAt time.Time) (err error) {
+	_, err = pgexec.Exec(ctx, `
+		WITH p AS (`+insertPost+`
+		RETURNING created_by, post_channel)
+		INSERT INTO last_seen_channel (user_id, channel_id, user_last_seen)
+		SELECT created_by, post_channel, $5::timestamptz FROM p
+		ON CONFLICT (user_id, channel_id)
+		DO UPDATE SET user_last_seen = EXCLUDED.user_last_seen`,
+		postUUID, channelUUID, userUUID, helpers.GetImportTimestamp(ctx), readAt)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/CreatePostReadBySender Failed to create new post err: %+v",
+			err)
 	}
 	return
 }
@@ -232,94 +256,27 @@ var postPageFields = `
 
 // pagePosts reads a page of a channel's posts (postPageFields), each with its
 // thread's people (domain/Message KeepPostRepliers): every page query's one read.
-func pagePosts(ctx context.Context, query string, variables map[string]string) ([]*dgraphStruct.DgraphPost, error) {
+// PostPage reads one page of the channel's messages, the first
+// POST_COUNT+1 of them in dir from at (Latest has no edge, and at is
+// unused): the one page query the latest, older and newer pages and the page
+// at a linked message read.
+func PostPage(ctx context.Context, channelUUID string, dir messageDomain.Direction, at time.Time) ([]*dgraphStruct.DgraphPost, error) {
+	variables := map[string]string{"$chId": channelUUID, "$first": strconv.Itoa(POST_COUNT + 1)}
+	if dir != messageDomain.Latest {
+		variables["$time"] = at.Format(time.RFC3339Nano)
+	}
+	query := `query PostInfo($chId: string, $time: string, $first: int){
+				postInfo(func: eq(ch_uuid, $chId)) {
+					ch_posts ` + dir.Block("post_created_at", "post_deleted_at") + ` {` + postPageFields + `}
+				}
+			}`
 	posts, err := dgraphModels.GetDgraphPosts(ctx, query, variables)
-	if err == nil {
-		messageDomain.KeepPostRepliers(ctx, posts)
-	}
-	return posts, err
-}
-
-func GetDgraphOldPostFromDgraph(ctx context.Context, channelUUID string, lastPostTime time.Time) (dgraphPosts []*dgraphStruct.DgraphPost, err error) {
-
-	variables := make(map[string]string)
-	variables["$time"] = lastPostTime.Format(time.RFC3339Nano)
-	variables["$chId"] = channelUUID
-	variables["$first"] = strconv.Itoa(POST_COUNT + 1)
-	query := `query PostInfo($chId: string, $time: string, $first: int){
-				postInfo(func: eq(ch_uuid, $chId)) {
-
-					ch_posts @filter(lt(post_created_at, $time) AND not gt(post_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderdesc: post_created_at) {` + postPageFields + `}
-					
-				}
-			}`
-
-	dgraphPosts, err = pagePosts(ctx, query, variables)
-
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphUserInfoByUUID Failed to get user in dgraph err: %+v",
-			err,
-		)
-		return
+		helpers.LogErrorWithContext(ctx, "domain/PostPage Failed to read a page of %s err: %+v", channelUUID, err)
+		return nil, err
 	}
-
-	return
-}
-
-func GetDgraphNewPostFromDgraph(ctx context.Context, channelUUID string, lastPostTime time.Time) (dgraphPosts []*dgraphStruct.DgraphPost, err error) {
-
-	variables := make(map[string]string)
-	variables["$time"] = lastPostTime.Format(time.RFC3339Nano)
-	variables["$chId"] = channelUUID
-	variables["$first"] = strconv.Itoa(POST_COUNT + 1)
-	query := `query PostInfo($chId: string, $time: string, $first: int){
-				postInfo(func: eq(ch_uuid, $chId)) {
-
-					ch_posts @filter(gt(post_created_at, $time) AND not gt(post_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderasc: post_created_at) {` + postPageFields + `}
-					
-				}
-			}`
-
-	dgraphPosts, err = pagePosts(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphUserInfoByUUID Failed to get user in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
-func GetDgraphNewPostIncludiongPostFromDgraph(ctx context.Context, channelUUID string, lastPostTime *time.Time) (dgraphPosts []*dgraphStruct.DgraphPost, err error) {
-
-	variables := make(map[string]string)
-	variables["$time"] = lastPostTime.Format(time.RFC3339Nano)
-	variables["$chId"] = channelUUID
-	variables["$first"] = strconv.Itoa(POST_COUNT + 1)
-
-	query := `query PostInfo($chId: string, $time: string, $first: int){
-				postInfo(func: eq(ch_uuid, $chId)) {
-
-					ch_posts @filter(ge(post_created_at, $time) AND not gt(post_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderasc: post_created_at) {` + postPageFields + `}
-					
-				}
-			}`
-
-	dgraphPosts, err = pagePosts(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphNewPostIncludiongPostFromDgraph Failed to get user in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
+	messageDomain.KeepPostRepliers(ctx, posts)
+	return posts, nil
 }
 
 func GetDgraphPostOnlyTextDgraph(ctx context.Context, postUUID string) (dgraphPost *dgraphStruct.DgraphPost, err error) {
@@ -392,32 +349,6 @@ func GetDgraphPostTextWithChannel(ctx context.Context, postUUID string) (dgraphP
 	return
 }
 
-func GetDgraphLatestPostFromDgraph(ctx context.Context, channelUUID string) (dgraphPosts []*dgraphStruct.DgraphPost, err error) {
-
-	variables := make(map[string]string)
-	variables["$chId"] = channelUUID
-	variables["$first"] = strconv.Itoa(POST_COUNT + 1)
-	query := `query PostInfo($chId: string, $first: int){
-					postInfo(func: eq(ch_uuid, $chId)) {
-
-					ch_posts @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z") ) (orderdesc: post_created_at, first: $first) {` + postPageFields + `}
-					
-				}
-			}`
-
-	dgraphPosts, err = pagePosts(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphUserInfoByUUID Failed to get user in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
 // GetUnDeletedDgraphPostChannelBasicInfo is a live post with its author and
 // channel, for a Slack import's replies, edits and deletes. The query named a
 // variable it never declared ($userId, for membership counts the import never
@@ -472,7 +403,9 @@ func GetDgraphPostByUUIDWithAllComments(ctx context.Context, postUUID string, us
 	variables["$userId"] = dgraphUIDOrNone(userDgraphUID)
 	// post_deleted_at: a deleted post keeps its text in the graph, so every
 	// reader of this one (a member's thread, a guest's) needs to know. The
-	// update times say the post or a reply was edited ("(edited)").
+	// update times say the post or a reply was edited ("(edited)"). The
+	// channel's privacy and the asker's member and moderator counts are who may
+	// read the thread (channelBusiness.CanRead), in this one read.
 	query := `query PostInfo($id: string, $userId: string){
 				postInfo(func: eq(post_uuid, $id)) {
 					uid
@@ -527,6 +460,7 @@ func GetDgraphPostByUUIDWithAllComments(ctx context.Context, postUUID string, us
 					post_channel {
 						uid
 						ch_uuid
+						ch_private
 						ch_is_member: count(ch_members @filter(uid($userId)))
 						ch_is_admin: count(ch_moderators @filter(uid($userId)))
 					}
@@ -661,6 +595,7 @@ func GetDgraphPostByUUID(ctx context.Context, postUUID string, userDraphUid stri
 						uid
 						ch_uuid
 						ch_name
+						ch_private
 						ch_deleted_at
 						ch_is_member: count(ch_members @filter(uid($userId)))
 						ch_is_admin: count(ch_moderators @filter(uid($userId)))

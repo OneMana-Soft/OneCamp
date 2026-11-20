@@ -13,9 +13,9 @@ import (
 
 // RestoreCycle brings a deleted cycle back with its tasks (POST
 // /restore/cycle/{id}, controllers/Restore): its project's admins, as its
-// delete.
+// delete, and never in an archived project.
 func RestoreCycle(w http.ResponseWriter, r *http.Request, id uuid.UUID, owner softDelete.Owner) {
-	if _, _, ok := projectaccess.RequireID(w, r, owner.Project.String(), workAccess.NeedManage, adminsOnly); !ok {
+	if _, _, s, ok := projectaccess.RequireIDStanding(w, r, owner.Project.String(), workAccess.NeedManage, adminsOnly); !ok || !changeable(w, s) {
 		return
 	}
 	if err := cycleBusiness.Restore(r.Context(), id); err != nil {

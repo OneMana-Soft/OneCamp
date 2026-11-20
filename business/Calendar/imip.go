@@ -42,10 +42,11 @@ import (
 	emailService "github.com/akashc777/OneCamp/services/Email"
 )
 
-// Seams for tests: whether this server emails people outside the workspace,
+// Seams for tests: whether this server emails people outside the workspace
+// (the one rule for notification email, which the public demo never sends),
 // and where such an email goes.
 var (
-	outsidersMailed = func() bool { return emailService.NotificationEmailEnabled() && !helpers.DemoMode() }
+	outsidersMailed = emailService.NotificationEmailEnabled
 	sendGuestMail   = func(ctx context.Context, opt emailService.SendOptions) error {
 		_, err := emailService.SendEmailWithOptions(ctx, opt)
 		return err
@@ -459,7 +460,7 @@ func (s *service) mailGuest(ctx context.Context, g models.Attendee, organiser IC
 		line(html.EscapeString("Where: " + e.Location))
 	}
 	if notes := plainNotes(e); notes != "" && method != ICS.Cancel {
-		line("<br>" + strings.ReplaceAll(html.EscapeString(notes), "\n", "<br>"))
+		line("<br>" + string(emailService.TextHTML(notes)))
 	}
 	if join != "" {
 		line(`<br><a href="` + html.EscapeString(join) + `"><strong>Join the call</strong></a>`)

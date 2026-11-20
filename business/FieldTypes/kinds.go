@@ -281,7 +281,7 @@ func coerceRelation(f *model.Field, v any, _ Input) (any, error) {
 	}
 	kinds := ItemKinds[target]
 	if target == ItemAny {
-		kinds = "docs, tasks, boards, projects or people"
+		kinds = EveryItemKind
 	}
 	if r := []rune(bad); len(r) > maxQuoted {
 		bad = string(r[:maxQuoted]) + "…"

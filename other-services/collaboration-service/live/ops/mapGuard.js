@@ -7,7 +7,8 @@
 //
 // guestStrokes keeps its record of who drew what from every socket,
 // facilitationGuard keeps a board's facilitation from its call guests (V-462),
-// and protect keeps its record of protected objects from every socket (miro-44).
+// protect keeps its record of protected objects from every socket (miro-44),
+// and authorGuard keeps every socket writing as itself (V-965).
 
 // newer is v as a version every tab takes over the ones given: a board's
 // elements are merged by version, so a put-back element goes in as newer than
@@ -17,17 +18,34 @@ export function newer(v, ...against) {
     return { ...v, version, versionNonce: Math.floor(Math.random() * 2 ** 31), updated: Date.now() }
 }
 
-// putBackSocketWrites keeps map against the sockets refuses(context) names
-// (every socket, unless told otherwise).
-export function putBackSocketWrites(doc, map, origin, refuses = () => true) {
+// putBackSocketWrites keeps map against the sockets' changes that
+// refuses(context, key, change, map) refuses, key by key (every socket's every
+// change, unless told otherwise; map.get(key) is the change as written). A
+// refused change is put back as it was, and heard(context, key, why) hears of
+// it, why being refuses' answer. refuses may instead answer { stamp: value }:
+// the change stands as value (authorGuard.js stamps a writer's own name), or
+// { stamp: value, told: why }: value puts it back (a newer version of an
+// element), and heard hears why.
+export function putBackSocketWrites(doc, map, origin, refuses = () => true, heard = () => {}) {
     map.observe((event) => {
         const context = event.transaction.origin?.context
-        if (!context || !refuses(context)) return
+        if (!context) return
+        const repairs = []
+        event.changes.keys.forEach((change, key) => {
+            const why = refuses(context, key, change, map)
+            if (why) repairs.push({ key, change, why })
+        })
+        if (repairs.length === 0) return
         doc.transact(() => {
-            event.changes.keys.forEach((change, key) => {
-                if (change.action === 'add') map.delete(key)
+            for (const { key, change, why } of repairs) {
+                if (why.stamp !== undefined) map.set(key, why.stamp)
+                else if (change.action === 'add') map.delete(key)
                 else map.set(key, change.oldValue)
-            })
+            }
         }, origin)
+        for (const { key, why } of repairs) {
+            const told = why.stamp === undefined ? why : why.told
+            if (told) heard(context, key, told)
+        }
     })
 }

@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -35,6 +36,7 @@ import (
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	"github.com/akashc777/OneCamp/helpers"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/router"
 	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/google/uuid"
@@ -570,6 +572,108 @@ func TestCAL53G15CalendarAPI(t *testing.T) {
 		}
 		if code, out := tool(anaTok, "restore_event", map[string]any{"id": mod.ID}); !toolOK(code, out) || !live(mod.ID) {
 			t.Errorf("the organiser: restore_event answered %d %s", code, out)
+		}
+	})
+
+	// A project's calendar fills itself with its tasks and milestones (gcal-14
+	// head A), but a token reads those only with the scopes that read them on
+	// every other route (main 13 Nov, CR-B84 F1): calendar:read alone, on /v1
+	// or an MCP agent's list_events, gets neither; with tasks:read and
+	// projects:read it gets them, and only those its member may read (never a
+	// restricted task she isn't let in to).
+	t.Run("a token reads a project calendar's tasks and milestones only with the scopes that read them", func(t *testing.T) {
+		launch, kit, vault := uuid.NewString(), uuid.NewString(), uuid.NewString()
+		const live = "0001-01-01T00:00:00Z"
+		person := func(u *userModels.UserInfo) map[string]any { return map[string]any{"uid": u.UserDgraphInfo.Uid} }
+		task := func(node, id, name string) map[string]any {
+			return map[string]any{"uid": "_:" + node, "dgraph.type": "Task", "task_uuid": id, "task_name": name, "task_status": "todo",
+				"task_deleted_at": live, "task_due_date": start.Add(24 * time.Hour).Format(time.RFC3339),
+				"task_project": map[string]any{"uid": "_:launch"}, "task_created_by": person(ben)}
+		}
+		dg.Mutate(t, []map[string]any{
+			{"uid": "_:launch", "dgraph.type": "Project", "project_uuid": launch, "project_name": "Launch g15d", "project_deleted_at": live,
+				"project_members": []map[string]any{person(ana), person(ben)}, "project_admins": []map[string]any{person(ben)}, "project_created_by": person(ben),
+				"project_tasks": []map[string]any{{"uid": "_:kit"}, {"uid": "_:vault"}}},
+			task("kit", kit, "Press kit g15d"), task("vault", vault, "Vault g15d"),
+		})
+		// The vault is restricted (Postgres's, models/taskread): Ben made it;
+		// Ana, a member, isn't let in.
+		if _, err := env.PG.Exec(`WITH p AS (INSERT INTO projects (id, project_name, created_by) VALUES ($1::uuid, 'Launch g15d', $3::uuid) RETURNING id),
+			t AS (INSERT INTO tasks (id, project_id, created_by) SELECT $2::uuid, id, $3::uuid FROM p RETURNING id, project_id)
+			INSERT INTO task_restrictions (task_id, project_id, restricted_by) SELECT id, project_id, $3::uuid FROM t`, launch, vault, ben.UserPostgresInfo.Id); err != nil {
+			t.Fatal(err)
+		}
+		var beta string
+		if err := env.PG.QueryRow(`WITH m AS (INSERT INTO milestones (project_uuid, name, target_date, created_by) VALUES ($1, 'Beta g15d', $2, $3) RETURNING id)
+			INSERT INTO milestone_projects (project_uuid, milestone_id, position) SELECT $1, id, 0 FROM m RETURNING milestone_id::text`,
+			launch, start.Add(48*time.Hour).Format("2006-01-02"), ben.UserPostgresInfo.Id).Scan(&beta); err != nil {
+			t.Fatal(err)
+		}
+		cal, err := events.ContainerCalendarFor(ctx, ana, "project", launch)
+		if err != nil {
+			t.Fatalf("Ana opens the project's calendar: %v", err)
+		}
+		from, to := start.Add(-24*time.Hour).Format(time.RFC3339), start.Add(10*24*time.Hour).Format(time.RFC3339)
+		// derived is what tok is answered on the project's calendar that no
+		// one made on it, by source, sorted.
+		derived := func(t *testing.T, tok *apiTokenBusiness.CreatedToken) string {
+			t.Helper()
+			code, out := send(tok, http.MethodGet, "/v1/events?from="+from+"&to="+to+"&calendar_id="+cal.String(), nil)
+			var page struct {
+				Items []calendarBusiness.Event `json:"items"`
+			}
+			if code != 200 || json.Unmarshal([]byte(out), &page) != nil {
+				t.Fatalf("the project's calendar: %d %s", code, out)
+			}
+			var got []string
+			for _, e := range page.Items {
+				if e.Source != nil {
+					got = append(got, e.Source.Kind+":"+e.Source.ID)
+				}
+			}
+			sort.Strings(got)
+			return strings.Join(got, " ")
+		}
+		want := []string{"milestone:" + beta, "task:" + kit}
+		sort.Strings(want)
+		every := token(ana.UserPostgresInfo.Id, nil, read, apiTokenBusiness.ScopeTasksRead, apiTokenBusiness.ScopeProjectsRead)
+		for _, c := range []struct {
+			what string
+			tok  *apiTokenBusiness.CreatedToken
+			want string
+		}{
+			{"calendar:read alone", anaReadOnly, ""},
+			{"calendar:read and tasks:read", token(ana.UserPostgresInfo.Id, nil, read, apiTokenBusiness.ScopeTasksRead), "task:" + kit},
+			{"calendar:read and projects:read", token(ana.UserPostgresInfo.Id, nil, read, apiTokenBusiness.ScopeProjectsRead), "milestone:" + beta},
+			{"all three", every, strings.Join(want, " ")},
+		} {
+			if got := derived(t, c.tok); got != c.want {
+				t.Errorf("Ana's token with %s is answered %q on the project's calendar, want %q", c.what, got, c.want)
+			}
+		}
+		// Ben runs the project and made the vault: his token with all three
+		// is answered it too.
+		if got := derived(t, token(ben.UserPostgresInfo.Id, nil, read, apiTokenBusiness.ScopeTasksRead, apiTokenBusiness.ScopeProjectsRead)); !strings.Contains(got, "task:"+vault) {
+			t.Errorf("Ben, let in to the vault, is answered %q", got)
+		}
+		if !ai {
+			return
+		}
+		mcpOn(t)
+		// An MCP agent on a calendar:read token: no task, no milestone.
+		reader := uuid.New()
+		if _, err := env.PG.Exec(`INSERT INTO ai_agents (id, name, created_by, trigger_type, enabled_tools) VALUES ($1, 'Planner', $2, 'mention', '["list_events"]'::jsonb)`,
+			reader, ana.UserPostgresInfo.Id); err != nil {
+			t.Fatal(err)
+		}
+		span := map[string]any{"from": from, "to": to, "calendar_id": cal.String()}
+		code, out := tool(token(ana.UserPostgresInfo.Id, &reader, read), "list_events", span)
+		if !toolOK(code, out) || strings.Contains(out, "Press kit g15d") || strings.Contains(out, "Beta g15d") || strings.Contains(out, "Vault g15d") {
+			t.Errorf("an MCP agent with calendar:read alone: %d %s", code, out)
+		}
+		code, out = tool(token(ana.UserPostgresInfo.Id, &reader, read, apiTokenBusiness.ScopeTasksRead, apiTokenBusiness.ScopeProjectsRead), "list_events", span)
+		if !toolOK(code, out) || !strings.Contains(out, "Press kit g15d") || !strings.Contains(out, "Beta g15d") || strings.Contains(out, "Vault g15d") {
+			t.Errorf("an MCP agent with all three: %d %s", code, out)
 		}
 	})
 }

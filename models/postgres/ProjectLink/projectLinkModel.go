@@ -8,8 +8,10 @@ package models
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
+	linkDomain "github.com/akashc777/OneCamp/domain/ProjectLink"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/models/pgexec"
 	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
@@ -39,7 +41,7 @@ var (
 	ErrDuplicate = errors.New("project links: already there")
 )
 
-const columns = `id, project_uuid, url, title, description, site_name, icon_object, image_object, position, created_at`
+const columns = linkDomain.Columns
 
 func scan(r pgexec.Row) (Link, error) {
 	var l Link
@@ -81,18 +83,18 @@ func Get(ctx context.Context, project, id uuid.UUID) (*Link, error) {
 }
 
 // counts is how many live links the project has, and ErrDuplicate when one
-// of them has address ("" asks after none).
-func counts(ctx context.Context, project uuid.UUID, address string) (int, error) {
+// of them has one of addresses (none asks after none).
+func counts(ctx context.Context, project uuid.UUID, addresses []string) (int, error) {
 	type got struct {
 		n   int
 		dup bool
 	}
-	g, _, err := pgexec.QueryOne(ctx, `SELECT COUNT(*), COALESCE(bool_or(url = $2), false) FROM project_links WHERE project_uuid = $1 AND `+softDelete.Live(""),
+	g, _, err := pgexec.QueryOne(ctx, linkDomain.Counts,
 		func(r pgexec.Row) (got, error) {
 			var g got
 			return g, r.Scan(&g.n, &g.dup)
-		}, project, address)
-	if err == nil && g.dup && address != "" {
+		}, project, addresses)
+	if err == nil && g.dup && len(addresses) > 0 {
 		err = ErrDuplicate
 	}
 	return g.n, err
@@ -100,10 +102,10 @@ func counts(ctx context.Context, project uuid.UUID, address string) (int, error)
 
 // Room is nil when the project may take a link to address: ErrDuplicate when
 // one of its live links has it, ErrFull when it holds most. It is read
-// without the project's lock, so a caller asks before slow work and Create
-// asks again under the lock.
+// without the project's lock, so a caller asks before slow work and
+// CreateMany asks again under the lock.
 func Room(ctx context.Context, project uuid.UUID, address string, most int) error {
-	n, err := counts(ctx, project, address)
+	n, err := counts(ctx, project, []string{address})
 	if err == nil && n >= most {
 		err = ErrFull
 	}
@@ -119,24 +121,38 @@ func lockOf(project uuid.UUID) string { return "project_links:" + project.String
 // (An address a live link has since is the store's to refuse: ErrDuplicate.)
 func Bound(project uuid.UUID, most int) softDelete.Bound {
 	return softDelete.Bound{Lock: lockOf(project), Most: most, Full: ErrFull,
-		Count: func(ctx context.Context) (int, error) { return counts(ctx, project, "") }}
+		Count: func(ctx context.Context) (int, error) { return counts(ctx, project, nil) }}
 }
 
-// Create adds l to its project, last in its order, as by (uuid.Nil: no one
-// person), unless the project holds most links (ErrFull) or a live link has
-// its address (ErrDuplicate). The count and the write hold the project's
-// lock, so two adds at once can't both take the last place or one address.
-func Create(ctx context.Context, l Link, by uuid.UUID, most int) (*Link, error) {
-	var made Link
-	added, err := pgexec.Capped(ctx, lockOf(l.ProjectUUID), most,
-		func(ctx context.Context) (int, error) { return counts(ctx, l.ProjectUUID, l.URL) },
+// CreateMany adds links to the project, last in its order in the order given,
+// as by (uuid.Nil: no one person), in one write, and answers them in that
+// order: all of them, or none when the project would hold more than most
+// (ErrFull) or a live link, or another of them, has one of their addresses
+// (ErrDuplicate). The count and the write hold the project's lock, so two
+// adds at once can't both take the last places or one address.
+func CreateMany(ctx context.Context, project uuid.UUID, links []Link, by uuid.UUID, most int) ([]Link, error) {
+	if len(links) == 0 {
+		return nil, nil
+	}
+	n := len(links)
+	urls, titles, descriptions, sites := make([]string, n), make([]string, n), make([]string, n), make([]string, n)
+	icons, images := make([]string, n), make([]string, n)
+	for i, l := range links {
+		urls[i], titles[i], descriptions[i], sites[i] = l.URL, l.Title, l.Description, l.SiteName
+		icons[i], images[i] = textOf(l.Icon), textOf(l.Image)
+	}
+	var made []Link
+	// Capped adds while the count is under its limit: n more fit when the
+	// count is at most most-n.
+	added, err := pgexec.Capped(ctx, lockOf(project), most-n+1,
+		func(ctx context.Context) (int, error) { return counts(ctx, project, urls) },
 		func(ctx context.Context) error {
 			var err error
-			made, _, err = pgexec.QueryOne(ctx, `INSERT INTO project_links (project_uuid, url, title, description, site_name, icon_object, image_object, created_by, position)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-					COALESCE((SELECT MAX(position) FROM project_links WHERE project_uuid = $1 AND `+softDelete.Live("")+`), 0) + 1)
-				RETURNING `+columns, scan,
-				l.ProjectUUID, l.URL, l.Title, l.Description, l.SiteName, nullOf(l.Icon), nullOf(l.Image), uuid.NullUUID{UUID: by, Valid: by != uuid.Nil})
+			made, err = pgexec.Query(ctx, linkDomain.Insert, scan,
+				project, urls, titles, descriptions, sites, icons, images, uuid.NullUUID{UUID: by, Valid: by != uuid.Nil})
+			if err == nil && len(made) != n {
+				err = errors.New("project links: the write didn't answer every link")
+			}
 			return err
 		})
 	switch {
@@ -147,7 +163,16 @@ func Create(ctx context.Context, l Link, by uuid.UUID, most int) (*Link, error) 
 	case !added:
 		return nil, ErrFull
 	}
-	return &made, nil
+	sort.Slice(made, func(i, j int) bool { return made[i].Position < made[j].Position })
+	return made, nil
+}
+
+// textOf is an object's id as Insert's arrays hold it: "" for none.
+func textOf(id *uuid.UUID) string {
+	if id == nil {
+		return ""
+	}
+	return id.String()
 }
 
 // SetPictures sets a live link's stored icon and picture (nil: none).

@@ -54,10 +54,14 @@ func callPeople(e *models.Event, guests []models.Attendee) *CallPeople {
 
 // CallKeys is what an event's call files what it makes under: the event's own
 // uuid and its series' (an instance's call is its series'), and the room of
-// its call, whose first holder Call State knows.
+// its call, whose first holder Call State knows; for one instance of a
+// series, also the Span its own calls started in (Holds).
 type CallKeys struct {
 	Events []uuid.UUID
 	Room   string
+	// Span is the time one instance's calls start in (CallSpan); nil for a
+	// single event or a series' own id, whose calls are all its.
+	Span *CallSpan
 }
 
 // CallArtefactKeys answers an event's CallKeys for someone who may read the
@@ -96,6 +100,11 @@ func (s *service) callArtefactKeys(ctx context.Context, who *model.UserInfo, id 
 	keys := CallKeys{Events: []uuid.UUID{inst.ID}, Room: owner.CallRoom}
 	if owner.ID != inst.ID {
 		keys.Events = append(keys.Events, owner.ID)
+	}
+	if inst.series != nil {
+		if keys.Span, err = s.callSpanOf(ctx, inst); err != nil {
+			return CallKeys{}, err
+		}
 	}
 	return keys, nil
 }

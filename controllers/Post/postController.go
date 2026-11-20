@@ -715,8 +715,16 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	createdCommentData, err := business.CreatePostComment(ctx, &commentInfo, &userInfo, mentionsDgraphUsersList, dgraphPost)
+	// The reply and its copy are one send, once per client id: a reply sent
+	// again after a lost answer is the same reply (messagePipeline.ReplyInPostThread).
+	createdCommentData, err := messagePipeline.ReplyInPostThread(ctx, &userInfo, &commentInfo, mentionsDgraphUsersList, dgraphPost, alsoPost)
 
+	// A repeat whose first try is still going, or a guard that can't answer,
+	// says so as a post's send does (CR-373 F1).
+	if rj, ok := sendBusiness.AsRejection(err); ok {
+		writeSendError(w, rj)
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/AddCommentToPost Failed to create post err: %+v",
@@ -727,20 +735,6 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 			"err": err,
 		})
 		return
-	}
-
-	// The reply is written, so posting it in the channel too is best-effort:
-	// a failure here must not fail the reply, so it is only logged.
-	if alsoPost != nil {
-		copied, perr := alsoPost.Commit(ctx)
-		if perr != nil {
-			helpers.LogErrorWithContext(ctx,
-				"controllers/AddCommentToPost also_send_to_channel failed err: %+v", perr)
-		} else if lerr := business.LinkReplyCopy(ctx, createdCommentData.Uuid, copied.Uuid); lerr != nil {
-			// The copy is posted; only following the reply's edits is lost.
-			helpers.LogErrorWithContext(ctx,
-				"controllers/AddCommentToPost Failed to link the reply to its copy err: %+v", lerr)
-		}
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
@@ -781,13 +775,15 @@ func PostByUUIDWithAllComments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphPost.Channel.IsMember == 0 {
-
+	// A thread is read by whoever may read its channel's posts, as latestPosts
+	// asks it (channelBusiness.CanRead): its members and moderators, and anyone
+	// signed in for a public channel, an archived one's included. Replying in
+	// it stays its members' (CreateCommentInPost).
+	if !channelBusiness.CanRead(dgraphPost.Channel) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
 		return
-
 	}
 
 	// A deleted message's thread shows nothing of it: a placeholder over its

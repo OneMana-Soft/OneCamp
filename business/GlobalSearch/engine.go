@@ -24,7 +24,7 @@ import (
 
 	querySpec "github.com/akashc777/OneCamp/business/QuerySpec"
 	searchQuery "github.com/akashc777/OneCamp/business/SearchQuery"
-	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/helpers"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	opensearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
 	"github.com/akashc777/OneCamp/models/taskread"
@@ -217,7 +217,7 @@ func Search(ctx context.Context, reach Reach, spec querySpec.Spec, page Page) (R
 		p part
 	}
 	var looks []looked
-	events := false
+	events, transcripts := false, false
 	for _, s := range sources {
 		if len(spec.Scope.Kinds) > 0 && !contains(spec.Scope.Kinds, s.kind) {
 			continue
@@ -228,9 +228,28 @@ func Search(ctx context.Context, reach Reach, spec querySpec.Spec, page Page) (R
 		}
 		looks = append(looks, looked{s, p})
 		events = events || s.kind == KindEvent
+		transcripts = transcripts || s.kind == KindTranscript
 	}
 	if events && reach.Calendars == nil {
 		reach.Calendars = eventCalendars(ctx, reach.Who)
+	}
+	// Whose calls' words the asker finds is read from the graph and the
+	// calls going on, once, when transcripts are looked at. A read that
+	// fails finds no transcript and leaves every other kind as it was.
+	if transcripts && reach.Calls == nil {
+		calls, err := callReach(ctx, reach)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "search: could not read whose calls' words the person finds, leaving transcripts out: %v", err)
+			kept := looks[:0]
+			for _, l := range looks {
+				if l.s.kind != KindTranscript {
+					kept = append(kept, l)
+				}
+			}
+			looks = kept
+		} else {
+			reach.Calls = calls
+		}
 	}
 	var should []map[string]any
 	var indices []string
@@ -349,25 +368,14 @@ func withExact(first *openSearchStruct.GlobalSearchOpenSearchResp, page []*openS
 }
 
 // keepPage is a page without the hits the graph says the asker can't open
-// now, or whose content is gone: every check today's search makes.
+// now, or whose content is gone: every check today's search makes. The read
+// checks run at once (keepReadable).
 func keepPage(ctx context.Context, reach Reach, hits []*openSearchStruct.GlobalSearchOpenSearchResp) []*openSearchStruct.GlobalSearchOpenSearchResp {
 	hits = keepLiveHits(ctx, hits)
 	hits = demoPeopleHits(reach.Email, hits)
-	before := hits
-	hits = keepReadableDocHits(ctx, reach.UserUUID, hits)
-	repairDropped(repairDoc, before, hits, docOfHit)
-	before = hits
-	hits = keepReadableBoardHits(ctx, reach.UserUUID, hits)
-	repairDropped(repairBoard, before, hits, boardOfHit)
-	before = hits
-	hits = keepReadableEventHits(ctx, reach.Who, hits)
-	repairDropped(repairEvent, before, hits, eventOfHit)
+	hits = keepReadable(ctx, hits, readChecks(reach))
 	showNextInstances(ctx, hits)
-	projects := make([]*dgraphStruct.DgraphProject, 0, len(reach.Projects))
-	for _, p := range reach.Projects {
-		projects = append(projects, &dgraphStruct.DgraphProject{Uuid: p})
-	}
-	return keepReadableProjectFileHits(ctx, reach.UserUUID, projects, hits)
+	return hits
 }
 
 // kindOfHit is the kind a hit is.
@@ -383,6 +391,8 @@ func kindOfHit(h *openSearchStruct.GlobalSearchOpenSearchResp) string {
 		return KindBoard
 	case openSearchStruct.EVENT_TYPE:
 		return KindEvent
+	case openSearchStruct.TRANSCRIPT_TYPE:
+		return KindTranscript
 	case openSearchStruct.TASK_TYPE:
 		return KindTask
 	case openSearchStruct.PROJECT_TYPE:
@@ -437,8 +447,11 @@ func sourceQuery(s source, reach Reach, p part) map[string]any {
 // unreturned are the fields an entry is matched on and a hit never carries: a
 // doc's body, a board's words (its highlight shows what matched), and an
 // event's notes, the people it is theirs to see and its guests' names (who is
-// invited is the event's to show, as its guests may see).
-var unreturned = []string{"doc_body", "board_text", "event_notes", "event_people", "event_guest_names"}
+// invited is the event's to show, as its guests may see), and a transcript
+// line's call session key and room (what its reach is checked by; the player
+// needs neither).
+var unreturned = []string{"doc_body", "board_text", "event_notes", "event_people", "event_guest_names",
+	"transcript_session_key", "transcript_room"}
 
 // highlight marks what matched, as the search page shows it.
 var highlight = map[string]any{
@@ -450,7 +463,7 @@ var highlight = map[string]any{
 		"task_name": map[string]any{}, "task_desc": map[string]any{}, "project_name": map[string]any{},
 		"team_name": map[string]any{}, "ch_name": map[string]any{}, "user_name": map[string]any{},
 		"event_title": map[string]any{}, "event_notes": map[string]any{}, "event_location": map[string]any{},
-		"board_text": map[string]any{},
+		"board_text": map[string]any{}, "transcript_text": map[string]any{},
 	},
 }
 

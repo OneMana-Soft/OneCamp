@@ -58,25 +58,37 @@ func invitedPerson(who accessBusiness.Subject) (uuid.UUID, bool) {
 	return id, err == nil && id != uuid.Nil
 }
 
-// undecided is the ids no rule opened.
-func undecided(out map[string]accessBusiness.Decision, ids []string) []string {
+// undecided is the ids no rule opened; with readers, also those a channel's
+// rule opened only as one of its readers (a public channel's, or a manager's
+// who isn't in it), below reply. A member's own decision is never in it.
+func undecided(out map[string]accessBusiness.Decision, ids []string, readers bool) []string {
 	var left []string
 	for _, id := range ids {
-		if out[id].Level == accessBusiness.LevelNone {
+		if d := out[id]; d.Level == accessBusiness.LevelNone || readers && channelReader(d) {
 			left = append(left, id)
 		}
 	}
 	return left
 }
 
+// channelReader is whether d is a channel's read for someone not in it
+// (decideChannel's public reason), never a member's. Pure.
+func channelReader(d accessBusiness.Decision) bool {
+	return d.Level < LevelReply && len(d.Reasons) == 1 && d.Reasons[0] == reasonPublic
+}
+
 // callInvites opens a live call's thread at reply to someone let into that
-// call through its invite. One read for the posts' calls, one for the invites.
-func callInvites(ctx context.Context, who accessBusiness.Subject, out map[string]accessBusiness.Decision, ids []string) error {
+// call through its invite, as far as its root's standing in roots holds it
+// (threadHeld): an archived channel's, or a deleted root's, at read. One read
+// for the posts' calls, one for the invites.
+func callInvites(ctx context.Context, who accessBusiness.Subject, out map[string]accessBusiness.Decision, ids []string, roots map[uuid.UUID]threadStanding) error {
 	if !AskedForCallThread(ctx) {
 		return nil
 	}
 	person, ok := invitedPerson(who)
-	left := undecided(out, ids)
+	// Someone a channel lets read as one of its readers still replies once
+	// let in (calls HU13; CR-372 F1).
+	left := undecided(out, ids, true)
 	if !ok || len(left) == 0 {
 		return nil
 	}
@@ -96,7 +108,7 @@ func callInvites(ctx context.Context, who accessBusiness.Subject, out map[string
 	}
 	for post, room := range calls {
 		if rooms[room] {
-			out[post.String()] = invited(LevelReply)
+			out[post.String()] = threadHeld(invited(LevelReply), roots[post])
 		}
 	}
 	return nil
@@ -105,7 +117,7 @@ func callInvites(ctx context.Context, who accessBusiness.Subject, out map[string
 // callRoomInvites lets someone let into a call through its invite join it.
 func callRoomInvites(ctx context.Context, who accessBusiness.Subject, out map[string]accessBusiness.Decision, rooms []string) error {
 	person, ok := invitedPerson(who)
-	left := undecided(out, rooms)
+	left := undecided(out, rooms, false)
 	if !ok || len(left) == 0 {
 		return nil
 	}

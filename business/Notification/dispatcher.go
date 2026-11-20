@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	prefDomain "github.com/akashc777/OneCamp/domain/UserNotificationPreference"
 	"github.com/akashc777/OneCamp/helpers"
@@ -70,7 +71,19 @@ const (
 	// EventCalendarReminder is a reminder a person set to come by email
 	// (calendar head A, gcal-5): sent as Requested.
 	EventCalendarReminder EventType = "calendar.reminder"
+	// EventCalendarRecap is the recap of an event's call, to its members
+	// (gcal-new-event-notes): on unless their email_calendar_recaps is off.
+	EventCalendarRecap EventType = "calendar.recap"
 )
+
+// EventTaskUrgent tells a task's assignee it was made Urgent (business/Task
+// urgent.go): news of their own work, by the assigned-to-you switch.
+const EventTaskUrgent EventType = "task.urgent"
+
+// EventTaskSLA tells a task's assignee its SLA is at risk or breached
+// (business/SLA alerts.go): news of their own work, by the assigned-to-you
+// switch, as EventTaskUrgent.
+const EventTaskSLA EventType = "task.sla"
 
 // Recipient describes a single user the dispatcher should consider. Only the
 // UUID is required; other fields are populated lazily.
@@ -112,6 +125,10 @@ type Event struct {
 	// applies all eligibility gates per-recipient.
 	Recipients []Recipient
 
+	// About, when set, is what the email is about, kept on its queue row so
+	// the worker asks again at the send whether it still holds (recheck.go).
+	About *About
+
 	// MayRead, when set, is which of the recipients (by user id, answered as
 	// given) may read what the event is about now: anyone it leaves out
 	// isn't emailed, and when it can't answer nobody is. An event about
@@ -120,6 +137,13 @@ type Event struct {
 	// the app would refuse it to, such as a commenter since taken off the
 	// task's project.
 	MayRead func(ctx context.Context, userIDs []string) (map[string]bool, error)
+
+	// Hears, when set, is which of the recipients (by user id, answered as
+	// given) their own setting for the place the event is in lets hear it
+	// (notifylevel.Hearing, levels read once for all of them, as hears builds
+	// it; no setting hears): anyone it leaves out isn't emailed, and when it can't answer nobody
+	// is. A setting only says whether they are told, never what they may read.
+	Hears func(ctx context.Context, userIDs []string) (map[string]bool, error)
 
 	// SkipOnlineCheck overrides the per-user "only when offline" policy.
 	// Used for events where email is the primary channel (digest, calendar
@@ -139,7 +163,9 @@ type Event struct {
 }
 
 // Dispatch is the single entry point. Returns the number of rows enqueued.
-// Always safe to call: when RESEND_API_KEY is unset, returns immediately.
+// Always safe to call: where no notification email is sent (no sending key,
+// essentials only, the public demo: emailService.NotificationEmailEnabled),
+// returns before asking any store.
 //
 // Best-effort by design: per-recipient errors are logged but do not stop the
 // fan-out, mirroring the FCM error handling pattern.
@@ -147,7 +173,8 @@ type Event struct {
 // Performance: this function used to do 4-5 PG round-trips PER recipient
 // (user, suppression, prefs, online-check). We now batch the user +
 // suppression + prefs lookups into 3 round-trips total regardless of
-// recipient count, then iterate in-memory. For a 50-member channel
+// recipient count (one more, the first time, to make the preference rows of
+// those who have none), then iterate in-memory. For a 50-member channel
 // mention this drops ~250 PG calls to 3.
 func Dispatch(ctx context.Context, evt Event) int {
 	if !emailService.NotificationEmailEnabled() {
@@ -178,7 +205,12 @@ func Dispatch(ctx context.Context, evt Event) int {
 		candidates = append(candidates, r.UserUUID)
 	}
 	// Step 1b: only those who may read what it is about (Event.MayRead).
-	if candidates = keepReaders(ctx, evt, candidates); len(candidates) == 0 {
+	if candidates = keepBy(ctx, evt.MayRead, "who may read", evt.Type, candidates); len(candidates) == 0 {
+		return 0
+	}
+	// Step 1c: only those whose setting for its place lets them hear it
+	// (Event.Hears).
+	if candidates = keepBy(ctx, evt.Hears, "whose setting lets them hear", evt.Type, candidates); len(candidates) == 0 {
 		return 0
 	}
 
@@ -207,46 +239,46 @@ func Dispatch(ctx context.Context, evt Event) int {
 		suppressed = map[string]string{}
 	}
 
-	// Step 4: batch-load preferences. We don't auto-create rows here
-	// — a missing row means "use defaults" and we can compute that
-	// in-memory.
-	prefs, err := prefDomain.LoadByUserIDs(ctx, candidates)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "notification/Dispatch batch prefs err: %+v", err)
-		// Fail open same as above.
-		prefs = map[uuid.UUID]*prefModels.UserNotificationPreference{}
-	}
-
-	// Step 5: dispatch per-recipient with all gates pre-resolved.
-	enqueued := 0
+	// Step 4: who it goes to: active, inside the workspace, with an address,
+	// not one of the demo's own (helpers.IsDemoPerson: the shared visitor's
+	// address is everyone who opens the demo, and the cast's and bots' take
+	// no mail), not suppressed.
+	to := make([]*userModels.User, 0, len(candidates))
 	for _, uid := range candidates {
 		user := users[uid]
-		if user == nil {
-			continue
-		}
-		if user.IsExternal || user.EmailID == "" {
-			continue
-		}
-		// The demo's own people are never emailed (helpers.IsDemoPerson): the
-		// shared visitor's address is everyone who opens the demo, so an AI's
-		// every reply to them would spend the free allowance the store and
-		// every workspace share (100 a day), and the cast's and bots' addresses
-		// take no mail at all.
-		if helpers.IsDemoPerson(user.EmailID) {
+		if user == nil || user.IsExternal || user.EmailID == "" || helpers.IsDemoPerson(user.EmailID) {
 			continue
 		}
 		if reason, ok := suppressed[strings.ToLower(strings.TrimSpace(user.EmailID))]; ok && reason != "" {
 			continue
 		}
-		pref := prefs[uid]
+		to = append(to, user)
+	}
+	if len(to) == 0 {
+		return 0
+	}
+
+	// Step 5: their preferences, in one read; the rows of those who have
+	// none are made in one more statement, with the defaults (every kind on)
+	// and the unsubscribe token their first email carries. A row that can't
+	// be read or made sends nothing but what they asked for by itself.
+	ids := make([]uuid.UUID, len(to))
+	for i, user := range to {
+		ids[i] = user.Id
+	}
+	prefs, err := prefDomain.LoadOrCreateMany(ctx, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "notification/Dispatch prefs err: %+v", err)
+	}
+
+	// Step 6: dispatch per-recipient with all gates pre-resolved.
+	enqueued := 0
+	for _, user := range to {
+		pref := prefs[user.Id]
 		if pref == nil && evt.Requested {
 			pref = &prefModels.UserNotificationPreference{}
 		}
 		if pref == nil {
-			// No preference row exists. We *could* lazily create one
-			// here, but it's cheaper to delay creation to the first
-			// time the user opens the settings page. Treat missing as
-			// "email disabled" — the user has not opted into emails.
 			continue
 		}
 		if dispatchPrepared(ctx, evt, user, pref) {
@@ -256,29 +288,49 @@ func Dispatch(ctx context.Context, evt Event) int {
 	return enqueued
 }
 
-// keepReaders is the candidates evt.MayRead lets read what the event is about:
-// all of them when the event has no gate, none when the gate can't answer.
-func keepReaders(ctx context.Context, evt Event, candidates []uuid.UUID) []uuid.UUID {
-	if evt.MayRead == nil || len(candidates) == 0 {
+// keepBy is the candidates an event's gate (Event.MayRead, Event.Hears) lets
+// through, asked once for all of them: all of them when the event has no such
+// gate, none when the gate can't answer. what names the gate in the log.
+func keepBy(ctx context.Context, gate func(context.Context, []string) (map[string]bool, error), what string, t EventType, candidates []uuid.UUID) []uuid.UUID {
+	if gate == nil || len(candidates) == 0 {
 		return candidates
 	}
 	ids := make([]string, len(candidates))
 	for i, c := range candidates {
 		ids[i] = c.String()
 	}
-	readers, err := evt.MayRead(ctx, ids)
+	let, err := gate(ctx, ids)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "notification/Dispatch could not check who may read a %s, emailing nobody: %+v", evt.Type, err)
+		helpers.LogErrorWithContext(ctx, "notification/Dispatch could not check %s a %s, emailing nobody: %+v", what, t, err)
 		return nil
 	}
 	kept := make([]uuid.UUID, 0, len(candidates))
 	for _, c := range candidates {
-		if readers[c.String()] {
+		if let[c.String()] {
 			kept = append(kept, c)
 		}
 	}
 	return kept
 }
+
+// hears is an Event.Hears gate for an event that reaches everyone it tells as
+// h: levelsOf reads their settings for its place once, by the id as given.
+func hears(levelsOf func(context.Context, []string) (map[string]string, error), h notifylevel.Heard) func(context.Context, []string) (map[string]bool, error) {
+	return func(ctx context.Context, ids []string) (map[string]bool, error) {
+		levels, err := levelsOf(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		let := make(map[string]bool, len(ids))
+		for _, id := range notifylevel.Hearing(levels, ids, func(string) notifylevel.Heard { return h }) {
+			let[id] = true
+		}
+		return let, nil
+	}
+}
+
+// enqueueEmail queues one email for the worker (a seam for tests).
+var enqueueEmail = emailQueueModels.AtomicEnqueue
 
 // dispatchPrepared is the per-recipient enqueue step run after Dispatch
 // has resolved the user, suppression, and preferences in batch. The
@@ -286,6 +338,14 @@ func keepReaders(ctx context.Context, evt Event, candidates []uuid.UUID) []uuid.
 // here.
 func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pref *prefModels.UserNotificationPreference) bool {
 	if !evt.Requested && (!pref.EmailEnabled || !eventEnabledForPref(evt.Type, pref)) {
+		return false
+	}
+	// Nothing goes out that its reader can't stop: an email they didn't ask
+	// for by itself carries their row's unsubscribe link (and the
+	// List-Unsubscribe header, worker.go), so one without a token is not
+	// queued.
+	if !evt.Requested && pref.UnsubscribeToken == "" {
+		helpers.LogErrorWithContext(ctx, "notification/dispatchPrepared a %s to %s has no unsubscribe token: not queued", evt.Type, user.Id)
 		return false
 	}
 
@@ -296,13 +356,9 @@ func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pre
 		return false
 	}
 
-	// Quiet hours. Defer to the next post-quiet-hours moment by setting
-	// next_retry_at at insert time so the worker can never pick the row
-	// up before the window closes.
-	deliverAt, deferred := deliveryTime(time.Now(), pref)
-	if evt.Requested {
-		deliverAt, deferred = time.Now(), false
-	}
+	// Quiet hours and the window (dueAt). Defer by setting next_retry_at at
+	// insert time so the worker can never pick the row up before it is due.
+	deliverAt, deferred := dueAt(evt.Type, evt.Requested, time.Now(), pref)
 
 	// A Requested email carries no unsubscribe link, since an unsubscribe
 	// never stops it; its Why says where to stop it instead.
@@ -348,13 +404,20 @@ func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pre
 		dedupKey = dedupKey[:240] + "|" + helpers.HashString(dedupKey)
 	}
 
-	metadata, _ := json.Marshal(map[string]string{
+	meta := map[string]any{
 		"event_type":        string(evt.Type),
 		"actor_uuid":        evt.ActorUUID,
 		"recipient":         user.Id.String(),
 		"deferred":          fmt.Sprintf("%t", deferred),
 		"unsubscribe_token": unsubscribeToken,
-	})
+	}
+	if evt.About != nil {
+		meta["about"] = evt.About
+	}
+	if batched(evt.Type) {
+		meta["line"] = noticeLine{Title: evt.Title, Place: evt.Subtitle, Snippet: trimSnippet(evt.Body, lineSnippet)}
+	}
+	metadata, _ := json.Marshal(meta)
 
 	in := emailQueueModels.EnqueueInput{
 		UserID:    user.Id,
@@ -370,7 +433,7 @@ func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pre
 	if deferred {
 		in.NextRetryAt = &deliverAt
 	}
-	inserted, err := emailQueueModels.AtomicEnqueue(in)
+	inserted, err := enqueueEmail(in)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"notification/dispatchPrepared enqueue failed event=%s err=%+v", evt.Type, err)
@@ -404,7 +467,7 @@ func eventEnabledForPref(t EventType, p *prefModels.UserNotificationPreference) 
 		// A check-in asks each of its people directly, as a mention does, and
 		// so does an @ in a doc's body or in a comment on a table's row.
 		return p.EmailMentions
-	case EventTaskAssigned:
+	case EventTaskAssigned, EventTaskUrgent, EventTaskSLA:
 		return p.EmailTaskAssigned
 	case EventTaskStatus, EventProjectUpdate:
 		// A project's update is news about its tasks, wanted (or not) by
@@ -426,6 +489,8 @@ func eventEnabledForPref(t EventType, p *prefModels.UserNotificationPreference) 
 		return p.EmailCalendarChanges
 	case EventCalendarAnswered:
 		return p.EmailCalendarAnswers
+	case EventCalendarRecap:
+		return p.EmailCalendarRecaps
 	default:
 		return true
 	}
@@ -455,6 +520,24 @@ func deliveryTime(now time.Time, p *prefModels.UserNotificationPreference) (time
 		from = *until
 	}
 	at, _ := p.QuietHoursUntil(from)
+	return at, at.After(now)
+}
+
+// dueAt is when an email of kind t, raised at now, may go out: one asked for
+// (requested) at once; a batched notice no sooner than the window's end
+// (batchWindow), so what follows it goes out in the same email; and past the
+// person's pause and quiet hours (deliveryTime). Returns (when, deferred). Pure.
+func dueAt(t EventType, requested bool, now time.Time, p *prefModels.UserNotificationPreference) (time.Time, bool) {
+	if requested {
+		return now, false
+	}
+	from := now
+	if batched(t) {
+		from = now.Add(batchWindow)
+	}
+	// The pause and quiet hours as they stand when the window ends: quiet
+	// hours starting inside it hold the notice to their end.
+	at, _ := deliveryTime(from, p)
 	return at, at.After(now)
 }
 

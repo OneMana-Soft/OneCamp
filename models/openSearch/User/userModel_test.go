@@ -26,15 +26,18 @@ import (
 func TestARenameLeavesTheNamesInTheUsersIndexAlone(t *testing.T) {
 	var mu sync.Mutex
 	scripts := map[string]string{} // index -> the update script sent to it
+	queries := map[string]string{} // index -> the entries it picks
 	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Script struct {
 				Source string `json:"source"`
 			} `json:"script"`
+			Query json.RawMessage `json:"query"`
 		}
 		if index, ok := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/"), "/_update_by_query"); ok && json.NewDecoder(r.Body).Decode(&body) == nil {
 			mu.Lock()
 			scripts[index] = body.Script.Source
+			queries[index] = string(body.Query)
 			mu.Unlock()
 		}
 		fmt.Fprint(w, `{"took":1,"total":0,"updated":0,"failures":[]}`)
@@ -68,10 +71,16 @@ func TestARenameLeavesTheNamesInTheUsersIndexAlone(t *testing.T) {
 		openSearchStruct.ATTACHMENT_INDEX: "attachment_by_user_full_name = params.newName",
 		openSearchStruct.DOC_INDEX:        "doc_created_by_user_full_name = params.newName",
 		openSearchStruct.TASK_INDEX:       "task_assignee_user_full_name = params.newName",
+		openSearchStruct.TRANSCRIPT_INDEX: "transcript_by_user_full_name = params.newName",
 	} {
 		if !strings.Contains(scripts[index], author) {
 			t.Errorf("%s does not take the name people see (%s): %q", index, author, scripts[index])
 		}
+	}
+	// A call's lines are found by who said them: the renamed speaker's own
+	// lines, picked by their id, take the new name.
+	if q := queries[openSearchStruct.TRANSCRIPT_INDEX]; !strings.Contains(q, `"transcript_by_user_id":"u-1"`) {
+		t.Errorf("the transcripts index picks %s; want the speaker's own lines by transcript_by_user_id", q)
 	}
 }
 
@@ -113,7 +122,8 @@ func TestARenameRewritesEntriesAnotherWriteWasHolding(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	for _, index := range []string{openSearchStruct.POST_INDEX, openSearchStruct.CHAT_INDEX, openSearchStruct.COMMENT_INDEX,
-		openSearchStruct.ATTACHMENT_INDEX, openSearchStruct.DOC_INDEX, openSearchStruct.TASK_INDEX, openSearchStruct.USER_INDEX} {
+		openSearchStruct.ATTACHMENT_INDEX, openSearchStruct.DOC_INDEX, openSearchStruct.TASK_INDEX, openSearchStruct.USER_INDEX,
+		openSearchStruct.TRANSCRIPT_INDEX} {
 		if runs[index] != 2 {
 			t.Errorf("%s was run %d times; want a second run for the entry another write held", index, runs[index])
 		}

@@ -2,6 +2,7 @@ package business
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
@@ -111,6 +113,10 @@ func TestAMentionTellsReadersAndAsksTheAuthorToShareWithTheRest(t *testing.T) {
 	if n.DedupKey != "doc.mentioned|"+docID+"|2026-10-12" || n.Email != notificationBusiness.EventDocMention ||
 		n.Title != "Person a2 mentioned you in Launch notes" || n.Path != "/app/doc/"+docID {
 		t.Errorf("the mention reads %+v", n)
+	}
+	// Its email is asked again at the send: the doc, as someone it names.
+	if want := (&notificationBusiness.About{Kind: notificationBusiness.AboutDoc, Item: docID, Heard: notifylevel.Named}); !reflect.DeepEqual(n.About, want) {
+		t.Errorf("the mention is asked again as %+v, want %+v", n.About, want)
 	}
 	asks := ts.of(kindMentionUnshared)
 	if len(asks) != 1 || !slices.Equal(asks[0].to, []string{editID + ":author"}) {
@@ -228,6 +234,10 @@ func TestAThreadReplyTellsItsPeopleAndFollowers(t *testing.T) {
 	if n.DedupKey != "comment|c9" || n.Email != notificationBusiness.EventDocComment || n.Body != "Sounds right" ||
 		n.Title != "Person a2 replied in a thread on Launch notes" || n.Data["thread_id"] != "t1" {
 		t.Errorf("the reply reads %+v", n)
+	}
+	// Its email is asked again at the send, about the doc and the reply.
+	if a := n.About; a == nil || a.Kind != notificationBusiness.AboutDoc || a.Item != n.ResourceUUID || a.Item == "" || a.Reply != "c9" {
+		t.Errorf("the reply's email is about %+v, want the doc %s and the reply c9", a, n.ResourceUUID)
 	}
 }
 

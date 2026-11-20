@@ -2,13 +2,13 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/authcookie"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
-	"github.com/google/uuid"
 )
 
 func VerifyAuthOnlyPostgres(next http.Handler) http.Handler {
@@ -30,9 +30,9 @@ func VerifyAuthOnlyPostgres(next http.Handler) http.Handler {
 			return
 		}
 
-		emptyUUID := uuid.UUID{}
 		userDBInfo, err := domain.GetActiveUserByUUID(ctx, userUUID)
-		if err == nil && (userDBInfo == nil || userDBInfo.Id == emptyUUID) {
+		if errors.Is(err, helpers.ErrNotFound) {
+			// No one active by that uuid (gone, or deactivated): no session.
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}

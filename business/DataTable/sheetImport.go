@@ -307,7 +307,7 @@ func sheetBase(sheets []contentIOBusiness.Sheet, opts SheetOptions, chosen []she
 	names := map[string]bool{}
 	done, total := 0, 0
 	for i, s := range sheets {
-		key := uniqueName(cmp.Or(strings.TrimSpace(s.Name), fmt.Sprintf("Sheet %d", i+1)), names)
+		key := helpers.UniqueName(cmp.Or(strings.TrimSpace(s.Name), fmt.Sprintf("Sheet %d", i+1)), names)
 		ch := choices[i]
 		if ch.Bring != nil && !*ch.Bring {
 			continue

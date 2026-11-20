@@ -73,6 +73,9 @@ type GuestCollabClaims struct {
 	ResourceType string
 	ResourceID   string
 	Name         string
+	// UnlockVersion is the link's password version the token was given
+	// under; -1 for a token from before versions were carried.
+	UnlockVersion int
 }
 
 // grantExpired is the single Go-side definition of "past its expiry", kept
@@ -106,6 +109,13 @@ func grantExpired(ctx context.Context, g *guestModel.GuestGrant) bool {
 // already means "use the default", and overloading it would turn a caller that
 // simply forgot to set a duration into a permanent public link.
 func CreateResourceGrant(ctx context.Context, creatorUUID uuid.UUID, resourceType, resourceID, capability string, ttl time.Duration, neverExpires bool) (*ResourceGrant, error) {
+	return CreateLink(ctx, creatorUUID, resourceType, resourceID, capability, ttl, neverExpires, "")
+}
+
+// CreateLink is CreateResourceGrant for a link that may carry a password: a
+// board's (miro-33), under the docs' rule and hash (boardLinks.go). The link
+// is written with its password, never without it.
+func CreateLink(ctx context.Context, creatorUUID uuid.UUID, resourceType, resourceID, capability string, ttl time.Duration, neverExpires bool, password string) (*ResourceGrant, error) {
 	if !settingsBusiness.GuestAccessEnabled() {
 		return nil, ErrGuestDisabled
 	}
@@ -124,14 +134,18 @@ func CreateResourceGrant(ctx context.Context, creatorUUID uuid.UUID, resourceTyp
 	if err := labelBusiness.Allows(ctx, resourceType, resourceID, labelBusiness.RuleNoGuestLinks); err != nil {
 		return nil, err
 	}
-	// Normalize capability: comment is for docs and projects, post for
-	// channels; everything else is view.
-	cap := guestModel.CapabilityView
-	if capability == guestModel.CapabilityComment && (resourceType == guestModel.ResourceDoc || resourceType == guestModel.ResourceProject) {
-		cap = guestModel.CapabilityComment
-	}
-	if capability == guestModel.CapabilityPost && resourceType == guestModel.ResourceChannel {
-		cap = guestModel.CapabilityPost
+	// Normalize capability: a board's view, comment or edit; comment for
+	// docs and projects, post for channels; everything else is view.
+	cap := linkCapability(resourceType, capability)
+	var passwordHash *string
+	if password != "" {
+		if resourceType != guestModel.ResourceBoard {
+			return nil, &PublishInvalid{"Only a board's link takes a password here."}
+		}
+		var err error
+		if passwordHash, err = hashSecret("password", password); err != nil {
+			return nil, err
+		}
 	}
 
 	raw, err := randomToken()
@@ -142,7 +156,7 @@ func CreateResourceGrant(ctx context.Context, creatorUUID uuid.UUID, resourceTyp
 	// workspace's cap to every link: permanence is only reachable by asking
 	// for it explicitly, and only while there is no cap (kinds.go).
 	expiresAt := linkLifetime(ctx, KindLink, time.Now(), ttl, neverExpires)
-	grantID, err := guestModel.CreateGrant(ctx, hashToken(raw), resourceType, resourceID, cap, creatorUUID, expiresAt)
+	grantID, err := guestModel.CreateLockedGrant(ctx, hashToken(raw), resourceType, resourceID, cap, creatorUUID, expiresAt, passwordHash)
 	if err != nil {
 		return nil, err
 	}
@@ -241,24 +255,26 @@ func notifyDocKeepers(ctx context.Context, docUUID, name, commentID, plain strin
 }
 
 // SharedTitle is the name of the doc or board a link opens, for the guest's
-// page header, which said "Shared document" whatever it was. Read as the
-// "Guests" principal; "" when it has no name or can't be read just now.
+// page header, which said "Shared document" whatever it was. A doc is read as
+// the "Guests" principal; a board as no one in particular (boardBusiness
+// LiveTitle), so opening a board link makes no users row: its guest is the
+// grant (miro-33 M-1). "" when it has no name or can't be read just now.
 func SharedTitle(ctx context.Context, grant *guestModel.GuestGrant) string {
 	if grant == nil {
 		return ""
 	}
-	bot, err := userBusiness.EnsureGuestBot(ctx)
-	if err != nil {
-		return ""
-	}
 	switch grant.ResourceType {
 	case guestModel.ResourceDoc:
+		bot, err := userBusiness.EnsureGuestBot(ctx)
+		if err != nil {
+			return ""
+		}
 		if d, err := docBusiness.GetBasicDgraphDocByUUID(ctx, grant.ResourceID, bot.DgraphUID); err == nil && d != nil {
 			return strings.TrimSpace(d.Title)
 		}
 	case guestModel.ResourceBoard:
-		if b, err := boardBusiness.GetBasicBoardByUUID(ctx, grant.ResourceID, bot.DgraphUID); err == nil && b != nil {
-			return strings.TrimSpace(b.Title)
+		if title, _, err := boardBusiness.LiveTitle(ctx, grant.ResourceID); err == nil {
+			return title
 		}
 	}
 	return ""
@@ -395,8 +411,10 @@ func IssueGuestCollabToken(ctx context.Context, grant *guestModel.GuestGrant, di
 		"gid":   grant.Id.String(),
 		"rt":    grant.ResourceType,
 		"rid":   grant.ResourceID,
-		"iat":   now.Unix(),
-		"exp":   now.Add(guestCollabTokenTTL).Unix(),
+		// The password's version it was given under: a new password ends it.
+		"uv":  grant.UnlockVersion,
+		"iat": now.Unix(),
+		"exp": now.Add(guestCollabTokenTTL).Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString([]byte(secret))
@@ -415,45 +433,57 @@ func IssueGuestCollabToken(ctx context.Context, grant *guestModel.GuestGrant, di
 // the grant baked into the JWT, so a valid guest token for one doc can't open
 // another. Returns the validated grant on success.
 func AuthorizeGuestCollab(ctx context.Context, bearerToken, kind, resourceID string) (*guestModel.GuestGrant, error) {
+	g, _, err := authorizeGuestCollab(ctx, bearerToken, kind, resourceID)
+	return g, err
+}
+
+// authorizeGuestCollab is AuthorizeGuestCollab, with the token's claims: who
+// the guest is on the doc or board, as the server signed it.
+func authorizeGuestCollab(ctx context.Context, bearerToken, kind, resourceID string) (*guestModel.GuestGrant, *GuestCollabClaims, error) {
 	if !settingsBusiness.GuestAccessEnabled() {
-		return nil, ErrGuestDisabled
+		return nil, nil, ErrGuestDisabled
 	}
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		return nil, errors.New("server auth not configured")
+		return nil, nil, errors.New("server auth not configured")
 	}
 	claims, err := parseGuestCollabClaims(strings.TrimSpace(bearerToken), secret)
 	if err != nil {
-		return nil, ErrInvalidGrant
+		return nil, nil, ErrInvalidGrant
 	}
 	// The JWT's baked-in scope must match BOTH the resource kind and the exact
 	// id the collab service is asking about — no widening.
 	if claims.ResourceType != kind || claims.ResourceID != strings.TrimSpace(resourceID) {
-		return nil, ErrInvalidGrant
+		return nil, nil, ErrInvalidGrant
 	}
 	// Re-validate the grant in the DB: active, not revoked, not expired, and
 	// still the same resource. This is what makes revocation immediate.
 	g, err := guestModel.GetByID(ctx, claims.GrantID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if g == nil || g.RevokedAt != nil || grantExpired(ctx, g) {
-		return nil, ErrInvalidGrant
+		return nil, nil, ErrInvalidGrant
 	}
 	if g.ResourceType != kind || g.ResourceID != strings.TrimSpace(resourceID) {
-		return nil, ErrInvalidGrant
+		return nil, nil, ErrInvalidGrant
 	}
 	if ServedAsPage(g) {
 		// A doc's view link (or one with a password) is the server's page
 		// alone: a token issued before it became one opens nothing here.
-		return nil, ErrInvalidGrant
+		return nil, nil, ErrInvalidGrant
+	}
+	// A password link's token opens it only at the password's version it
+	// was given under: a new password, or none, ends every one given before.
+	if g.PasswordHash != nil && claims.UnlockVersion != g.UnlockVersion {
+		return nil, nil, ErrInvalidGrant
 	}
 	// Every (re)connect, so a doc deleted while a guest has it open takes
 	// them out at their next one.
 	if err := grantedLive(ctx, g); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return g, nil
+	return g, claims, nil
 }
 
 // parseGuestCollabClaims verifies a share link's guest collab JWT and
@@ -478,7 +508,11 @@ func parseGuestCollabClaims(tokenString, secret string) (*GuestCollabClaims, err
 	if rt == "" || rid == "" {
 		return nil, ErrInvalidGrant
 	}
-	return &GuestCollabClaims{GrantID: gid, ResourceType: rt, ResourceID: rid, Name: name}, nil
+	uv := -1
+	if v, ok := claims["uv"].(float64); ok {
+		uv = int(v)
+	}
+	return &GuestCollabClaims{GrantID: gid, ResourceType: rt, ResourceID: rid, Name: name, UnlockVersion: uv}, nil
 }
 
 // verifiedGuestClaims verifies a guest collab JWT's signature and expiry, and

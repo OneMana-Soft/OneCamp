@@ -106,7 +106,8 @@ func InsertNotices(ctx context.Context, rows []*Notice) (map[uuid.UUID]bool, err
 	return written, res.Err()
 }
 
-// storedKey is a dedup key as the column holds it.
+// storedKey is a dedup key as the column holds it: a long one cut, with its
+// hash.
 func storedKey(key string) string {
 	if len(key) > maxDedupKey {
 		return key[:120] + "|" + helpers.HashString(key)
@@ -114,42 +115,27 @@ func storedKey(key string) string {
 	return key
 }
 
-// MentionKey is the dedup key of telling people of a mention in a thing (kind
-// "task", "post", "chat" or "comment", and its uuid): each person's notice
-// adds "|<their uuid>" (business/Notification Tell), so the feed can ask whom
-// it was told to (HeldNotices).
-func MentionKey(kind, id string) string { return "mention|" + kind + "|" + id }
-
-// HeldNotices is which of keys (each a telling's key and a person's id, as
-// Tell writes them) name a notice the inbox shows: one indexed read (the
-// unique dedup_key index). A listed notice (ReasonListed) isn't shown, so it
-// isn't held. A retracted one is (ReasonRetracted): what it told of was
-// deleted, and the feed keeps the graph's mention of it left out.
-func HeldNotices(ctx context.Context, keys []string) (map[string]bool, error) {
-	held := map[string]bool{}
-	if len(keys) == 0 {
-		return held, nil
-	}
-	stored := make([]string, len(keys))
-	asked := make(map[string]string, len(keys))
+// StoredKeys is keys as the column holds them (storedKey), and each stored
+// key back to the key as asked: what a read or a write by many keys asks by
+// (RetractNotices; domain/Activity ReaderPageSettings).
+func StoredKeys(keys []string) (stored []string, asked map[string]string) {
+	stored = make([]string, len(keys))
+	asked = make(map[string]string, len(keys))
 	for i, k := range keys {
 		stored[i] = storedKey(k)
 		asked[stored[i]] = k
 	}
-	found, err := pgexec.Query(ctx, `SELECT dedup_key FROM resource_notices WHERE dedup_key = ANY($1) AND reason <> $2`,
-		pgexec.Text, pq.Array(stored), ReasonListed)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/Follow HeldNotices err: %+v", err)
-		return nil, err
-	}
-	for _, k := range found {
-		held[asked[k]] = true
-	}
-	return held, nil
+	return stored, asked
 }
 
+// MentionKey is the dedup key of telling people of a mention in a thing (kind
+// "task", "post", "chat" or "comment", and its uuid): each person's notice
+// adds "|<their uuid>" (business/Notification Tell), so the feed can ask whom
+// it was told to (domain/Activity ReaderPageSettings).
+func MentionKey(kind, id string) string { return "mention|" + kind + "|" + id }
+
 // RetractNotices takes back the notices of keys (each a telling's key and a
-// person's id, as HeldNotices reads them): soft, by their reason, so the
+// person's id, as the Inbox reads them): soft, by their reason, so the
 // inbox stops showing and counting them. A listed notice was never shown and
 // stays listed. One write by the unique dedup_key index; answers how many
 // were taken back.
@@ -157,10 +143,7 @@ func RetractNotices(ctx context.Context, keys []string) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
-	stored := make([]string, len(keys))
-	for i, k := range keys {
-		stored[i] = storedKey(k)
-	}
+	stored, _ := StoredKeys(keys)
 	n, err := pgexec.Exec(ctx, `UPDATE resource_notices SET reason = $2 WHERE dedup_key = ANY($1) AND reason <> ALL($3)`,
 		pq.Array(stored), ReasonRetracted, hidden)
 	if err != nil {

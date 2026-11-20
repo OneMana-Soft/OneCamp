@@ -62,16 +62,28 @@ func readableBy(ctx context.Context, boardUUID, userUUID string) bool {
 // read, no canvas. An error is the graph not answering, and says nothing
 // about the board.
 func Live(ctx context.Context, boardUUID string) (bool, error) {
+	_, live, err := LiveTitle(ctx, boardUUID)
+	return live, err
+}
+
+// LiveTitle is Live with the board's name, trimmed: what a guest's link shows
+// in its page header. Asked as no one in particular, so a link's guest is read
+// for as its grant and no principal (no users row) is made to ask it. "" and
+// false for a board deleted or not there.
+func LiveTitle(ctx context.Context, boardUUID string) (string, bool, error) {
 	boards, err := readBoardsAccess(ctx, []string{boardUUID}, "")
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	for _, b := range boards {
 		if b != nil && strings.EqualFold(b.Uuid, boardUUID) {
-			return !isDeleted(b), nil
+			if isDeleted(b) {
+				return "", false, nil
+			}
+			return strings.TrimSpace(b.Title), true, nil
 		}
 	}
-	return false, nil
+	return "", false, nil
 }
 
 // ReadableBoardsFor answers, of the named boards, which the person (by uuid)

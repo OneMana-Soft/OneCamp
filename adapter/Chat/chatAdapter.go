@@ -41,6 +41,10 @@ type InputCreateOrUpdateCommentToChat struct {
 	HTMLText string                     `json:"comment_text_html,omitempty"`
 	ChatUuid string                     `json:"chat_id,omitempty"`
 	Uuid     string                     `json:"comment_id,omitempty"`
+	// ClientMsgID is the id the app gave the reply when it showed it: a send
+	// tried again with it is the same reply (business/MessagePipeline
+	// ReplyIn*Thread). Optional; without one, every send is a reply.
+	ClientMsgID string `json:"client_msg_id,omitempty"`
 	// Outsider is the server's alone: the writer isn't in the conversation
 	// (let into its call by the call's invite, calls CALLS-3b), so the thread's
 	// index records the reply but not them.

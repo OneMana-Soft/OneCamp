@@ -2,13 +2,13 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/authcookie"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
-	"github.com/google/uuid"
 )
 
 func VerifyRefreshToken(next http.Handler) http.Handler {
@@ -30,17 +30,20 @@ func VerifyRefreshToken(next http.Handler) http.Handler {
 			return
 		}
 
-		emptyUUID := uuid.UUID{}
 		userDBInfo, err := domain.GetActiveUserByUUID(ctx, userUUID)
-		if err == nil && (userDBInfo == nil || userDBInfo.Id == emptyUUID) {
+		if errors.Is(err, helpers.ErrNotFound) {
+			// No one active by that uuid (gone, or deactivated): no session.
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		if err != nil {
 			helpers.LogErrorWithContext(ctx,
-				"middleware/VerifyAuth Error getting user from postgres err: %+v",
+				"middleware/VerifyRefreshToken Error getting user from postgres err: %+v",
 				err)
-			w.WriteHeader(http.StatusUnauthorized)
+			// Postgres didn't answer: nothing was refused. A 401 here would
+			// sign the device out (the web forgets a session whose refresh is
+			// refused), so the refresh is tried again instead (V-1125).
+			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 		// Members only: a token naming an external person or a bot

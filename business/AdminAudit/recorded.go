@@ -42,6 +42,14 @@ func RecordedAs(ctx context.Context, p Principal, action, category, summary stri
 	return nil
 }
 
+// RecordAs writes one row naming p (p's agent and token beside the person,
+// Principal.Meta) for an outcome the caller has decided, such as a refusal,
+// or a change it writes in the same breath; an error is the row not written,
+// and "no record, no action" is the caller's to keep.
+func RecordAs(ctx context.Context, p Principal, action, category, summary string, metadata map[string]interface{}) error {
+	return recordedSeams.as(ctx, p.ID, p.Email, p.Kind, action, category, summary, p.Meta(metadata))
+}
+
 // Recorded makes a change only once its audit row is written: no record, no
 // action. It is for a change whose row is the lasting record of who made it
 // and when, such as a team's member or admin taken off, which leaves no node or

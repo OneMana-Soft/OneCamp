@@ -70,7 +70,7 @@ func withLinks(t *testing.T) *links {
 	}
 	unpublishGrant = func(_ context.Context, id uuid.UUID) (*guestModel.GuestGrant, error) {
 		g := l.byID[id]
-		if g == nil || g.RevokedAt != nil {
+		if g == nil || g.RevokedAt != nil || g.Slug == nil {
 			return nil, nil
 		}
 		g.Slug, g.PasswordHash, g.Indexable, g.AllowCopies = nil, nil, false, false
@@ -246,6 +246,9 @@ func TestPublishingALink(t *testing.T) {
 
 	if g, err := UnpublishLink(ctx, second.Id); err != nil || g.Slug != nil {
 		t.Errorf("unpublishing: %+v, %v", g, err)
+	}
+	if _, err := UnpublishLink(ctx, second.Id); !errors.Is(err, ErrNotOnTheWeb) {
+		t.Errorf("unpublishing a link that isn't on the web: %v", err)
 	}
 	now := time.Now()
 	view.RevokedAt = &now

@@ -19,9 +19,11 @@ package integration_test
 // signs it. What people see is read back through the channel's own routes.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/google/uuid"
@@ -144,13 +146,20 @@ func TestARecordingThatCapturedNothingSaysSo(t *testing.T) {
 		})
 	}
 
-	// Someone outside the channel is told nothing about it.
+	// Someone outside the channel is told nothing about it: its recording is
+	// answered as one there isn't (V-1126), and its list as a channel there
+	// isn't, so they can't learn that the channel is there (V-1163).
 	if got := call(t, userController.GetChannelRecordingURL, http.MethodGet, "/ch/getRecordingURL/"+room+"/"+last, cy, "",
-		map[string]string{"channel_uuid": room, "egress_id": last}); got.Code != http.StatusForbidden {
-		t.Errorf("Cy, outside the channel, opening its recording: %d %s, want 403", got.Code, got.Body.String())
+		map[string]string{"channel_uuid": room, "egress_id": last}); got.Code != http.StatusNotFound || msgOf(got) != "Recording not found" {
+		t.Errorf("Cy, outside the channel, opening its recording: %d %s, want 404 Recording not found", got.Code, got.Body.String())
 	}
-	if got := call(t, channelController.GetAllChannelRecordingList, http.MethodGet, "/ch/getRecordingList/"+room, cy, "",
-		map[string]string{"channel_uuid": room}); got.Code != http.StatusForbidden {
-		t.Errorf("Cy, outside the channel, listing its recordings: %d, want 403", got.Code)
+	list := func(channel string) *httptest.ResponseRecorder {
+		return call(t, channelController.GetAllChannelRecordingList, http.MethodGet, "/ch/getRecordingList/"+channel+"?pageIndex=0&pageSize=20",
+			cy, "", map[string]string{"channel_uuid": channel})
+	}
+	got, missing := list(room), list(uuid.NewString())
+	if got.Code != http.StatusNotFound || got.Code != missing.Code || !bytes.Equal(got.Body.Bytes(), missing.Body.Bytes()) {
+		t.Errorf("Cy, outside the channel, listing its recordings: %d %s, want %d %s as for a channel there isn't, and a 404",
+			got.Code, got.Body.String(), missing.Code, missing.Body.String())
 	}
 }

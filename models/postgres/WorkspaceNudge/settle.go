@@ -31,11 +31,17 @@ func SupersedeByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID][]uuid.
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	type closed struct{ id, user uuid.UUID }
-	rows, err := pgexec.Query(ctx, `
+	return closedByUser(ctx, `
 		UPDATE workspace_nudges SET status = 'superseded', updated_at = NOW()
 		WHERE id = ANY($1) AND status = 'open'
-		RETURNING id, user_id`, func(r pgexec.Row) (c closed, err error) { err = r.Scan(&c.id, &c.user); return }, pq.Array(ids))
+		RETURNING id, user_id`, pq.Array(ids))
+}
+
+// closedByUser runs a statement that closes nudges (RETURNING id, user_id)
+// and answers the ones it closed, by whose they were.
+func closedByUser(ctx context.Context, query string, args ...any) (map[uuid.UUID][]uuid.UUID, error) {
+	type closed struct{ id, user uuid.UUID }
+	rows, err := pgexec.Query(ctx, query, func(r pgexec.Row) (c closed, err error) { err = r.Scan(&c.id, &c.user); return }, args...)
 	if err != nil {
 		return nil, err
 	}

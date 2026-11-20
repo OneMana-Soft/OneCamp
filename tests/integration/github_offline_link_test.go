@@ -14,13 +14,18 @@ package integration_test
 
 import (
 	"context"
+	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
+	syncBusiness "github.com/akashc777/OneCamp/business"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	githubLinkModel "github.com/akashc777/OneCamp/models/postgres/GitHubLink"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -157,6 +162,186 @@ func TestAnOfflineFixtureLinkIsLeftOutOfEveryLiveRead(t *testing.T) {
 		}
 		if _, pr := w.links(w.other); pr != "" {
 			t.Errorf("the repair kept %q, a pull request in a repository Website doesn't link", pr)
+		}
+	})
+}
+
+// The demo's Q4-8 read "Sync failed" (CHAT76). Its close by the integration's
+// bot (RecordLanded) queues its status for GitHub, and the check on what a
+// sync may send read online links alone: it took the fixture repository for
+// one Q4 launch never linked, marked the task's sync failed and refused. A
+// repository the task's own project links offline has nothing to reach GitHub
+// with: the sync sends nothing, reads nothing, is done, and leaves the task's
+// sync state as it was, and so does a refresh. All else is as it was: a
+// repository another project links, online or offline, or one no project
+// links, is refused and the task's sync marked failed; the task's own
+// project's online link syncs.
+func TestASyncThroughItsOwnProjectsOfflineLinkSendsNothingAndIsDone(t *testing.T) {
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	env := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
+		t.Fatal(err)
+	}
+	integration.StubMqttClient(t)
+	dg := integration.SetupDgraph(t)
+	gh := recordGitHub(t)
+	w := seedGitHubWorkspace(t, env, dg)
+	// The seed links acme/web to Website and acme/billing to Billing, online.
+	// The fixture is Website's offline link, as the seed writes it; Billing
+	// has an offline link of its own.
+	for project, repo := range map[string]string{w.project: "q4-launch-site", w.billing: "billing-site"} {
+		if err := githubLinkModel.CreateGitHubLink(ctx, uuid.New(), uuid.MustParse(project), "demo-team", repo, nil, nil, false, false, false, w.people["ana"], time.Now()); err != nil {
+			t.Fatalf("an offline link: %v", err)
+		}
+	}
+	// Each a task of Website's, linked to an issue or a pull request in repo.
+	cases := []struct {
+		name, task, issue, pr, repo string
+		want                        string // "done", "sent" or "refused"
+	}{
+		{"its own project's offline link (the fixture)", w.other, "", "https://github.com/demo-team/q4-launch-site/pull/128", "/repos/demo-team/q4-launch-site/", "done"},
+		{"its own project's online link", w.task, "https://github.com/acme/web/issues/5", "", "/repos/acme/web/", "sent"},
+		{"another project's online link", w.third, "https://github.com/acme/billing/issues/3", "", "/repos/acme/billing/", "refused"},
+		{"another project's offline link", uuid.NewString(), "", "https://github.com/demo-team/billing-site/pull/4", "/repos/demo-team/billing-site/", "refused"},
+		{"a repository no project links, beside its project's offline one", uuid.NewString(), "https://github.com/demo-team/elsewhere/issues/7", "", "/repos/demo-team/elsewhere/", "refused"},
+	}
+	for _, c := range cases[3:] {
+		w.exec(`INSERT INTO tasks (id, project_id, created_by) VALUES ($1, $2, $3)`, c.task, w.project, w.people["ana"])
+	}
+	for _, c := range cases {
+		w.exec(`UPDATE tasks SET github_issue_url = NULLIF($2, ''), github_pr_url = NULLIF($3, '') WHERE id = $1`, c.task, c.issue, c.pr)
+	}
+	syncState := func(task string) (status, reason string) {
+		t.Helper()
+		if err := env.PG.QueryRow(`SELECT COALESCE(github_sync_status, ''), COALESCE(github_sync_error, '') FROM tasks WHERE id = $1`, task).Scan(&status, &reason); err != nil {
+			t.Fatal(err)
+		}
+		return status, reason
+	}
+	// item is the state of the task's sync item and how often it was tried.
+	item := func(task string) (state string, tries int) {
+		_ = env.PG.QueryRow(`SELECT status, attempts FROM github_sync_queue WHERE task_id = $1 ORDER BY created_at DESC LIMIT 1`, task).Scan(&state, &tries)
+		return state, tries
+	}
+	// syncAsAsked is what the task's sync read the last time GitHub was asked
+	// call ("METHOD /path"): the card says "Syncing…", and polls, only while
+	// it reads pending. fail, when not nil, is how the call fails.
+	syncAsAsked := func(task, call string, fail error) func() string {
+		var mu sync.Mutex
+		read := "nothing: GitHub wasn't asked " + call
+		gh.atEachCall(func(asked string) error {
+			if asked != call {
+				return nil
+			}
+			var status string
+			_ = env.PG.QueryRow(`SELECT COALESCE(github_sync_status, '') FROM tasks WHERE id = $1`, task).Scan(&status)
+			mu.Lock()
+			read = status
+			mu.Unlock()
+			return fail
+		})
+		return func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			return read
+		}
+	}
+
+	t.Run("the sync job: the offline link's is done with nothing sent, the rest as before", func(t *testing.T) {
+		workers, stopWorkers := context.WithCancel(ctx)
+		defer stopWorkers()
+		sending := syncAsAsked(cases[1].task, "PATCH "+cases[1].repo+"issues/5", nil)
+		defer gh.atEachCall(nil)
+		githubBusiness.StartGitHubSyncWorker(syncBusiness.SyncSignal, workers)
+		// A closed task's status, as the demo's close queued Q4-8's.
+		for _, c := range cases {
+			syncBusiness.EnqueueGitHubSync(ctx, uuid.MustParse(c.task), "status", map[string]interface{}{"status": "done"})
+		}
+		// Every item tried once and none mid-try: a refusal is final, a send
+		// or a skip done, and a retry waits for the worker's next pass.
+		tried := func() bool {
+			for _, c := range cases {
+				if state, tries := item(c.task); tries == 0 || state == "processing" {
+					return false
+				}
+			}
+			return true
+		}
+		for deadline := time.Now().Add(60 * time.Second); !tried(); time.Sleep(200 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("the sync didn't try every item: GitHub saw %v", gh.calls())
+			}
+		}
+		stopWorkers()
+		for _, c := range cases {
+			state, tries := item(c.task)
+			status, reason := syncState(c.task)
+			switch c.want {
+			case "done":
+				if state != "completed" || tries != 1 || status != "synced" || reason != "" || gh.count(c.repo) != 0 {
+					t.Errorf("%s: the item is %q after %d tries, the task's sync reads %q %q, GitHub saw %d calls there; want it done at once, nothing sent or read, the sync as it was",
+						c.name, state, tries, status, reason, gh.count(c.repo))
+				}
+			case "sent":
+				if state != "completed" || status != "synced" || gh.count("PATCH "+c.repo+"issues/5") != 1 {
+					t.Errorf("%s: the item is %q, the task's sync reads %q %q, GitHub saw %v; want the status sent", c.name, state, status, reason, gh.calls())
+				}
+				if read := sending(); read != "pending" {
+					t.Errorf("%s: as its status went to GitHub the task's sync read %s; want pending", c.name, read)
+				}
+			case "refused":
+				if state != "failed" || status != "failed" || !strings.Contains(reason, "isn't linked to") || gh.count(c.repo) != 0 {
+					t.Errorf("%s: the item is %q, the task's sync reads %q %q, GitHub saw %d calls there; want it refused as outside its project",
+						c.name, state, status, reason, gh.count(c.repo))
+				}
+			}
+		}
+	})
+
+	t.Run("a refresh through its own project's offline link reads nothing and is done, another project's is refused", func(t *testing.T) {
+		done, refused := cases[0], cases[3]
+		w.exec(`UPDATE tasks SET github_sync_status = 'synced', github_sync_error = NULL, github_sync_attempts = 0 WHERE id IN ($1, $2)`, done.task, refused.task)
+		gh.reset()
+		if err := githubBusiness.RefreshFromGitHub(ctx, uuid.MustParse(done.task), false, nil); err != nil {
+			t.Errorf("%s: the refresh answered %v; want it done", done.name, err)
+		}
+		if status, reason := syncState(done.task); status != "synced" || reason != "" {
+			t.Errorf("%s: after the refresh the task's sync reads %q %q; want it as it was", done.name, status, reason)
+		}
+		err := githubBusiness.RefreshFromGitHub(ctx, uuid.MustParse(refused.task), false, nil)
+		if err == nil || !strings.Contains(err.Error(), "isn't linked to") {
+			t.Errorf("%s: the refresh answered %v; want it refused as outside its project", refused.name, err)
+		}
+		if status, reason := syncState(refused.task); status != "failed" || !strings.Contains(reason, "isn't linked to") {
+			t.Errorf("%s: after the refresh the task's sync reads %q %q; want it failed", refused.name, status, reason)
+		}
+		if calls := gh.calls(); len(calls) != 0 {
+			t.Errorf("GitHub saw %v; want nothing sent or read", calls)
+		}
+	})
+
+	t.Run("a refresh through its own project's online link reads pending while it reads GitHub", func(t *testing.T) {
+		online := cases[1]
+		ana, err := userDomain.GetDgraphUserInfoByUUID(ctx, w.people["ana"].String())
+		if err != nil || ana == nil {
+			t.Fatalf("Ana's node: %v", err)
+		}
+		w.exec(`UPDATE tasks SET github_sync_status = 'synced', github_sync_error = NULL, github_sync_attempts = 0 WHERE id = $1`, online.task)
+		gh.reset()
+		// GitHub's read fails, so nothing of an answer is applied: what is
+		// read here is the task's sync while the read is made.
+		reading := syncAsAsked(online.task, "GET "+online.repo+"issues/5", errors.New("GitHub can't be reached"))
+		defer gh.atEachCall(nil)
+		err = githubBusiness.RefreshFromGitHub(ctx, uuid.MustParse(online.task), false, ana)
+		if read := reading(); read != "pending" {
+			t.Errorf("%s: as the refresh read the issue from GitHub the task's sync read %s; want pending", online.name, read)
+		}
+		if err == nil || !strings.Contains(err.Error(), "GitHub can't be reached") {
+			t.Errorf("%s: the refresh answered %v; want GitHub's failed read", online.name, err)
+		}
+		if status, reason := syncState(online.task); status != "failed" || !strings.Contains(reason, "GitHub can't be reached") {
+			t.Errorf("%s: after the failed read the task's sync reads %q %q; want it failed, saying why", online.name, status, reason)
 		}
 	})
 }

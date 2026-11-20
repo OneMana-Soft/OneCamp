@@ -86,16 +86,21 @@ func scanRows(rows *sql.Rows) ([]Row, error) {
 	return out, rows.Err()
 }
 
-// Insert adds rs as held in one statement, inside ex (the change's
-// transaction), and answers their ids in rs's order. The rows are inserted in
-// that order (WITH ORDINALITY), so their ids rise with it and a key's events
-// in rs run oldest first. Each row's sinks go as a JSON list, since unnest
-// flattens an array of arrays.
+// Insert adds rs in one statement, inside ex (the change's transaction), and
+// answers their ids in rs's order. A row is held unless it says it is ready
+// (Enqueue's: no change's transaction holds it, so it has nothing to wait
+// for). The rows are inserted in that order (WITH ORDINALITY), so their ids
+// rise with it and a key's events in rs run oldest first. Each row's sinks go
+// as a JSON list, since unnest flattens an array of arrays.
 func Insert(ctx context.Context, ex Execer, rs []Row) ([]int64, error) {
 	n := len(rs)
 	eventIDs, topics, kinds, keys := make([]string, n), make([]string, n), make([]string, n), make([]string, n)
-	entities, actors, sinks := make([]string, n), make([]string, n), make([]string, n)
+	entities, actors, sinks, states := make([]string, n), make([]string, n), make([]string, n), make([]string, n)
 	for i, r := range rs {
+		states[i] = StateHeld
+		if r.State == StateReady {
+			states[i] = StateReady
+		}
 		e := []byte("{}")
 		if r.Entities != nil {
 			var err error
@@ -117,12 +122,12 @@ func Insert(ctx context.Context, ex Execer, rs []Row) ([]int64, error) {
 	rows, err := ex.QueryContext(cctx, `
 		INSERT INTO outbox (event_id, topic, kind, key, entities, actor, sinks, state, created_at, available_at)
 		SELECT u.event_id, u.topic, u.kind, u.key, u.entities::jsonb, NULLIF(u.actor, '')::uuid,
-			ARRAY(SELECT jsonb_array_elements_text(u.sinks::jsonb)), 'held', NOW(), NOW()
-		FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
-			WITH ORDINALITY AS u(event_id, topic, kind, key, entities, actor, sinks, ord)
+			ARRAY(SELECT jsonb_array_elements_text(u.sinks::jsonb)), u.state, NOW(), NOW()
+		FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[])
+			WITH ORDINALITY AS u(event_id, topic, kind, key, entities, actor, sinks, state, ord)
 		ORDER BY u.ord
 		RETURNING id, event_id`,
-		pq.Array(eventIDs), pq.Array(topics), pq.Array(kinds), pq.Array(keys), pq.Array(entities), pq.Array(actors), pq.Array(sinks))
+		pq.Array(eventIDs), pq.Array(topics), pq.Array(kinds), pq.Array(keys), pq.Array(entities), pq.Array(actors), pq.Array(sinks), pq.Array(states))
 	if err != nil {
 		return nil, err
 	}
@@ -156,17 +161,25 @@ func Release(ctx context.Context, ids []int64) error {
 	return err
 }
 
-// ReleaseWith makes a held row ready with more entities merged into its own,
-// answering whether it was held.
-func ReleaseWith(ctx context.Context, id int64, more map[string]string) (bool, error) {
-	raw, err := json.Marshal(more)
-	if err != nil {
-		return false, err
+// ReleaseManyWith makes the held rows of ids ready in one statement, merging
+// more[i] (none: nothing) into the entities of ids[i].
+func ReleaseManyWith(ctx context.Context, ids []int64, more []map[string]string) error {
+	raws := make([]string, len(ids))
+	for i := range ids {
+		raws[i] = "{}"
+		if len(more[i]) > 0 {
+			raw, err := json.Marshal(more[i])
+			if err != nil {
+				return err
+			}
+			raws[i] = string(raw)
+		}
 	}
-	n, err := pgexec.Exec(ctx, `
-		UPDATE outbox SET state = 'ready', available_at = NOW(), entities = entities || $2::jsonb
-		WHERE id = $1 AND state = 'held'`, id, raw)
-	return n == 1, err
+	_, err := pgexec.Exec(ctx, `
+		UPDATE outbox o SET state = 'ready', available_at = NOW(), entities = o.entities || u.more::jsonb
+		FROM unnest($1::bigint[], $2::text[]) AS u(id, more)
+		WHERE o.id = u.id AND o.state = 'held'`, pq.Array(ids), pq.Array(raws))
+	return err
 }
 
 // Cancel drops a row that hasn't run (held or ready), inside ex (nil is the

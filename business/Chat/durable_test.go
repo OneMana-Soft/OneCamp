@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -42,9 +43,9 @@ func (s *chatSteps) note(f string, a ...any) {
 
 func recordChatSteps(t *testing.T, s *chatSteps) {
 	t.Helper()
-	pRows, pDM, pGroup, pStartDM, pStartGroup, pRead, pRelease, pDeliver, pTakeBack, pAnswered, pReadChat := writeChatRows, writeDM, writeGroup, startNewDM, startNewGroup, markRead, releaseEvent, deliverEvent, takeBackChatFn, chatAnswered, readChat
+	pRows, pDM, pGroup, pStartDM, pStartGroup, pRead, pRelease, pDeliver, pTakeBack, pAnswered, pReadChat := writeChatRows, writeDM, writeGroup, startNewDM, startNewGroup, markRead, releaseEvents, deliverEvents, takeBackChatFn, chatAnswered, readChat
 	t.Cleanup(func() {
-		writeChatRows, writeDM, writeGroup, startNewDM, startNewGroup, markRead, releaseEvent, deliverEvent, takeBackChatFn, chatAnswered, readChat = pRows, pDM, pGroup, pStartDM, pStartGroup, pRead, pRelease, pDeliver, pTakeBack, pAnswered, pReadChat
+		writeChatRows, writeDM, writeGroup, startNewDM, startNewGroup, markRead, releaseEvents, deliverEvents, takeBackChatFn, chatAnswered, readChat = pRows, pDM, pGroup, pStartDM, pStartGroup, pRead, pRelease, pDeliver, pTakeBack, pAnswered, pReadChat
 	})
 	writeChatRows = func(_ context.Context, kind, conversation string, _, _ uuid.UUID, clientID string, _ time.Time, _ string) ([]int64, error) {
 		s.note("rows %s %s %s", kind, conversation, clientID)
@@ -68,18 +69,18 @@ func recordChatSteps(t *testing.T, s *chatSteps) {
 		s.note("start group of %d", len(people))
 	}
 	markRead = func(context.Context, string, string, *userModels.UserInfo, time.Time) { s.note("read") }
-	releaseEvent = func(_ context.Context, id int64, more map[string]string) error {
-		if more != nil {
-			s.note("release %d opened %s", id, more["opened"])
+	releaseEvents = func(_ context.Context, ids []int64, more map[int64]map[string]string) error {
+		if m := more[ids[0]]; m != nil {
+			s.note("release %v opened %s", ids, m["opened"])
 		} else {
-			s.note("release %d", id)
+			s.note("release %v", ids)
 		}
-		if id == s.unreleased {
+		if slices.Contains(ids, s.unreleased) {
 			return errors.New("postgres away")
 		}
 		return nil
 	}
-	deliverEvent = func(id int64) { s.note("deliver %d", id) }
+	deliverEvents = func(ids []int64) { s.note("deliver %v", ids) }
 	takeBackChatFn = func(_ context.Context, chat uuid.UUID, events []int64) error {
 		s.mu.Lock()
 		s.tookBack = append(s.tookBack, fmt.Sprintf("%v", events))
@@ -112,7 +113,7 @@ func TestADurableDMIsReleasedAndDeliveredOnceItsNodeIsWritten(t *testing.T) {
 		t.Fatalf("%+v %v", out, err)
 	}
 	grp := helpers.GetGroupingId("8d5f8a8e-0000-4000-8000-00000000000a", "8d5f8a8e-0000-4000-8000-00000000000b")
-	if got := strings.Join(s.did, ", "); got != "rows dm "+grp+" local-1, node, read, release 7, deliver 7, release 8, deliver 8" {
+	if got := strings.Join(s.did, ", "); got != "rows dm "+grp+" local-1, node, read, release [7 8], deliver [7 8]" {
 		t.Errorf("steps: %s", got)
 	}
 }
@@ -123,7 +124,7 @@ func TestAFirstDurableDMSetsItsConversationUpAndSaysWhomItsFor(t *testing.T) {
 	if _, err := durableDM(t); err != nil {
 		t.Fatal(err)
 	}
-	want := "node, start dm, read, release 7 opened 8d5f8a8e-0000-4000-8000-00000000000a,8d5f8a8e-0000-4000-8000-00000000000b, deliver 7, release 8, deliver 8"
+	want := "node, start dm, read, release [7 8] opened 8d5f8a8e-0000-4000-8000-00000000000a,8d5f8a8e-0000-4000-8000-00000000000b, deliver [7 8]"
 	if got := strings.Join(s.did[1:], ", "); got != want {
 		t.Errorf("steps:\n got  %s\n want %s", got, want)
 	}
@@ -141,7 +142,7 @@ func TestANewGroupsDurableFirstMessageMakesItsIDFromItsPeople(t *testing.T) {
 	if in.GrpUuid != grp {
 		t.Errorf("the group's id is %q, want %q", in.GrpUuid, grp)
 	}
-	want := "rows group " + grp + " local-2, node with 3 new members, start group of 3, read, release 7 opened " + ada.Uuid + "," + sam.Uuid + "," + jonas.Uuid + ", deliver 7, release 8, deliver 8"
+	want := "rows group " + grp + " local-2, node with 3 new members, start group of 3, read, release [7 8] opened " + ada.Uuid + "," + sam.Uuid + "," + jonas.Uuid + ", deliver [7 8]"
 	if got := strings.Join(s.did, ", "); got != want {
 		t.Errorf("steps:\n got  %s\n want %s", got, want)
 	}
@@ -168,7 +169,7 @@ func TestADurableMessagesEventItsWriterCouldntReleaseIsLeftToItsResolver(t *test
 	if _, err := durableDM(t); err != nil {
 		t.Fatalf("the message is written, so it answers: %v", err)
 	}
-	if got := strings.Join(s.did[1:], ", "); got != "node, read, release 7, release 8, deliver 8" {
+	if got := strings.Join(s.did[1:], ", "); got != "node, read, release [7 8]" {
 		t.Errorf("steps: %s: a held event isn't delivered, and the other goes on", got)
 	}
 }

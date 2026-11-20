@@ -331,11 +331,16 @@ var exemptFromDeadExportedCheck = map[string]string{
 	"ArchivedProjectsWithNamePrefix":  "called only by beta's demo seed (retired copies of the curated projects); the release lines don't carry it.",
 	"ChannelIDsWithNamePrefix":        "called only by beta's demo seed (the visitor leaves every retired copy of the curated channels); the release lines don't carry it.",
 	"ClearForPersonInProject":         "called only by beta's demo seed (its showcase time entries); the release lines don't carry it.",
+	"ConnectDemo":                     "called only by beta's demo seed (business/DemoSeed/showcaseMail.go connects the demo's triage mailbox); the release lines carry the old seeder, and business/TriageMail keeps it identical to beta's",
+	"CreateResourceGrant":             "called only by beta's demo seed (business/DemoSeed/publishedPage.go grants the demo's published page); the release lines carry the old seeder, and business/Guest keeps it identical to beta's",
 	"CreatorOf":                       "models/postgres/Project's is called only by beta's demo seed (business/DemoSeed/codeLinked.go finds who made the project); the release lines don't carry the seed.",
+	"EventCallArtefacts":              "called only by beta's demo seed (business/DemoSeed/recordedCall.go reads back the demo's recorded call); the release lines carry the old seeder, and domain/Recording keeps it identical to beta's",
 	"FileUnderGroup":                  "business/LiveKit's is called only by beta's demo seed (business/DemoSeed/groupCall.go files the demo call's recording under its group); the release lines don't carry the seed.",
 	"KeepEndedSession":                "models/postgres/CallState's is called only by beta's demo seed (business/DemoSeed/groupCall.go keeps a finished call whole); the release lines don't carry the seed.",
 	"MarkProjectArchivedInOpenSearch": "called only by beta's demo seed (a refresh takes every retired copy of a curated project out of search); the release lines don't carry it.",
 	"NoteColourByID":                  "business/Board/scene's is called only by beta's demo seed (business/DemoSeed/board.go colours its board's notes by id); the release lines don't carry the seed.",
+	"OnReservedDomain":                "called only by beta's demo seed (business/DemoSeed/calendarAnswers.go skips reserved demo addresses); the release lines carry the old seeder, and services/Email keeps it identical to beta's",
+	"PutAllBack":                      "called only by beta's demo seed (business/DemoSeed/unread.go restores the visitor's inbox marks at reset); the release lines carry the old seeder, and models/postgres/InboxMark keeps it identical to beta's",
 	"RecordLanded":                    "business/GitHub's is called only by beta's demo seed (business/DemoSeed/codeLinked.go writes a landed pull request on a task as GitHub's deliveries would); the release lines don't carry the seed.",
 	"SaveAll":                         "business/TaskTemplate's is called only by beta's demo seed (business/DemoSeed/taskTemplates.go writes the demo's templates, each scope's set at once); the release lines don't carry the seed.",
 	"SetDgraphTaskHistory":            "domain/Task's is called only by beta's demo seed (business/DemoSeed/history.go and topup.go write finished tasks' status history); the release lines don't carry the seed.",
@@ -375,6 +380,17 @@ var exemptFromDeadExportedCheck = map[string]string{
 	"SetMigrationPollForTest": "sets how the schema check's wait for a fresh database's migrations sleeps " +
 		"between looks (initializers/postgresInit), so the integration test can migrate at the moment the " +
 		"start waits and prove its claims land; it exists only in the integration build.",
+	"HoldClockForTest": "holds the clock the task-read caches age by (models/taskread/generation), so the " +
+		"store-budget harness's measured call hits what its warm-up filled however loaded the machine is; " +
+		"and the one the sidebar's kept answer of which calls are going on ages by (business/LiveKit " +
+		"activeRooms), so tests/integration calls_dot_cache_test.go's second read gets the answer its " +
+		"first kept however loaded the machine is. Each exists only in the integration build.",
+	"AsAnotherProcessForTest": "runs a write to the task-read rows as another process's (models/taskread/" +
+		"generation puts its local count back), so tests/integration taskread_generation_test.go proves each " +
+		"writer moves the shared generation in Redis; it exists only in the integration build.",
+	"ConnectTracedForTest": "connects the pool with a test's statement tracer chained after the session's " +
+		"own (initializers/postgresInit testTracer), so the store-budget harness (tests/integration " +
+		"storebudget.go) counts every statement a request makes; it exists only in the integration build.",
 	"PointAtSlackForTest": "sends the Slack bridge's Web API calls to a local fake, so the " +
 		"integration test can run the whole bridge (both directions, threads, edits, deletions, " +
 		"echo suppression) against real stores without a Slack workspace.",
@@ -398,6 +414,22 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"booking test runs once per calendar store in one process, and the store before's " +
 		"\"office-hours\" answered for the next store's deleted page. In the integration build " +
 		"only (the tag keeps it out of the shipped binary).",
+	"WhileRescheduleHeldForTest": "runs a function inside a guest's move's page lock (business/Calendar " +
+		"RescheduleBooking), so the integration test can book the same time meanwhile and prove the " +
+		"lock makes that booking wait and then find the time taken. In the integration build only.",
+	"WhileSlotCheckForTest": "runs a function as a booking's or a guest's move's slot check starts " +
+		"(business/Calendar slotFree), so the integration test can prove a move reads the calendars, " +
+		"Google's over the network, before it takes the page's lock. In the integration build only.",
+	"CountEventReadsForTest": "counts the reads of one event from either calendar store (business/Calendar " +
+		"load, domain/Calendar GetDgraphEventInfoByUUID), so the integration test can prove a guest's move " +
+		"reads its meeting once. In the integration build only.",
+	"CountPageReadsForTest": "counts the booking pages read by id (models/postgres/Booking PageById), so " +
+		"the integration test can prove a guest's move reads its page once. In the integration build only.",
+	"LetReservedNamesThroughForTest": "lets mail to a reserved name (example.com, .test) through " +
+		"services/Email Deliverable for one test, so the integration tests that catch mail with a " +
+		"fake transport address it to alex@example.com, not a real provider's address; a reserved " +
+		"name still skips the MX lookup. In the integration build only (the tag keeps it out of the " +
+		"shipped binary, which refuses every reserved name).",
 
 	"ForgetSettingsForTest": "drops the workspace settings cached for 30 seconds, after an " +
 		"integration test starts a fresh database; the previous test's choices (the channels new " +
@@ -449,11 +481,21 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"started before every comparison they make, so nothing else can make a restored stamp " +
 		"older than the process. It is built only with the integration tag.",
 
+	"SyncThroughForTest": "has the calendar sync sink and sweep send through the integration test's own " +
+		"Google, so the test of writes going to Google through the outbox (gcal-18) counts what is sent. " +
+		"Google is registered in that build, and no test can reach it.",
 	"SyncLinkForTest": "keeps one Google link in step through a fake provider, as the sync sweep " +
 		"does, so the integration test of a see-only calendar (V-594) proves the provider's own events " +
 		"still land on it and nothing is sent to it. No test can reach Google, and the sweep picks its " +
 		"adapter from the registry. It is built only with the integration tag.",
 
+	"SetRoomCheckCapsForTest": "lowers the room clash check's caps (business/Calendar's maxRoomBookings " +
+		"and maxRoomOccurrences), so the integration test can prove a write past either is refused " +
+		"(rooms_too_many) with a few bookings, not 5,000; it exists only in the integration build.",
+
+	"SwapGoogleEventsFetchForTest": "stands in for the read of a person's Google calendar in the " +
+		"event list, so the integration test can hand back a task's Google copy and prove it is " +
+		"listed once. No test can reach Google. It is built only with the integration tag.",
 	"SwapGoogleEventUpdateForTest": "stands in for the write of an edit to an event's Google copy, " +
 		"so the integration test of a copy Google says is gone can answer \"gone\" only after a " +
 		"newer edit has landed, and prove the forgetting keeps that edit. No test can reach " +
@@ -465,6 +507,16 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"turns on the instant, and only the handler reads it. It is built only with the " +
 		"integration tag, so no request and no product code can move the clock.",
 
+	"SendWaitingPushesForTest": "is one pass of the Sweeper's notify.push.wait (business/Notify), " +
+		"so the integration test of a push that waits while its person is in OneCamp can send the " +
+		"due ones at the moment it names, and run two passes at once to prove one push, instead of " +
+		"waiting on the Sweeper's 15-second slot. It is built only with the integration tag.",
+
+	"FailPayloadsForTest": "makes keeping a waiting push's payload (Redis) fail until restored, so " +
+		"the integration test can prove a push whose payload can't be kept goes now and its row is " +
+		"marked sent; Redis can't be made to blink for one write. It is built only with the " +
+		"integration tag.",
+
 	"AgentBudgetLimit": "reads the per-agent cap off a context so business/MCPServer's tests can " +
 		"assert SpendContext actually carries it. services/AI keeps budgetDimensions unexported, " +
 		"so no other package can see the limit. The invariant is production behaviour — a metered " +
@@ -475,6 +527,17 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"it, so business/MCPServer's tests can assert SpendContext attributes an MCP call's spend " +
 		"to the token's person. services/AI keeps actorFromContext unexported. Until October 2026 " +
 		"a field named ActorID elsewhere hid it from this check.",
+
+	"RegisterTranslator": "the third EDITION-CONDITIONAL registration slot (zoom-05 C1). " +
+		"business/TranscriptExport is on both editions and asks the registered Translator for a " +
+		"?lang= read; business/AI fills it from an init and exists only on the AI edition, so the " +
+		"AI-free build has no caller and answers ?lang= with 400 \"Translation is not in this " +
+		"edition.\" by design.",
+
+	"NewBoundedTTLCache": "EDITION-CONDITIONAL, beside RegisterTranslator (zoom-05 C1). A shared " +
+		"bounded cache whose one caller today is business/AI's per-member translation cache, which " +
+		"exists only on the AI edition, so the AI-free build has no caller; it stays shared so the " +
+		"next cache keyed by request input takes a bound instead of a second copy.",
 }
 
 // readDeadExportedBaseline loads the recorded backlog: one function name per line, # for comments.

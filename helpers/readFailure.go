@@ -110,6 +110,19 @@ func WriteReadFailure(w http.ResponseWriter, r *http.Request, err error, what, w
 	WriteRetryLater(w, "Couldn't load the "+what+".")
 }
 
+// WriteFailedRead answers a read that failed, as WriteReadFailure does, and
+// says whether it did. A read that worked, or one that found nothing
+// (ErrNotFound), is left to its caller, which answers a thing that isn't there
+// as it answers someone the thing is closed to: so nobody learns from the
+// answer whether it exists.
+func WriteFailedRead(w http.ResponseWriter, r *http.Request, err error, what, where string) bool {
+	if err == nil || errors.Is(err, ErrNotFound) {
+		return false
+	}
+	WriteReadFailure(w, r, err, what, where)
+	return true
+}
+
 // WriteWriteFailure answers a change that failed, and its handler then
 // returns. A clash (ErrConflict: an address someone else uses, or a change
 // made at the same moment that the write lost to after its retries) is a 409

@@ -143,3 +143,34 @@ func TestTTLCacheSweepsExpiredEntriesNobodyReads(t *testing.T) {
 		t.Fatalf("the cache holds %d entries, want only the %d unexpired ones", got, long)
 	}
 }
+
+// A bounded cache holds at most its bound: at the bound a new key first
+// sweeps out the expired, then frees an eighth; a key it holds is replaced
+// in place, evicting nothing.
+func TestABoundedTTLCacheHoldsAtMostItsBound(t *testing.T) {
+	c := NewBoundedTTLCache[int](time.Minute, 16)
+	for i := 0; i < 100; i++ {
+		c.Set(strconv.Itoa(i), i)
+		if c.Len() > 16 {
+			t.Fatalf("after %d sets the cache holds %d; want at most 16", i+1, c.Len())
+		}
+		if v, ok := c.Get(strconv.Itoa(i)); !ok || v != i {
+			t.Fatalf("the key just set (%d) is gone", i)
+		}
+	}
+	n := c.Len()
+	c.Set("99", 1)
+	if c.Len() != n {
+		t.Fatalf("replacing a held key changed the size %d -> %d", n, c.Len())
+	}
+	c = NewBoundedTTLCache[int](time.Minute, 4)
+	for i := 0; i < 3; i++ {
+		c.SetWithTTL("old"+strconv.Itoa(i), i, time.Nanosecond)
+	}
+	c.Set("live", 1)
+	time.Sleep(time.Millisecond)
+	c.Set("new", 2)
+	if _, ok := c.Get("live"); !ok || c.Len() != 2 {
+		t.Fatalf("at the bound the expired go first: live kept? %v, %d held; want the live and the new", ok, c.Len())
+	}
+}

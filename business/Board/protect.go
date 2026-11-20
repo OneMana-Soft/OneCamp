@@ -62,20 +62,19 @@ var protectSeams = struct {
 		return collab.ProtectBoard(ctx, boardUUID, ids, protect, by, name)
 	},
 	recorded: auditBusiness.RecordedAs,
-	refused: func(ctx context.Context, p auditBusiness.Principal, action, category, summary string, meta map[string]interface{}) error {
-		return auditBusiness.RecordForPrincipal(ctx, p.ID, p.Email, p.Kind, action, category, summary, p.Meta(meta))
-	},
+	refused:  auditBusiness.RecordAs,
 }
 
 // CanProtect is who may protect objects on a board and lift their
-// protection: its owner, or a workspace admin; nobody, once it is deleted.
+// protection: its owner and co-owners (CanManage), or a workspace admin;
+// nobody, once it is deleted.
 // Pure: admin is whether the person is a workspace admin for this call
 // (userDomain.IsWorkspaceAdmin, which an API token never is).
 func CanProtect(board *dgraphStruct.DgraphBoard, userUUID string, admin bool) bool {
 	if board == nil || isDeleted(board) {
 		return false
 	}
-	return admin || (board.CreatedBy != nil && board.CreatedBy.Uuid != "" && board.CreatedBy.Uuid == userUUID)
+	return admin || CanManage(board, userUUID)
 }
 
 // protectIDs is ids once each, in their order, or ErrProtectIDs.

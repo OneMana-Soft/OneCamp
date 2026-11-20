@@ -23,7 +23,8 @@ import (
 )
 
 // OpenShown is how many open cycles the backlog shows: the current one and
-// the next two, as Linear keeps them ready.
+// the next two, as Linear keeps them ready. Where cycles run side by side,
+// every running one shows, and the next two after them.
 const OpenShown = 3
 
 // PlanCycle is an open cycle as a container: its tasks and their estimate,
@@ -56,17 +57,30 @@ type Backlog struct {
 	Scale *estimateScale.View `json:"scale"`
 }
 
-// openCycles is the cycles not yet completed, by number, at most OpenShown.
-func openCycles(cycles []cycleModel.Cycle) []cycleModel.Cycle {
-	var out []cycleModel.Cycle
+// openCycles is the cycles not yet completed, by number: every one running
+// at now, and the others first by number up to OpenShown in all (one more
+// for each running cycle past the first). Pure.
+func openCycles(cycles []cycleModel.Cycle, now time.Time) []cycleModel.Cycle {
+	var open []cycleModel.Cycle
+	running := 0
 	for _, c := range cycles {
 		if c.CompletedAt == nil {
-			out = append(out, c)
+			open = append(open, c)
+			if State(c, now) == "current" {
+				running++
+			}
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Number < out[j].Number })
-	if len(out) > OpenShown {
-		out = out[:OpenShown]
+	sort.Slice(open, func(i, j int) bool { return open[i].Number < open[j].Number })
+	room := OpenShown - min(running, 1)
+	var out []cycleModel.Cycle
+	for _, c := range open {
+		if State(c, now) == "current" {
+			out = append(out, c)
+		} else if room > 0 {
+			out = append(out, c)
+			room--
+		}
 	}
 	return out
 }
@@ -98,7 +112,7 @@ func Assemble(cycles []cycleModel.Cycle, members map[uuid.UUID][]string, read *p
 		points := round1(estimateScale.CountedAll(scale, read.Count, read.Pointed, read.Points))
 		b.EstimatePoints = &points
 	}
-	for _, c := range openCycles(cycles) {
+	for _, c := range openCycles(cycles, now) {
 		pc := PlanCycle{Tasks: []*dgraphStruct.DgraphTask{}}
 		var statuses []string
 		var points float64

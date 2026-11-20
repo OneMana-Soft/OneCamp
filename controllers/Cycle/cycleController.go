@@ -34,13 +34,31 @@ func write(w http.ResponseWriter, r *http.Request, where string, err error) {
 }
 
 // project checks the caller may do need with the project: see its cycles, or
-// (NeedManage) make, rename, complete and delete them.
+// (NeedManage) make, rename, complete and delete them, and turn parallel
+// cycles on or off. An archived project's cycles are read, never changed.
 func project(w http.ResponseWriter, r *http.Request, need workAccess.Need) (uuid.UUID, *dgraphStruct.DgraphProject, workAccess.Standing, bool) {
-	return projectaccess.RequireStanding(w, r, need, adminsOnly)
+	id, p, s, ok := projectaccess.RequireStanding(w, r, need, adminsOnly)
+	if ok && need == workAccess.NeedManage && !changeable(w, s) {
+		return uuid.Nil, nil, s, false
+	}
+	return id, p, s, ok
 }
 
-// adminsOnly is the refusal of a change to a project's cycles.
-const adminsOnly = "Only the project's admins can change its cycles."
+// changeable refuses a change to an archived project's cycles, as every
+// admin's cycle write does (project, RestoreCycle).
+func changeable(w http.ResponseWriter, s workAccess.Standing) bool {
+	if s.Archived {
+		helpers.WriteForbidden(w, archived)
+		return false
+	}
+	return true
+}
+
+// adminsOnly and archived are the refusals of a change to a project's cycles.
+const (
+	adminsOnly = "Only the project's admins can change its cycles."
+	archived   = "This project is archived, so its cycles can't change. Restore the project first."
+)
 
 // cycleIn reads the cycle in the URL, which must belong to the project.
 func cycleIn(w http.ResponseWriter, r *http.Request, projectID uuid.UUID) (*cycleModel.Cycle, bool) {
@@ -75,9 +93,16 @@ func ListCycles(w http.ResponseWriter, r *http.Request) {
 		write(w, r, "ListCycles", err)
 		return
 	}
-	// can_edit tells the page whether to offer making and completing cycles;
-	// schedule, whether they run themselves (B3b).
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"cycles": views, "schedule": schedule, "can_edit": standing.Can(workAccess.NeedManage)}})
+	parallel, err := cycleBusiness.Parallel(r.Context(), id)
+	if err != nil {
+		write(w, r, "ListCycles", err)
+		return
+	}
+	// can_edit tells the page whether to offer making and completing cycles
+	// (never in an archived project); schedule, whether they run themselves
+	// (B3b); parallel, whether they may share days (jira-04).
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"cycles": views, "schedule": schedule, "parallel": parallel,
+		"can_edit": !standing.Archived && standing.Can(workAccess.NeedManage)}})
 }
 
 // CycleBurndown is a cycle's burndown, by day in the reader's zone, and the
@@ -300,8 +325,15 @@ func Backlog(w http.ResponseWriter, r *http.Request) {
 		write(w, r, "Backlog", err)
 		return
 	}
+	// Whether its cycles may share days (jira-04): the tab's setting line reads it.
+	parallel, err := cycleBusiness.Parallel(r.Context(), id)
+	if err != nil {
+		write(w, r, "Backlog", err)
+		return
+	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{
-		"backlog": b, "schedule": schedule, "can_edit": standing.Can(workAccess.NeedManage), "can_plan": standing.Can(workAccess.NeedEditTask),
+		"backlog": b, "schedule": schedule, "parallel": parallel,
+		"can_edit": !standing.Archived && standing.Can(workAccess.NeedManage), "can_plan": standing.Can(workAccess.NeedEditTask),
 	}})
 }
 
@@ -442,6 +474,33 @@ func PublicCycleFeed(w http.ResponseWriter, r *http.Request) {
 		helpers.LogErrorWithContext(r.Context(), "controllers/Cycle/PublicCycleFeed err: %v", err)
 		helpers.WriteError(w, http.StatusServiceUnavailable, "Something went wrong")
 	}
+}
+
+// SetParallelCycles turns the project's parallel cycles on or off (jira-04):
+// its admins only (NeedManage), never in an archived project. Refused in
+// words while two open cycles share days (off) or a schedule runs them (on).
+// POST /project/{p}/cycles/parallel {on}
+func SetParallelCycles(w http.ResponseWriter, r *http.Request) {
+	id, _, _, ok := project(w, r, workAccess.NeedManage)
+	if !ok {
+		return
+	}
+	var in struct {
+		On *bool `json:"on"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 256)).Decode(&in); err != nil || in.On == nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
+		return
+	}
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	if err := cycleBusiness.SetParallel(r.Context(), id, *in.On, userInfo.UserPostgresInfo.Id); err != nil {
+		write(w, r, "SetParallelCycles", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"parallel": *in.On}})
 }
 
 // RunningCycles is the running cycle of every project the caller may view,

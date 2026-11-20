@@ -91,6 +91,17 @@ func ExtractGitHubIssueInfo(address string) (owner, repo string, number int, err
 	return owner, repo, int(n), nil
 }
 
+// samePull is whether addresses a and b both name one pull request (or
+// issue), however each spells it: http or https, www., any case in the
+// owner and repository, a trailing slash or "/files". An address
+// ExtractGitHubIssueInfo refuses names none. Pure.
+func samePull(a, b string) bool {
+	aOwner, aRepo, aNumber, aErr := ExtractGitHubIssueInfo(a)
+	bOwner, bRepo, bNumber, bErr := ExtractGitHubIssueInfo(b)
+	return aErr == nil && bErr == nil && aNumber == bNumber &&
+		strings.EqualFold(aOwner, bOwner) && strings.EqualFold(aRepo, bRepo)
+}
+
 // errNotARepo refuses a search of something that isn't a repository's name.
 var errNotARepo = errors.New("not a GitHub repository")
 

@@ -1,17 +1,19 @@
 // Package business (Triage) is the Triage Queue
-// (design/projects-vs-asana-jira/PROGRAM.md §4.2 #91 and D-PJ-5; B1 builds
-// it): a project's incoming work (from forms, email, chat, the API and
-// imports) waits in triage until someone accepts it, marks it a duplicate,
-// declines, snoozes or moves it, with a reason, and one person a week may hold
-// triage by rotation.
-//
-// DAY 0. No project has triage (projects.triage is off), so Decide answers
-// ErrNotBuilt and Waiting answers nothing. Nothing calls Queue yet.
+// (design/projects-vs-asana-jira/PROGRAM.md §4.2 #91 and D-PJ-5; package 9
+// R5a): a project with triage on (its projects.triage policy) takes the work
+// that comes in from outside its board (a form, the API, an agent, GitHub, a
+// chat, an import) into triage until one of its people accepts it, marks it
+// a duplicate, declines it or snoozes it, with a reason. What waits leaves the project's lists and counts
+// (models/taskread Waiting) and is hidden from no one: the task itself, a
+// search and the queue still read it. Triage is a mark beside the status
+// (models/postgres/Triage), never a status, and the task node in the graph
+// is unchanged.
 package business
 
 import (
 	"context"
 	"errors"
+	"time"
 
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -21,33 +23,50 @@ import (
 type Decision string
 
 const (
-	Accept    Decision = "accept"
+	// Accept makes it the team's work, in the status chosen, or as it is.
+	Accept Decision = "accept"
+	// Duplicate cancels it, and says on the original that it was asked again.
 	Duplicate Decision = "duplicate"
-	Decline   Decision = "decline"
-	Snooze    Decision = "snooze"
-	Move      Decision = "move"
+	// Decline cancels it, saying why on the task.
+	Decline Decision = "decline"
+	// Snooze keeps it waiting, out of the queue until a time.
+	Snooze Decision = "snooze"
 )
+
+// Choice is a decision and what it takes: a reason (for any; a decline's is
+// said on the task), the status an accepted task starts in (optional), the
+// original of a duplicate, and when a snoozed task comes back.
+type Choice struct {
+	Decision    Decision  `json:"decision"`
+	Reason      string    `json:"reason"`
+	Status      string    `json:"status"`
+	DuplicateOf uuid.UUID `json:"duplicate_of"`
+	Until       time.Time `json:"until"`
+}
 
 // Queue is a project's triage.
 type Queue interface {
-	// Waiting is the tasks waiting in a project's triage, oldest first.
-	Waiting(ctx context.Context, who *userModels.UserInfo, projectID uuid.UUID) ([]string, error)
-	// Decide decides a waiting task, with a reason.
-	Decide(ctx context.Context, who *userModels.UserInfo, taskID uuid.UUID, d Decision, reason string) error
+	// Waiting is what waits in a project's triage that the person may read,
+	// oldest first, snoozed or not; none while the project has triage off.
+	Waiting(ctx context.Context, who *userModels.UserInfo, projectID uuid.UUID) ([]Request, error)
+	// Decide decides a task waiting in its project's triage.
+	Decide(ctx context.Context, who *userModels.UserInfo, taskID uuid.UUID, c Choice) error
 }
 
-// ErrNotBuilt is triage before B1.
-var ErrNotBuilt = errors.New("triage: that isn't built yet")
+// ErrNotWaiting is a decision on a task that isn't waiting in triage: decided
+// already, or never in it.
+var ErrNotWaiting = errors.New("triage: that task isn't waiting in triage")
+
+// ErrTriageOff is a decision in a project with triage off.
+var ErrTriageOff = errors.New("triage: this project has triage off")
+
+// ErrBadChoice is a decision that is missing what it takes, or names
+// something it can't use.
+var ErrBadChoice = errors.New("triage: that decision can't be made")
+
+// ErrNeedsPriority is an accept in a project that asks for a priority before
+// work leaves triage (projects.triage.priority), of a task without one.
+var ErrNeedsPriority = errors.New("triage: give it a priority before accepting it")
 
 // Triage is the queue everything asks.
-var Triage Queue = noTriage{}
-
-type noTriage struct{}
-
-func (noTriage) Waiting(context.Context, *userModels.UserInfo, uuid.UUID) ([]string, error) {
-	return nil, nil
-}
-
-func (noTriage) Decide(context.Context, *userModels.UserInfo, uuid.UUID, Decision, string) error {
-	return ErrNotBuilt
-}
+var Triage Queue = queue{}

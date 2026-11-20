@@ -53,6 +53,25 @@ func RecordWritten(r *http.Request, action, category, summary string, metadata m
 	return auditModel.Insert(r.Context(), requestEntry(r, action, category, summary, metadata))
 }
 
+// CallPrivacyPrefix starts the action of every call-privacy row: what a
+// person agreed to in a call (zoom-09: "consent_accepted", "consent_left"),
+// and what an admin acknowledged of where a call's audio goes.
+const CallPrivacyPrefix = "call.privacy."
+
+// RecordCallPrivacy writes a call-privacy row of kind for the person making
+// this request and waits until it is written: a member through their session,
+// or a call's guest, who has none, so the row names no member and the guest is
+// in metadata, as the caller proved them. The calls category, so admins read
+// it beside what the people running calls did, on every plan.
+func RecordCallPrivacy(r *http.Request, kind, summary string, metadata map[string]interface{}) error {
+	return auditModel.Insert(r.Context(), callPrivacyEntry(r, kind, summary, metadata))
+}
+
+// callPrivacyEntry is RecordCallPrivacy's row. Pure but for the request.
+func callPrivacyEntry(r *http.Request, kind, summary string, metadata map[string]interface{}) *auditModel.AuditEntry {
+	return requestEntry(r, CallPrivacyPrefix+kind, CategoryCalls, truncate(summary, 1024), metadata)
+}
+
 // requestEntry is the entry for the person making this request.
 func requestEntry(r *http.Request, action, category, summary string, metadata map[string]interface{}) *auditModel.AuditEntry {
 	entry := &auditModel.AuditEntry{
@@ -217,7 +236,8 @@ const CategoryCalls = auditModel.CategoryCalls
 const CategoryCalendar = auditModel.CategoryCalendar
 
 // CategoryTables is who may change a table: its general level and the
-// people granted edit on it.
+// people granted edit on it; and every export of tables, one table's or
+// every table its reader can open.
 const CategoryTables = auditModel.CategoryTables
 
 // CategoryBoards is who a board was shared with, who lost a place on it,

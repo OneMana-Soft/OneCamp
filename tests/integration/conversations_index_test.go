@@ -35,8 +35,10 @@ import (
 
 	channelAdapter "github.com/akashc777/OneCamp/adapter/Channel"
 	dmAdapter "github.com/akashc777/OneCamp/adapter/Chat"
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
+	messagePipeline "github.com/akashc777/OneCamp/business/MessagePipeline"
 	chatController "github.com/akashc777/OneCamp/controllers/Chat"
 	conversationDomain "github.com/akashc777/OneCamp/domain/Conversation"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -220,6 +222,9 @@ func sameList(t *testing.T, what string, got []string, want ...string) {
 func TestTheConversationsIndexFollowsTheGraph(t *testing.T) {
 	ctx := context.Background()
 	w := newIndexWorld(t, "maya", "jonas", "sam", "priya", "olu")
+	// This test leaves decisions at the index; the next test's read the state
+	// again (CR-372 F2).
+	t.Cleanup(conversationDomain.StartedForTest(conversationDomain.StartedAt()))
 	maya, jonas, sam, priya := w.info(t, "maya"), w.info(t, "jonas"), w.info(t, "sam"), w.info(t, "priya")
 
 	// Maya makes a private channel and lets in Jonas, Sam and Olu.
@@ -234,6 +239,24 @@ func TestTheConversationsIndexFollowsTheGraph(t *testing.T) {
 		}
 	}
 	sameList(t, "the channel's people", w.members(t, ch), "maya:manager", "jonas:member", "sam:member", "olu:member")
+
+	// And a public one, with a post whose thread Priya, who isn't in it, reads
+	// (V-1087): the index decides it as the graph does.
+	err, notesChannel := channelBusiness.CreateChannel(ctx, &channelAdapter.InputCreateChannel{ChannelName: "launch-notes"}, maya)
+	if err != nil {
+		t.Fatalf("making the public channel: %v", err)
+	}
+	notes, err := messagePipeline.Messages.Write(ctx, maya, messagePipeline.Write{Op: messagePipeline.OpSend,
+		To: conversationBusiness.Ref{Kind: conversationBusiness.KindChannel, ID: notesChannel.String()}, Draft: messagePipeline.Draft{HTML: "<p>Notes</p>"}})
+	if err != nil || notes.ID == "" {
+		t.Fatalf("the public channel's post: %+v %v", notes, err)
+	}
+	// And a post in the private channel, whose thread Priya can't read.
+	pricing, err := messagePipeline.Messages.Write(ctx, maya, messagePipeline.Write{Op: messagePipeline.OpSend,
+		To: conversationBusiness.Ref{Kind: conversationBusiness.KindChannel, ID: ch}, Draft: messagePipeline.Draft{HTML: "<p>Pricing</p>"}})
+	if err != nil || pricing.ID == "" {
+		t.Fatalf("the private channel's post: %+v %v", pricing, err)
+	}
 
 	if err := channelBusiness.AddChannelModeratorEdge(ctx, ch, w.uids["jonas"]); err != nil {
 		t.Fatal(err)
@@ -324,6 +347,7 @@ func TestTheConversationsIndexFollowsTheGraph(t *testing.T) {
 		{Kind: conversationBusiness.KindGroup, ID: group},
 		{Kind: conversationBusiness.KindThread, ID: fmt.Sprint(dmMessage["uuid"])},
 		{Kind: conversationBusiness.KindThread, ID: fmt.Sprint(groupMessage["uuid"])},
+		{Kind: conversationBusiness.KindThread, ID: notes.ID},
 		{Kind: conversationBusiness.KindCall, ID: ch},
 		{Kind: conversationBusiness.KindCall, ID: group},
 	}
@@ -339,6 +363,26 @@ func TestTheConversationsIndexFollowsTheGraph(t *testing.T) {
 		return out
 	}
 	fromIndex := decisions()
+	if got, want := fromIndex["priya thread "+notes.ID], fmt.Sprintf("%s %v %v", conversationBusiness.LevelRead, false, nil); got != want {
+		t.Errorf("Priya's decision on a public channel's thread, from the index: %q, want %q", got, want)
+	}
+	// One batch from the index decides threads in two channels, each by its
+	// own channel's facts, whichever comes first: Priya reads the public
+	// channel's thread and not the private one's.
+	notesRes := accessBusiness.Resource{Kind: conversationBusiness.KindThread, UUID: notes.ID}
+	pricingRes := accessBusiness.Resource{Kind: conversationBusiness.KindThread, UUID: pricing.ID}
+	for _, batch := range [][]accessBusiness.Resource{{notesRes, pricingRes}, {pricingRes, notesRes}} {
+		got, err := accessBusiness.ResolveAll(ctx, accessBusiness.SubjectOf(priya), batch)
+		if err != nil {
+			t.Fatalf("Priya's batch %v from the index: %v", batch, err)
+		}
+		if d := got[notesRes]; d.Level != conversationBusiness.LevelRead {
+			t.Errorf("batch %v: Priya's decision on the public channel's thread is %q, want %q", batch, d.Level, conversationBusiness.LevelRead)
+		}
+		if d, ok := got[pricingRes]; ok && d.Level != accessBusiness.LevelNone {
+			t.Errorf("batch %v: Priya, outside the private channel, decides %q on its thread", batch, d.Level)
+		}
+	}
 	conversationDomain.MarkDirty(ctx, "the test asks the graph")
 	if c := conversationDomain.AccessSource(ctx); c.Index {
 		t.Fatal("a dirty index is read")

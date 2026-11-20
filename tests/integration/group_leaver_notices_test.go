@@ -256,6 +256,38 @@ func TestSomeoneWhoLeftAGroupIsToldNothingMoreOfIt(t *testing.T) {
 		}
 	})
 
+	// Named and answered, they are still not in the place: the setting they
+	// kept is not a place in the group (business/UserChatNotification Members
+	// keeps only the levels of those in it now).
+	t.Run("a message that names them and answers theirs isn't told to them", func(t *testing.T) {
+		since := mark()
+		msg := send("bo", chatController.CreateGroupChat, chatAdapter.ChatInfo{GrpUuid: grp, ReplyToUuid: cyMsg,
+			TextHtml: "<p>" + mention("cy") + " " + mention("ada") + " about your draft</p>"}, "uuid")
+		isMsg := func(d map[string]string) bool {
+			return d[firebaseInit.FIREBASE_PUSH_DATA_TYPE] == firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT &&
+				d[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] == msg
+		}
+		waitFor(t, "the message's pushes to ada and dee", func() bool { return len(pushedTo(isMsg)) >= 2 })
+		waitFor(t, "the message's emails to ada and dee", func() bool { return len(emailed(msg)) >= 2 })
+		settle()
+		// A group message is a DM to each of its people: ada and dee are
+		// pushed and emailed it, as the group's.
+		if got, want := pushedTo(isMsg), []string{"ada", "dee"}; !slices.Equal(got, want) {
+			t.Errorf("pushed to %v, want %v: cy left the group, named and answered or not", got, want)
+		}
+		if got, want := emailed(msg), []string{"ada", "dee"}; !slices.Equal(got, want) {
+			t.Errorf("emailed %v, want %v: cy left the group, named and answered or not", got, want)
+		}
+		broker.mu.Lock()
+		defer broker.mu.Unlock()
+		topic := helpers.GetMqttTopicForUserActivity(people["cy"].String())
+		for _, m := range broker.got[since:] {
+			if m.topic == topic {
+				t.Errorf("cy's Activity was sent %s: cy left the group", m.payload)
+			}
+		}
+	})
+
 	t.Run("a reply in the thread of their message isn't told to them", func(t *testing.T) {
 		reply := send("bo", chatController.CreateChatComment, chatAdapter.InputCreateOrUpdateCommentToChat{ChatUuid: cyMsg, HTMLText: "<p>Published the draft</p>"}, "comment_id")
 		isReply := func(d map[string]string) bool {

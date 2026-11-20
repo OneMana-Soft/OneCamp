@@ -20,22 +20,31 @@ import (
 // test reports. The release lines leave out the demo's own code, so theirs is
 // one lower (1,166 on v2.75.0's main). without-ai leaves out the AI edition's
 // packages too, so its own count is 984 (v1.60.0; 981 once
-// UpdateAttachmentDeletedTimeByUUID went).
-const handExecutorBaseline = 914
+// UpdateAttachmentDeletedTimeByUUID went; 914 by v1.65.0; 980 once the guard
+// counted dgraphInit's DoCommitNow and ReadInto as running DQL by hand, REPORT
+// C-4, which raised main's by the same 66).
+const handExecutorBaseline = 980
 
 // backgroundTimeoutBaseline is how many times models/ starts a statement's
 // timeout from context.Background() instead of the caller's ctx (206 at the
 // audit, 199 when this landed; 146 once V-184 head 3b moved the two admin
 // role writes onto the request's ctx through pgexec; 145 once V-237 moved the
-// reactivation onto pgexec). It only goes down.
-const backgroundTimeoutBaseline = 143
+// reactivation onto pgexec; 142 once V-986 wrote a pull request's reviews on
+// the caller's ctx; 141 once gcal-18 read a config key on the caller's ctx,
+// configByKey; 140 once V-1060 read them on it). It only goes down.
+const backgroundTimeoutBaseline = 131
 
 // executorCalls are the calls that run a statement or a query on a store
 // client, or open a graph transaction to run one in (an HTTP client's Do is
-// not one, so a graph write is counted by its NewTxn).
+// not one, so a graph write is counted by its NewTxn). dgraphInit's
+// DoCommitNow and ReadInto open their own graph transaction inside, so a
+// function calling them runs DQL by hand as much as one calling NewTxn
+// (REPORT C-4). ReadIntoTxn is not one: it reads in a transaction its caller
+// opened, and that NewTxn is counted where it is.
 var executorCalls = map[string]bool{
 	"ExecContext": true, "QueryContext": true, "QueryRowContext": true, "BeginTx": true,
 	"QueryWithVars": true, "NewTxn": true, "NewReadOnlyTxn": true,
+	"DoCommitNow": true, "ReadInto": true,
 }
 
 // goFuncs walks the non-test Go files under roots and calls fn with each
@@ -169,5 +178,32 @@ func TestModelsTimeFewerStatementsFromBackground(t *testing.T) {
 		t.Errorf("models/ times %d statements from context.Background(), more than %d: take the caller's ctx (models/pgexec does)", count, backgroundTimeoutBaseline)
 	case count < backgroundTimeoutBaseline:
 		t.Errorf("models/ times %d statements from context.Background() now, fewer than %d: lower backgroundTimeoutBaseline to %d", count, backgroundTimeoutBaseline, count)
+	}
+}
+
+// The guard sees a graph commit and a graph read run by hand (REPORT C-4): a
+// function calling dgraphInit.DoCommitNow or dgraphInit.ReadInto runs DQL its
+// own way as much as one opening a NewTxn, and one calling dgexec does not.
+func TestHandExecutorsIncludeGraphCommitsAndReads(t *testing.T) {
+	src := `package x
+func commit(ctx context.Context, req *api.Request) { _, _ = dgraphInit.DoCommitNow(ctx, req) }
+func read(ctx context.Context) { _ = dgraphInit.ReadInto(ctx, q, nil, &out) }
+func readTxn(ctx context.Context) { _ = dgraphInit.ReadIntoTxn(ctx, txn, q, nil, &out) }
+func through(ctx context.Context) { _ = dgexec.Read(ctx, q, nil, &out) }
+`
+	f, err := parser.ParseFile(token.NewFileSet(), "x.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"commit": true, "read": true, "readTxn": false, "through": false}
+	for _, d := range f.Decls {
+		fd := d.(*ast.FuncDecl)
+		hand := false
+		for name := range calledMethods(fd) {
+			hand = hand || executorCalls[name]
+		}
+		if hand != want[fd.Name.Name] {
+			t.Errorf("%s: counted as a hand executor = %v, want %v", fd.Name.Name, hand, want[fd.Name.Name])
+		}
 	}
 }

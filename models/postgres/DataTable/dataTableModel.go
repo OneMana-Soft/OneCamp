@@ -304,17 +304,21 @@ func UpdateTable(ctx context.Context, id uuid.UUID, c TableChange) (*DataTable, 
 	return out, before, nil
 }
 
-// SoftDeleteTable marks a table deleted (its children cascade logically via the
-// table_id scoping of every read), by who deleted it: it goes to the trash
-// (DeletedTables), from which RestoreTable brings it back.
-func SoftDeleteTable(ctx context.Context, id, by uuid.UUID) error {
-	const q = `UPDATE data_tables SET deleted_at=NOW(), updated_at=NOW(), deleted_by=$2 WHERE id=$1 AND deleted_at IS NULL`
-	n, err := pgexec.Exec(ctx, q, id, nullUUID(by))
+// SoftDeleteTables marks tables deleted (their children cascade logically via
+// the table_id scoping of every read), by who deleted them, in one write: each
+// goes to the trash (DeletedTables), from which RestoreTable brings it back.
+// The live ones among ids (distinct) are deleted; sql.ErrNoRows says one of
+// them wasn't live.
+func SoftDeleteTables(ctx context.Context, ids []uuid.UUID, by uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	n, err := pgexec.Exec(ctx, tableDomain.SoftDeleteTables, ids, nullUUID(by))
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/SoftDeleteTable err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "models/SoftDeleteTables err: %+v", err)
 		return err
 	}
-	if n == 0 {
+	if n < int64(len(ids)) {
 		return sql.ErrNoRows
 	}
 	return nil
@@ -640,7 +644,7 @@ func UpdateFieldAndCells(ctx context.Context, tableID, fieldID uuid.UUID, plan F
 			for id, cell := range converted {
 				ids, cellsOf = append(ids, id), append(cellsOf, string(cell))
 			}
-			// A list a row long goes to pgx as it is, as in CellsOf: through
+			// A list a row long goes to pgx as it is, as in CellsOfMany: through
 			// pq.Array, pgx writes out the whole list in an error before taking it.
 			if err := collectCells(ctx, tx, changed, &cells, f.Id.String(), setCellsSQL, f.TableId, f.Id.String(), ids, cellsOf); err != nil {
 				helpers.LogErrorWithContext(ctx, "models/UpdateFieldAndCells convert err: %+v", err)

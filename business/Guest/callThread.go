@@ -96,7 +96,7 @@ func GetCallThread(ctx context.Context, kind, post string, from, until time.Time
 		}
 		root, replies = guestMessage(p.Uuid, p.PostBy, p.Text, p.CreatedAt), p.Comments
 	case "dm", "group":
-		c, err := chatDomain.GetDgraphChatByUUIDWithAllComments(ctx, post)
+		c, err := chatDomain.GetDgraphChatByUUIDWithAllComments(ctx, post, "")
 		if readFailed(err, chatModels.ErrNotFound) {
 			return nil, err
 		}

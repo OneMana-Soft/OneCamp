@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,28 +15,39 @@ import (
 
 var now = time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)
 
-// fakeCall answers one live session with Maya in it, and keeps what is written.
-func fakeCall(t *testing.T, s *callStateBusiness.Session) *[]qualityModel.Sample {
+// fakeCall answers the calls given, and keeps what is written. Gia's call
+// token "Bearer gia" is for the first call's room; "Bearer gia@<room>" is hers
+// for that room.
+func fakeCall(t *testing.T, calls ...*callStateBusiness.Session) *[]qualityModel.Sample {
 	t.Helper()
 	old := seams
 	t.Cleanup(func() { seams = old })
 	var written []qualityModel.Sample
 	seams.now = func() time.Time { return now }
 	seams.session = func(_ context.Context, id string) (*callStateBusiness.Session, error) {
-		if s == nil || s.ID != id {
-			return nil, nil
+		for _, s := range calls {
+			if s.ID == id {
+				return s, nil
+			}
 		}
-		return s, nil
+		return nil, nil
 	}
-	seams.current = func(_ context.Context, ref callStateBusiness.Ref) (*callStateBusiness.Session, error) {
-		if s == nil || callStateBusiness.RoomOf(ref) != s.Room {
-			return nil, nil
+	// As Call State's LatestInRoom: a room's latest call, going on or over.
+	seams.latest = func(_ context.Context, room string) (*callStateBusiness.Session, error) {
+		var latest *callStateBusiness.Session
+		for _, s := range calls {
+			if s.Room == room && (latest == nil || s.StartedAt.After(latest.StartedAt)) {
+				latest = s
+			}
 		}
-		return s, nil
+		return latest, nil
 	}
 	seams.guestOf = func(raw string) (string, string, error) {
+		if room, ok := strings.CutPrefix(raw, "Bearer gia@"); ok {
+			return "guest-g1-gia", room, nil
+		}
 		if raw == "Bearer gia" {
-			return "guest-g1-gia", s.Room, nil
+			return "guest-g1-gia", calls[0].Room, nil
 		}
 		return "", "", errors.New("not a call token")
 	}
@@ -51,9 +63,34 @@ func liveCall() *callStateBusiness.Session {
 		ID: "11111111-1111-4111-8111-111111111111", Room: "4f0c2a1e-3b7d-4c55-9a51-0d8b1f6a2c33", Live: true, StartedAt: now.Add(-20 * time.Minute),
 		People: []callStateBusiness.Person{
 			{Identity: "0x1", Name: "Maya Chen", In: true},
-			{Identity: "0x2", Name: "Ben", In: false},
+			{Identity: "0x2", Name: "Ben", In: false, LeftAt: ago(5 * time.Minute)},
 			{Identity: "guest-g1-gia", Name: "Gia", Role: "guest", Guest: true, In: true},
 		},
+	}
+}
+
+// ago is the moment d before now.
+func ago(d time.Duration) *time.Time {
+	at := now.Add(-d)
+	return &at
+}
+
+// ended is s as it ended d ago: whoever was still in it left then.
+func ended(s *callStateBusiness.Session, d time.Duration) *callStateBusiness.Session {
+	s.Live, s.EndedAt = false, ago(d)
+	for i := range s.People {
+		if s.People[i].In {
+			s.People[i].In, s.People[i].LeftAt = false, s.EndedAt
+		}
+	}
+	return s
+}
+
+// otherCall is a call in another room, that nobody in liveCall was ever in.
+func otherCall() *callStateBusiness.Session {
+	return &callStateBusiness.Session{
+		ID: "33333333-3333-4333-8333-333333333333", Room: "9b2e7c4d-1a3f-4e8b-8c6d-5f0a1b2c3d4e", Live: true, StartedAt: now.Add(-20 * time.Minute),
+		People: []callStateBusiness.Person{{Identity: "0x5", Name: "Omar", In: true}},
 	}
 }
 
@@ -62,7 +99,7 @@ func liveCall() *callStateBusiness.Session {
 // dropped.
 func TestASampleIsKeptWithinItsRanges(t *testing.T) {
 	s := liveCall()
-	got, ok := row(s, "0x1", Sample{AgoMs: 10_000, RttMs: 90_000, JitterMs: -4, LossPct: 140, SendKbps: 2_000_000, RecvKbps: 900, Fps: 500, FreezeMs: 70_000, Limited: "cpu", CPU: "serious"}, now)
+	got, ok := row(s, "0x1", Sample{AgoMs: 10_000, RttMs: 90_000, JitterMs: -4, LossPct: 140, SendKbps: 2_000_000, RecvKbps: 900, Fps: 500, FreezeMs: 70_000, Limited: "cpu", CPU: "serious"}, now, nil)
 	if !ok {
 		t.Fatal("a sample from ten seconds ago was dropped")
 	}
@@ -72,22 +109,23 @@ func TestASampleIsKeptWithinItsRanges(t *testing.T) {
 	}
 	// One sample per person per 10 s (CODE-REVIEWER): 13.4 s ago is kept at
 	// the start of its 10 s, where a resent copy of it lands too.
-	if got, _ := row(s, "0x1", Sample{AgoMs: 13_400}, now); !got.At.Equal(now.Add(-20 * time.Second)) {
+	if got, _ := row(s, "0x1", Sample{AgoMs: 13_400}, now, nil); !got.At.Equal(now.Add(-20 * time.Second)) {
 		t.Errorf("13.4 s ago is kept at %s", got.At)
 	}
-	if got, _ := row(s, "0x1", Sample{Limited: "warp", CPU: "melting"}, now); got.Limited != "other" || got.CPU != "" {
+	if got, _ := row(s, "0x1", Sample{Limited: "warp", CPU: "melting"}, now, nil); got.Limited != "other" || got.CPU != "" {
 		t.Errorf("unknown words: %+v", got)
 	}
 	for name, ago := range map[string]int64{"before the call": int64(25 * time.Minute / time.Millisecond), "in the future": -60_000} {
-		if _, ok := row(s, "0x1", Sample{AgoMs: ago}, now); ok {
+		if _, ok := row(s, "0x1", Sample{AgoMs: ago}, now, nil); ok {
 			t.Errorf("%s: kept", name)
 		}
 	}
 }
 
-// Only someone in the live call sends its samples: a member through their
+// Only someone in the call sends its samples: a member through their
 // session, a guest through their own call token. Nobody sends for anyone
-// else, for a call that's over, through an API token, or too much at once.
+// else, for a call they left or that ended longer ago than the grace, through
+// an API token, or too much at once.
 func TestOnlySomeoneInTheCallSendsItsSamples(t *testing.T) {
 	ctx := context.Background()
 	s := liveCall()
@@ -112,7 +150,7 @@ func TestOnlySomeoneInTheCallSendsItsSamples(t *testing.T) {
 		batch []Sample
 		want  error
 	}{
-		"someone who left":       {ctx, &dgraphStruct.DgraphUser{Uid: "0x2"}, s.ID, batch, ErrNotInCall},
+		"someone who left longer ago than the grace": {ctx, &dgraphStruct.DgraphUser{Uid: "0x2"}, s.ID, batch, ErrNotInCall},
 		"a stranger":             {ctx, &dgraphStruct.DgraphUser{Uid: "0x9"}, s.ID, batch, ErrNotInCall},
 		"no such call":           {ctx, maya, "22222222-2222-4222-8222-222222222222", batch, ErrNotInCall},
 		"through an API token":   {helpers.WithActsThroughToken(ctx), maya, s.ID, batch, ErrThroughToken},
@@ -126,14 +164,117 @@ func TestOnlySomeoneInTheCallSendsItsSamples(t *testing.T) {
 	if _, err := RecordGuest(ctx, "Bearer someone-else", batch); !errors.Is(err, ErrNotInCall) {
 		t.Errorf("a stranger's token: %v", err)
 	}
-	s.Live = false
-	if _, err := Record(ctx, maya, s.ID, batch); !errors.Is(err, ErrNotInCall) {
-		t.Errorf("a call that's over: %v", err)
+	ended(s, 2*time.Minute+time.Second)
+	if _, err := Record(ctx, maya, s.ID, []Sample{{AgoMs: 150_000}}); !errors.Is(err, ErrNotInCall) {
+		t.Errorf("a call over longer ago than the grace: %v", err)
 	}
 	if len(*written) != 4 {
 		t.Errorf("refusals wrote %d rows", len(*written)-4)
 	}
 }
+
+// A person's app sends its last batch as the call goes from their screen,
+// after the room let them go, so their leave (or the call's end, for the last
+// one out) often lands first (V-973). That batch is kept for a while after
+// they left, member or guest, but nothing from after they left, nothing from
+// someone put out of the call, and nothing for a call they were never in.
+func TestTheBatchSentOnLeavingIsKept(t *testing.T) {
+	// before is the samples of the 20 s before someone left d ago.
+	before := func(d time.Duration) []Sample {
+		return []Sample{{AgoMs: (d + 20*time.Second).Milliseconds(), RttMs: 80}, {AgoMs: (d + 10*time.Second).Milliseconds(), RttMs: 85}}
+	}
+	benLeft := func(d time.Duration) *callStateBusiness.Session {
+		s := liveCall()
+		s.People[1].LeftAt = ago(d)
+		return s
+	}
+	// endedOnly is a call that ended d ago, read before Maya's leave was
+	// written: her time in it ended with it.
+	endedOnly := func(d time.Duration) *callStateBusiness.Session {
+		s := liveCall()
+		s.Live, s.EndedAt = false, ago(d)
+		return s
+	}
+	with := func(s *callStateBusiness.Session, p callStateBusiness.Person) *callStateBusiness.Session {
+		s.People = append(s.People, p)
+		return s
+	}
+	// Ruth was put out of the call: still connected, or gone a second ago.
+	ruthIn := callStateBusiness.Person{Identity: "0x3", Name: "Ruth", Removed: true, In: true}
+	ruthOut := callStateBusiness.Person{Identity: "0x3", Name: "Ruth", Removed: true, LeftAt: ago(time.Second)}
+	removedGuest := liveCall()
+	removedGuest.People[2].Removed, removedGuest.People[2].In, removedGuest.People[2].LeftAt = true, false, ago(time.Second)
+	parent := liveCall()
+	room := &callStateBusiness.Session{
+		ID: "44444444-4444-4444-8444-444444444444", Room: callStateBusiness.BreakoutRoom(parent.Room, 1), Parent: parent.ID, Live: true, StartedAt: now.Add(-5 * time.Minute),
+		People: []callStateBusiness.Person{{Identity: "guest-g1-gia", Name: "Gia", Role: "guest", Guest: true, In: true}},
+	}
+	// lobby is a room no call uses: a token for it is refused before any read.
+	lobby := liveCall()
+	lobby.Room = "lobby"
+	grace, past := 2*time.Minute, 2*time.Minute+time.Second
+	other := otherCall().Room
+
+	for name, c := range map[string]struct {
+		calls []*callStateBusiness.Session
+		// who sends: a member's uid, or a guest's call token.
+		who, token string
+		// sid is the call a member sends for; the first call's when empty.
+		sid     string
+		viaAPI  bool
+		batch   []Sample
+		n       int
+		refused error
+	}{
+		"a member who left 30 s ago":                                      {calls: answering(benLeft(30 * time.Second)), who: "0x2", batch: before(30 * time.Second), n: 2},
+		"a member who left as long ago as the grace":                      {calls: answering(benLeft(grace)), who: "0x2", batch: before(grace), n: 2},
+		"the last one out, the call ended 30 s ago":                       {calls: answering(ended(liveCall(), 30*time.Second)), who: "0x1", batch: before(30 * time.Second), n: 2},
+		"a guest who just left, the call just ended":                      {calls: answering(ended(liveCall(), 30*time.Second)), token: "Bearer gia", batch: before(30 * time.Second), n: 2},
+		"a guest in one of the call's breakout rooms":                     {calls: answering(parent, room), token: "Bearer gia@" + room.Room, batch: before(0), n: 2},
+		"only what they saw: up to 10 s after they left":                  {calls: answering(benLeft(30 * time.Second)), who: "0x2", batch: []Sample{{AgoMs: 45_000}, {AgoMs: 25_000}, {AgoMs: 20_000}, {AgoMs: 19_000}, {AgoMs: 1_000}}, n: 3},
+		"the call ended 30 s ago, her leave not yet written":              {calls: answering(endedOnly(30 * time.Second)), who: "0x1", batch: before(30 * time.Second), n: 2},
+		"the call ended longer ago than the grace, her leave not written": {calls: answering(endedOnly(past)), who: "0x1", batch: before(past), refused: ErrNotInCall},
+		"a member who left longer ago than the grace":                     {calls: answering(benLeft(past)), who: "0x2", batch: before(past), refused: ErrNotInCall},
+		"a member who left long before the call ended 30 s ago":           {calls: answering(ended(liveCall(), 30*time.Second)), who: "0x2", batch: before(30 * time.Second), refused: ErrNotInCall},
+		"a call over longer ago than the grace":                           {calls: answering(ended(liveCall(), past)), who: "0x1", batch: before(past), refused: ErrNotInCall},
+		"a guest, the call over longer ago than the grace":                {calls: answering(ended(liveCall(), past)), token: "Bearer gia", batch: before(past), refused: ErrNotInCall},
+		"someone put out of the call a second ago":                        {calls: answering(with(liveCall(), ruthOut)), who: "0x3", batch: before(time.Second), refused: ErrNotInCall},
+		"someone put out of the call, not yet gone":                       {calls: answering(with(liveCall(), ruthIn)), who: "0x3", batch: before(0), refused: ErrNotInCall},
+		"a guest put out of the call a second ago":                        {calls: answering(removedGuest), token: "Bearer gia", batch: before(time.Second), refused: ErrNotInCall},
+		"a stranger, the call just ended":                                 {calls: answering(ended(liveCall(), 30*time.Second)), who: "0x9", batch: before(30 * time.Second), refused: ErrNotInCall},
+		"through an API token, just after leaving":                        {calls: answering(benLeft(30 * time.Second)), who: "0x2", viaAPI: true, batch: before(30 * time.Second), refused: ErrThroughToken},
+		"no such call":                                          {calls: answering(ended(liveCall(), 30*time.Second)), who: "0x1", sid: "22222222-2222-4222-8222-222222222222", batch: before(30 * time.Second), refused: ErrNotInCall},
+		"another call's id, going on":                           {calls: answering(liveCall(), otherCall()), who: "0x1", sid: otherCall().ID, batch: before(0), refused: ErrNotInCall},
+		"another call's id, just ended":                         {calls: answering(liveCall(), ended(otherCall(), 30*time.Second)), who: "0x1", sid: otherCall().ID, batch: before(30 * time.Second), refused: ErrNotInCall},
+		"a guest's token for a room no call uses":               {calls: answering(lobby), token: "Bearer gia@lobby", batch: before(0), refused: ErrNotInCall},
+		"a guest's token for another room, its call going on":   {calls: answering(liveCall(), otherCall()), token: "Bearer gia@" + other, batch: before(0), refused: ErrNotInCall},
+		"a guest's token for another room, its call just ended": {calls: answering(liveCall(), ended(otherCall(), 30*time.Second)), token: "Bearer gia@" + other, batch: before(30 * time.Second), refused: ErrNotInCall},
+	} {
+		t.Run(name, func(t *testing.T) {
+			written := fakeCall(t, c.calls...)
+			ctx := context.Background()
+			if c.viaAPI {
+				ctx = helpers.WithActsThroughToken(ctx)
+			}
+			if c.sid == "" {
+				c.sid = c.calls[0].ID
+			}
+			var n int
+			var err error
+			if c.token != "" {
+				n, err = RecordGuest(ctx, c.token, c.batch)
+			} else {
+				n, err = Record(ctx, &dgraphStruct.DgraphUser{Uid: c.who}, c.sid, c.batch)
+			}
+			if !errors.Is(err, c.refused) || n != c.n || len(*written) != c.n {
+				t.Errorf("%d, %v (wrote %d); want %d, %v", n, err, len(*written), c.n, c.refused)
+			}
+		})
+	}
+}
+
+// answering is the calls a test's fakeCall answers.
+func answering(calls ...*callStateBusiness.Session) []*callStateBusiness.Session { return calls }
 
 // Why a call stuttered for someone, from what their own app said: their
 // network, their computer, the other side (they were fine, what reached them

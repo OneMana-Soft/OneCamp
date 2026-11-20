@@ -80,16 +80,10 @@ func UpdateProjectNameByProjectUUID(query string, projectName string, currentTim
 	return
 }
 
-func UpdateProjectDeletedTimeByUUID(query string, projectUUID uuid.UUID, deleteTime *time.Time, updateTime *time.Time) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		deleteTime,
-		updateTime,
-		projectUUID,
-	)
+// UpdateProjectDeletedTimeByUUID runs through pgexec on ctx, so it joins
+// the transaction ctx carries (the project's delete stops its mailbox in it).
+func UpdateProjectDeletedTimeByUUID(ctx context.Context, query string, projectUUID uuid.UUID, deleteTime *time.Time, updateTime *time.Time) (err error) {
+	_, err = pgexec.Exec(ctx, query, deleteTime, updateTime, projectUUID)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

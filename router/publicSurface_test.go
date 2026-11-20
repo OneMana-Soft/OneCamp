@@ -232,3 +232,38 @@ func TestResendWebhookIsRateLimited(t *testing.T) {
 	}
 	t.Fatal("/webhooks/resend is not registered")
 }
+
+// A guest's move of their booking is public, its link's token the bearer
+// (route-access.tsv: POST /public/booking/{token}/reschedule): it is limited
+// per address in booking's own bucket, with booking's body limit, so moves
+// and bookings from one address share one cap, and token guesses are limited
+// like the cancel link's.
+func TestBookingRescheduleIsLimitedLikeBooking(t *testing.T) {
+	var book, move string
+	for _, line := range routerSource(t) {
+		switch {
+		case strings.Contains(line, `Post("/public/book/{slug}"`):
+			book = line
+		case strings.Contains(line, `Post("/public/booking/{token}/reschedule"`):
+			move = line
+		}
+	}
+	if book == "" || move == "" {
+		t.Fatalf("the booking route %q or the reschedule route %q is not registered", book, move)
+	}
+	for _, want := range []string{
+		`IPRateLimit("booking", 10, "Too many bookings from here. Try again later.")`,
+	} {
+		if !strings.Contains(book, want) || !strings.Contains(move, want) {
+			t.Errorf("the booking and reschedule routes don't share %s:\n%s\n%s", want, strings.TrimSpace(book), strings.TrimSpace(move))
+		}
+	}
+	// A booking carries the answers to the page's questions (gcal-7 H3); a
+	// move, a time alone.
+	if !strings.Contains(book, `BodyLimit(eventController.BookBodyLimit)`) || !strings.Contains(move, `BodyLimit(8<<10)`) {
+		t.Errorf("the booking route takes up to the handler's BookBodyLimit and the reschedule route 8 KiB:\n%s\n%s", strings.TrimSpace(book), strings.TrimSpace(move))
+	}
+	if !strings.Contains(move, `LoginRateLimit("booking-reschedule")`) {
+		t.Errorf("the reschedule route has no token-guess limit: %s", strings.TrimSpace(move))
+	}
+}

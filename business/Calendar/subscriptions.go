@@ -542,7 +542,7 @@ func (s *service) takeSubscribed(ctx context.Context, sub models.Subscription, c
 		}
 	}
 	if len(fresh) > 0 {
-		made, err := s.importFiles(ctx, who, []ICS.Calendar{{Name: sub.Name, Events: fresh}}, func(int, int) {}, calendar)
+		made, err := s.importFiles(ctx, who, []ICS.Calendar{{Name: sub.Name, Events: fresh}}, func(int, int) {}, calendar, SearchEntriesChanged) // read from an address: search only
 		if err != nil {
 			fail("bring new events in", err)
 			return
@@ -615,6 +615,6 @@ func (s *service) retakeSubscribed(ctx context.Context, e *models.Event, main IC
 		if err != nil || series == nil || series.RRule == "" {
 			return
 		}
-		s.takeRemoteInstance(ctx, series, inst, now, false)
+		s.takeRemoteInstance(ctx, uuid.Nil, series, inst, now, false)
 	}
 }

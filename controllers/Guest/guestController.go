@@ -376,7 +376,7 @@ func RevokeGuestGrant(w http.ResponseWriter, r *http.Request) {
 	auditBusiness.Record(r, "guest.grant.revoke", auditBusiness.CategorySecurity,
 		"Revoked a guest grant", map[string]interface{}{"grant_id": id.String()})
 	if g != nil {
-		recordItemLinkRow(r, false, g.ResourceType, g.ResourceID, id)
+		recordItemLinkRow(r, linkTurnedOff, g.ResourceType, g.ResourceID, id)
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Guest grant revoked"})
 }
@@ -556,6 +556,8 @@ func CreateResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 		// never the default: expiry is the safe behaviour and stays the default
 		// for anybody who does not ask.
 		NeverExpires bool `json:"never_expires"`
+		// Password locks a board's link (miro-33), under the docs' rule.
+		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
@@ -566,10 +568,15 @@ func CreateResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	grant, err := guestBusiness.CreateResourceGrant(ctx, userInfo.UserPostgresInfo.Id, body.ResourceType, body.ResourceID, body.Capability, time.Duration(body.TTLHours)*time.Hour, body.NeverExpires)
+	grant, err := guestBusiness.CreateLink(ctx, userInfo.UserPostgresInfo.Id, body.ResourceType, body.ResourceID, body.Capability, time.Duration(body.TTLHours)*time.Hour, body.NeverExpires, body.Password)
 	if err != nil {
 		if errors.Is(err, guestBusiness.ErrGuestDisabled) {
 			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Guest access is disabled for this workspace."})
+			return
+		}
+		var invalid *guestBusiness.PublishInvalid
+		if errors.As(err, &invalid) {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": invalid.Reason})
 			return
 		}
 		// A sensitivity label with no_guest_links (business/Label), in its words.
@@ -583,8 +590,9 @@ func CreateResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 
 	auditBusiness.Record(r, "guest.link.create", auditBusiness.CategorySecurity,
 		"Created an external share link",
-		map[string]interface{}{"resource_type": grant.ResourceType, "resource_id": grant.ResourceID, "grant_id": grant.GrantID.String()})
-	recordItemLinkRow(r, true, grant.ResourceType, grant.ResourceID, grant.GrantID)
+		map[string]interface{}{"resource_type": grant.ResourceType, "resource_id": grant.ResourceID, "grant_id": grant.GrantID.String(),
+			"capability": grant.Capability, "password": body.Password != "", "expires_at": grant.ExpiresAt})
+	recordItemLinkRow(r, linkMade, grant.ResourceType, grant.ResourceID, grant.GrantID)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{
 		"token":         grant.Token, // raw link token, shown once
@@ -607,6 +615,9 @@ func GuestCollabToken(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		DisplayName string `json:"display_name"`
+		// A password link's password, or the unlock it gave (miro-33).
+		Password string `json:"password"`
+		Unlock   string `json:"unlock"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body) // body optional
 
@@ -614,6 +625,15 @@ func GuestCollabToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		guestReadFailed(w, r, "GuestCollabToken", err, "")
 		return
+	}
+	var unlock string
+	if !guestBusiness.ServedAsPage(grant) {
+		if unlock, err = guestBusiness.OpenLocked(ctx, grant, body.Password, body.Unlock, helpers.ClientIP(r)); err != nil {
+			if !lockedRefused(w, err) {
+				guestReadFailed(w, r, "GuestCollabToken", err, "")
+			}
+			return
+		}
 	}
 	if guestBusiness.ServedAsPage(grant) {
 		// A doc's view link is the server's own script-free page (D-25): no
@@ -652,6 +672,8 @@ func GuestCollabToken(w http.ResponseWriter, r *http.Request) {
 		"resource_id":   grant.ResourceID,
 		"capability":    grant.Capability,
 		"title":         guestBusiness.SharedTitle(ctx, grant),
+		// The board's reads (pictures, polls) carry it as ?k=; "" without a password.
+		"unlock": unlock,
 	})
 }
 
@@ -692,7 +714,12 @@ func GuestDocColabAuthorize(w http.ResponseWriter, r *http.Request) {
 // until when the link stops working, so the collaboration service closes the
 // socket then (live/ops/reauth.js closeWhenLinkEnds).
 func guestAuthorised(ctx context.Context, g *guestModel.GuestGrant) helpers.Envolope {
-	out := helpers.Envolope{"msg": "Authorised", "canEdit": false}
+	// A board link's guest draws with the edit role and comments with
+	// comment or edit (miro-33); a doc's guest reads.
+	board := g.ResourceType == guestModel.ResourceBoard
+	out := helpers.Envolope{"msg": "Authorised",
+		"canEdit":    board && g.Capability == guestModel.CapabilityEdit,
+		"canComment": board && (g.Capability == guestModel.CapabilityComment || g.Capability == guestModel.CapabilityEdit)}
 	if end := guestBusiness.LinkEnds(ctx, g); end != nil {
 		out["until"] = end.UTC()
 	}
@@ -1106,15 +1133,19 @@ func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserIn
 		}
 	case "board":
 		// The board's own rules: one the caller may not read, deleted or not
-		// there is not found; one they may read but not change is refused,
-		// since only its creator and its editors share it.
+		// there is not found; one they may read but not share is refused:
+		// its owner and co-owners share it, its editors while its switch is
+		// on (miro-32).
 		b, err := boardBusiness.GetBasicBoardByUUID(ctx, resourceID, userInfo.UserDgraphInfo.Uid)
 		if err != nil || !boardBusiness.CanRead(b, userInfo.UserDgraphInfo.Uuid) {
 			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Board not found"})
 			return false
 		}
-		if !boardBusiness.CanEdit(b, userInfo.UserDgraphInfo.Uuid) {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need edit access to share this board."})
+		// Its guest links are its owner's and co-owners' alone (miro-33 M-4):
+		// the editors' switch lets them invite people, never make, change
+		// or turn off a link that lets someone outside in.
+		if !boardBusiness.CanManage(b, userInfo.UserDgraphInfo.Uuid) {
+			helpers.WriteForbidden(w, boardBusiness.ErrNotManager.Error())
 			return false
 		}
 	case "table":
@@ -1294,7 +1325,9 @@ func RevokeResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That link isn't here any more."})
 		return
 	}
-	if g.CreatedBy != userInfo.UserPostgresInfo.Id && !mayShare(w, r, userInfo, g.ResourceType, g.ResourceID, false) {
+	// A board's link is its managers' alone, its maker's too only while
+	// they manage it (miro-33 M-4).
+	if (g.ResourceType == guestModel.ResourceBoard || g.CreatedBy != userInfo.UserPostgresInfo.Id) && !mayShare(w, r, userInfo, g.ResourceType, g.ResourceID, false) {
 		return
 	}
 	if err := guestBusiness.RevokeGrant(r.Context(), id); err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -1303,7 +1336,7 @@ func RevokeResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 	}
 	auditBusiness.Record(r, "guest.link.revoke", auditBusiness.CategorySecurity, "Turned off an external share link",
 		map[string]interface{}{"resource_type": g.ResourceType, "resource_id": g.ResourceID, "grant_id": id.String()})
-	recordItemLinkRow(r, false, g.ResourceType, g.ResourceID, id)
+	recordItemLinkRow(r, linkTurnedOff, g.ResourceType, g.ResourceID, id)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Turned off"})
 }
 
@@ -1316,15 +1349,28 @@ var linkAreas = map[string]struct{ category, noun string }{
 	guestModel.ResourceTable: {auditBusiness.CategoryTables, "table"},
 }
 
-// recordItemLinkRow writes the item's own row for a link made to it (made) or
-// turned off, with the link's id; nothing for kinds with no area of their own.
-func recordItemLinkRow(r *http.Request, made bool, resourceType, resourceID string, grantID uuid.UUID) {
+// What became of a link, as the item's own row says it.
+type linkEvent int
+
+const (
+	linkMade linkEvent = iota
+	linkChanged
+	linkTurnedOff
+)
+
+// recordItemLinkRow writes the item's own row for a link made to it, changed
+// (its role, password or end) or turned off, with the link's id; nothing for
+// kinds with no area of their own.
+func recordItemLinkRow(r *http.Request, what linkEvent, resourceType, resourceID string, grantID uuid.UUID) {
 	area, ok := linkAreas[resourceType]
 	if !ok {
 		return
 	}
 	action, summary := resourceType+".guest_link_made", "Made an external share link to a "+area.noun
-	if !made {
+	switch what {
+	case linkChanged:
+		action, summary = resourceType+".guest_link_changed", "Changed an external share link to a "+area.noun
+	case linkTurnedOff:
 		action, summary = resourceType+".guest_link_turned_off", "Turned off an external share link to a "+area.noun
 	}
 	auditBusiness.Record(r, action, area.category, summary,

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/akashc777/OneCamp/business/Access/level"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 )
 
@@ -37,24 +38,26 @@ var (
 // resource. Everything else about who has access is full access's (Apply).
 // Every offer to share that only adds people asks this, so the share
 // dialog's Invite and sharing with someone just mentioned agree.
-func MayInvite(d Decision) bool { return d.Level >= LevelEdit }
+func MayInvite(d Decision) bool { return level.MayInvite(d.Level) }
 
 // inviteRefusal says why someone with decision d may not make change c as an
-// invite, or nil when they may: each grant at their own level or below. Pure.
+// invite, or nil when they may: each grant at their own level or below, by the
+// one invite rule every kind answers to (level.InviteRefusal). Pure.
 func inviteRefusal(d Decision, c Change) error {
-	switch {
-	case !MayInvite(d):
-		return ErrForbidden
-	case len(c.Add) == 0, len(c.Remove) > 0, c.General != nil, c.Private != nil, c.Replace, c.ApplyToSubpages:
-		return ErrNotAnInvite
-	}
+	given := make([]Level, 0, len(c.Add))
 	for _, g := range c.Add {
-		switch {
-		case g.Level <= LevelNone:
-			return ErrBadLevel
-		case g.Level > d.Level:
-			return ErrAboveYourLevel
-		}
+		given = append(given, g.Level)
+	}
+	onlyAdds := len(c.Remove) == 0 && c.General == nil && c.Private == nil && !c.Replace && !c.ApplyToSubpages
+	switch level.InviteRefusal(d.Level, onlyAdds, given) {
+	case level.InviteForbidden:
+		return ErrForbidden
+	case level.InviteNotAnInvite:
+		return ErrNotAnInvite
+	case level.InviteNoLevel:
+		return ErrBadLevel
+	case level.InviteAboveYourLevel:
+		return ErrAboveYourLevel
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -128,10 +129,57 @@ func reapStale() {
 	}
 }
 
+// sendEmail is the one send of a queue row's email; an in-package test puts
+// a recorder in its place to see what the worker would send.
+var sendEmail = emailService.SendEmailWithOptions
+
+// retryLater leaves queue rows waiting, saying why, until at; a seam, as
+// sendEmail is.
+var retryLater = emailQueueModels.RetryLater
+
+// processBatch claims what is due, with each batched row's window-mates, and
+// settles it.
 func processBatch(shutdownCtx context.Context) {
-	items, err := emailQueueModels.FetchAndLockPending(batchSize)
+	items, err := emailQueueModels.FetchAndLockPending(batchSize, claimMates)
 	if err != nil || len(items) == 0 {
 		return
+	}
+	settle(shutdownCtx, items)
+}
+
+// settle asks every claimed row again (recheck.go) and sends what still
+// holds: a person's batched rows as one email (batch.go), any other row as
+// its own. Each outcome is one UPDATE over its rows.
+func settle(shutdownCtx context.Context, items []*emailQueueModels.QueueItem) {
+	held := verdicts(shutdownCtx, items)
+	var live, gone, later []*emailQueueModels.QueueItem
+	for _, it := range items {
+		switch held[it.ID] {
+		case noLongerTold:
+			gone = append(gone, it)
+		case askLater:
+			later = append(later, it)
+		default:
+			live = append(live, it)
+		}
+	}
+	suppress(gone, "no longer told")
+	_ = retryLater(emailQueueModels.IDsOf(later), "what it is about couldn't be read", time.Now().Add(time.Minute))
+	groups := groupsOf(live)
+	if len(groups) == 0 {
+		return
+	}
+
+	// Once for the batch: who is on the suppression list now (they may have
+	// joined it since the enqueue), the sender, and the logo a list shows.
+	var addresses []string
+	for _, g := range groups {
+		addresses = append(addresses, g[0].ToEmail)
+	}
+	blocked, _ := suppressionModels.IsSuppressedBatch(addresses)
+	sh := shell{sender: resolveSender()}
+	if slices.ContainsFunc(groups, func(g group) bool { return len(g) > 1 }) {
+		sh.logo = brandLogoURL()
 	}
 
 	concurrency := concurrencyDefault
@@ -145,43 +193,41 @@ func processBatch(shutdownCtx context.Context) {
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
-	for _, it := range items {
+	for _, g := range groups {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(item *emailQueueModels.QueueItem) {
+		go func(g group) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			defer func() {
 				if r := recover(); r != nil {
 					helpers.LogErrorWithContext(context.Background(),
 						"notification/processBatch worker panic recovered: %v", r)
-					// Best-effort: leave the row in 'processing'; the reaper
-					// will roll it back to 'pending' after staleAfter.
+					// Best-effort: leave the rows in 'processing'; the reaper
+					// will roll them back to 'pending' after staleAfter.
 				}
 			}()
-			deliverItem(shutdownCtx, item)
-		}(it)
+			deliverGroup(shutdownCtx, g, sh, blocked[strings.ToLower(strings.TrimSpace(g[0].ToEmail))])
+		}(g)
 	}
 	wg.Wait()
 }
 
-// deliverItem performs the actual send for one queue row, then records the
-// outcome in the log table and transitions the queue row.
-func deliverItem(parentCtx context.Context, item *emailQueueModels.QueueItem) {
-	// Pre-flight suppression check. Worth re-checking here because the
-	// recipient may have been added to the suppression list between
-	// enqueue and send.
-	if reason, _ := suppressionModels.IsSuppressed(item.ToEmail); reason != "" {
-		_ = emailQueueModels.MarkSuppressed(item.ID, "suppressed: "+reason)
-		_ = emailLogModels.Insert(emailLogModels.LogRow{
-			UserID:    &item.UserID,
-			ToEmail:   item.ToEmail,
-			EventType: item.EventType,
-			Subject:   item.Subject,
-			Status:    emailLogModels.StatusSuppressed,
-			QueueID:   &item.ID,
-			Attempts:  item.Attempts,
-		})
+// deliverGroup sends g's one email, unless its address is on the suppression
+// list (blocked says why), then writes its rows' outcome and its log row
+// right after the send, so only a crash between the two can send it again,
+// and then under the same key (groupsOf), which the provider sends once.
+func deliverGroup(parentCtx context.Context, g group, sh shell, blocked string) {
+	if blocked != "" {
+		suppress(g, blocked)
+		return
+	}
+	m, err := g.mail(sh)
+	if err != nil {
+		helpers.LogErrorWithContext(parentCtx, "notification/deliverGroup render failed: %+v", err)
+		errMsg := "render failed: " + err.Error()
+		_ = emailQueueModels.MarkFailed(g.ids(), errMsg)
+		logEmail(g, m, emailLogModels.StatusFailed, nil, &errMsg)
 		return
 	}
 
@@ -191,34 +237,11 @@ func deliverItem(parentCtx context.Context, item *emailQueueModels.QueueItem) {
 	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer cancel()
 
-	senderEmail := resolveSender()
-
-	res, err := emailService.SendEmailWithOptions(ctx, emailService.SendOptions{
-		From:                senderEmail,
-		To:                  item.ToEmail,
-		Subject:             item.Subject,
-		HTML:                item.HTMLBody,
-		Text:                item.TextBody,
-		IdempotencyKey:      item.DedupKey,
-		UnsubscribeURL:      buildUnsubscribeFromQueue(item),
-		ListUnsubscribePost: true,
-		Tags: map[string]string{
-			"event_type": item.EventType,
-		},
-	})
+	res, err := sendEmail(ctx, g.options(m, sh))
 
 	if errors.Is(err, emailService.ErrUndeliverable) {
 		// Nothing was sent, and nothing ever could be: suppressed, not failed.
-		_ = emailQueueModels.MarkSuppressed(item.ID, "suppressed: "+err.Error())
-		_ = emailLogModels.Insert(emailLogModels.LogRow{
-			UserID:    &item.UserID,
-			ToEmail:   item.ToEmail,
-			EventType: item.EventType,
-			Subject:   item.Subject,
-			Status:    emailLogModels.StatusSuppressed,
-			QueueID:   &item.ID,
-			Attempts:  item.Attempts,
-		})
+		suppress(g, err.Error())
 		return
 	}
 	if err != nil {
@@ -226,51 +249,70 @@ func deliverItem(parentCtx context.Context, item *emailQueueModels.QueueItem) {
 		if len(errMsg) > 1000 {
 			errMsg = errMsg[:1000]
 		}
-		if emailService.IsTerminal(err) || item.Attempts >= maxAttempts {
-			_ = emailQueueModels.MarkFailed(item.ID, errMsg)
-			_ = emailLogModels.Insert(emailLogModels.LogRow{
-				UserID:       &item.UserID,
-				ToEmail:      item.ToEmail,
-				EventType:    item.EventType,
-				Subject:      item.Subject,
-				Status:       emailLogModels.StatusFailed,
-				ErrorMessage: &errMsg,
-				QueueID:      &item.ID,
-				Attempts:     item.Attempts,
-			})
+		attempts := g.attempts()
+		if emailService.IsTerminal(err) || attempts >= maxAttempts {
+			_ = emailQueueModels.MarkFailed(g.ids(), errMsg)
+			logEmail(g, m, emailLogModels.StatusFailed, nil, &errMsg)
 			return
 		}
 		// Transient: exponential backoff with jitter capped at 10 minutes.
 		// Attempts has already been incremented by FetchAndLockPending.
 		// Jitter prevents thundering herds when Resend recovers from a
 		// rate-limit window with many of our rows ready at the same instant.
-		base := time.Duration(1<<uint(item.Attempts-1)) * 30 * time.Second
+		base := time.Duration(1<<uint(attempts-1)) * 30 * time.Second
 		if base > 10*time.Minute {
 			base = 10 * time.Minute
 		}
 		jitter := time.Duration(rand.Int63n(int64(base / 4)))
-		nextRetry := time.Now().Add(base + jitter)
-		_ = emailQueueModels.RetryLater(item.ID, errMsg, nextRetry)
+		_ = retryLater(g.ids(), errMsg, time.Now().Add(base+jitter))
 		return
 	}
 
 	// Success.
-	_ = emailQueueModels.MarkSent(item.ID)
+	_ = emailQueueModels.MarkSent(g.ids())
 	var providerID *string
 	if res.MessageID != "" {
 		mid := res.MessageID
 		providerID = &mid
 	}
+	logEmail(g, m, emailLogModels.StatusSent, providerID, nil)
+}
+
+// logEmail writes g's one email to the log, under its newest row.
+func logEmail(g group, m mail, status string, providerID, errMsg *string) {
 	_ = emailLogModels.Insert(emailLogModels.LogRow{
-		UserID:            &item.UserID,
-		ToEmail:           item.ToEmail,
-		EventType:         item.EventType,
-		Subject:           item.Subject,
-		Status:            emailLogModels.StatusSent,
+		UserID:            &g[0].UserID,
+		ToEmail:           g[0].ToEmail,
+		EventType:         m.kind,
+		Subject:           m.subject,
+		Status:            status,
 		ProviderMessageID: providerID,
-		QueueID:           &item.ID,
-		Attempts:          item.Attempts,
+		ErrorMessage:      errMsg,
+		QueueID:           &g[0].ID,
+		Attempts:          g.attempts(),
 	})
+}
+
+// suppress records that items' emails are not sent, and why: one UPDATE
+// over their rows, and a log row each, in one INSERT.
+func suppress(items []*emailQueueModels.QueueItem, why string) {
+	if len(items) == 0 {
+		return
+	}
+	_ = emailQueueModels.MarkSuppressed(emailQueueModels.IDsOf(items), "suppressed: "+why)
+	rows := make([]emailLogModels.LogRow, len(items))
+	for i, it := range items {
+		rows[i] = emailLogModels.LogRow{
+			UserID:    &it.UserID,
+			ToEmail:   it.ToEmail,
+			EventType: it.EventType,
+			Subject:   it.Subject,
+			Status:    emailLogModels.StatusSuppressed,
+			QueueID:   &it.ID,
+			Attempts:  it.Attempts,
+		}
+	}
+	_ = emailLogModels.InsertMany(rows)
 }
 
 // resolveSender pulls the configured sender email from system_configs, with

@@ -3,10 +3,13 @@ package businness
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
 
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
 )
@@ -58,5 +61,17 @@ func TestALiveCommentReachesOnlyThoseWhoMayReadTheDoc(t *testing.T) {
 	PublishDocCommentActivity("c3", "<p>hi</p>", time.Now(), doc, dgraphStruct.DgraphUser{Uuid: "author"}, mentions)
 	if len(got) != 0 {
 		t.Errorf("with the rule unanswered, told %v", got)
+	}
+}
+
+// A mention an edit adds to a doc's comment is asked again at its send
+// (business/Notification verdicts): the doc and the comment, as someone it
+// names.
+func TestAnEditsDocCommentMentionIsAskedAgainAtTheSend(t *testing.T) {
+	ada := &dgraphStruct.DgraphUser{Uuid: "a", UserName: "Ada"}
+	got := docCommentMentionNotice(ada, &dgraphStruct.DgraphDoc{Uuid: "d1", Title: "Launch notes"}, "c1", "<p>@Bo</p>").About
+	want := &notificationBusiness.About{Kind: notificationBusiness.AboutDoc, Item: "d1", Reply: "c1", Heard: notifylevel.Named}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("asked again as %+v, want %+v", got, want)
 	}
 }

@@ -388,31 +388,34 @@ func keptChanges(ctx context.Context, cs *rowLedger.ChangeSet) error {
 	if cs.Kind == rowLedger.ChangeField {
 		return nil
 	}
+	// A row a change names is of cs.Table, the table the write is to, so its
+	// table is known; the ends of a link it made or removed may be of another
+	// table, which the store looks up (ends).
 	seen := map[uuid.UUID]bool{}
-	var rows []uuid.UUID
-	add := func(id uuid.UUID) {
+	var rows, ends []uuid.UUID
+	add := func(to *[]uuid.UUID, id uuid.UUID) {
 		if id != uuid.Nil && !seen[id] {
 			seen[id] = true
-			rows = append(rows, id)
+			*to = append(*to, id)
 		}
 	}
 	for _, ch := range cs.Changes {
 		if ch.Field == rowLedger.FieldPosition || ch.Field == rowLedger.FieldColumn {
 			continue // a move changes no value; a column's change is the trigger's (migration 538)
 		}
-		add(ch.Row)
+		add(&rows, ch.Row)
 		if strings.HasPrefix(ch.Field, rowLedger.LinksPrefix) {
 			var links struct {
 				Add, Remove []struct{ From, To uuid.UUID }
 			}
 			_ = json.Unmarshal(ch.After, &links)
 			for _, l := range append(links.Add, links.Remove...) {
-				add(l.From)
-				add(l.To)
+				add(&ends, l.From)
+				add(&ends, l.To)
 			}
 		}
 	}
-	return model.MarkComputedDirty(ctx, []uuid.UUID{cs.Table}, rows)
+	return model.MarkComputedDirty(ctx, []uuid.UUID{cs.Table}, rows, ends)
 }
 
 // RecomputeKept is the sweep (computedStore.SweepRecompute; exported for a

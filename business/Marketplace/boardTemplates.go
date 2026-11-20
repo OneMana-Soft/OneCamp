@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"strings"
 
 	boardAdapter "github.com/akashc777/OneCamp/adapter/Board"
@@ -152,7 +153,8 @@ func roundUnit(v float64) int {
 func installBoard(ctx context.Context, payload, name string, userInfo *userModels.UserInfo) (*InstallResult, error) {
 	p, err := readBoardPayload(payload)
 	if err != nil {
-		return nil, err
+		// Its checks read nothing: each is the template's, in words.
+		return nil, &Refusal{http.StatusBadRequest, err.Error()}
 	}
 	title := p.Title
 	if title == "" {

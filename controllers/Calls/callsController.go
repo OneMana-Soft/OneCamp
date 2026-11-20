@@ -379,3 +379,24 @@ func SetMeetingLobby(w http.ResponseWriter, r *http.Request) {
 	auditBusiness.Record(r, "call.lobby", auditBusiness.CategoryCalls, "Changed who waits in a meeting's lobby", map[string]interface{}{"meeting": id, "guests_wait": *body.GuestsWait})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{"guests_wait": *body.GuestsWait}})
 }
+
+// LinkableCalls lists the calls the signed-in member may link a table's row
+// to, newest first: GET /calls/linkable?q=<words in the title>&limit=<n>.
+func LinkableCalls(w http.ResponseWriter, r *http.Request) {
+	userInfo, ok := signedIn(w, r)
+	if !ok {
+		return
+	}
+	limit := helpers.SizeParam(r.URL.Query(), "limit", callStateBusiness.MaxLinkableCalls, callStateBusiness.MaxLinkableCalls)
+	calls, err := callStateBusiness.LinkableCalls(r.Context(), &userInfo, r.URL.Query().Get("q"), limit)
+	if errors.Is(err, callStateBusiness.ErrLinkableCallsRefused) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Calls to link are listed in the app."})
+		return
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/Calls/LinkableCalls failed: %+v", err)
+		helpers.WriteRetryLater(w, "The server couldn't list calls just now.")
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"calls": calls})
+}

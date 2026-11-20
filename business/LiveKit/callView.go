@@ -53,6 +53,49 @@ func parseRoomMeta(metadata string) roomMetaView {
 	return m
 }
 
+// OnNow is what a call's room has switched on now, as its metadata says: the
+// recording (who started it, and its egress once there is one) and the
+// captions switch. A consent record says what was on from here, read at the
+// moment it is written, never from what the person's request claims.
+type OnNow struct {
+	Recording RecordingView
+	// Egress is the running recording's egress id: "" while none runs, and
+	// for the seconds before a new one's id lands.
+	Egress        string
+	Transcription TranscriptionSwitch
+}
+
+// onNowOf is what a room's metadata says is on; anything unreadable is
+// nothing. Pure.
+func onNowOf(metadata string) OnNow {
+	meta := parseRoomMeta(metadata)
+	var on OnNow
+	if meta.IsRecording {
+		on.Recording = RecordingView{On: true, By: meta.RecordingStartedBy}
+		on.Egress = meta.EgressID
+	}
+	if meta.Transcription != nil {
+		on.Transcription = *meta.Transcription
+	}
+	return on
+}
+
+// ReadOnNow is what a room has on now. A room with no call, or a server with
+// no LiveKit, has nothing on.
+func ReadOnNow(ctx context.Context, roomName string) (OnNow, error) {
+	if !livekitInit.LiveKitService.Ready() {
+		return OnNow{}, nil
+	}
+	room, err := livekitInit.LiveKitService.GetRoom(ctx, roomName)
+	if errors.Is(err, livekitInit.ErrRoomNotFound) {
+		return OnNow{}, nil
+	}
+	if err != nil {
+		return OnNow{}, err
+	}
+	return onNowOf(room.Metadata), nil
+}
+
 // ReadCallView answers what is on in a room's call. withPeople lists who is in
 // it (members' green room; a guest's page gets no names). A room with no call
 // is an inactive view, not an error.
@@ -68,14 +111,8 @@ func ReadCallView(ctx context.Context, roomName string, withPeople bool) (CallVi
 	if err != nil {
 		return view, err
 	}
-	meta := parseRoomMeta(room.Metadata)
-	view.Recording = RecordingView{On: meta.IsRecording}
-	if meta.IsRecording {
-		view.Recording.By = meta.RecordingStartedBy
-	}
-	if meta.Transcription != nil {
-		view.Transcription = *meta.Transcription
-	}
+	on := onNowOf(room.Metadata)
+	view.Recording, view.Transcription = on.Recording, on.Transcription
 
 	people, err := livekitInit.LiveKitService.ConnectedParticipants(ctx, roomName)
 	if err != nil {

@@ -110,6 +110,23 @@ const MaxOpenTasks = 2000
 // member may see. Each task carries what a rule reads of it: its name,
 // status, priority, tags, due date, assignee, creator and project.
 func OpenTasks(ctx context.Context, projectUUIDs []string, dueFrom, dueTo *time.Time, perProject int) (map[string][]*dgraphStruct.DgraphTask, error) {
+	cond := dgraphStruct.TASK_OPEN_FILTER
+	if dueFrom != nil {
+		cond += fmt.Sprintf(` AND ge(task_due_date, "%s")`, dueFrom.UTC().Format(time.RFC3339))
+	}
+	if dueTo != nil {
+		cond += fmt.Sprintf(` AND le(task_due_date, "%s")`, dueTo.UTC().Format(time.RFC3339))
+	}
+	return TasksIn(ctx, projectUUIDs, cond, perProject)
+}
+
+// TasksIn is these projects' live tasks that meet cond (a condition built
+// here, such as a TaskListFilter's Clause; "" for every one), by project, in
+// one read: in each, soonest due first and those with no due date last, at
+// most perProject (and at most MaxOpenTasks). A restricted task the reader of
+// ctx may not see isn't in it (models/taskread). Each task carries its name,
+// status, priority, tags, start and due dates, assignee, creator and project.
+func TasksIn(ctx context.Context, projectUUIDs []string, cond string, perProject int) (map[string][]*dgraphStruct.DgraphTask, error) {
 	out := make(map[string][]*dgraphStruct.DgraphTask, len(projectUUIDs))
 	if len(projectUUIDs) == 0 {
 		return out, nil
@@ -125,12 +142,9 @@ func OpenTasks(ctx context.Context, projectUUIDs []string, dueFrom, dueTo *time.
 	if err != nil {
 		return nil, err
 	}
-	filter := dgraphquery.Live("task_deleted_at") + ` AND ` + dgraphStruct.TASK_OPEN_FILTER
-	if dueFrom != nil {
-		filter += fmt.Sprintf(` AND ge(task_due_date, "%s")`, dueFrom.UTC().Format(time.RFC3339))
-	}
-	if dueTo != nil {
-		filter += fmt.Sprintf(` AND le(task_due_date, "%s")`, dueTo.UTC().Format(time.RFC3339))
+	filter := dgraphquery.Live("task_deleted_at")
+	if strings.TrimSpace(cond) != "" {
+		filter += ` AND (` + cond + `)`
 	}
 	query := tr.Fill(fmt.Sprintf(`{
 		project(func: eq(project_uuid, %s)) {
@@ -143,6 +157,7 @@ func OpenTasks(ctx context.Context, projectUUIDs []string, dueFrom, dueTo *time.
 				task_custom_status_name
 				task_priority
 				task_label
+				task_start_date
 				task_due_date
 				task_assignee { user_uuid }
 				task_created_by { user_uuid }

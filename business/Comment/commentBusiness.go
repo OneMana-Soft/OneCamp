@@ -9,11 +9,11 @@ import (
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
 	domain "github.com/akashc777/OneCamp/domain/Comment"
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
-	userProjectNotificationDomain "github.com/akashc777/OneCamp/domain/UserProjectNotification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -68,7 +68,7 @@ func CreateCommentInTask(ctx context.Context, dgraphTask *dgraphStruct.DgraphTas
 // setting, who may read it, and how they're told.
 var (
 	taskCommentThread   = domain.GetDgraphTaskCommentUUIDsInfo
-	taskCommentAudience = userProjectNotificationDomain.GetTaskCommentAudience
+	taskCommentAudience = userProjectNotificationBusiness.TaskCommentAudience
 	taskCommentReaders  = taskDomain.Readers
 	taskCommentDeliver  = notificationBusiness.Deliver
 	taskCommentEmail    = notificationBusiness.DispatchTaskComment
@@ -220,7 +220,7 @@ func Addressee(task *dgraphStruct.DgraphTask) *dgraphStruct.DgraphUser {
 }
 
 // taskCommentPushedTo is who is pushed a comment on the task: those of its
-// project's people who hear of it by their setting (GetTaskCommentAudience)
+// project's people who hear of it by their setting (TaskCommentAudience)
 // and may read the task now. A setting outlives someone's place in the
 // project (taking someone off a team takes them off its projects and leaves
 // their settings), so with no answer of who may read it, nobody is pushed.

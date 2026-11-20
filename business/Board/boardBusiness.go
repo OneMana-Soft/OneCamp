@@ -8,6 +8,7 @@ import (
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Board"
+	"github.com/akashc777/OneCamp/business/Access/level"
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	resourceViewBusiness "github.com/akashc777/OneCamp/business/ResourceView"
 	domain "github.com/akashc777/OneCamp/domain/Board"
@@ -141,6 +142,11 @@ func UpdateBoard(ctx context.Context, input *adapter.InputUpdateBoard) (err erro
 	}
 	if input.ThumbnailKey != nil {
 		dgraphBoard.ThumbnailKey = *input.ThumbnailKey
+	}
+	// The editors-may-share switch (miro-32): the route let only its owner
+	// or a co-owner turn it (SettingsRefusal).
+	if input.EditorsShare != nil {
+		dgraphBoard.EditorsShare = input.EditorsShare
 	}
 	// Bump updated_at only for real edits, not for periodic thumbnail refreshes
 	// (which would otherwise constantly reorder the recents list).
@@ -301,9 +307,13 @@ func deleteBoard(ctx context.Context, boardUUID string, scratch bool) (err error
 	return
 }
 
-// UpdateBoardPermissions adds/removes collaborators. Owner only. Enforces a
-// single role per user (adding to one role removes them from the others).
-func UpdateBoardPermissions(ctx context.Context, input adapter.InputUpdateBoardPermissions, userUID string) (err error) {
+// UpdateBoardPermissions adds/removes collaborators, as the person (graph
+// uid and uuid) may (roleChangeRefusal, miro-32): the owner any role; a
+// co-owner the roles below co-owner; an editor, while the switch is on, adds
+// people only. A refusal is a Refusal. Enforces a single role per user
+// (adding to one role removes them from the others); a co-owner is an editor
+// too, so making one adds the edit role and taking edit takes co-owner.
+func UpdateBoardPermissions(ctx context.Context, input adapter.InputUpdateBoardPermissions, userUID, userUUID string) (err error) {
 	checkBoard, err := domain.GetBasicDgraphBoardByUUID(ctx, input.BoardId, userUID)
 	if err != nil {
 		return err
@@ -311,53 +321,31 @@ func UpdateBoardPermissions(ctx context.Context, input adapter.InputUpdateBoardP
 	if checkBoard == nil {
 		return errors.New("board not found")
 	}
-	if checkBoard.CreatedBy == nil || checkBoard.CreatedBy.Uid != userUID {
-		return errors.New("unauthorized: only the board owner can manage permissions")
-	}
-
-	ensureUnique := func(slice []string) []string {
-		keys := make(map[string]bool)
-		list := []string{}
-		for _, entry := range slice {
-			if _, value := keys[entry]; !value {
-				keys[entry] = true
-				list = append(list, entry)
-			}
-		}
-		return list
-	}
-
-	if len(input.AddEditors) > 0 {
-		input.RemoveViewers = append(input.RemoveViewers, input.AddEditors...)
-		input.RemoveCommenters = append(input.RemoveCommenters, input.AddEditors...)
-	}
-	if len(input.AddViewers) > 0 {
-		input.RemoveEditors = append(input.RemoveEditors, input.AddViewers...)
-		input.RemoveCommenters = append(input.RemoveCommenters, input.AddViewers...)
-	}
-	if len(input.AddCommenters) > 0 {
-		input.RemoveEditors = append(input.RemoveEditors, input.AddCommenters...)
-		input.RemoveViewers = append(input.RemoveViewers, input.AddCommenters...)
-	}
-
-	input.RemoveEditors = ensureUnique(input.RemoveEditors)
-	input.RemoveViewers = ensureUnique(input.RemoveViewers)
-	input.RemoveCommenters = ensureUnique(input.RemoveCommenters)
-
-	// Who held which role before it, so that a change taking anyone's role
-	// away, or lowering it, is made only once its audit row is written (no
-	// record, no action): the edges it deletes say nothing of who held them.
+	// Who held which role before it: what the change is judged against, and,
+	// so that a change taking anyone's role away, or lowering it, is made only
+	// once its audit row is written (no record, no action), what it records.
 	held, err := domain.GetBoardPermissions(ctx, input.BoardId)
 	if err != nil {
 		return err
 	}
-	var holders map[string]string
+	holders := map[string]string{}
 	if held != nil {
 		holders = dgraphStruct.RoleHolders(held.EditingUser, held.CommentingUser, held.ReadingUser)
+		for _, u := range held.CoOwners {
+			if u != nil && u.Uuid != "" {
+				holders[strings.ToLower(u.Uuid)] = "full"
+			}
+		}
 	}
+	if err := roleChangeRefusal(checkBoard, userUUID, holders, input); err != nil {
+		return err
+	}
+
+	input = oneRoleEach(input)
+
 	shifts := auditBusiness.RoleShifts(holders,
-		map[string][]string{"edit": input.AddEditors, "comment": input.AddCommenters, "view": input.AddViewers},
-		map[string][]string{"edit": input.RemoveEditors, "comment": input.RemoveCommenters, "view": input.RemoveViewers})
+		map[string][]string{"full": input.AddCoOwners, "edit": input.AddEditors, "comment": input.AddCommenters, "view": input.AddViewers},
+		map[string][]string{"full": input.RemoveCoOwners, "edit": input.RemoveEditors, "comment": input.RemoveCommenters, "view": input.RemoveViewers})
 	if err := auditBusiness.RecordedTaking(ctx, auditBusiness.ContextPrincipal(ctx, ""), "board.access.remove",
 		"Took away or lowered people's roles on a board", "board", input.BoardId, shifts, nil,
 		func() error { return domain.UpdateBoardPermissions(ctx, &input) }); err != nil {
@@ -368,13 +356,7 @@ func UpdateBoardPermissions(ctx context.Context, input adapter.InputUpdateBoardP
 	emitBoardShared(ctx, checkBoard, shifts)
 	// Whoever's place on it moved is authorised afresh on its live canvas:
 	// taken off it, refused; made a viewer, read-only; made an editor, editing.
-	var moved []string
-	for _, id := range ensureUnique(slices.Concat(input.RemoveEditors, input.RemoveViewers, input.RemoveCommenters)) {
-		if id != "" {
-			moved = append(moved, id)
-		}
-	}
-	if len(moved) > 0 {
+	if moved := level.Unique(slices.Concat(input.RemoveEditors, input.RemoveViewers, input.RemoveCommenters)); len(moved) > 0 {
 		collab.ReauthBoardLater(input.BoardId, moved)
 	}
 
@@ -459,28 +441,28 @@ func GetBoardList(ctx context.Context, userUID string, search string, first int,
 // comment id via a deterministic UUID, so repeated calls (edits / new replies)
 // UPSERT the same rows instead of duplicating them. Mentioned users, when any,
 // additionally get a Mention node plus a realtime activity notification.
-// Authorization mirrors the canvas write gate (own / edit / comment access).
+// This is the web's mirror of a comment written on the live canvas, which only
+// the board's editors write (CanEdit; ErrMirrorEditorsOnly for anyone else,
+// ErrBoardNotFound for whoever can't read it): a commenter's comment is
+// mirrored by CommentOnBoard.
 func SyncBoardComment(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, createdByPostgresID uuid.UUID, boardUUID string, commentID string, commentText string, mentionedUserUUIDs []string) (err error) {
+	board, err := ReadableBoard(ctx, boardUUID, createdByUser.Uid, createdByUser.Uuid)
+	if err != nil {
+		return err
+	}
+	if !CanEdit(board, createdByUser.Uuid) {
+		return ErrMirrorEditorsOnly
+	}
+	return syncBoardComment(ctx, board, createdByUser, createdByPostgresID, commentID, commentText, mentionedUserUUIDs)
+}
+
+// syncBoardComment is SyncBoardComment's mirror, for one already allowed it.
+func syncBoardComment(ctx context.Context, board *dgraphStruct.DgraphBoard, createdByUser *dgraphStruct.DgraphUser, createdByPostgresID uuid.UUID, commentID string, commentText string, mentionedUserUUIDs []string) (err error) {
+	boardUUID := board.Uuid
 	commentText = strings.TrimSpace(commentText)
 	commentID = strings.TrimSpace(commentID)
 	if commentID == "" || commentText == "" {
 		return errors.New("board_comment_id and comment_text are required")
-	}
-
-	// Authorize: the author must be able to edit or comment on the board (or own
-	// it). This mirrors the access gate the collaboration service applies before
-	// allowing canvas writes.
-	board, err := domain.GetBasicDgraphBoardByUUID(ctx, boardUUID, createdByUser.Uid)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/SyncBoardComment Failed to get board err: %+v", err)
-		return err
-	}
-	if board == nil {
-		return errors.New("board not found")
-	}
-	isOwner := board.CreatedBy != nil && board.CreatedBy.Uid == createdByUser.Uid
-	if !isOwner && board.HasEditAccess == 0 && board.HasCommentAccess == 0 {
-		return errors.New("unauthorized: no comment access to this board")
 	}
 
 	// Resolve mentioned users in ONE batch query, skipping self, blanks and
@@ -587,26 +569,31 @@ func SyncBoardComment(ctx context.Context, createdByUser *dgraphStruct.DgraphUse
 // it drops from activity) and removes the OpenSearch comment doc + embedding (so
 // it stops surfacing in global search and the AI assistant). Keyed by the same
 // deterministic UUID as the create/update path. Authorization mirrors the
-// canvas gate. Idempotent: a no-op when nothing was ever mirrored.
+// canvas gate: the board's editors (CanEdit; ErrMirrorEditorsOnly for anyone
+// else), as only they delete on the live canvas; a commenter's deletion is
+// mirrored by CommentOnBoard. Idempotent: a no-op when nothing was ever
+// mirrored.
 func DeleteBoardComment(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, boardUUID string, commentID string) (err error) {
+	if strings.TrimSpace(commentID) == "" {
+		return errors.New("board_comment_id is required")
+	}
+	board, err := ReadableBoard(ctx, boardUUID, createdByUser.Uid, createdByUser.Uuid)
+	if err != nil {
+		return err
+	}
+	if !CanEdit(board, createdByUser.Uuid) {
+		return ErrMirrorEditorsOnly
+	}
+	return unsyncBoardComment(ctx, board.Uuid, commentID)
+}
+
+// unsyncBoardComment is DeleteBoardComment's soft delete of the mirror, for
+// one already allowed it.
+func unsyncBoardComment(ctx context.Context, boardUUID string, commentID string) error {
 	commentID = strings.TrimSpace(commentID)
 	if commentID == "" {
 		return errors.New("board_comment_id is required")
 	}
-
-	board, err := domain.GetBasicDgraphBoardByUUID(ctx, boardUUID, createdByUser.Uid)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/DeleteBoardComment Failed to get board err: %+v", err)
-		return err
-	}
-	if board == nil {
-		return errors.New("board not found")
-	}
-	isOwner := board.CreatedBy != nil && board.CreatedBy.Uid == createdByUser.Uid
-	if !isOwner && board.HasEditAccess == 0 && board.HasCommentAccess == 0 {
-		return errors.New("unauthorized: no comment access to this board")
-	}
-
 	commentUUIDObj := boardCommentUUID(boardUUID, commentID)
 	commentUUID := commentUUIDObj.String()
 	now := time.Now()

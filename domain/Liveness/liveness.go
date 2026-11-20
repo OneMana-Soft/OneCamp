@@ -23,12 +23,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/lib/pq"
 )
 
@@ -36,18 +37,23 @@ import (
 // soft-deleted (false). An id it does not return does not exist.
 type Checker func(ctx context.Context, ids []string) (map[string]bool, error)
 
-// Checkers covers every content type whose rows can disappear, keyed by the
-// type names search results carry. A type not listed here is never filtered.
+// Checkers and Tables cover every content type whose rows can disappear,
+// keyed by the type names search results carry: Checkers what lives outside
+// Postgres, Tables what lives in it. A type in neither is never filtered.
 var Checkers = map[string]Checker{
-	"post":    postgres("posts"),
-	"chat":    postgres("chats"),
-	"comment": postgres("comments"),
-	"task":    postgres("tasks"),
-	"doc":     dgraphDocs,
-	// An archived project (deleted_at set) whose search entry missed the
-	// archive is dropped here, not shown: a rename once wrote the entry back
-	// to live, and the demo's retired copies turned up in searches.
-	"project": postgres("projects"),
+	"doc": dgraphDocs,
+}
+
+// Tables are the kinds kept in Postgres, by table. States checks every one
+// of them a request names in one statement (UnionQuery), each table with its
+// own deletion predicate; a kind that also has a Checker (a test's) is
+// checked by that instead.
+var Tables = map[string]string{
+	"post":    "posts",
+	"chat":    "chats",
+	"comment": "comments",
+	"task":    "tasks",
+	"project": "projects",
 }
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -61,18 +67,37 @@ func States[T any](ctx context.Context, checkers map[string]Checker, items []T, 
 	ids := make(map[string][]string)
 	for _, it := range items {
 		t, id := key(it)
-		if _, checked := checkers[t]; checked && uuidPattern.MatchString(id) {
+		if _, checked := checkers[t]; (checked || Tables[t] != "") && uuidPattern.MatchString(id) {
 			ids[t] = append(ids[t], strings.ToLower(id))
 		}
 	}
 	states := make(map[string]map[string]bool, len(ids))
+	inTables := map[string][]string{}
 	for t, list := range ids {
-		state, err := checkers[t](ctx, list)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "liveness: could not check whether %d %s results still exist, keeping them: %v", len(list), t, err)
-			continue
+		if check, own := checkers[t]; own {
+			state, err := check(ctx, list)
+			if err != nil {
+				helpers.LogErrorWithContext(ctx, "liveness: could not check whether %d %s results still exist, keeping them: %v", len(list), t, err)
+				continue
+			}
+			states[t] = state
+		} else {
+			inTables[t] = list
 		}
-		states[t] = state
+	}
+	if len(inTables) == 0 {
+		return states
+	}
+	found, err := checkTables(ctx, inTables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "liveness: could not check whether results in %d tables still exist, keeping them: %v", len(inTables), err)
+		return states
+	}
+	for t := range inTables {
+		states[t] = found[t]
+		if states[t] == nil {
+			states[t] = map[string]bool{}
+		}
 	}
 	return states
 }
@@ -101,30 +126,51 @@ func Partition[T any](items []T, key Key[T], states map[string]map[string]bool) 
 	return kept, gone
 }
 
-// postgres reads a table keyed by a uuid id with a deleted_at column. table
-// only ever comes from Checkers, never from input.
-func postgres(table string) Checker {
-	query := fmt.Sprintf(`SELECT id::text, COALESCE(deleted_at <= TIMESTAMPTZ 'epoch', TRUE) FROM %s WHERE id = ANY($1::uuid[])`, table)
-	return func(ctx context.Context, ids []string) (map[string]bool, error) {
-		if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
-			return nil, fmt.Errorf("no database connection")
-		}
-		rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, pq.Array(ids))
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		out := make(map[string]bool, len(ids))
-		for rows.Next() {
-			var id string
-			var live sql.NullBool
-			if err := rows.Scan(&id, &live); err != nil {
-				return nil, err
-			}
-			out[strings.ToLower(id)] = live.Valid && live.Bool
-		}
-		return out, rows.Err()
+// UnionQuery is one statement that says, for every table named, which of
+// its ids still have a row and whether each is live (not soft-deleted): a
+// row of (kind, id, live) per id found, each table's arm with its own = ANY
+// list (the arguments, in the order of kinds) and deletion predicate.
+func UnionQuery(kinds []string) string {
+	arms := make([]string, len(kinds))
+	for i, k := range kinds {
+		arms[i] = fmt.Sprintf(`SELECT %s::text, id::text, COALESCE(deleted_at <= TIMESTAMPTZ 'epoch', TRUE) FROM %s WHERE id = ANY($%d::uuid[])`,
+			pq.QuoteLiteral(k), pq.QuoteIdentifier(Tables[k]), i+1)
 	}
+	return strings.Join(arms, " UNION ALL ")
+}
+
+// checkTables is UnionQuery run for the ids of each kind kept in a table:
+// by kind, each found id and whether it is live.
+func checkTables(ctx context.Context, ids map[string][]string) (map[string]map[string]bool, error) {
+	kinds := make([]string, 0, len(ids))
+	for k := range ids {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	args := make([]any, len(kinds))
+	for i, k := range kinds {
+		args[i] = pq.Array(ids[k])
+	}
+	type found struct {
+		kind, id string
+		live     sql.NullBool
+	}
+	rows, err := pgexec.Query(ctx, UnionQuery(kinds), func(r pgexec.Row) (found, error) {
+		var f found
+		err := r.Scan(&f.kind, &f.id, &f.live)
+		return f, err
+	}, args...)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]map[string]bool, len(kinds))
+	for _, f := range rows {
+		if out[f.kind] == nil {
+			out[f.kind] = map[string]bool{}
+		}
+		out[f.kind][strings.ToLower(f.id)] = f.live.Valid && f.live.Bool
+	}
+	return out, nil
 }
 
 // DocQuery asks Dgraph which of ids are docs, and which of those are deleted,

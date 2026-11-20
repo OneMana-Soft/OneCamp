@@ -92,10 +92,15 @@ type Thread struct {
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
-// Person is someone as a comment shows them.
+// Person is someone as a comment shows them. A bot says so and carries the
+// name it goes by: one made before bots took their name as user_name has its
+// login handle there, and the web names it by FullName (lib/utils/
+// userDisplayName). A person is named by Name alone, the one rule.
 type Person struct {
 	UUID       string `json:"user_uuid"`
 	Name       string `json:"user_name,omitempty"`
+	FullName   string `json:"user_full_name,omitempty"`
+	IsBot      bool   `json:"is_bot,omitempty"`
 	ProfileKey string `json:"user_profile_object_key,omitempty"`
 }
 

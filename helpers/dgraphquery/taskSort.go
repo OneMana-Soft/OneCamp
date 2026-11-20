@@ -28,6 +28,18 @@ const ManualOrder = "manual"
 // manualSort is the key the app sends for it.
 const manualSort = "task_rank"
 
+// SLAOrder is the list's SLA sort, breaches soonest (business/SLA ByBreach):
+// Postgres keeps the timers, so the caller orders it as it does Manual.
+// slaSort is the key the app sends for it.
+const (
+	SLAOrder = "sla"
+	slaSort  = "task_sla"
+)
+
+// SideOrdered is whether order is one the graph can't sort by, which the
+// caller puts the tasks in itself: Manual or SLA.
+func SideOrdered(order string) bool { return order == ManualOrder || order == SLAOrder }
+
 // taskListDefaultOrder is a task list's order when it asks for none the list
 // offers: newest first.
 const taskListDefaultOrder = "orderdesc: task_created_at"
@@ -52,6 +64,10 @@ func TaskListOrder(sorting string) (string, error) {
 	for _, s := range sorts {
 		if s.ID == manualSort {
 			order = ManualOrder
+			continue
+		}
+		if s.ID == slaSort {
+			order = SLAOrder
 			continue
 		}
 		predicate, ok := taskSorts[s.ID]

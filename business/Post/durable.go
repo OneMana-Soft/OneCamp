@@ -76,8 +76,8 @@ func postEvents(kind string, post, channel uuid.UUID, actor string, imported boo
 var (
 	writeRows = writePostRowsOnce
 	writeNode = writePostNode
-	release   = outboxBusiness.Release
-	deliver   = outboxBusiness.Deliver
+	release   = outboxBusiness.ReleaseMany
+	deliver   = outboxBusiness.DeliverMany
 	takeBack  = takeBackPost
 	answered  = sentBefore
 )
@@ -115,14 +115,12 @@ func CreatePostDurably(ctx context.Context, postInfo *adapter.InputCreateOrUpdat
 		return nil, err
 	}
 
-	// 3. Its side effects.
-	for _, id := range events {
-		if err := release(ctx, id); err != nil {
-			// Held, it is the resolver's: the node is written, so it releases it.
-			helpers.LogErrorWithContext(ctx, "business/CreatePostDurably event %d of post %s wasn't released, so the drain will: %+v", id, postUUID, err)
-			continue
-		}
-		deliver(id)
+	// 3. Its side effects: its events released together, then delivered.
+	if err := release(ctx, events); err != nil {
+		// Held, they are the resolver's: the node is written, so it releases them.
+		helpers.LogErrorWithContext(ctx, "business/CreatePostDurably the events of post %s weren't released, so the drain will: %+v", postUUID, err)
+	} else {
+		deliver(events)
 	}
 	return &adapter.OutputCreatePostForPost{Uuid: postUUID.String(), PostCreated: at}, nil
 }
@@ -191,15 +189,7 @@ func writePostRows(ctx context.Context, tx *sql.Tx, postUUID, author, channel uu
 		}
 		return nil, err
 	}
-	var events []int64
-	for _, e := range postEvents(MessageCreated, postUUID, channel, authorUUID, helpers.IsBulkImport(ctx), helpers.MessageKind(ctx)) {
-		id, err := outboxBusiness.Add(cctx, tx, e)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, id)
-	}
-	return events, nil
+	return outboxBusiness.AddMany(cctx, tx, postEvents(MessageCreated, postUUID, channel, authorUUID, helpers.IsBulkImport(ctx), helpers.MessageKind(ctx)))
 }
 
 // clientIDFormat is the client ids a send is made once by: up to 64 letters,

@@ -1,6 +1,7 @@
 package Calendar
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -134,5 +135,38 @@ func TestAWeekOfRangesIsCheckedAndWalked(t *testing.T) {
 		if l := s.Start.In(london); l.Hour() == 12 || (l.Hour() == 13 && l.Minute() == 0) {
 			t.Errorf("a slot across the gap: %v", l)
 		}
+	}
+}
+
+// A page's week of its own (Tuesday mornings, Thursday afternoons) with dates
+// of their own: one Tuesday off, two Saturdays open 10 to 12, either side of
+// London's clocks going back on Sun 25 Oct 2026 (gcal-7).
+func TestFreeSlotsFollowTheWeekAndItsDates(t *testing.T) {
+	london, _ := time.LoadLocation("Europe/London")
+	var hours WorkingHours
+	if err := json.Unmarshal([]byte(`{"tz":"Europe/London",
+		"week":{"2":[{"start":"09:00","end":"12:00"}],"4":[{"start":"14:00","end":"18:00"}]},
+		"dates":{"2026-10-20":[],"2026-10-24":[{"start":"10:00","end":"12:00"}],"2026-10-31":[{"start":"10:00","end":"12:00"}]}}`), &hours); err != nil {
+		t.Fatal(err)
+	}
+	from := time.Date(2026, 10, 19, 0, 0, 0, 0, london)
+	slots := FreeSlots(nil, from, from.AddDate(0, 0, 14), hours, SlotRules{Duration: time.Hour, Step: time.Hour})
+	var got []string
+	for _, s := range slots {
+		got = append(got, s.Start.In(london).Format("Mon 02 15:04"))
+	}
+	want := []string{
+		"Thu 22 14:00", "Thu 22 15:00", "Thu 22 16:00", "Thu 22 17:00",
+		"Sat 24 10:00", "Sat 24 11:00",
+		"Tue 27 09:00", "Tue 27 10:00", "Tue 27 11:00",
+		"Thu 29 14:00", "Thu 29 15:00", "Thu 29 16:00", "Thu 29 17:00",
+		"Sat 31 10:00", "Sat 31 11:00",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("slots:\n got %v\nwant %v", got, want)
+	}
+	// The same wall clock either side of the change: 09:00 UTC in summer time, 10:00 after.
+	if a, b := slots[4].Start, slots[13].Start; a.UTC().Hour() != 9 || b.UTC().Hour() != 10 {
+		t.Errorf("Saturdays at %v and %v", a.UTC(), b.UTC())
 	}
 }

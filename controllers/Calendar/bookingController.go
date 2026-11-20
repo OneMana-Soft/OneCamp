@@ -12,7 +12,6 @@ import (
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 	customMiddleware "github.com/akashc777/OneCamp/middleware"
-	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	"github.com/go-chi/chi/v5"
@@ -26,15 +25,22 @@ import (
 func writeAvailabilityError(w http.ResponseWriter, r *http.Request, where string, err error) {
 	var ae *business.AvailabilityError
 	var busy *business.PageBusyError
+	var moved *business.MovedTooOftenError
 	switch {
 	case errors.As(err, &busy):
 		customMiddleware.WriteRateLimited(w, busy.Limit, registry.PublicReadRate, "This page is very busy right now. Wait a minute and try again.")
+	case errors.As(err, &moved):
+		customMiddleware.WriteRateLimited(w, moved.Limit, registry.BookingMoveRate, "This booking has been moved too often today. Try again tomorrow.")
 	case errors.As(err, &ae):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ae.Error()})
 	case errors.Is(err, business.ErrNoPage):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "This booking page isn't available."})
 	case errors.Is(err, business.ErrCalendarUnread):
 		helpers.WriteRetryLater(w, "Couldn't check the calendar.")
+	case errors.Is(err, business.ErrNoRoom), errors.As(err, new(*business.EventRefusal)):
+		// Rooms Find a time was asked about: unknown or retired, or the asker
+		// sees no directory.
+		writeCalendarError(w, r, where, err)
 	default:
 		helpers.WriteWriteFailure(w, r, err, "Something went wrong.", "controllers/Calendar/"+where)
 	}
@@ -68,7 +74,7 @@ func FindTime(w http.ResponseWriter, r *http.Request) {
 // GET /event/bookingPages
 func GetMyBookingPages(w http.ResponseWriter, r *http.Request) {
 	userInfo := r.Context().Value(helpers.UserInfoContextKey).(model.UserInfo)
-	pages, err := bookingModel.ListPages(userInfo.UserPostgresInfo.Id)
+	pages, err := business.MyBookingPages(r.Context(), userInfo.UserPostgresInfo.Id)
 	if err != nil {
 		writeAvailabilityError(w, r, "GetMyBookingPages", err)
 		return
@@ -81,10 +87,12 @@ func GetMyBookingPages(w http.ResponseWriter, r *http.Request) {
 func SaveMyBookingPage(w http.ResponseWriter, r *http.Request) {
 	userInfo := r.Context().Value(helpers.UserInfoContextKey).(model.UserInfo)
 	var in business.PageInput
-	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&in); err != nil {
+	// Room for ten questions of ten choices each (gcal-7 H3).
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
 		return
 	}
+	in.Owner = &userInfo.UserDgraphInfo // the session's name, for a host's invite
 	page, err := business.SaveBookingPage(r.Context(), userInfo.UserPostgresInfo.Id, in)
 	if err != nil {
 		writeAvailabilityError(w, r, "SaveMyBookingPage", err)
@@ -144,11 +152,22 @@ type publicBookInput struct {
 	Website string `json:"website"`
 }
 
+// BookBodyLimit is the most a booking's body holds, the route's and the
+// handler's alike: a name, a 1,000-character note and ten 1,000-character
+// answers, in 4-byte characters at worst (about 45 KB).
+const BookBodyLimit = 48 << 10
+
+// decodeBook reads a booking's body, up to BookBodyLimit.
+func decodeBook(body io.Reader) (in publicBookInput, err error) {
+	err = json.NewDecoder(io.LimitReader(body, BookBodyLimit)).Decode(&in)
+	return in, err
+}
+
 // BookPublicSlot books a slot for a visitor.
 // POST /public/book/{slug} {start, name, email, note, tz}
 func BookPublicSlot(w http.ResponseWriter, r *http.Request) {
-	var in publicBookInput
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&in); err != nil {
+	in, err := decodeBook(r.Body)
+	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
 		return
 	}
@@ -181,6 +200,30 @@ func CancelPublicBooking(w http.ResponseWriter, r *http.Request) {
 	view, err := business.CancelBooking(r.Context(), chi.URLParam(r, "token"))
 	if err != nil {
 		writeAvailabilityError(w, r, "CancelPublicBooking", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
+}
+
+// ReschedulePublicBooking moves a guest's booking, by its link's token, to
+// the body's start: {"start": RFC 3339}. Nothing else in the body is read, so
+// a guest never sets the title, the people or the owner. A link that can't
+// move a booking answers as a missing one (404).
+func ReschedulePublicBooking(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Start time.Time `json:"start"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
+		return
+	}
+	if in.Start.IsZero() {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Pick a time."})
+		return
+	}
+	view, err := business.RescheduleBooking(r.Context(), chi.URLParam(r, "token"), in.Start, time.Now())
+	if err != nil {
+		writeAvailabilityError(w, r, "ReschedulePublicBooking", err)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
@@ -342,4 +385,55 @@ func PersonStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	loc, twelve := business.ReaderClock(r.Context(), userInfo.UserPostgresInfo.Id)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"kind": st.Kind, "until": st.Until, "words": business.StatusWords(st, now, loc, twelve), "private": private}})
+}
+
+// GetHostingBookingPages lists the team pages the person hosts or is invited
+// to host, through their own host rows alone.
+// GET /event/bookingPages/hosting
+func GetHostingBookingPages(w http.ResponseWriter, r *http.Request) {
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	pages, err := business.HostingBookingPages(r.Context(), userInfo.UserPostgresInfo.Id)
+	if err != nil {
+		writeAvailabilityError(w, r, "GetHostingBookingPages", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": pages})
+}
+
+// AcceptBookingHost is the person accepting a team page they're invited to
+// host. POST /event/bookingPages/hosting/accept {page_id}
+func AcceptBookingHost(w http.ResponseWriter, r *http.Request) { answerBookingHost(w, r, true) }
+
+// LeaveBookingHost is the person leaving a team page they host or are
+// invited to. POST /event/bookingPages/hosting/leave {page_id}
+func LeaveBookingHost(w http.ResponseWriter, r *http.Request) { answerBookingHost(w, r, false) }
+
+// answerBookingHost changes the caller's own host row alone: any other page
+// answers as a missing one.
+func answerBookingHost(w http.ResponseWriter, r *http.Request, accept bool) {
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		PageId string `json:"page_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
+		return
+	}
+	page, err := uuid.Parse(in.PageId)
+	if err == nil {
+		err = business.AnswerBookingHost(r.Context(), page, userInfo.UserPostgresInfo.Id, accept)
+	} else {
+		err = business.ErrNoPage
+	}
+	if err != nil {
+		writeAvailabilityError(w, r, "answerBookingHost", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]bool{"ok": true}})
 }

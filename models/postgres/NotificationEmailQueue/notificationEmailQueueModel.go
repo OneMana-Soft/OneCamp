@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strconv"
+	"slices"
 	"time"
 
+	queueDomain "github.com/akashc777/OneCamp/domain/NotificationEmailQueue"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -105,11 +107,20 @@ func AtomicEnqueue(in EnqueueInput) (bool, error) {
 	return rows > 0, nil
 }
 
+// Mates is which of a claimed person's other pending rows FetchAndLockPending
+// claims with theirs: those of Kinds due within Window from now, at most Max,
+// when a claimed row is one of Kinds. The zero Mates claims none.
+type Mates struct {
+	Kinds  []string
+	Window time.Duration
+	Max    int
+}
+
 // FetchAndLockPending atomically claims up to `limit` pending rows.
 // Uses SELECT ... FOR UPDATE SKIP LOCKED so multiple workers don't fight
 // over the same rows. Items are flipped to 'processing' inside the same
 // transaction, with attempts++.
-func FetchAndLockPending(limit int) ([]*QueueItem, error) {
+func FetchAndLockPending(limit int, mates Mates) ([]*QueueItem, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout*5)
 	defer cancel()
 
@@ -126,71 +137,29 @@ func FetchAndLockPending(limit int) ([]*QueueItem, error) {
 		}
 	}()
 
-	selectQ := `
-		SELECT id, user_id, to_email, event_type, subject, html_body, text_body,
-		       cta_url, dedup_key, status, attempts, next_retry_at, error_message,
-		       metadata, created_at, updated_at
-		FROM notification_email_queue
-		WHERE status = 'pending'
-		  AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-		ORDER BY created_at ASC
-		LIMIT $1
-		FOR UPDATE SKIP LOCKED
-	`
-	rows, err := tx.QueryContext(ctx, selectQ, limit)
+	items, err := scanItems(tx.QueryContext(ctx, queueDomain.Due, limit))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/NotificationEmailQueue/FetchAndLockPending select err: %+v", err)
 		return nil, err
 	}
-
-	var items []*QueueItem
-	for rows.Next() {
-		var it QueueItem
-		var ctaURL sql.NullString
-		var metadata []byte
-		if err := rows.Scan(
-			&it.ID, &it.UserID, &it.ToEmail, &it.EventType, &it.Subject,
-			&it.HTMLBody, &it.TextBody, &ctaURL, &it.DedupKey, &it.Status,
-			&it.Attempts, &it.NextRetryAt, &it.ErrorMessage, &metadata,
-			&it.CreatedAt, &it.UpdatedAt,
-		); err != nil {
-			rows.Close()
-			helpers.LogErrorWithContext(ctx,
-				"models/NotificationEmailQueue/FetchAndLockPending scan err: %+v", err)
-			return nil, err
-		}
-		if ctaURL.Valid {
-			s := ctaURL.String
-			it.CTAURL = &s
-		}
-		it.Metadata = metadata
-		items = append(items, &it)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
 	if len(items) == 0 {
 		_ = tx.Commit()
 		committed = true
 		return nil, nil
 	}
-
-	ids := make([]any, len(items))
-	placeholders := ""
-	for i, it := range items {
-		if i > 0 {
-			placeholders += ","
+	if users := mates.of(items); len(users) > 0 {
+		more, err := scanItems(tx.QueryContext(ctx, queueDomain.WindowMates, pgexec.Array(users), pgexec.Array(mates.Kinds),
+			pgexec.Array(helpers.UUIDStrings(IDsOf(items))), fmt.Sprintf("%d seconds", int(mates.Window.Seconds())), mates.Max))
+		if err != nil {
+			helpers.LogErrorWithContext(ctx,
+				"models/NotificationEmailQueue/FetchAndLockPending window-mates err: %+v", err)
+			return nil, err
 		}
-		placeholders += "$" + strconv.Itoa(i+1)
-		ids[i] = it.ID
+		items = append(items, more...)
 	}
-	updateQ := `UPDATE notification_email_queue
-	            SET status = 'processing', attempts = attempts + 1, updated_at = NOW()
-	            WHERE id IN (` + placeholders + `)`
-	if _, err := tx.ExecContext(ctx, updateQ, ids...); err != nil {
+
+	if _, err := tx.ExecContext(ctx, queueDomain.Claim, pgexec.Array(helpers.UUIDStrings(IDsOf(items)))); err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/NotificationEmailQueue/FetchAndLockPending update err: %+v", err)
 		return nil, err
@@ -211,54 +180,93 @@ func FetchAndLockPending(limit int) ([]*QueueItem, error) {
 	return items, nil
 }
 
-// MarkSent transitions a row to terminal 'sent'.
-func MarkSent(id uuid.UUID) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
-		`UPDATE notification_email_queue SET status = 'sent', updated_at = NOW(), error_message = NULL WHERE id = $1`,
-		id)
-	return err
+// of is the people among items with a row of m's kinds: those whose
+// window-mates the claim takes too. None for the zero Mates.
+func (m Mates) of(items []*QueueItem) []string {
+	if m.Max <= 0 || len(m.Kinds) == 0 {
+		return nil
+	}
+	var users []string
+	for _, it := range items {
+		if u := it.UserID.String(); slices.Contains(m.Kinds, it.EventType) && !slices.Contains(users, u) {
+			users = append(users, u)
+		}
+	}
+	return users
 }
 
-// MarkFailed transitions a row to terminal 'failed' (max retries exhausted).
-func MarkFailed(id uuid.UUID, errMsg string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
-		`UPDATE notification_email_queue
-		 SET status = 'failed', error_message = $1, updated_at = NOW()
-		 WHERE id = $2`,
-		errMsg, id)
-	return err
+// IDsOf is items' ids. Pure.
+func IDsOf(items []*QueueItem) []uuid.UUID {
+	ids := make([]uuid.UUID, len(items))
+	for i, it := range items {
+		ids[i] = it.ID
+	}
+	return ids
 }
 
-// MarkSuppressed transitions a row to 'suppressed' — recipient is on the
-// bounce/complaint list, or recipient prefs disable the channel.
-func MarkSuppressed(id uuid.UUID, reason string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
-		`UPDATE notification_email_queue
-		 SET status = 'suppressed', error_message = $1, updated_at = NOW()
-		 WHERE id = $2`,
-		reason, id)
-	return err
+// scanItems reads the queue rows a query answered (queueDomain's columns).
+func scanItems(rows *sql.Rows, err error) ([]*QueueItem, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []*QueueItem
+	for rows.Next() {
+		var it QueueItem
+		var ctaURL sql.NullString
+		var metadata []byte
+		if err := rows.Scan(
+			&it.ID, &it.UserID, &it.ToEmail, &it.EventType, &it.Subject,
+			&it.HTMLBody, &it.TextBody, &ctaURL, &it.DedupKey, &it.Status,
+			&it.Attempts, &it.NextRetryAt, &it.ErrorMessage, &metadata,
+			&it.CreatedAt, &it.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if ctaURL.Valid {
+			s := ctaURL.String
+			it.CTAURL = &s
+		}
+		it.Metadata = metadata
+		items = append(items, &it)
+	}
+	return items, rows.Err()
 }
 
-// RetryLater pushes a row back to 'pending' with a future next_retry_at.
-func RetryLater(id uuid.UUID, errMsg string, nextRetryAt time.Time) error {
+// MarkSent closes the rows ids, one email's, as sent.
+func MarkSent(ids []uuid.UUID) error {
+	return closeRows(queueDomain.Sent, ids)
+}
+
+// MarkFailed closes the rows ids as failed (a terminal error, or retries
+// exhausted).
+func MarkFailed(ids []uuid.UUID, errMsg string) error {
+	return closeRows(queueDomain.Closed, ids, "failed", errMsg)
+}
+
+// MarkSuppressed closes the rows ids as suppressed: the recipient is on the
+// bounce/complaint list, can't be sent to, or is no longer told.
+func MarkSuppressed(ids []uuid.UUID, reason string) error {
+	return closeRows(queueDomain.Closed, ids, "suppressed", reason)
+}
+
+// RetryLater puts the rows ids back to 'pending' until nextRetryAt.
+func RetryLater(ids []uuid.UUID, errMsg string, nextRetryAt time.Time) error {
+	return closeRows(queueDomain.Later, ids, errMsg, nextRetryAt)
+}
+
+// closeRows runs q, one UPDATE, over the rows ids ($1) with args ($2 on);
+// nothing for no ids.
+func closeRows(q string, ids []uuid.UUID, args ...any) error {
+	if len(ids) == 0 {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
-		`UPDATE notification_email_queue
-		 SET status = 'pending', error_message = $1, next_retry_at = $2, updated_at = NOW()
-		 WHERE id = $3`,
-		errMsg, nextRetryAt, id)
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, q, append([]any{pgexec.Array(helpers.UUIDStrings(ids))}, args...)...)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/NotificationEmailQueue/closeRows err: %+v", err)
+	}
 	return err
 }
 

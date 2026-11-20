@@ -29,8 +29,8 @@ func TestACappedKindsRestoreNamesItsBound(t *testing.T) {
 
 // TestTheCappedKindsArePinned: the kinds whose create holds a most are a
 // project's fields, statuses, forms (and a table's own) and links, the
-// milestones each project shows, and the workspace's project statuses and
-// labels. A new kind, or a new most on one, changes this list and gives its
+// milestones each project shows, the workspace's project statuses and
+// labels, and a project's SLA rules. A new kind, or a new most on one, changes this list and gives its
 // restore its bound.
 func TestTheCappedKindsArePinned(t *testing.T) {
 	var got []string
@@ -40,7 +40,7 @@ func TestTheCappedKindsArePinned(t *testing.T) {
 		}
 	}
 	slices.Sort(got)
-	want := []string{"field", "form", "link", "milestone", "project_label", "project_status", "status"}
+	want := []string{"field", "form", "link", "milestone", "project_label", "project_status", "sla_rule", "status"}
 	if !slices.Equal(got, want) {
 		t.Errorf("the capped kinds are %v, want %v", got, want)
 	}
@@ -50,7 +50,7 @@ func TestTheCappedKindsArePinned(t *testing.T) {
 // and once each, as every other restore does, so two restores over the same
 // projects (a milestone shown in several) never wait on each other in a ring.
 func TestBoundLocksAreTakenInOneOrder(t *testing.T) {
-	got := lockOrder([]Bound{{Lock: "milestones:b"}, {Lock: "milestones:a"}, {Lock: "milestones:b"}, {Lock: "milestones:c"}})
+	got := LockKeys([]Bound{{Lock: "milestones:b"}, {Lock: "milestones:a"}, {Lock: "milestones:b"}, {Lock: "milestones:c"}})
 	if want := []string{"milestones:a", "milestones:b", "milestones:c"}; !slices.Equal(got, want) {
 		t.Errorf("lock order %v, want %v", got, want)
 	}

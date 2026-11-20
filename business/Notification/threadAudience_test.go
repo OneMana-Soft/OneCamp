@@ -26,8 +26,9 @@ func TestWhoHearsOfAThreadReply(t *testing.T) {
 		// "mention" nothing of threads it had replied in (TN-BUG-15).
 		{"all", author, true}, {"all", replied, true}, {"all", mentioned, true}, {"all", bystander, false},
 		{"mention", author, true}, {"mention", replied, true}, {"mention", mentioned, true}, {"mention", bystander, false},
-		// "block" ("Nothing") hears only what is addressed to it.
-		{"block", author, true}, {"block", replied, false}, {"block", mentioned, true}, {"block", bystander, false},
+		// "block" ("Nothing") hears nothing, not even what is addressed to it,
+		// as at the top of the conversation (NOTIF M1).
+		{"block", author, false}, {"block", replied, false}, {"block", mentioned, false}, {"block", bystander, false},
 		// Nobody outside the conversation, whatever they were to the thread
 		// (TN-BUG-2): mentioned from outside it, or removed from it since.
 		{"", author, false}, {"", replied, false}, {"", mentioned, false},
@@ -62,13 +63,13 @@ func TestAThreadReplysAudienceIsOneList(t *testing.T) {
 	got := ThreadAudience(levels, "max", "bo",
 		[]string{"ada", "dee", "gus", "fay", "max", "ada"},
 		[]string{"cy", "eve", "jonas", "bo"}, Follows{})
-	if want := []string{"bo", "ada", "dee", "cy", "eve"}; !slices.Equal(got.Told, want) {
+	if want := []string{"bo", "ada", "dee", "cy"}; !slices.Equal(got.Told, want) { // never eve or gus (Nothing)
 		t.Errorf("told %v, want %v", got.Told, want)
 	}
 	if got.Author != "bo" {
 		t.Errorf("the author told as %q", got.Author)
 	}
-	if want := []string{"cy", "eve"}; !slices.Equal(got.Mentioned, want) {
+	if want := []string{"cy"}; !slices.Equal(got.Mentioned, want) {
 		t.Errorf("the live mention item to %v, want %v (the author gets the reply item instead)", got.Mentioned, want)
 	}
 	// The author's own reply in their thread tells them nothing.

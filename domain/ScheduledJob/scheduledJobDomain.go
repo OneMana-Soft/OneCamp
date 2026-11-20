@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/akashc777/OneCamp/models/pgexec"
 	model "github.com/akashc777/OneCamp/models/postgres/ScheduledJob"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -41,4 +42,15 @@ func ListByUser(ctx context.Context, userUUID uuid.UUID, jobType string, statuse
 func CountByUser(ctx context.Context, userUUID uuid.UUID, jobType string, statuses []string) (int, error) {
 	return model.CountJobs(ctx, `SELECT count(*) FROM scheduled_jobs WHERE user_uuid = $1 AND job_type = $2 AND status = ANY($3) AND deleted_at IS NULL`,
 		[]any{userUUID, jobType, pq.Array(statuses)})
+}
+
+// CancelPendingFor cancels, softly, a user's pending jobs of one type whose
+// payload holds value under key (a booking's reminders, by its id), and says
+// how many. One UPDATE through pgexec, on the user's (user_uuid, status)
+// index.
+func CancelPendingFor(ctx context.Context, userUUID uuid.UUID, jobType, key, value string) (int, error) {
+	n, err := pgexec.Exec(ctx, `UPDATE scheduled_jobs SET status = 'cancelled', updated_at = NOW()
+		WHERE user_uuid = $1 AND status = 'pending' AND job_type = $2 AND payload->>$3 = $4 AND deleted_at IS NULL`,
+		userUUID, jobType, key, value)
+	return int(n), err
 }

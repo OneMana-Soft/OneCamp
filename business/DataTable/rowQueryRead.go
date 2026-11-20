@@ -50,6 +50,7 @@ func QueryRows(ctx context.Context, table uuid.UUID, actor Actor, spec query.Spe
 	if count {
 		qctx = rowQuery.WithCount(qctx)
 	}
+	qctx, held := rowQuery.WithHeld(qctx)
 	res, err := query.Queries.Run(qctx, who, spec, page)
 	switch {
 	case errors.Is(err, rowQuery.ErrNotFound):
@@ -63,12 +64,8 @@ func QueryRows(ctx context.Context, table uuid.UUID, actor Actor, spec query.Spe
 			ids = append(ids, id)
 		}
 	}
-	found, err := model.RowsByIDs(ctx, table, ids)
+	rows, err := windowRows(asViewer(ctx, actor), table, ids, held)
 	if err != nil {
-		return nil, errRowsUnavailable
-	}
-	rows := inOrder(found, ids) // without those deleted since they were found
-	if rows, err = readWithComputed(asViewer(ctx, actor), table, rows); err != nil {
 		return nil, err
 	}
 	w := &RowsWindow{Rows: rows, Next: res.Next, At: page.At, Summaries: res.Summaries, Groups: res.Groups}
@@ -80,4 +77,33 @@ func QueryRows(ctx context.Context, table uuid.UUID, actor Actor, spec query.Spe
 		w.Total = &total
 	}
 	return w, nil
+}
+
+// windowRows is a window's rows, ids in order, without those deleted since
+// they were found, with their computed cells worked out for the reader ctx
+// carries. With the fields Run held, the rows are read in the round trip that
+// opens the tables those fields link to; a Runner that held none has the
+// rows read, and the fields, on their own.
+func windowRows(ctx context.Context, table uuid.UUID, ids []uuid.UUID, held *rowQuery.Held) ([]*model.Row, error) {
+	if len(ids) == 0 {
+		return []*model.Row{}, nil
+	}
+	if !held.Read {
+		found, err := model.RowsByIDs(ctx, table, ids)
+		if err != nil {
+			return nil, errRowsUnavailable
+		}
+		return readWithComputed(ctx, table, inOrder(found, ids))
+	}
+	var found []*model.Row
+	var err error
+	c := planAlong(ctx, held.Fields, model.PlanRowsByIDs(ctx, table, ids, func(rows []*model.Row, e error) { found, err = rows, e }))
+	if err != nil {
+		return nil, errRowsUnavailable
+	}
+	rows := inOrder(found, ids)
+	if len(rows) > 0 {
+		c.apply(ctx, rows)
+	}
+	return rows, nil
 }

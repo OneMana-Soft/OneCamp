@@ -4,6 +4,7 @@ import (
 	"context"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	notifylevel "github.com/akashc777/OneCamp/business/NotifyLevel"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -29,6 +30,9 @@ func taskMentionNotice(actor *dgraphStruct.DgraphUser, task *dgraphStruct.Dgraph
 		Path:          "/app/task/" + task.Uuid,
 		Email:         notificationBusiness.EventTaskMention,
 		Push:          &notificationBusiness.Push{Type: firebaseInit.FIREBASE_PUSH_DATA_TYPE_TASK, ID: task.Uuid},
+		// Its email is asked again at the send: the task, and the comment
+		// when it is in one, as someone it names.
+		About: &notificationBusiness.About{Kind: notificationBusiness.AboutTask, Item: task.Uuid, Reply: commentUUID, Heard: notifylevel.Named},
 	}
 	if commentUUID != "" {
 		n.Data = map[string]string{"comment_uuid": commentUUID}

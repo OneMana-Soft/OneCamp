@@ -41,8 +41,11 @@ func newCalendarRouters(root, admin, event chi.Router) calendarRouters {
 // mountCalendarProgramme mounts every merged package of the calendar
 // programme: one line per package, in merge order, and nothing else.
 func mountCalendarProgramme(rt calendarRouters) {
-	mountCalendarEvents(rt)    // A1: the calendar's events in its one store
-	mountCalendarAnswers(rt)   // A2: answers, nudges and guests' links
-	mountCalendarReminders(rt) // A5: each person's reminders, and snoozes
-	mountCalendarRetention(rt) // governance trail H2: retention rules and holds
+	mountCalendarEvents(rt)     // A1: the calendar's events in its one store
+	mountCalendarAnswers(rt)    // A2: answers, nudges and guests' links
+	mountCalendarReminders(rt)  // A5: each person's reminders, and snoozes
+	mountCalendarRetention(rt)  // governance trail H2: retention rules and holds
+	mountCalendarFeeds(rt)      // basecamp-05: an admin's list of live links, and stopping one
+	mountCalendarSyncLedger(rt) // gcal-8 H1: an admin's ledger of every sync link, and breaking one
+	mountCalendarRooms(rt)      // gcal-6 head 1: rooms (Resource Directory)
 }

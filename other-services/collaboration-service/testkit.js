@@ -197,7 +197,8 @@ export class FakeBackend {
             const until = this.until.get(sub)
             const name = path.endsWith('/guestAuthorize') ? undefined : this.names.get(sub)
             // 'unsaid': an answer that leaves canEdit out (V-230: the relay reads that as read-only).
-            const can = level === 'unsaid' ? {} : { canEdit: level === 'edit' || level === 'full' }
+            // 'comment': a board's commenter (miro-32), canComment true and canEdit false.
+            const can = level === 'unsaid' ? {} : { canEdit: level === 'edit' || level === 'full', ...(level === 'comment' ? { canComment: true } : {}) }
             return { status: 200, data: { ...can, ...(until ? { until } : {}), ...(name ? { name } : {}) } }
         }
         if (path === '/docColab/updateDoc' || path === '/boardColab/updateBoard') this.saveAttempts++

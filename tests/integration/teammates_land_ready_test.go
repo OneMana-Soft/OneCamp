@@ -888,6 +888,7 @@ func TestAnInvitationSaysWhetherItWasEmailed(t *testing.T) {
 	)
 	old := emailService.SharedHTTPClient.Transport
 	t.Cleanup(func() { emailService.SharedHTTPClient.Transport = old })
+	emailService.LetReservedNamesThroughForTest(t)
 	emailService.SharedHTTPClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		var body map[string]any
 		raw, _ := io.ReadAll(r.Body)
@@ -901,9 +902,9 @@ func TestAnInvitationSaysWhetherItWasEmailed(t *testing.T) {
 
 	// 1. No key anywhere: the invitation is made, not emailed, and the admin
 	// is told so, with the link to send themselves.
-	answer := invite(userController.AddInvitation, "ana@outlook.com")
+	answer := invite(userController.AddInvitation, "ana@example.com")
 	if answer["email_sent"] != false || answer["email_error"] != "email isn't set up on this server" ||
-		answer["invite_link"] != linkFor("ana@outlook.com") || len(sent) != 0 {
+		answer["invite_link"] != linkFor("ana@example.com") || len(sent) != 0 {
 		t.Errorf("with no key: %v (sent %d)", answer, len(sent))
 	}
 
@@ -914,8 +915,8 @@ func TestAnInvitationSaysWhetherItWasEmailed(t *testing.T) {
 	if err := settingsBusiness.Save(settingsBusiness.SaveInput{ResendAPIKey: &key}); err != nil {
 		t.Fatal(err)
 	}
-	answer = invite(userController.AddInvitation, "ben@outlook.com")
-	if answer["email_sent"] != true || answer["email_error"] != "" || answer["invite_link"] != linkFor("ben@outlook.com") {
+	answer = invite(userController.AddInvitation, "ben@example.com")
+	if answer["email_sent"] != true || answer["email_error"] != "" || answer["invite_link"] != linkFor("ben@example.com") {
 		t.Errorf("with a key saved in Admin: %v", answer)
 	}
 	if len(sent) != 1 || keys[0] != "Bearer re_saved_in_admin" {
@@ -927,7 +928,7 @@ func TestAnInvitationSaysWhetherItWasEmailed(t *testing.T) {
 		t.Errorf("from %v, reply to %v, subject %v", email["from"], email["reply_to"], email["subject"])
 	}
 	if html := fmt.Sprint(email["html"]); !strings.Contains(html, "Owner invited you to join them at team.example.test.") ||
-		!strings.Contains(html, linkFor("ben@outlook.com")) {
+		!strings.Contains(html, linkFor("ben@example.com")) {
 		t.Errorf("the email does not say who and where, or lacks the link: %s", html)
 	}
 
@@ -939,8 +940,8 @@ func TestAnInvitationSaysWhetherItWasEmailed(t *testing.T) {
 	mu.Lock()
 	status, response = http.StatusForbidden, `{"name":"validation_error","message":"The acme.example domain is not verified."}`
 	mu.Unlock()
-	answer = invite(userController.AddInvitation, "cam@outlook.com")
-	if answer["email_sent"] != false || answer["invite_link"] != linkFor("cam@outlook.com") ||
+	answer = invite(userController.AddInvitation, "cam@example.com")
+	if answer["email_sent"] != false || answer["invite_link"] != linkFor("cam@example.com") ||
 		answer["email_error"] != "the email provider refused it (The acme.example domain is not verified)" {
 		t.Errorf("a refused email: %v", answer)
 	}
@@ -952,21 +953,21 @@ func TestAnInvitationSaysWhetherItWasEmailed(t *testing.T) {
 	mu.Lock()
 	status, response = http.StatusOK, `{"id":"em_2"}`
 	mu.Unlock()
-	before := linkFor("cam@outlook.com")
-	answer = invite(userController.ResendInvitation, "cam@outlook.com")
-	if answer["email_sent"] != true || answer["invite_link"] == before || answer["invite_link"] != linkFor("cam@outlook.com") {
+	before := linkFor("cam@example.com")
+	answer = invite(userController.ResendInvitation, "cam@example.com")
+	if answer["email_sent"] != true || answer["invite_link"] == before || answer["invite_link"] != linkFor("cam@example.com") {
 		t.Errorf("sending again: %v", answer)
 	}
 
 	// 5. The sign-up page says who invited them, and to where.
-	token := strings.TrimPrefix(linkFor("cam@outlook.com"), "https://team.example.test/signup?token=")
+	token := strings.TrimPrefix(linkFor("cam@example.com"), "https://team.example.test/signup?token=")
 	rec := httptest.NewRecorder()
 	authController.ValidateInvitationToken(rec, httptest.NewRequest(http.MethodGet, "/auth/validate-token?token="+token, nil))
 	var page map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil || page["inviter_name"] != "Owner" || page["workspace"] != "team.example.test" {
 		t.Errorf("the sign-up page: %s", rec.Body.String())
 	}
-	if _, err := lr.env.PG.Exec(`UPDATE invitations SET token_expires_at = NOW() - interval '1 hour' WHERE email = 'cam@outlook.com'`); err != nil {
+	if _, err := lr.env.PG.Exec(`UPDATE invitations SET token_expires_at = NOW() - interval '1 hour' WHERE email = 'cam@example.com'`); err != nil {
 		t.Fatal(err)
 	}
 	rec = httptest.NewRecorder()

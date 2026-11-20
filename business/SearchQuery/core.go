@@ -38,6 +38,7 @@ var kindChoices = []Choice{
 	{Value: "board", Synonyms: []string{"boards", "whiteboard", "whiteboards"}, Label: "Boards"},
 	{Value: "event", Synonyms: []string{"events", "meeting", "meetings", "calendar"}, Label: "Events"},
 	{Value: "team", Synonyms: []string{"teams"}, Label: "Teams"},
+	{Value: "transcript", Synonyms: []string{"transcripts", "call", "calls"}, Label: "Transcripts"},
 }
 
 func init() { registerCore(Fields) }
@@ -76,6 +77,9 @@ var (
 			return "", false, false, nil
 		}
 		u, err := userDomain.GetActiveUserByUUID(ctx, uid)
+		if errors.Is(err, helpers.ErrNotFound) {
+			return "", false, false, nil
+		}
 		if err != nil || u == nil {
 			return "", false, false, err
 		}

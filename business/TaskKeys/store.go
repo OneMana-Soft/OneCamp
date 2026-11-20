@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync"
 
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	model "github.com/akashc777/OneCamp/models/postgres/TaskKey"
 	"github.com/google/uuid"
 )
@@ -30,6 +32,7 @@ var (
 	resolve       = model.Resolve
 	keepAliases   = model.KeepAliases
 	factsFor      = model.FactsFor
+	factsRead     = model.FactsRead
 	projectKeys   = model.ProjectKeys
 )
 
@@ -111,13 +114,47 @@ func Ref(ctx context.Context, raw string) (uuid.UUID, error) {
 	return Resolve(ctx, raw)
 }
 
+// Layer lays more of a task's Postgres values over the tasks Lay lays (each
+// with a task id, a stub for a task the reader can't see left out): one read
+// of its own for them all, never one a task, which goes in Lay's batch with
+// the keys' read (pgexec.Planned: its Reads, then its Then lays them; a read
+// that waits on them goes in Then). A failure is its own to log; the answer
+// still goes. A package that keeps such values registers one from its init
+// (business/SLA), so TaskKeys never imports it.
+type Layer func(ctx context.Context, tasks []*dgraphStruct.DgraphTask) pgexec.Planned
+
+var (
+	layersMu sync.RWMutex
+	layers   []Layer
+)
+
+// RegisterLayer adds a layer every Lay runs, from an init.
+func RegisterLayer(l Layer) {
+	layersMu.Lock()
+	defer layersMu.Unlock()
+	layers = append(layers, l)
+}
+
+func layersNow() []Layer {
+	layersMu.RLock()
+	defer layersMu.RUnlock()
+	return layers
+}
+
 // Lay sets each task's key and type, and those of the tasks it holds (its
 // sub-tasks, its parent, what it waits on and what waits on it), from one
 // read, for an answer to the app. A task with no row, or a read that failed,
 // keeps none: the answer still goes, without keys, and the failure is logged.
 // A task the reader can't see (a stub, models/taskread) keeps none either: it
-// says only that it is there.
+// says only that it is there. Its read and every layer's go to Postgres in
+// one round trip (pgexec.Batch).
 func Lay(ctx context.Context, tasks ...*dgraphStruct.DgraphTask) {
+	pgexec.Together(ctx, Planned(ctx, tasks...))
+}
+
+// Planned is Lay for a caller that pipelines its reads with its own
+// (pgexec.Together): Lay's reads, then its laying.
+func Planned(ctx context.Context, tasks ...*dgraphStruct.DgraphTask) pgexec.Planned {
 	type read struct {
 		t  *dgraphStruct.DgraphTask
 		id uuid.UUID
@@ -149,24 +186,41 @@ func Lay(ctx context.Context, tasks ...*dgraphStruct.DgraphTask) {
 		walk(t, 0)
 	}
 	if len(ids) == 0 {
-		return
+		return pgexec.Planned{}
 	}
-	facts, err := factsFor(ctx, ids)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/TaskKeys.Lay couldn't read %d tasks' keys and types: %+v", len(ids), err)
-		return
-	}
+	shown := make([]*dgraphStruct.DgraphTask, 0, len(all))
 	for _, r := range all {
-		f, ok := facts[r.id]
-		if !ok {
-			continue
-		}
-		r.t.Key = f.Key
-		r.t.WorkType = nil
-		if f.Type != nil {
-			r.t.WorkType = &dgraphStruct.TaskWorkType{ID: f.Type.ID.String(), Builtin: f.Type.Builtin, Name: f.Type.Name, Icon: f.Type.Icon}
-		}
+		shown = append(shown, r.t)
 	}
+	var layers []pgexec.Planned
+	var reads []*pgexec.Read
+	for _, l := range layersNow() {
+		p := l(ctx, shown)
+		layers = append(layers, p)
+		reads = append(reads, p.Reads...)
+	}
+	keys, factsOf := factsRead(ids)
+	reads = append(reads, keys)
+	return pgexec.Planned{Reads: reads, Then: func() {
+		for _, p := range layers {
+			if p.Then != nil {
+				p.Then()
+			}
+		}
+		facts, err := factsOf()
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "business/TaskKeys.Lay couldn't read %d tasks' keys and types: %+v", len(ids), err)
+			return
+		}
+		for _, r := range all {
+			f, ok := facts[r.id]
+			if !ok {
+				continue
+			}
+			r.t.Key = f.Key
+			r.t.WorkType = f.Type.Shown()
+		}
+	}}
 }
 
 // LayProjects sets each project's key on an answer that lists projects (a

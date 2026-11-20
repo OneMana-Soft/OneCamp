@@ -12,8 +12,10 @@ import (
 
 	calendarSyncBusiness "github.com/akashc777/OneCamp/business/CalendarSync"
 	ICS "github.com/akashc777/OneCamp/business/ICS"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/google/uuid"
 )
 
 // liveGoogle is a Google calendar that changes: its events, a sync token
@@ -37,6 +39,9 @@ type liveGoogle struct {
 	// pullErr is Google's answer to a read of the person's own calendar, nil
 	// when it reads.
 	pullErr error
+	// down is Google's answer to a read of any calendar while it can't be
+	// reached, nil when it can.
+	down error
 }
 
 // sharedCalendar is a calendar shared with the person at Google, and its
@@ -68,7 +73,7 @@ func (*liveGoogle) Provider() string { return "google" }
 func (g *liveGoogle) Calendars(_ context.Context, l calendarSyncBusiness.Link) ([]calendarSyncBusiness.Remote, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	out := []calendarSyncBusiness.Remote{{Link: l, ID: "sam@outlook.com", Name: "sam@outlook.com", Primary: true}}
+	out := []calendarSyncBusiness.Remote{{Link: l, ID: "sam@example.com", Name: "sam@example.com", Primary: true}}
 	for _, c := range g.shared {
 		r := c.Remote
 		r.Link = l
@@ -82,6 +87,9 @@ func (g *liveGoogle) Pull(_ context.Context, cal calendarSyncBusiness.Remote, cu
 	defer g.mu.Unlock()
 	if g.revoked {
 		return nil, "", calendarSyncBusiness.ErrRevoked
+	}
+	if g.down != nil {
+		return nil, "", g.down
 	}
 	for _, c := range g.shared {
 		if c.ID == cal.ID {
@@ -203,7 +211,7 @@ func syncWithGoogle(t *testing.T, h *harness, who *model.UserInfo, g *liveGoogle
 	h.s.ledger, h.s.moveNow = ledger, true
 	prevProvider, prevAccount := syncProvider, googleAccountOf
 	syncProvider = func(string) (calendarSyncBusiness.Adapter, bool) { return g, true }
-	googleAccountOf = func(context.Context, *model.UserInfo) (string, bool, error) { return "sam@outlook.com", true, nil }
+	googleAccountOf = func(context.Context, *model.UserInfo) (string, bool, error) { return "sam@example.com", true, nil }
 	t.Cleanup(func() { syncProvider, googleAccountOf = prevProvider, prevAccount })
 	if st, err := h.s.MoveFrom(context.Background(), who, "google"); err != nil || st.State != models.SyncSynced {
 		t.Fatalf("move %+v %v", st, err)
@@ -524,7 +532,7 @@ func TestNothingIsSentToACalendarThePersonMayOnlyRead(t *testing.T) {
 	}
 	cals, _ := ledger.calendarsOf(context.Background(), ledger.links[personOf(sam).String()+"google"].ID)
 	for _, c := range cals {
-		if want := c.RemoteID != "sam@outlook.com"; c.ReadOnly != want {
+		if want := c.RemoteID != "sam@example.com"; c.ReadOnly != want {
 			t.Errorf("%s read-only %v, want %v", c.RemoteID, c.ReadOnly, want)
 		}
 	}
@@ -708,7 +716,7 @@ func TestAWholeReadWhosePrivacyDidntLandIsReadWholeAgain(t *testing.T) {
 	if got := g.said(); len(got) != 0 {
 		t.Fatalf("sent while the whole read's privacy hadn't landed: %v", got)
 	}
-	if c := ledger.cursorOf("sam@outlook.com"); c != "" {
+	if c := ledger.cursorOf("sam@example.com"); c != "" {
 		t.Fatalf("a whole read whose privacy didn't land kept the cursor %q", c)
 	}
 
@@ -719,7 +727,7 @@ func TestAWholeReadWhosePrivacyDidntLandIsReadWholeAgain(t *testing.T) {
 	if got := g.said(); !slices.Equal(got, []string{"update Doctor, moved class=PRIVATE"}) {
 		t.Fatalf("sent %v", got)
 	}
-	if c := ledger.cursorOf("sam@outlook.com"); c == "" {
+	if c := ledger.cursorOf("sam@example.com"); c == "" {
 		t.Fatal("a whole read that landed kept no cursor")
 	}
 	sweep()
@@ -867,7 +875,7 @@ func TestAWholeReadWhoseInstancePrivacyDidntLandIsReadWholeAgain(t *testing.T) {
 	h.store.failNext = map[string]error{"update": errors.New("Postgres is down")}
 	h.store.mu.Unlock()
 	sweep()
-	if c := ledger.cursorOf("sam@outlook.com"); c != "" {
+	if c := ledger.cursorOf("sam@example.com"); c != "" {
 		t.Fatalf("a whole read whose instance privacy didn't land kept the cursor %q", c)
 	}
 	sweep()
@@ -919,5 +927,137 @@ func TestAWholeReadSendsAPrivateInstanceThoughItsSeriesChangedAtGoogle(t *testin
 	sweep()
 	if got := g.said(); len(got) != 0 {
 		t.Fatalf("an echo: %v", got)
+	}
+}
+
+// A change at Google that moves an event onto a time its room is booked is
+// refused here (room_taken): OneCamp keeps its own version and its organiser
+// is told once, through the router, when the refusal is first kept; a later
+// poll that meets the same refusal tells nobody again, and nobody else is
+// ever told.
+func TestAGoogleChangeRefusedForItsRoomTellsTheOrganiserOnce(t *testing.T) {
+	h := newHarness(t)
+	sam := h.member("Sam")
+	g := newLiveGoogle(func() time.Time { return h.clock })
+	start := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	g.put(calendarSyncBusiness.Change{ExternalID: "st", Event: ICS.Event{UID: "standup@google.com", Summary: "Standup", Start: start, End: start.Add(15 * time.Minute), Zone: "UTC"}})
+	ledger, sweep := syncWithGoogle(t, h, sam, g)
+	sweep()
+	type told struct {
+		n  notificationBusiness.Notice
+		to []notificationBusiness.NoticeRecipient
+	}
+	var notices []told
+	old := tellNotice
+	t.Cleanup(func() { tellNotice = old })
+	tellNotice = func(_ context.Context, n notificationBusiness.Notice, r []notificationBusiness.NoticeRecipient) []string {
+		notices = append(notices, told{n, r})
+		return nil
+	}
+	e := eventFromGoogle(h, "standup@google.com")
+	if e == nil {
+		t.Fatal("the standup didn't come")
+	}
+	refused := &RoomTakenError{RoomID: uuid.NewString(), Room: "Huddle", At: start.Add(2 * time.Hour), Date: "Tue 20 Oct", other: uuid.New()}
+	for poll := 1; poll <= 2; poll++ {
+		h.clock = h.clock.Add(time.Minute)
+		g.put(calendarSyncBusiness.Change{ExternalID: "st", Event: ICS.Event{UID: "standup@google.com", Summary: "Standup", Start: start.Add(2 * time.Hour), End: start.Add(2*time.Hour + 15*time.Minute), Zone: "UTC"}})
+		h.store.mu.Lock()
+		if h.store.failNext == nil {
+			h.store.failNext = map[string]error{}
+		}
+		h.store.failNext["update"] = refused
+		h.store.mu.Unlock()
+		sweep()
+		if got := eventFromGoogle(h, "standup@google.com"); got == nil || !got.StartAt.Equal(start) {
+			t.Fatalf("poll %d: OneCamp's version wasn't kept: %+v", poll, got)
+		}
+		if len(notices) != 1 {
+			t.Fatalf("poll %d: %d notices, want the organiser told once: %+v", poll, len(notices), notices)
+		}
+	}
+	n := notices[0]
+	if len(n.to) != 1 || n.to[0].UserUUID != sam.UserDgraphInfo.Uuid || n.to[0].Reason != "organiser" {
+		t.Errorf("told %+v, want the organiser alone", n.to)
+	}
+	if n.n.Kind != noticeUpdated || n.n.ResourceUUID != e.ID.String() || !strings.Contains(n.n.Body, "Huddle") || !strings.Contains(n.n.Body, "OneCamp kept its own version") {
+		t.Errorf("notice %+v, want calendar.updated on the standup naming the room and that OneCamp kept its version", n.n)
+	}
+	if f, err := ledger.refusalsOf(context.Background(), ledger.links[personOf(sam).String()+"google"].ID, []uuid.UUID{e.ID}); err != nil || len(f) != 1 {
+		t.Errorf("the refusal kept: %+v %v, want one", f, err)
+	}
+}
+
+// One occurrence that Google moves onto a time its room is booked is refused
+// as a whole event is (CR-335 r2): OneCamp keeps its own version and the
+// organiser alone is told once per refused instance, however many polls meet
+// it: an occurrence with no row here yet (keyed on its series), and one
+// already moved here (keyed on its own row).
+func TestAGoogleMoveOfOneOccurrenceRefusedForItsRoomTellsTheOrganiserOnce(t *testing.T) {
+	h := newHarness(t)
+	sam := h.member("Sam")
+	g := newLiveGoogle(func() time.Time { return h.clock })
+	start := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
+	g.put(calendarSyncBusiness.Change{ExternalID: "st", Event: ICS.Event{UID: "standup@google.com", Summary: "Standup", Start: start, End: start.Add(15 * time.Minute), Zone: "UTC", RRule: "FREQ=DAILY;COUNT=5"}})
+	_, sweep := syncWithGoogle(t, h, sam, g)
+	sweep()
+	series := eventFromGoogle(h, "standup@google.com")
+	if series == nil {
+		t.Fatal("the standup didn't come")
+	}
+	var notices []notificationBusiness.Notice
+	var told []notificationBusiness.NoticeRecipient
+	old := tellNotice
+	t.Cleanup(func() { tellNotice = old })
+	tellNotice = func(_ context.Context, n notificationBusiness.Notice, r []notificationBusiness.NoticeRecipient) []string {
+		notices, told = append(notices, n), append(told, r...)
+		return nil
+	}
+	move := func(rid time.Time, by time.Duration, failing string) {
+		h.clock = h.clock.Add(time.Minute)
+		at := rid.Add(by)
+		g.put(calendarSyncBusiness.Change{ExternalID: "st_" + rid.Format("20060102T150405Z"), SeriesID: "st", Event: ICS.Event{UID: "standup@google.com", RecurrenceID: &rid, Summary: "Standup", Start: at, End: at.Add(15 * time.Minute), Zone: "UTC"}})
+		if failing != "" {
+			h.store.mu.Lock()
+			if h.store.failNext == nil {
+				h.store.failNext = map[string]error{}
+			}
+			h.store.failNext[failing] = &RoomTakenError{RoomID: uuid.NewString(), Room: "Huddle", At: at, Date: "Thu 12 Nov", other: uuid.New()}
+			h.store.mu.Unlock()
+		}
+		sweep()
+	}
+	plain := start.AddDate(0, 0, 2)
+	for poll := 1; poll <= 2; poll++ {
+		move(plain, 2*time.Hour, "apply")
+		if ov, err := h.store.overrideAt(context.Background(), series.ID, plain); err != nil || ov != nil {
+			t.Fatalf("poll %d: OneCamp's occurrence wasn't kept: %+v %v", poll, ov, err)
+		}
+		if len(notices) != 1 || notices[0].ResourceUUID != series.ID.String() {
+			t.Fatalf("poll %d: %d notices %+v, want the series' organiser told once", poll, len(notices), notices)
+		}
+	}
+	moved := start.AddDate(0, 0, 3)
+	move(moved, time.Hour, "")
+	ov, err := h.store.overrideAt(context.Background(), series.ID, moved)
+	if err != nil || ov == nil || !ov.StartAt.Equal(moved.Add(time.Hour)) {
+		t.Fatalf("Google's first move didn't come: %+v %v", ov, err)
+	}
+	for poll := 1; poll <= 2; poll++ {
+		move(moved, 3*time.Hour, "update")
+		if got, err := h.store.overrideAt(context.Background(), series.ID, moved); err != nil || got == nil || !got.StartAt.Equal(moved.Add(time.Hour)) {
+			t.Fatalf("poll %d: OneCamp's moved occurrence wasn't kept: %+v %v", poll, got, err)
+		}
+		if len(notices) != 2 || notices[1].ResourceUUID != ov.ID.String() {
+			t.Fatalf("poll %d: %d notices %+v, want the moved occurrence's organiser told once", poll, len(notices), notices)
+		}
+	}
+	for _, r := range told {
+		if r.UserUUID != sam.UserDgraphInfo.Uuid || r.Reason != "organiser" {
+			t.Errorf("told %+v, want the organiser alone", r)
+		}
+	}
+	if !strings.Contains(notices[0].Body, "Huddle") || !strings.Contains(notices[0].Body, "OneCamp kept its own version") {
+		t.Errorf("notice %+v, want it to name the room and say OneCamp kept its version", notices[0])
 	}
 }

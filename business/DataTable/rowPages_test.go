@@ -34,11 +34,11 @@ func newPageWorld(t *testing.T) *pageWorld {
 	w := &pageWorld{table: uuid.New(), row: uuid.New(), other: uuid.New(), level: accessBusiness.LevelEdit,
 		pages: map[uuid.UUID]uuid.UUID{}, docs: map[string]*dgraphStruct.DgraphDoc{}}
 	oldDecide, oldHomes, oldTitles := decideRow, rowHomes, rowTitlesOf
-	oldPages, oldTablePages, oldEnsure, oldHosted := pagesOfRows, pagesOfTable, ensureRowPage, ensureHostedDoc
+	oldPages, oldTablePages, oldEnsure, oldHosted := pagesOfRows, pagesOfTables, ensureRowPage, ensureHostedDoc
 	oldDoc, oldChanged, oldPublish := pageDocOf, hostsChanged, publishPage
 	t.Cleanup(func() {
 		decideRow, rowHomes, rowTitlesOf = oldDecide, oldHomes, oldTitles
-		pagesOfRows, pagesOfTable, ensureRowPage, ensureHostedDoc = oldPages, oldTablePages, oldEnsure, oldHosted
+		pagesOfRows, pagesOfTables, ensureRowPage, ensureHostedDoc = oldPages, oldTablePages, oldEnsure, oldHosted
 		pageDocOf, hostsChanged, publishPage = oldDoc, oldChanged, oldPublish
 	})
 	decideRow = func(_ context.Context, _ accessBusiness.Subject, row uuid.UUID) (accessBusiness.Decision, error) {

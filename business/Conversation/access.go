@@ -153,6 +153,7 @@ func decideGroup(participant bool) accessBusiness.Decision {
 type threadStanding struct {
 	member, manager bool
 	channel         bool // a channel's thread, whose managers moderate
+	public          bool // a public channel's, whose other readers read it
 	archived        bool
 	authorLeft      bool // a DM's or group's message whose person left
 	rootDeleted     bool
@@ -161,8 +162,14 @@ type threadStanding struct {
 // decideThread is a thread's rule. Pure.
 func decideThread(s threadStanding) accessBusiness.Decision {
 	if !s.member {
-		// Nothing, not even whether its root was deleted.
-		return accessBusiness.Decision{}
+		if !s.channel {
+			// Nothing, not even whether its root was deleted.
+			return accessBusiness.Decision{}
+		}
+		// Someone not in the channel reads its threads as they read the
+		// channel (decideChannel): a public one's, or as a manager who isn't
+		// in it, read and never reply; anyone else's, nothing at all.
+		return threadHeld(decideChannel(channelStanding{manager: s.manager, public: s.public}), s)
 	}
 	var d accessBusiness.Decision
 	switch {
@@ -177,6 +184,17 @@ func decideThread(s threadStanding) accessBusiness.Decision {
 		}
 	}
 	d.Was = d.Level
+	return threadHeld(d, s)
+}
+
+// threadHeld is d as a thread's holds leave it, whatever opened it (the
+// thread's rule, a call's invite): an archived channel's thread, or a deleted
+// root's, is read only, and says which. What opened nothing stays nothing,
+// not even whether its root was deleted. Pure.
+func threadHeld(d accessBusiness.Decision, s threadStanding) accessBusiness.Decision {
+	if d.Level == accessBusiness.LevelNone {
+		return d
+	}
 	if s.archived {
 		d = capAt(d, LevelRead)
 		d.Archived = true
@@ -243,29 +261,26 @@ func groupDecision(dm *dgraphStruct.DgraphDm) accessBusiness.Decision {
 	return decideGroup(dm.ParticipantIsMember > 0)
 }
 
-// postThreadDecision is today's rule for a channel thread, its root as read
-// for the person. Pure.
-func postThreadDecision(post *dgraphStruct.DgraphPost) accessBusiness.Decision {
-	ch := post.Channel
-	return decideThread(threadStanding{
-		member: ch.IsMember > 0, manager: ch.IsAdmin > 0, channel: true,
-		archived:    helpers.IsSoftDeleted(ch.DeletedAt),
+// postThreadStanding is a channel thread as the person stands in it, its root
+// as read for them. Pure.
+func postThreadStanding(post *dgraphStruct.DgraphPost) threadStanding {
+	ch := graphChannel(post.Channel)
+	return threadStanding{
+		member: ch.member, manager: ch.manager, public: ch.public, channel: true,
+		archived:    ch.archived,
 		rootDeleted: helpers.IsSoftDeleted(post.DeletedAt),
-	})
+	}
 }
 
-// chatThreadDecision is today's rule for a DM's or group's thread: its
-// participants reply, unless either person of the message has left; a deleted
-// root's thread is read only. Pure.
-func chatThreadDecision(chat *dgraphStruct.DgraphChat) accessBusiness.Decision {
-	if chat.DM == nil {
-		return accessBusiness.Decision{}
-	}
-	return decideThread(threadStanding{
+// chatThreadStanding is a DM's or group's thread as the person stands in it,
+// its root as read for them (decideThread: its participants reply, unless
+// either person of the message has left); chat.DM is not nil. Pure.
+func chatThreadStanding(chat *dgraphStruct.DgraphChat) threadStanding {
+	return threadStanding{
 		member:      chat.DM.ParticipantIsMember > 0,
 		authorLeft:  left(chat.From) || left(chat.To),
 		rootDeleted: helpers.IsSoftDeleted(chat.DeletedAt),
-	})
+	}
 }
 
 // channelCallDecision is today's rule for a channel's call. Pure.
@@ -335,29 +350,22 @@ func canReceive(p models.Person, found bool) bool {
 	return found && p.Active && (!p.External || p.Bot)
 }
 
-// indexPlace is where me stands in conv by the index: whether they are in it
-// (a DM's two people always are), whether they manage it, and whether the index
-// has it at all.
-func indexPlace(ctx context.Context, me uuid.UUID, conv Ref) (member, manager, found bool, err error) {
+// indexPlace is where me stands in a DM or group, conv, by the index: whether
+// they are in it (a DM's two people always are), and whether the index has it
+// at all. A channel's standing is indexChannelStanding's.
+func indexPlace(ctx context.Context, me uuid.UUID, conv Ref) (member, found bool, err error) {
 	switch conv.Kind {
-	case KindChannel:
-		facts, err := indexChannels(ctx, me, []string{conv.ID})
-		if err != nil {
-			return false, false, false, err
-		}
-		f, ok := facts[conv.ID]
-		return f.Member, f.Manager, ok, nil
 	case KindGroup:
 		in, err := indexGroups(ctx, me, []string{conv.ID})
 		if err != nil {
-			return false, false, false, err
+			return false, false, err
 		}
 		participant, ok := in[conv.ID]
-		return participant, false, ok, nil
+		return participant, ok, nil
 	case KindDM:
-		return conv.Other(me.String()) != "", false, true, nil
+		return conv.Other(me.String()) != "", true, nil
 	}
-	return false, false, false, nil
+	return false, false, nil
 }
 
 // ------------------------------------------------------------------ channels
@@ -526,29 +534,44 @@ func (threadRules) DecideMany(ctx context.Context, who accessBusiness.Subject, i
 			return out, err
 		}
 	}
+	// Each root's holds (archived, rootDeleted), decided or not, filled once
+	// per root kind whichever source decides: what holds its thread for
+	// someone a call's invite lets in (V-1138). Nothing else of a standing is
+	// stored in it.
+	roots := map[uuid.UUID]threadStanding{}
+	// From the index, a channel post's root waits for its channel's facts,
+	// which come for every root's channel in one read after the loop.
+	type channelRoot struct {
+		id, channel string
+		s           threadStanding
+	}
+	var channelRoots []channelRoot
+	var channelIDs []string
+	channelSeen := map[string]bool{}
 	for _, id := range ids {
-		if _, err := uuid.Parse(id); err != nil || uid == "" {
+		root, err := uuid.Parse(id)
+		if err != nil || uid == "" {
 			continue
 		}
 		// A root is a channel's post or a DM's or group's message, read from
 		// the graph; who is in its conversation, from wherever decisions read.
 		post, err := postBusiness.GetDgraphPostByUUID(ctx, id, uid)
 		if err == nil && post != nil && post.Channel != nil {
-			if !index {
-				out[id] = postThreadDecision(post)
-				continue
-			}
-			s := threadStanding{
-				channel: true, archived: helpers.IsSoftDeleted(post.Channel.DeletedAt),
+			roots[root] = threadStanding{
+				archived:    helpers.IsSoftDeleted(post.Channel.DeletedAt),
 				rootDeleted: helpers.IsSoftDeleted(post.DeletedAt),
 			}
-			var found bool
-			if s.member, s.manager, found, err = indexPlace(ctx, me, Ref{Kind: KindChannel, ID: post.Channel.Uuid}); err != nil {
-				return nil, err
+			if !index {
+				out[id] = decideThread(postThreadStanding(post))
+				continue
 			}
-			if found {
-				out[id] = decideThread(s)
+			s := roots[root]
+			s.channel = true
+			if !channelSeen[post.Channel.Uuid] {
+				channelSeen[post.Channel.Uuid] = true
+				channelIDs = append(channelIDs, post.Channel.Uuid)
 			}
+			channelRoots = append(channelRoots, channelRoot{id: id, channel: post.Channel.Uuid, s: s})
 			continue
 		}
 		if err != nil && !errors.Is(err, postDgraphModels.ErrNotFound) {
@@ -564,24 +587,39 @@ func (threadRules) DecideMany(ctx context.Context, who accessBusiness.Subject, i
 		if chat == nil || chat.DM == nil {
 			continue
 		}
+		roots[root] = threadStanding{rootDeleted: helpers.IsSoftDeleted(chat.DeletedAt)}
 		if !index {
-			out[id] = chatThreadDecision(chat)
+			out[id] = decideThread(chatThreadStanding(chat))
 			continue
 		}
-		s := threadStanding{authorLeft: left(chat.From) || left(chat.To), rootDeleted: helpers.IsSoftDeleted(chat.DeletedAt)}
+		s := roots[root]
+		s.authorLeft = left(chat.From) || left(chat.To)
 		var found bool
-		if s.member, _, found, err = indexPlace(ctx, me, ChatRef(chat.DM.GroupingId)); err != nil {
+		if s.member, found, err = indexPlace(ctx, me, ChatRef(chat.DM.GroupingId)); err != nil {
 			return nil, err
 		}
 		if found {
 			out[id] = decideThread(s)
 		}
 	}
+	if len(channelIDs) > 0 {
+		facts, err := indexChannels(ctx, me, channelIDs)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range channelRoots {
+			if f, found := facts[r.channel]; found {
+				ch := indexChannelStanding(f)
+				r.s.member, r.s.manager, r.s.public = ch.member, ch.manager, ch.public
+				out[r.id] = decideThread(r.s)
+			}
+		}
+	}
 	// A live call's thread, for someone let into the call through its invite:
 	// never for someone the graph has no uid for (deactivated), whom no rule
 	// above decides either.
 	if uid != "" {
-		if err := callInvites(ctx, who, out, ids); err != nil {
+		if err := callInvites(ctx, who, out, ids, roots); err != nil {
 			return nil, err
 		}
 	}
@@ -603,24 +641,52 @@ func (callRules) DecideMany(ctx context.Context, who accessBusiness.Subject, ids
 		if err != nil || !active {
 			return out, err
 		}
+		// The rooms' channels in one read and their groups in one, whatever
+		// their number (a table's call links, the call picker's pages); a
+		// DM's room is its two people, and reads nothing (indexPlace's rule).
+		channelRooms, groupRooms := map[string][]string{}, map[string][]string{}
+		var channelIDs, groupIDs []string
 		for _, room := range ids {
 			channelID, groupingID := helpers.ClassifyRoom(room)
-			switch {
+			switch conv := ChatRef(groupingID); {
 			case channelID != "":
-				facts, err := indexChannels(ctx, me, []string{channelID})
-				if err != nil {
-					return nil, err
+				if channelRooms[channelID] == nil {
+					channelIDs = append(channelIDs, channelID)
 				}
-				if f, ok := facts[channelID]; ok {
-					out[room] = decideChannelCall(indexChannelStanding(f))
+				channelRooms[channelID] = append(channelRooms[channelID], room)
+			case groupingID == "":
+			case conv.Kind == KindDM:
+				out[room] = decideGroup(conv.Other(me.String()) != "")
+			case conv.Kind == KindGroup:
+				if groupRooms[conv.ID] == nil {
+					groupIDs = append(groupIDs, conv.ID)
 				}
-			case groupingID != "":
-				member, _, found, err := indexPlace(ctx, me, ChatRef(groupingID))
-				if err != nil {
-					return nil, err
+				groupRooms[conv.ID] = append(groupRooms[conv.ID], room)
+			}
+		}
+		if len(channelIDs) > 0 {
+			facts, err := indexChannels(ctx, me, channelIDs)
+			if err != nil {
+				return nil, err
+			}
+			for id, rooms := range channelRooms {
+				if f, ok := facts[id]; ok {
+					for _, room := range rooms {
+						out[room] = decideChannelCall(indexChannelStanding(f))
+					}
 				}
-				if found {
-					out[room] = decideGroup(member)
+			}
+		}
+		if len(groupIDs) > 0 {
+			in, err := indexGroups(ctx, me, groupIDs)
+			if err != nil {
+				return nil, err
+			}
+			for id, rooms := range groupRooms {
+				if participant, ok := in[id]; ok {
+					for _, room := range rooms {
+						out[room] = decideGroup(participant)
+					}
 				}
 			}
 		}

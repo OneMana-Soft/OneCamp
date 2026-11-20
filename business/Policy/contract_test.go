@@ -67,7 +67,7 @@ func TestTheProjectsPoliciesDefaults(t *testing.T) {
 		t.Error("team admins make projects, and guests follow the workspace, as before")
 	}
 	if Policies.BoolIn(ctx, ProjectsTriage, project) || Policies.BoolIn(ctx, ProjectsWIPHard, project) || Policies.Bool(ctx, ProjectsAITriage) {
-		t.Error("no triage, no hard limits and no AI triage yet")
+		t.Error("triage is off until a project or the workspace turns it on; no hard limits and no AI triage yet")
 	}
 	if Policies.IntIn(ctx, ProjectsAutoCloseDays, project) != 0 {
 		t.Error("nothing closes by itself yet")
@@ -79,15 +79,20 @@ func TestTheProjectsPoliciesDefaults(t *testing.T) {
 	}
 	listed := map[string]Info{}
 	for _, in := range Admin.ListAll(ctx) {
-		if strings.HasPrefix(in.Key, "projects.") {
+		if strings.HasPrefix(in.Key, "projects.") && in.Key != ProjectsSLA.Key {
 			listed[in.Key] = in
 		}
 	}
-	if len(listed) != 2 || listed[ProjectsEditWho.Key].Value != "members" || listed[ProjectsCreateWho.Key].Value != "team_admins" {
+	if len(listed) != 4 || listed[ProjectsEditWho.Key].Value != "members" || listed[ProjectsCreateWho.Key].Value != "team_admins" ||
+		listed[ProjectsTriage.Key].Value != false || listed[ProjectsTriagePriority.Key].Value != false {
 		t.Errorf("the admin's list: %+v", listed)
 	}
 	if _, err := Admin.InfoIn(ctx, ProjectsEditWho.Key, project); err != nil {
 		t.Errorf("a project's own Who can change tasks: %v", err)
+	}
+	// Each project turns its own triage on (package 9 R5a).
+	if in, err := Admin.InfoIn(ctx, ProjectsTriage.Key, project); err != nil || in.Value != false {
+		t.Errorf("a project's own triage: %+v, %v", in, err)
 	}
 	if _, err := Admin.InfoIn(ctx, ProjectsCreateWho.Key, project); err == nil {
 		t.Error("who makes projects is the workspace's, not a project's")

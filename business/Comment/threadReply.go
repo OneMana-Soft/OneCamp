@@ -151,12 +151,13 @@ func InThreadInbox(ctx context.Context, r ThreadReply, who string) bool {
 // and, to the post's author and those mentioned, the live Activity item, to
 // whom it told. When the thread can't be read, nobody is told: a missed
 // notice costs less than the reply's text in the wrong inbox. It takes its
-// time; run it on its own goroutine.
-func NotifyThreadReply(r ThreadReply) {
+// time; run it on its own goroutine, with a ctx of its own: nothing of the
+// request's but a seeded or imported reply's time (helpers.ImportTimeOnly),
+// which its deliveries are stamped at.
+func NotifyThreadReply(ctx context.Context, r ThreadReply) {
 	if r.By == nil || r.Post == nil || r.Post.PostBy == nil || r.Post.Channel == nil {
 		return
 	}
-	ctx := context.Background()
 	// The thread's index first: its latest reply, the writer and those
 	// mentioned as its people, so the Threads view has it and the plan
 	// counts who follows it now.

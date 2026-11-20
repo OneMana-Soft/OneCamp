@@ -10,12 +10,10 @@ package models
 // field's links stay until the trash is purged; nothing reads them through it.
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -39,106 +37,6 @@ type Link struct {
 type FieldLinks struct {
 	Field       uuid.UUID
 	Add, Remove []Link
-}
-
-// linkEnds is the column of data_table_links a read starts from, and the
-// one it finds: from_row to to_row, or the other way when to is set.
-func linkEnds(to bool) (at, other string) {
-	if to {
-		return "to_row", "from_row"
-	}
-	return "from_row", "to_row"
-}
-
-// CountLinks counts a relation field's links from each of rows (to them,
-// when to is set), at most upTo a row: a row with more counts upTo. Every
-// row is in the answer.
-func CountLinks(ctx context.Context, fieldId uuid.UUID, rows []uuid.UUID, upTo int, to bool) (map[uuid.UUID]int, error) {
-	out := make(map[uuid.UUID]int, len(rows))
-	if len(rows) == 0 {
-		return out, nil
-	}
-	at, _ := linkEnds(to)
-	q := `SELECT r.id, (SELECT COUNT(*) FROM (SELECT 1 FROM data_table_links l
-			WHERE l.field_id = $1 AND l.` + at + ` = r.id LIMIT $3) x)
-		FROM unnest($2::uuid[]) AS r(id)`
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	rs, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, fieldId, pq.Array(rows), upTo)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/CountLinks err: %+v", err)
-		return nil, err
-	}
-	defer rs.Close()
-	for rs.Next() {
-		var id uuid.UUID
-		var n int
-		if err := rs.Scan(&id, &n); err != nil {
-			return nil, err
-		}
-		out[id] = n
-	}
-	return out, rs.Err()
-}
-
-// LinksOf finds a relation field's links from each of rows (to them, when to
-// is set): the first limits[i] row i has, in the order they were made. It
-// returns each row's, by row.
-func LinksOf(ctx context.Context, fieldId uuid.UUID, rows []uuid.UUID, limits []int, to bool) (map[uuid.UUID][]uuid.UUID, error) {
-	out := make(map[uuid.UUID][]uuid.UUID, len(rows))
-	if len(rows) == 0 {
-		return out, nil
-	}
-	at, other := linkEnds(to)
-	// Each row's first links, by index: its others aren't read.
-	q := `SELECT r.id, x.other, x.created_at FROM unnest($2::uuid[], $3::int[]) AS r(id, k)
-		CROSS JOIN LATERAL (SELECT l.` + other + ` AS other, l.created_at FROM data_table_links l
-			WHERE l.field_id = $1 AND l.` + at + ` = r.id
-			ORDER BY l.created_at, l.` + other + ` LIMIT r.k) x`
-	k := make([]int64, len(limits))
-	for i, n := range limits {
-		k[i] = int64(n)
-	}
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	rs, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, fieldId, pq.Array(rows), pq.Array(k))
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/LinksOf err: %+v", err)
-		return nil, err
-	}
-	defer rs.Close()
-	type made struct {
-		other uuid.UUID
-		at    time.Time
-	}
-	found := map[uuid.UUID][]made{}
-	for rs.Next() {
-		var row uuid.UUID
-		var m made
-		if err := rs.Scan(&row, &m.other, &m.at); err != nil {
-			return nil, err
-		}
-		found[row] = append(found[row], m)
-	}
-	if err := rs.Err(); err != nil {
-		return nil, err
-	}
-	// Put in order here: sorting them all in the query takes longer than
-	// reading them.
-	for row, ms := range found {
-		sort.Slice(ms, func(i, j int) bool {
-			if !ms[i].at.Equal(ms[j].at) {
-				return ms[i].at.Before(ms[j].at)
-			}
-			return bytes.Compare(ms[i].other[:], ms[j].other[:]) < 0
-		})
-		ids := make([]uuid.UUID, len(ms))
-		for i, m := range ms {
-			ids[i] = m.other
-		}
-		out[row] = ids
-	}
-	return out, nil
 }
 
 // RowsIn says which of ids are rows of a table: true for one that hasn't
@@ -223,48 +121,6 @@ func emptyIfBlank(values string) string {
 		return "{}"
 	}
 	return values
-}
-
-// CellsOf returns the rows of a table among ids that haven't been deleted,
-// in no particular order, each with only its id, its cells keys, and what a
-// field worked out from the row reads (its number, when it was made and last
-// changed, and by whom).
-func CellsOf(ctx context.Context, tableId uuid.UUID, ids []uuid.UUID, keys []string) ([]*Row, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	// The row's values read once: each -> reads all of them again.
-	const q = `SELECT id, row_no, created_by, created_at, updated_at, updated_by,
-		COALESCE((SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(values) e WHERE e.key = ANY($3)), '{}'::jsonb)
-		FROM data_table_rows WHERE table_id=$1 AND id = ANY($2) AND deleted_at IS NULL`
-	// The ids go to pgx as they are: through pq.Array, pgx writes out the
-	// whole list in an error before taking it, megabytes for a batch.
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, tableId, ids, pq.Array(keys))
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/CellsOf err: %+v", err)
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]*Row, 0, len(ids))
-	for rows.Next() {
-		r := &Row{TableId: tableId}
-		var rowNo sql.NullInt64
-		var createdBy, updatedBy uuid.NullUUID
-		if err := rows.Scan(&r.Id, &rowNo, &createdBy, &r.CreatedAt, &r.UpdatedAt, &updatedBy, &r.Values); err != nil {
-			return nil, err
-		}
-		r.RowNo = rowNo.Int64
-		if createdBy.Valid {
-			r.CreatedBy = &createdBy.UUID
-		}
-		if updatedBy.Valid {
-			r.UpdatedBy = &updatedBy.UUID
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
 }
 
 // ListRowIDs returns the ids of a table's rows in the table's order, a page

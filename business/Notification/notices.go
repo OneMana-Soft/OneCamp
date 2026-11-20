@@ -76,6 +76,9 @@ type Notice struct {
 	Path string
 	// Email is the kind of email it is ("" sends none); its toggle decides.
 	Email EventType
+	// About, when set, is what its email is about, asked again at the send
+	// (Event.About).
+	About *About
 	// Push is where its push opens, for a notice about something other than
 	// a doc; nil opens the doc ResourceUUID names.
 	Push *Push
@@ -391,6 +394,7 @@ func emailNotice(ctx context.Context, n Notice, recipients []string) {
 		CTAText:       "Open in OneCamp",
 		DedupKeyParts: []string{n.DedupKey},
 		Recipients:    recipientsFromStrings(recipients),
+		About:         n.About,
 	})
 }
 

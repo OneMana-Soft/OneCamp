@@ -31,9 +31,10 @@ func TestNoDgraphQueryAsksForAPredicateNothingHolds(t *testing.T) {
 	for file, qs := range byFile {
 		vars[file] = valueVariables(qs)
 	}
+	byFunc := queriesByFunc(queries)
 	var hits []string
 	for _, q := range queries {
-		for _, name := range unknownPredicates(q.text, held, vars[q.file]) {
+		for _, name := range unknownPredicates(q.text, held, queryVariables(q, vars[q.file], byFunc)) {
 			hits = append(hits, q.file+":"+strconv.Itoa(q.line)+": "+name)
 		}
 	}
@@ -112,6 +113,64 @@ func valueVariables(queries []dgraphQuery) map[string]bool {
 		}
 	}
 	return vars
+}
+
+// queriesByFunc is the queries each function builds, by its "dir.Name".
+func queriesByFunc(queries []dgraphQuery) map[string][]dgraphQuery {
+	byFunc := map[string][]dgraphQuery{}
+	for _, q := range queries {
+		if q.fn != "" {
+			byFunc[q.fn] = append(byFunc[q.fn], q)
+		}
+	}
+	return byFunc
+}
+
+// queryVariables is the variables a query may use: its file's, and those a
+// fragment it calls defines (models/dgraph/Recording.MemberRecordingsBlock sets
+// ch_recs and dm_recs in the query that calls it, and only there).
+func queryVariables(q dgraphQuery, fileVars map[string]bool, byFunc map[string][]dgraphQuery) map[string]bool {
+	if len(q.calls) == 0 {
+		return fileVars
+	}
+	vars := make(map[string]bool, len(fileVars))
+	for v := range fileVars {
+		vars[v] = true
+	}
+	for _, c := range q.calls {
+		for v := range valueVariables(byFunc[c]) {
+			vars[v] = true
+		}
+	}
+	return vars
+}
+
+// A fragment another package builds defines its variables in the query that
+// calls it, and in no other: the guard learns them through the call, without
+// letting a query that doesn't call it use them.
+func TestAQueryKnowsTheVariablesOfTheFragmentsItCalls(t *testing.T) {
+	dir := t.TempDir()
+	src := "package p\n\nimport rec \"" + modulePath + "/domain/Recording\"\n\n" +
+		"var q = `x(func: uid(ch_recs)) { uid }` + rec.Block(`uid($u)`) + local()\n"
+	path := filepath.Join(dir, "p.go")
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found := dgraphQueriesIn(t, path)
+	if len(found) != 1 || strings.Join(found[0].calls, ",") != "domain/Recording.Block,"+filepath.Dir(found[0].file)+".local" {
+		t.Fatalf("read %+v, want the query's calls named through the file's imports and its own dir", found)
+	}
+	frag := dgraphQuery{file: "domain/Recording/r.go", fn: "domain/Recording.Block", text: "var(func: uid($u)) { ~ch_members { ch_recs as ch_recording } }"}
+	byFunc := queriesByFunc([]dgraphQuery{frag})
+	held := map[string]bool{"ch_recording": true, "ch_members": true}
+	caller := dgraphQuery{file: "domain/User/u.go", text: "x(func: uid(ch_recs)) { uid }", calls: []string{"domain/Recording.Block"}}
+	if got := unknownPredicates(caller.text, held, queryVariables(caller, nil, byFunc)); len(got) != 0 {
+		t.Errorf("the caller of the fragment is flagged for %v", got)
+	}
+	other := dgraphQuery{file: "domain/User/u.go", text: "x(func: uid(ch_recs)) { uid }", calls: []string{"domain/Recording.Other"}}
+	if got := unknownPredicates(other.text, held, queryVariables(other, nil, byFunc)); len(got) != 1 || got[0] != "ch_recs" {
+		t.Errorf("a query that doesn't call the fragment got %v, want ch_recs flagged", got)
+	}
 }
 
 // unknownPredicates is each predicate-like name in q that held lacks, sorted:

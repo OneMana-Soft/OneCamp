@@ -55,3 +55,26 @@ func TestALiveDocWithAZeroDeletionTimeIsLive(t *testing.T) {
 		t.Fatalf("a doc that does not exist read as found")
 	}
 }
+
+// TestUnionQueryChecksEveryTableOnce: the one statement has an arm for every
+// kind asked about, each on its own table with its own id list and deletion
+// predicate, so no kind's results go unchecked (H6 A1-12).
+func TestUnionQueryChecksEveryTableOnce(t *testing.T) {
+	kinds := make([]string, 0, len(Tables))
+	for k := range Tables {
+		kinds = append(kinds, k)
+	}
+	q := UnionQuery(kinds)
+	arms := strings.Split(q, " UNION ALL ")
+	if len(arms) != len(kinds) {
+		t.Fatalf("%d arms for %d kinds: %s", len(arms), len(kinds), q)
+	}
+	for i, k := range kinds {
+		arm := arms[i]
+		for _, want := range []string{"'" + k + "'", `FROM "` + Tables[k] + `"`, "ANY($" + string(rune('1'+i)) + "::uuid[])", "deleted_at <= TIMESTAMPTZ 'epoch'"} {
+			if !strings.Contains(arm, want) {
+				t.Errorf("%s's arm %q lacks %q", k, arm, want)
+			}
+		}
+	}
+}

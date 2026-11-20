@@ -18,6 +18,7 @@ import (
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	model "github.com/akashc777/OneCamp/models/postgres/TaskField"
 	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -191,7 +192,7 @@ func TestCustomFields(t *testing.T) {
 	if err := CopyValues(ctx, uuid.MustParse(t1.Uuid), uuid.MustParse(t3.Uuid), admin); err != nil {
 		t.Fatal(err)
 	}
-	copied, _, _ := model.ReadValues(ctx, []uuid.UUID{uuid.MustParse(t3.Uuid)})
+	copied, _ := readValues(ctx, uuid.MustParse(t3.Uuid))
 	var got []string
 	for id := range copied[t3.Uuid] {
 		got = append(got, id)
@@ -225,7 +226,7 @@ func TestCustomFields(t *testing.T) {
 	if v, _ := model.ValueOf(ctx, uuid.MustParse(t1.Uuid), budget.ID); v != nil {
 		t.Errorf("the deleted field's value reads: %s", v)
 	}
-	if values, _, _ := model.ReadValues(ctx, []uuid.UUID{uuid.MustParse(t1.Uuid)}); values[t1.Uuid][budget.ID.String()] != nil {
+	if values, _ := readValues(ctx, uuid.MustParse(t1.Uuid)); values[t1.Uuid][budget.ID.String()] != nil {
 		t.Errorf("the deleted field's value is listed")
 	}
 	if fields, _ := List(ctx, project); len(fields) != 4 {
@@ -293,4 +294,12 @@ func TestAddOptionsTogether(t *testing.T) {
 	if _, err := AddOptions(ctx, project, uuid.New(), []OptionInput{{Label: "x"}}); !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("another project's field: %v", err)
 	}
+}
+
+// readValues is the tasks' field values, read as a task list reads them.
+func readValues(ctx context.Context, ids ...uuid.UUID) (model.Values, error) {
+	read, values := model.ValuesRead(ids)
+	pgexec.Batch(ctx, read)
+	out, _, err := values()
+	return out, err
 }

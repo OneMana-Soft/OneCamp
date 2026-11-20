@@ -40,7 +40,7 @@ func (f *fakes) install(t *testing.T) {
 		allowFetch = old[2].(func(context.Context, string, string) (bool, int))
 		keepPicture = old[3].(func(context.Context, unfurlBusiness.Picture, uuid.UUID) (uuid.UUID, error))
 		room = old[4].(func(context.Context, uuid.UUID, string, int) error)
-		create = old[5].(func(context.Context, linkModel.Link, uuid.UUID, int) (*linkModel.Link, error))
+		create = old[5].(func(context.Context, uuid.UUID, []linkModel.Link, uuid.UUID, int) ([]linkModel.Link, error))
 		setPictures = old[6].(func(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, *uuid.UUID) error)
 	})
 	unfurl = func(_ context.Context, raw string, budget func() error) (unfurlBusiness.Card, error) {
@@ -71,13 +71,17 @@ func (f *fakes) install(t *testing.T) {
 		return uuid.New(), nil
 	}
 	room = func(context.Context, uuid.UUID, string, int) error { return f.roomErr }
-	create = func(_ context.Context, l linkModel.Link, _ uuid.UUID, most int) (*linkModel.Link, error) {
+	create = func(_ context.Context, project uuid.UUID, links []linkModel.Link, _ uuid.UUID, most int) ([]linkModel.Link, error) {
 		if most != MostLinks {
 			t.Errorf("create's cap: %d, want MostLinks", most)
 		}
+		if len(links) != 1 || links[0].ProjectUUID != project {
+			t.Fatalf("an add makes one link of its project: %+v", links)
+		}
+		l := links[0]
 		l.ID, l.CreatedAt = uuid.New(), time.Now()
 		f.made = &l
-		return &l, nil
+		return []linkModel.Link{l}, nil
 	}
 	setPictures = func(_ context.Context, _, _ uuid.UUID, icon, image *uuid.UUID) error {
 		f.icon, f.pict = icon, image

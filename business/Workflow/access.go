@@ -21,10 +21,10 @@ package business
 
 import (
 	"context"
-	"errors"
 
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	"github.com/akashc777/OneCamp/helpers"
 	workflowModel "github.com/akashc777/OneCamp/models/postgres/Workflow"
 	"github.com/google/uuid"
 )
@@ -39,9 +39,13 @@ type ownerAccess struct {
 
 var access = ownerAccess{readsChannel: channelBusiness.ReadableBy, inProject: projectBusiness.HasMember}
 
+// scopeCheck is where helpers.RefusedUnless logs a read checkScope couldn't make.
+const scopeCheck = "business/Workflow checkScope"
+
+// What checkScope refuses is the person's to change: refusals in words.
 var (
-	errScopeChannel = errors.New("choose a channel the workflow's owner can read")
-	errScopeProject = errors.New("choose a project the workflow's owner is in")
+	errScopeChannel = workflowRefused("choose a channel the workflow's owner can read")
+	errScopeProject = workflowRefused("choose a project the workflow's owner is in")
 )
 
 // allows reports whether a workflow owned by ownerUUID may act on ev: its
@@ -64,17 +68,21 @@ func (a ownerAccess) allows(ctx context.Context, ownerUUID string, ev triggerEve
 
 // checkScope refuses to save a workflow scoped to a channel its owner can't
 // read, or to moves in a project they aren't in: it would never run, and it
-// isn't theirs to name. An id that names nothing is refused the same way.
+// isn't theirs to name. An id that names nothing is refused the same way. A
+// read that failed still refuses, but as ours, logged here, not as a refusal
+// (helpers.RefusedUnless), so an install answers it 500.
 func (a ownerAccess) checkScope(ctx context.Context, ownerUUID string, channelID *uuid.UUID, triggerType string, triggerConfig map[string]interface{}) error {
 	if channelID != nil {
-		if ok, err := a.readsChannel(ctx, ownerUUID, channelID.String()); err != nil || !ok {
-			return errScopeChannel
+		ok, err := a.readsChannel(ctx, ownerUUID, channelID.String())
+		if err := helpers.RefusedUnless(ctx, scopeCheck, ok, err, errScopeChannel); err != nil {
+			return err
 		}
 	}
 	if triggerType == workflowModel.TriggerTaskStatusChanged {
 		if projectID, _ := triggerConfig["project_id"].(string); projectID != "" {
-			if ok, err := a.inProject(ctx, ownerUUID, projectID); err != nil || !ok {
-				return errScopeProject
+			ok, err := a.inProject(ctx, ownerUUID, projectID)
+			if err := helpers.RefusedUnless(ctx, scopeCheck, ok, err, errScopeProject); err != nil {
+				return err
 			}
 		}
 	}

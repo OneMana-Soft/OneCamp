@@ -7,9 +7,18 @@ import (
 	"testing"
 
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	model "github.com/akashc777/OneCamp/models/postgres/TaskKey"
 	"github.com/google/uuid"
 )
+
+// stubFacts stands f in for the keys' and types' read, alone or batched.
+func stubFacts(t *testing.T, f func(context.Context, []uuid.UUID) (map[uuid.UUID]model.Facts, error)) {
+	swap(t, &factsFor, f)
+	swap(t, &factsRead, func(ids []uuid.UUID) (*pgexec.Read, func() (map[uuid.UUID]model.Facts, error)) {
+		return nil, func() (map[uuid.UUID]model.Facts, error) { return f(context.Background(), ids) }
+	})
+}
 
 func swap[T any](t *testing.T, p *T, v T) {
 	t.Helper()
@@ -56,7 +65,7 @@ func TestEnsureReadsTheProjectsNameWhenNotGiven(t *testing.T) {
 func TestLaySetsKeysAndTypesOnEveryTaskInAnAnswer(t *testing.T) {
 	parent, task, sub, waits, unknown := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	reads := 0
-	swap(t, &factsFor, func(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
+	stubFacts(t, func(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
 		reads++
 		if len(ids) != 5 {
 			t.Errorf("read %d tasks, want 5", len(ids))
@@ -93,7 +102,7 @@ func TestLaySetsKeysAndTypesOnEveryTaskInAnAnswer(t *testing.T) {
 }
 
 func TestLayWithoutKeysWhenTheReadFails(t *testing.T) {
-	swap(t, &factsFor, func(context.Context, []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
+	stubFacts(t, func(context.Context, []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
 		return nil, errors.New("down")
 	})
 	task := &dgraphStruct.DgraphTask{Uuid: uuid.NewString()}
@@ -161,7 +170,7 @@ func TestTheSweepKeysProjectsAndNumbersTheirTasks(t *testing.T) {
 // it is given no key or type, and isn't read for one.
 func TestLayLeavesATaskTheReaderCantSeeBare(t *testing.T) {
 	task, hidden := uuid.New(), uuid.New()
-	swap(t, &factsFor, func(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
+	stubFacts(t, func(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
 		for _, id := range ids {
 			if id == hidden {
 				t.Error("a stub's key was read")
@@ -223,7 +232,7 @@ func TestASourceKeyIsOneToTenCapitalsAndDigitsStartingWithALetter(t *testing.T) 
 // be read.
 func TestAnAnswerNamesATaskByItsKey(t *testing.T) {
 	keyed, bare := uuid.New(), uuid.New()
-	swap(t, &factsFor, func(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
+	stubFacts(t, func(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
 		out := map[uuid.UUID]model.Facts{}
 		for _, id := range ids {
 			if id == keyed {
@@ -239,7 +248,7 @@ func TestAnAnswerNamesATaskByItsKey(t *testing.T) {
 	if got := Named(KeyOf(ctx, bare), `"Draft the FAQ"`); got != `"Draft the FAQ"` {
 		t.Errorf("a task without a key is named %s", got)
 	}
-	swap(t, &factsFor, func(context.Context, []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
+	stubFacts(t, func(context.Context, []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
 		return nil, errors.New("down")
 	})
 	if got := KeyOf(ctx, keyed); got != "" {
@@ -253,7 +262,7 @@ func TestAnAnswerNamesATaskByItsKey(t *testing.T) {
 func TestANoticeNamesItsTaskByKey(t *testing.T) {
 	keyed, bare, hidden := uuid.New(), uuid.New(), uuid.New()
 	reads := 0
-	swap(t, &factsFor, func(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
+	stubFacts(t, func(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
 		reads++
 		out := map[uuid.UUID]model.Facts{}
 		for _, id := range ids {
@@ -276,7 +285,7 @@ func TestANoticeNamesItsTaskByKey(t *testing.T) {
 	if one := NamedTask(ctx, keyed.String(), "Fix the login"); one != "Q4-12 Fix the login" {
 		t.Errorf("one task named %q", one)
 	}
-	swap(t, &factsFor, func(context.Context, []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
+	stubFacts(t, func(context.Context, []uuid.UUID) (map[uuid.UUID]model.Facts, error) {
 		return nil, errors.New("down")
 	})
 	if got := NamedAll(ctx, names); !reflect.DeepEqual(got, names) {

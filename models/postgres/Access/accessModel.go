@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -200,8 +201,22 @@ func scanExpiry(row interface{ Scan(...any) error }) (*Expiry, error) {
 	return &e, nil
 }
 
+// expiryWrites counts the writes to access_grant_expiry this process made
+// (ExpiryWrites). Every writer here (SetExpiry, ClearExpiry, ClearAllExpiry,
+// Ended) bumps it after its statement returned, also when it failed: a
+// failed statement may still have written.
+var expiryWrites atomic.Uint64
+
+func wroteExpiry() { expiryWrites.Add(1) }
+
+// ExpiryWrites is the generation of access_grant_expiry in this process: a
+// doc open keeps the doc grants that are due to end only while it is the
+// same as when it read them (business/Doc).
+func ExpiryWrites() uint64 { return expiryWrites.Load() }
+
 // SetExpiry records that a grant ends at a moment (replacing when it ended).
 func SetExpiry(ctx context.Context, e Expiry) error {
+	defer wroteExpiry()
 	c, cancel := timeout(ctx)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(c, `
@@ -220,6 +235,7 @@ func ClearExpiry(ctx context.Context, kind string, resources []uuid.UUID, princi
 	if len(resources) == 0 {
 		return nil
 	}
+	defer wroteExpiry()
 	c, cancel := timeout(ctx)
 	defer cancel()
 	ids := make([]string, len(resources))
@@ -242,6 +258,7 @@ func ClearAllExpiry(ctx context.Context, kind string, resources []uuid.UUID) err
 	if len(resources) == 0 {
 		return nil
 	}
+	defer wroteExpiry()
 	c, cancel := timeout(ctx)
 	defer cancel()
 	ids := make([]string, len(resources))
@@ -258,15 +275,40 @@ func ClearAllExpiry(ctx context.Context, kind string, resources []uuid.UUID) err
 
 // ListExpiry is the grants on a resource that end, soonest first.
 func ListExpiry(ctx context.Context, kind string, resource uuid.UUID) ([]*Expiry, error) {
+	on, err := ListExpiryOn(ctx, kind, []uuid.UUID{resource})
+	if err != nil {
+		return nil, err
+	}
+	return on[resource], nil
+}
+
+// ListExpiryOn is the grants on each of the resources that end, soonest
+// first, by resource, in one read.
+func ListExpiryOn(ctx context.Context, kind string, resources []uuid.UUID) (map[uuid.UUID][]*Expiry, error) {
+	out := map[uuid.UUID][]*Expiry{}
+	if len(resources) == 0 {
+		return out, nil
+	}
+	ids := make([]string, len(resources))
+	for i, r := range resources {
+		ids[i] = r.String()
+	}
 	c, cancel := timeout(ctx)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `SELECT `+expiryColumns+` FROM access_grant_expiry
-		WHERE resource_kind = $1 AND resource_uuid = $2 ORDER BY expires_at`, kind, resource)
+		WHERE resource_kind = $1 AND resource_uuid = ANY($2::uuid[]) ORDER BY expires_at`, kind, pq.Array(ids))
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/Access ListExpiry err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "models/Access ListExpiryOn err: %+v", err)
 		return nil, err
 	}
-	return scanExpiries(rows)
+	list, err := scanExpiries(rows)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range list {
+		out[e.ResourceUUID] = append(out[e.ResourceUUID], e)
+	}
+	return out, nil
 }
 
 // DueExpiry is up to limit grants that have ended by now, the oldest first.
@@ -285,6 +327,7 @@ func DueExpiry(ctx context.Context, now time.Time, limit int) ([]*Expiry, error)
 // Ended forgets an ended grant once it is taken away: only while it still
 // ends at that moment, so a grant extended meanwhile is kept.
 func Ended(ctx context.Context, e Expiry) error {
+	defer wroteExpiry()
 	c, cancel := timeout(ctx)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(c, `

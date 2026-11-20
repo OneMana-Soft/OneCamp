@@ -72,6 +72,12 @@ func GetBoardInfo(w http.ResponseWriter, r *http.Request) {
 	dgraphBoard.MqttTopic = helpers.GetMqttTopicForBoard(dgraphBoard.Uuid)
 	// Whether the board offers this reader Protect and Lift protection (miro-44).
 	dgraphBoard.CanProtect = business.CanProtect(dgraphBoard, userInfo.UserDgraphInfo.Uuid, userDomain.IsWorkspaceAdmin(ctx, userInfo.UserDgraphInfo.Uuid))
+	// What the board offers this reader of its roles (miro-32): sharing it,
+	// and its owner's and co-owners' settings.
+	dgraphBoard.CanShare = business.MayShare(dgraphBoard, userInfo.UserDgraphInfo.Uuid)
+	dgraphBoard.CanManage = business.CanManage(dgraphBoard, userInfo.UserDgraphInfo.Uuid)
+	// Whether it offers this reader the comment box (miro-32 Can comment).
+	dgraphBoard.CanComment = business.CanComment(dgraphBoard, userInfo.UserDgraphInfo.Uuid)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got boardInfo successfully!", "data": dgraphBoard})
 }
@@ -93,8 +99,10 @@ func UpdateBoard(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteReadFailure(w, r, err, "board", "controllers/UpdateBoard")
 		return
 	}
-	if boardDgraph.HasEditAccess == 0 && (boardDgraph.CreatedBy == nil || boardDgraph.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid) {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
+	// Its title is anyone's who may edit it; its general access and the
+	// editors-may-share switch its owner's and co-owners' (miro-32).
+	if err := business.SettingsRefusal(boardDgraph, userInfo.UserDgraphInfo.Uuid, input); err != nil {
+		helpers.WriteForbidden(w, err.Error())
 		return
 	}
 
@@ -106,7 +114,7 @@ func UpdateBoard(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "updated board successfully!"})
 }
 
-// DeleteBoard GET /board/deleteBoard — soft delete. Owner only.
+// DeleteBoard POST /board/deleteBoard — soft delete. Owner only (CanDelete).
 func DeleteBoard(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -122,8 +130,9 @@ func DeleteBoard(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteReadFailure(w, r, err, "board", "controllers/DeleteBoard")
 		return
 	}
-	if boardDgraph.CreatedBy == nil || boardDgraph.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
+	// Its owner's alone: never a co-owner's (miro-32, the lead's R5).
+	if !business.CanDelete(boardDgraph, userInfo.UserDgraphInfo.Uuid) {
+		helpers.WriteForbidden(w, business.ErrNotDeleter.Error())
 		return
 	}
 
@@ -207,7 +216,11 @@ func BoardCollabAuthorize(w http.ResponseWriter, r *http.Request) {
 	// name is who opens it, as their presence names them to everyone on the
 	// board (a call's guests too): a session token carries no name, so the
 	// service takes this one. Never an address (NameForGuests).
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": edit, "name": userDomain.NameForGuests(ctx, userInfo.UserPostgresInfo.Id)})
+	// canComment tells the web to offer the comment box, which writes through
+	// POST /board/comment: the live canvas stays read-only for a commenter
+	// (the collaboration service reads canEdit alone, failing closed).
+	canComment := edit || (read && !helpers.ActsThroughToken(ctx) && business.CanComment(boardDgraph, userInfo.UserDgraphInfo.Uuid))
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": edit, "canComment": canComment, "name": userDomain.NameForGuests(ctx, userInfo.UserPostgresInfo.Id)})
 }
 
 // GetBoardForCollab GET /boardColab/getBoard/{board_uuid} - internal-service
@@ -319,12 +332,18 @@ func UpdateBoardPermissions(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse boardUUID", "err": err})
 		return
 	}
-	if !helpers.AllCanonicalUUIDs(input.AddEditors, input.RemoveEditors, input.AddViewers, input.RemoveViewers, input.AddCommenters, input.RemoveCommenters) {
+	if !helpers.AllCanonicalUUIDs(input.AddEditors, input.RemoveEditors, input.AddViewers, input.RemoveViewers, input.AddCommenters, input.RemoveCommenters, input.AddCoOwners, input.RemoveCoOwners) {
 		helpers.WriteBadRequest(w, "Share the board with people by their ids.")
 		return
 	}
 
-	if err := business.UpdateBoardPermissions(ctx, input, userInfo.UserDgraphInfo.Uid); err != nil {
+	if err := business.UpdateBoardPermissions(ctx, input, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid); err != nil {
+		// Who may change which role is the board's rule, refused in words.
+		var refused business.Refusal
+		if errors.As(err, &refused) {
+			helpers.WriteForbidden(w, refused.Error())
+			return
+		}
 		// A role taken away is made only once it's recorded (no record, no action).
 		if auditBusiness.RefusedUnrecorded(w, r, err, "controllers/UpdateBoardPermissions") {
 			return
@@ -474,12 +493,75 @@ func BoardCommentMention(w http.ResponseWriter, r *http.Request) {
 
 	dgraphUser := userInfo.UserDgraphInfo
 	if err := business.SyncBoardComment(ctx, &dgraphUser, userInfo.UserPostgresInfo.Id, input.BoardId, input.CommentID, input.CommentText, input.MentionedUserUUIDs); err != nil {
+		if mirrorRefused(w, err) {
+			return
+		}
 		helpers.LogErrorWithContext(ctx, "controllers/BoardCommentMention failed err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to record board comment", "err": err.Error()})
 		return
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Success"})
+}
+
+// CommentOnBoard POST /board/comment - a comment on a board written by the
+// server (miro-32 Can comment): add a pin, reply, or delete one's own
+// message. Its owners, co-owners, editors and commenters may (403 with words
+// for anyone else who may read it, 404 for whoever can't); the comment is
+// always the caller's, whatever the body says.
+func CommentOnBoard(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	var input adapter.InputBoardComment
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		helpers.WriteRefusal(w, business.ErrCommentInput)
+		return
+	}
+	if _, err := uuid.Parse(input.BoardId); err != nil {
+		helpers.WriteBadRequest(w, "Send the board's id.")
+		return
+	}
+	if len(input.MentionedUserUUIDs) > 50 || !helpers.AllCanonicalUUIDs(input.MentionedUserUUIDs) {
+		helpers.WriteBadRequest(w, "Mention at most 50 people, each by their id.")
+		return
+	}
+	user := userInfo.UserDgraphInfo
+	answer, err := business.CommentOnBoard(ctx, input.BoardId, &user, userInfo.UserPostgresInfo.Id, business.BoardCommentRequest{
+		Action: input.Action, CommentID: input.CommentID, MessageID: input.MessageID, X: input.X, Y: input.Y,
+		Text: input.CommentText, Mentioned: input.MentionedUserUUIDs,
+	})
+	var refused business.Refusal
+	switch {
+	case err == nil:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Success", "data": answer})
+	case errors.As(err, &refused):
+		helpers.WriteForbidden(w, refused.Error())
+	case errors.Is(err, business.ErrBoardNotFound):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Board not found"})
+	case helpers.WriteRefusal(w, err):
+		// A request the board can't take (400), or a comment it no longer holds (404).
+	default:
+		helpers.LogErrorWithContext(ctx, "controllers/CommentOnBoard err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't comment just now. Try again."})
+	}
+}
+
+// mirrorRefused answers the web's mirror routes' refusals: 403 in words for
+// one who may not write the canvas, 404 for a board they can't read.
+func mirrorRefused(w http.ResponseWriter, err error) bool {
+	var refused business.Refusal
+	switch {
+	case errors.As(err, &refused):
+		helpers.WriteForbidden(w, refused.Error())
+	case errors.Is(err, business.ErrBoardNotFound):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Board not found"})
+	default:
+		return false
+	}
+	return true
 }
 
 // BoardCommentDelete removes a board comment's server-side mirror (search index
@@ -504,6 +586,9 @@ func BoardCommentDelete(w http.ResponseWriter, r *http.Request) {
 
 	dgraphUser := userInfo.UserDgraphInfo
 	if err := business.DeleteBoardComment(ctx, &dgraphUser, input.BoardId, input.CommentID); err != nil {
+		if mirrorRefused(w, err) {
+			return
+		}
 		helpers.LogErrorWithContext(ctx, "controllers/BoardCommentDelete failed err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to delete board comment", "err": err.Error()})
 		return

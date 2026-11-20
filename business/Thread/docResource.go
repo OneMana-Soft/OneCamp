@@ -225,6 +225,9 @@ func personOf(u *dgraphStruct.DgraphUser) Person {
 		return Person{}
 	}
 	p := Person{UUID: u.Uuid, Name: u.DisplayName()}
+	if u.IsBot {
+		p.IsBot, p.FullName = true, u.UserFullName
+	}
 	if u.ProfileKey != nil {
 		p.ProfileKey = *u.ProfileKey
 	}

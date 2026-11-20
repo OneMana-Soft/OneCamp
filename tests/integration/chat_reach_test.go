@@ -101,6 +101,11 @@ func newReachWorld(t *testing.T) *reachWorld {
 		if name != "scout" {
 			exec(`INSERT INTO users_fcm_token (user_id, device_id, fcm_token) VALUES ($1, 'phone', 'tok-' || $2)`, id, name)
 		}
+		if name == "jonas" {
+			// Jonas is in OneCamp: his pushes go right away here, as these
+			// tests are about who is told; chat_push_wait_test.go is the wait.
+			exec(`INSERT INTO person_preferences (user_id, key, value, updated_at) VALUES ($1, 'notify.push_delay', '0', NOW())`, id)
+		}
 		if level, in := levels[name]; in {
 			exec(`INSERT INTO users_channel_notification (user_id, channel_id, notification_type) VALUES ($1, $2, $3)`, id, w.channel, level)
 		}

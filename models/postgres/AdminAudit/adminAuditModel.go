@@ -56,7 +56,9 @@ const (
 	CategoryCalendar = "calendar"
 	// CategoryTables is who may change a table that an auditor asks about:
 	// its general level and the people granted edit on it, each change with
-	// what it was before and after (business/DataTable editAccess.go).
+	// what it was before and after (business/DataTable editAccess.go); and
+	// every export of tables, one table's or every table its reader can open,
+	// naming the tables' ids (controllers/DataTable tableExport.go).
 	CategoryTables = "tables"
 	// CategoryBoards is who a board was shared with and who lost a place on
 	// it, and every export of it (business/Board's audit sink). A private
@@ -93,9 +95,9 @@ func AllCategories() []string {
 	}
 }
 
-// auditChainLockKey is the advisory-lock key that serializes audit inserts so
+// AuditChainLockKey is the advisory-lock key that serializes audit inserts so
 // the hash chain is built in a single linear order under concurrency.
-const auditChainLockKey int64 = 472074
+const AuditChainLockKey int64 = 472074
 
 // AuditEntry mirrors a row of admin_audit_log.
 type AuditEntry struct {

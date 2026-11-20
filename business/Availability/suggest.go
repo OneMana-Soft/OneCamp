@@ -42,6 +42,8 @@ type Ask struct {
 	Earliest       time.Time
 	Zone           *time.Location
 	PerDay, Limit  int
+	// RoomsBusy is when the rooms the meeting needs are booked: never offered.
+	RoomsBusy []calendarBusiness.Interval
 }
 
 // unavailable is when a person can't meet: busy, or outside their hours.
@@ -101,6 +103,7 @@ func Rank(people []Person, ask Ask) []Suggestion {
 	for k, p := range people {
 		un[k] = unavailable{busy: calendarBusiness.MergeBusy(p.Busy), outside: outsideHours(p.Hours, ask.From, ask.To)}
 	}
+	rooms, ri := calendarBusiness.MergeBusy(ask.RoomsBusy), 0
 	start := ask.From
 	if ask.Earliest.After(start) {
 		start = ask.Earliest
@@ -125,6 +128,9 @@ func Rank(people []Person, ask Ask) []Suggestion {
 	perDay := map[string]int{}
 	for s := first; !s.Add(ask.Duration).After(ask.To); s = s.Add(step) {
 		e := s.Add(ask.Duration)
+		if clashes(rooms, &ri, s, e) {
+			continue
+		}
 		c := candidate{s: Suggestion{Start: s.UTC(), End: e.UTC()}, dayKey: s.In(zone).Format("2006-01-02")}
 		var busyNames, outsideNames []string
 		for k := range people {

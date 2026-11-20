@@ -44,6 +44,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	computedStore "github.com/akashc777/OneCamp/business/ComputedStore"
@@ -324,6 +325,17 @@ func TestComputedFieldsSortAndFilterAt100k(t *testing.T) {
 	// leg's: none, as it is what its computed twin is held to.
 	perRow := func(windows int) int64 { return int64(windows * (windowSize + 1) * entriesPerRow) }
 	measured := func(int) int64 { return math.MaxInt64 }
+	// The legs are held to the entries they read, not to the clock. A
+	// window whose walk runs past WalkBudget is answered by the one query,
+	// which reads every row, and so is every window after it, since a
+	// cursor names its plan. On a loaded machine, the first walk after the
+	// fill (its index pages cold) ran past 150 ms (V-1246), so the budget is
+	// pinned for the legs. A walk within its entries' budget takes well
+	// under a second here, even cold, and one that reads past them fails on
+	// its entries whatever its time.
+	walkBudget := rowQuery.WalkBudget
+	rowQuery.WalkBudget = 30 * time.Second
+	t.Cleanup(func() { rowQuery.WalkBudget = walkBudget })
 	// walk reads a spec's first 4 windows as who: the right rows in order,
 	// along the index, within budget, and says how many index entries they
 	// read. Each leg says what failed and the legs after it still run.
@@ -332,6 +344,7 @@ func TestComputedFieldsSortAndFilterAt100k(t *testing.T) {
 		before := readsNow(ctx, t)
 		var cursor query.Cursor
 		var got []float64
+		var plans []string
 		windows := 0
 		for ; windows < 4; windows++ {
 			res, err := query.Queries.Run(ctx, who, spec, query.Page{Size: windowSize, After: cursor})
@@ -352,6 +365,7 @@ func TestComputedFieldsSortAndFilterAt100k(t *testing.T) {
 				got = append(got, value[id])
 			}
 			cursor = res.Next
+			plans = append(plans, cursorKindOf(t, cursor))
 		}
 		after := readsNow(ctx, t)
 		if want := top(value, keep, len(got)); fmt.Sprint(got) != fmt.Sprint(want) {
@@ -361,6 +375,7 @@ func TestComputedFieldsSortAndFilterAt100k(t *testing.T) {
 			t.Errorf("%s: %d windows read a table through, %d times, %d tuples", name, windows, n, after.seqTuples-before.seqTuples)
 		}
 		n := after.indexTuples - before.indexTuples
+		t.Logf("%s: %d windows answered by %v, %d index entries", name, windows, plans, n)
 		if most := budget(windows); n > most {
 			t.Errorf("%s: %d windows read %d index entries, past the budget of %d", name, windows, n, most)
 		}

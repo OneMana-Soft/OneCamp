@@ -1,7 +1,6 @@
 # Copied code in production Go: per file, how many tokens sit in a run of 100 that is
 # also somewhere else (helpers/copiedCodeGuard_test.go). A line is debt: lift the copy into
 # one shared function and lower the line (WRITE_COPIED_CODE_BASELINE=1 rewrites this file).
-business/Board/boardBusiness.go 223
 business/Board/boardSnapshot.go 127
 business/BotPost/botPost.go 101
 business/BotPost/stream_comment.go 101
@@ -11,7 +10,6 @@ business/Connector/connectorOAuth.go 152
 business/DataSource/aggregate.go 149
 business/DataSource/dataSourceBusiness.go 248
 business/DataSource/queryplan.go 149
-business/Doc/docBusiness.go 223
 business/Doc/docSnapshot.go 127
 business/GitHub/githubBusiness.go 1004
 business/GitHub/githubSync.go 744
@@ -38,14 +36,14 @@ business/Task/taskBusiness.go 526
 business/Task/taskReactions.go 101
 controllers/Board/boardController.go 250
 controllers/Channel/channelController.go 550
-controllers/Chat/chatController.go 862
+controllers/Chat/chatController.go 340
 controllers/DataTable/dataTableController.go 230
 controllers/Doc/docController.go 646
 controllers/EntityLink/entityLinkController.go 526
 controllers/GitHub/githubController.go 323
 controllers/Import/importController.go 419
 controllers/Post/postController.go 246
-controllers/Project/projectController.go 450
+controllers/Project/projectController.go 206
 controllers/SlackImport/slackImportController.go 419
 controllers/Task/taskController.go 425
 controllers/Task/taskRecurrenceController.go 236
@@ -57,8 +55,6 @@ domain/Post/postDomain.go 240
 domain/Task/taskDomain.go 240
 domain/WhoKnows/count.go 107
 domain/WorkGraph/neighbours.go 107
-middleware/requireAuth.go 208
-middleware/requireDocColabAuth.go 208
 models/dgraph/Activity/activityModel.go 316
 models/postgres/CalendarV2/reminderModel.go 212
 models/postgres/Import/importModel.go 741

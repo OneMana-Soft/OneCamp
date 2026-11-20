@@ -136,9 +136,9 @@ func TestARoutesPolicyIsAskedAtEachRequest(t *testing.T) {
 func TestEveryPolicyIsListed(t *testing.T) {
 	r := withStore(t, &store{values: map[string]string{GuestLinkMaxDays.Key: "14"}})
 	all := r.ListAll(context.Background())
-	// Six of the docs' and projects' programmes, chat P3's three, and the
+	// Nine of the docs' and projects' programmes, chat P3's three, and the
 	// calendar's two.
-	if len(all) != len(specs) || len(all) != 11 {
+	if len(all) != len(specs) || len(all) != 14 {
 		t.Fatalf("listed %d", len(all))
 	}
 	for _, in := range all {

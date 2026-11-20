@@ -504,4 +504,113 @@ func TestDocAccessJoin(t *testing.T) {
 			t.Errorf("the demo's visitor sharing a demo doc: %d %v", a.code, a.body)
 		}
 	})
+
+	// H6 A2-2: a doc open keeps the doc grants due to end within 15 s for as
+	// long as this process wrote no grant's end since it read them. Every
+	// writer of a grant's end moves that generation (accessModels.ExpiryWrites),
+	// so the open after it reads them again: an end set, moved or removed is
+	// honoured at once. A write never reads the kept grants: it asks fresh.
+	t.Run("every writer of a grant's end refreshes what a doc open keeps", func(t *testing.T) {
+		doc := create("olu", "Ends", nil)
+		docID := uuid.MustParse(doc)
+		update("olu", map[string]any{"doc_uuid": doc, "adds": []any{user("ann", "view"), user("bea", "edit")}})
+		integration.Settle(t)
+		open := func(who string) int {
+			t.Helper()
+			return call(who, "GET", "/doc/getDocInfo/"+doc, docController.GetDocPage, nil, map[string]string{"doc_uuid": doc}).code
+		}
+		wrote := func(writer string, write func()) {
+			t.Helper()
+			before := accessModels.ExpiryWrites()
+			write()
+			if after := accessModels.ExpiryWrites(); after == before {
+				t.Errorf("%s wrote a grant's end and left ExpiryWrites at %d: a doc open would keep what it read before it", writer, before)
+			}
+		}
+		annEnded := accessModels.Expiry{ResourceKind: "doc", ResourceUUID: docID, PrincipalKind: "user", PrincipalUUID: people["ann"], Level: "view"}
+
+		t.Run("SetExpiry", func(t *testing.T) {
+			if got := open("ann"); got != 200 {
+				t.Fatalf("ann opening Ends, shared with her: %d", got)
+			}
+			until := time.Now().Add(time.Second).UTC()
+			wrote("SetExpiry (sharing until a moment)", func() {
+				update("olu", map[string]any{"doc_uuid": doc, "adds": []any{
+					map[string]any{"kind": "user", "uuid": people["ann"].String(), "level": "view", "until": until.Format(time.RFC3339Nano)}}})
+			})
+			time.Sleep(time.Until(until.Add(300 * time.Millisecond)))
+			if got := open("ann"); got != 403 {
+				t.Errorf("ann opened Ends after her grant ended, before the sweep: %d; want 403", got)
+			}
+		})
+		t.Run("ClearExpiry", func(t *testing.T) {
+			wrote("ClearExpiry (sharing again with no end)", func() { update("olu", map[string]any{"doc_uuid": doc, "adds": []any{user("ann", "edit")}}) })
+			if got := open("ann"); got != 200 {
+				t.Errorf("ann, shared with again with no end, opening Ends: %d; want 200", got)
+			}
+		})
+		t.Run("ClearAllExpiry", func(t *testing.T) {
+			annEnded.Level, annEnded.ExpiresAt = "edit", time.Now().Add(-time.Second)
+			wrote("SetExpiry (an end already passed)", func() {
+				if err := accessModels.SetExpiry(ctx, annEnded); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if got := open("ann"); got != 403 {
+				t.Errorf("ann opened Ends with her grant's end passed: %d; want 403", got)
+			}
+			wrote("ClearAllExpiry", func() {
+				if err := accessModels.ClearAllExpiry(ctx, "doc", []uuid.UUID{docID}); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if got := open("ann"); got != 200 {
+				t.Errorf("ann opening Ends once its ends were all cleared: %d; want 200", got)
+			}
+		})
+		t.Run("Ended", func(t *testing.T) {
+			annEnded.ExpiresAt = time.Now().Add(-time.Second)
+			if err := accessModels.SetExpiry(ctx, annEnded); err != nil {
+				t.Fatal(err)
+			}
+			if got := open("ann"); got != 403 {
+				t.Errorf("ann opened Ends with her grant's end passed: %d; want 403", got)
+			}
+			wrote("Ended (the sweep, EndDueGrants)", func() {
+				if err := accessBusiness.EndDueGrants(ctx); err != nil {
+					t.Fatal(err)
+				}
+			})
+			integration.Settle(t)
+			if got := open("ann"); got != 403 {
+				t.Errorf("ann opened Ends after the sweep took her grant away: %d; want 403", got)
+			}
+			if got := open("bea"); got != 200 {
+				t.Errorf("bea, whose grant has no end, opening Ends: %d; want 200", got)
+			}
+		})
+		t.Run("a write in the window reads the ended grant fresh", func(t *testing.T) {
+			look := func() int {
+				return call("bea", "POST", "/doc/look", docController.SetDocLook, map[string]any{"doc_uuid": doc, "full_width": true}, nil).code
+			}
+			if got := look(); got != 200 {
+				t.Fatalf("bea, an editor, changing Ends' look: %d", got)
+			}
+			if got := open("bea"); got != 200 {
+				t.Fatalf("bea opening Ends: %d", got)
+			}
+			// Another server instance ends bea's grant: this process wrote
+			// nothing, so what bea's open kept still says nothing is due.
+			if _, err := env.PG.Exec(`INSERT INTO access_grant_expiry (resource_kind, resource_uuid, principal_kind, principal_uuid, level, expires_at)
+				VALUES ('doc', $1, 'user', $2, 'edit', NOW() - interval '1 second')`, docID, people["bea"]); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_, _ = env.PG.Exec(`DELETE FROM access_grant_expiry WHERE resource_uuid = $1 AND principal_uuid = $2`, docID, people["bea"])
+			})
+			if got := look(); got == 200 {
+				t.Errorf("bea changed Ends' look in the window after her grant ended: %d; want refused", got)
+			}
+		})
+	})
 }

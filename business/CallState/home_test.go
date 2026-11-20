@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
+	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
+	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	model "github.com/akashc777/OneCamp/models/postgres/CallState"
 	"github.com/google/uuid"
 )
@@ -64,5 +68,36 @@ func TestACallsArtefactsLandWhereItsHomeIs(t *testing.T) {
 	meetingOf = func(context.Context, string) (*model.Meeting, error) { return nil, down }
 	if got, err := HomeOf(context.Background(), "meet-"+eventMeeting); !errors.Is(err, down) {
 		t.Errorf("a meeting that can't be read has home %+v, %v; want its error", got, err)
+	}
+}
+
+// A call with no start (a transcript-only node the boot repair ended, which
+// writes none) is the instance's it ended in: listed, played and read there,
+// and on no other instance (V-1061).
+func TestACallWithNoStartIsTheInstancesItEndedIn(t *testing.T) {
+	ctx := context.Background()
+	series := uuid.New()
+	from := time.Date(2026, 11, 13, 8, 45, 0, 0, time.UTC)
+	keys := calendarBusiness.CallKeys{Events: []uuid.UUID{series}, Span: &calendarBusiness.CallSpan{From: from, To: from.AddDate(0, 0, 1)}}
+	in, after := from.Add(40*time.Minute), from.AddDate(0, 0, 1).Add(40*time.Minute)
+	was := eventCallArtefacts
+	t.Cleanup(func() { eventCallArtefacts = was })
+	eventCallArtefacts = func(context.Context, []uuid.UUID, time.Time, time.Time) ([]recordingDomain.CallArtefact, error) {
+		return []recordingDomain.CallArtefact{{Key: "ended-in", EndedAt: &in}, {Key: "ended-after", EndedAt: &after}}, nil
+	}
+	calls, err := EventArtefacts(ctx, keys)
+	if err != nil || len(calls) != 1 || calls[0].Key != "ended-in" {
+		t.Errorf("the instance lists %+v, %v; want only the call with no start that ended in it", calls, err)
+	}
+	for _, c := range []struct {
+		ended time.Time
+		want  bool
+	}{{in, true}, {after, false}} {
+		read := func(context.Context, string) (*dgraphStruct.DgraphRecording, error) {
+			return &dgraphStruct.DgraphRecording{Event: series.String(), EndedAt: &c.ended}, nil
+		}
+		if rec, err := eventRecordingIn(ctx, keys, "k", read); err != nil || (rec != nil) != c.want {
+			t.Errorf("a call with no start that ended at %s: found %v, %v; want %v", c.ended, rec != nil, err, c.want)
+		}
 	}
 }

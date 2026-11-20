@@ -379,7 +379,7 @@ func fakeWriterSteps(t *testing.T, dmUID string, quoted *dgraphStruct.DgraphChat
 	t.Cleanup(func() {
 		createChatRow, writeDM, writeGroup, startNewDM, startNewGroup, markRead = pRow, pDM, pGroup, pStartDM, pStartGroup, pRead
 	})
-	createChatRow = func(context.Context, uuid.UUID, uuid.UUID, string) error { return nil }
+	createChatRow = func(context.Context, uuid.UUID, uuid.UUID, string, time.Time) (bool, error) { return false, nil }
 	writeDM = func(_ context.Context, _ uuid.UUID, _ *adapter.ChatInfo, _ *userModels.UserInfo, _ *dgraphStruct.DgraphUser, _ string, _ []*dgraphStruct.DgraphUser, _ time.Time) (*dgraphStruct.DgraphChat, string, error) {
 		return quoted, s.dmUID, nil
 	}

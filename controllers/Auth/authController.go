@@ -530,25 +530,23 @@ func ForgotPassword(w http.ResponseWriter, r *http.Request) {
 		"status": "success",
 	}
 
+	// No link goes where email can't (EssentialEmailEnabled): with no key, or
+	// on the public demo, whose addresses are its shared visitor's, its cast's
+	// and its operators' (V-1261). Nothing is looked up or minted, so neither
+	// the answer nor its timing says anything about the address.
+	if !emailService.EssentialEmailEnabled() {
+		helpers.WriteJSON(w, http.StatusOK, successResponse)
+		return
+	}
+
 	// An address outside ASCII is matched to no account (helpers.NormalizeEmail).
 	if requestBody.Email == "" || !helpers.AddressIsASCII(requestBody.Email) {
 		helpers.WriteJSON(w, http.StatusOK, successResponse)
 		return
 	}
 
-	// Check if user exists
-	user, err := domain.GetUserByEmailId(ctx, &requestBody.Email)
-	if err != nil || user == nil || user.Id == (uuid.UUID{}) {
-		helpers.WriteJSON(w, http.StatusOK, successResponse)
-		return
-	}
-
-	// Check that the user exists and isn't SSO-managed. OAuth users
-	// (Google/GitHub) who don't have a password yet are allowed through
-	// so they can set one via the reset link. SSO-managed users are
-	// owned by their IdP and must authenticate there.
-	userWithPw, err := domain.GetUserByEmailIdWithPassword(ctx, requestBody.Email)
-	if err != nil || userWithPw == nil || userWithPw.IsSSOManaged {
+	userID, ok := resettableAccount(ctx, requestBody.Email)
+	if !ok {
 		helpers.WriteJSON(w, http.StatusOK, successResponse)
 		return
 	}
@@ -563,7 +561,7 @@ func ForgotPassword(w http.ResponseWriter, r *http.Request) {
 
 	// Store token with 1-hour expiry
 	expiresAt := time.Now().Add(1 * time.Hour)
-	err = passwordResetModels.CreateResetToken(user.Id, token, expiresAt)
+	err = mintResetToken(userID, token, expiresAt)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/ForgotPassword Failed to create reset token err: %+v", err)
 		helpers.WriteJSON(w, http.StatusOK, successResponse)
@@ -578,7 +576,8 @@ func ForgotPassword(w http.ResponseWriter, r *http.Request) {
 
 	// Send reset email asynchronously. The HTTP response is committed first
 	// (anti-enumeration), so we log failures for operators but never expose
-	// them to the caller.
+	// them to the caller. Logs name the account by id and the failure in
+	// words (emailService.Reason), never an address.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -586,19 +585,38 @@ func ForgotPassword(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 		bgCtx := context.Background()
-		sendErr := emailService.SendPasswordResetEmail(bgCtx, requestBody.Email, senderEmail, resetLink)
+		sendErr := sendPasswordReset(bgCtx, requestBody.Email, senderEmail, resetLink)
 		if sendErr != nil {
-			helpers.LogErrorWithContext(bgCtx,
-				"controllers/ForgotPassword FAILED to=%s from=%s err: %+v",
-				requestBody.Email, senderEmail, sendErr)
+			helpers.LogErrorWithContext(bgCtx, "controllers/ForgotPassword FAILED user=%s: %s", userID, emailService.Reason(sendErr))
 		} else {
-			helpers.LogInfoWithContext(bgCtx,
-				"controllers/ForgotPassword SENT to=%s from=%s", requestBody.Email, senderEmail)
+			helpers.LogInfoWithContext(bgCtx, "controllers/ForgotPassword SENT user=%s", userID)
 		}
 	}()
 
 	helpers.WriteJSON(w, http.StatusOK, successResponse)
 }
+
+// resettableAccount is the account a reset link may be minted for: the
+// person with this address, unless their identity provider owns the account.
+// OAuth users (Google/GitHub) who don't have a password yet are allowed
+// through so they can set one via the reset link; SSO-managed users must
+// authenticate at their IdP. One query: the sign-in lookup has every filter
+// the plain one has (not deleted, not external) and also leaves out bots,
+// which never sign in with a password. A seam for tests.
+var resettableAccount = func(ctx context.Context, email string) (uuid.UUID, bool) {
+	user, err := domain.GetUserByEmailIdWithPassword(ctx, email)
+	if err != nil || user == nil || user.Id == (uuid.UUID{}) || user.IsSSOManaged {
+		return uuid.UUID{}, false
+	}
+	return user.Id, true
+}
+
+// mintResetToken stores a reset token and sendPasswordReset mails its link:
+// seams for tests.
+var (
+	mintResetToken    = passwordResetModels.CreateResetToken
+	sendPasswordReset = emailService.SendPasswordResetEmail
+)
 
 // validResetToken is the reset token lookup, a seam for tests.
 var validResetToken = passwordResetModels.GetValidResetToken
@@ -1349,7 +1367,7 @@ func GetEnabledProviders(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status":           "success",
 		"providers":        signInMethods(r.Context()),
-		"email_configured": emailService.IsEmailEnabled(),
+		"email_configured": emailService.EssentialEmailEnabled(), // a reset or invitation can arrive: never on the demo
 		"email_sender":     emailService.SenderAddress(),
 		"workspace_name":   settingsBusiness.WorkspaceName(),
 		"hosting":          settingsBusiness.Hosting(),

@@ -111,8 +111,10 @@ func GetGitHubLinksByRepo(ctx context.Context, repoOwner string, repoName string
 // uuid.Nil), the newest first, offline ones included: what the start's repair
 // (business/GitHub repairTaskLinks) checks tasks' issues and pull requests
 // against, so it keeps the demo's seeded pull request. Its only callers are
-// that repair and the seed's own once-check (business/DemoSeed
-// linkFixtureRepo); neither ever hands a link to a client.
+// that repair, the seed's own once-check (business/DemoSeed linkFixtureRepo)
+// and a sync's check (business/GitHub syncReach), which finds by it that a
+// task's repository is its project's offline link, with nothing to send; none
+// ever hands a link to a client or calls GitHub for an offline one.
 func GetLinksForRepair(ctx context.Context, project uuid.UUID) ([]*GitHubLink, error) {
 	if project == uuid.Nil {
 		return liveLinks(ctx, "GetLinksForRepair", nil, "")
@@ -206,23 +208,6 @@ func SoftDeleteAllGitHubLinks(ctx context.Context, deletedAt time.Time) error {
 	_, err := pgexec.Exec(ctx, `UPDATE github_links SET deleted_at = $1, updated_at = $1 WHERE deleted_at IS NULL`, deletedAt)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SoftDeleteAllGitHubLinks Failed err: %+v", err)
-	}
-	return err
-}
-
-// BatchClearAllGitHubFields unlinks every task from GitHub.
-func BatchClearAllGitHubFields(ctx context.Context) error {
-	_, err := pgexec.Exec(ctx, `
-		UPDATE tasks SET
-			github_issue_number = NULL,
-			github_issue_url = NULL,
-			github_pr_number = NULL,
-			github_pr_url = NULL,
-			github_branch = NULL,
-			updated_at = NOW()
-		WHERE github_issue_url IS NOT NULL OR github_pr_url IS NOT NULL`)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/BatchClearAllGitHubFields Failed err: %+v", err)
 	}
 	return err
 }

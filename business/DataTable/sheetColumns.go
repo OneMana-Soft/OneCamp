@@ -367,7 +367,7 @@ func columnName(name string, i int, seen map[string]bool) string {
 	if name == "" {
 		name = fmt.Sprintf("Column %d", i+1)
 	}
-	return uniqueName(name, seen)
+	return helpers.UniqueName(name, seen)
 }
 
 // The orders a numeric date is written in. A day-first and a month-first

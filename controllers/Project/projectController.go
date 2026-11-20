@@ -9,6 +9,7 @@ import (
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -19,10 +20,11 @@ import (
 	business "github.com/akashc777/OneCamp/business/Project"
 	templateBusiness "github.com/akashc777/OneCamp/business/ProjectTemplate"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
+	slaBusiness "github.com/akashc777/OneCamp/business/SLA"
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
-	teamBusiness "github.com/akashc777/OneCamp/business/Team"
+	triageBusiness "github.com/akashc777/OneCamp/business/Triage"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
@@ -65,7 +67,10 @@ func CreateProject(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	dgraphTeam, err := teamBusiness.GetBasicDgraphTeamInfoByUUID(ctx, createProjectInfo.TeamUuid, userInfo.UserDgraphInfo.Uid)
+	// Who makes projects in a team is the workspace's "Who can make projects":
+	// its admins, or everyone in it (Work Access), asked as every path that
+	// makes a project asks it (MayMakeProjectIn).
+	dgraphTeam, mayMake, err := business.MayMakeProjectIn(ctx, createProjectInfo.TeamUuid, &userInfo)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -79,9 +84,7 @@ func CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Who makes projects in a team is the workspace's "Who can make projects":
-	// its admins, or everyone in it (Work Access).
-	if !workAccess.CanMakeProjects(ctx, dgraphTeam) || len(createProjectInfo.TeamUuid) == 0 || len(createProjectInfo.Name) == 0 {
+	if !mayMake || len(createProjectInfo.TeamUuid) == 0 || len(createProjectInfo.Name) == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -618,12 +621,17 @@ func ProjectInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// What the reader may do in it (project_access), from the rule: the app
-	// shows what they can do and never guesses.
-	if err := workAccess.Decorate(ctx, userInfo.UserDgraphInfo.Uuid, dgraphProject); err != nil {
+	// shows what they can do and never guesses. The same standing says whether
+	// they may read its triage queue, so project_triage is laid from it with
+	// no second read of their role.
+	standing, err := workAccess.Of(ctx, userInfo.UserDgraphInfo.Uuid, dgraphProject)
+	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/ProjectInfo couldn't read the reader's role err: %+v", err)
 		helpers.WriteRetryLater(w, "Couldn't load the project.")
 		return
 	}
+	dgraphProject.Access = standing.Access()
+	triageBusiness.Lay(ctx, userInfo.UserDgraphInfo.Uuid, standing, dgraphProject)
 
 	var notificationType string
 	notificationType, err = userProjectNotificationBusiness.GetNotificationTypeByUserIdAndProjectId(userInfo.UserDgraphInfo.Uuid, projectUUIDString)
@@ -1027,100 +1035,62 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dgraphProject, err := business.GetBasicDgraphProjectInfo(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil {
-		helpers.WriteReadFailure(w, r, err, "project", "controllers/GetProjectTaskList")
-		return
+	queryParams := r.URL.Query()
+	// What the list asks for is worked out before access is decided, so the
+	// project and a page of its tasks can be read in one query
+	// (business.OpenProjectTaskPage). A request that asks wrongly hears so only
+	// once access is decided, as before: someone not in the project hears 403
+	// whatever they asked.
+	asked, failed := taskListAsked(ctx, projectUUIDString, queryParams)
+	listCtx := helpers.WithZone(ctx, queryParams.Get("tz"))
+	var dgraphProject, dgraphProjectWithTasks *dgraphStruct.DgraphProject
+	if failed == nil && queryParams.Get("format") != "csv" && business.ListReadsInOne(asked.sort, asked.pageSize, asked.getAll) {
+		dgraphProject, dgraphProjectWithTasks, err = business.OpenProjectTaskPage(listCtx, projectUUIDString, userInfo.UserDgraphInfo.Uid, asked.filter, asked.sort, asked.pageSize, asked.pageIndex)
+		if err != nil {
+			// Read again the way that says why: the project first, then the list.
+			dgraphProject, dgraphProjectWithTasks = nil, nil
+		}
 	}
-
+	if dgraphProject == nil {
+		dgraphProject, err = business.GetBasicDgraphProjectInfo(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid)
+		if err != nil {
+			helpers.WriteReadFailure(w, r, err, "project", "controllers/GetProjectTaskList")
+			return
+		}
+	}
 	if !dgraphProject.ReaderIsIn() {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
-
-	queryParams := r.URL.Query()
-
-	filtersParamString := queryParams["filters"]
-	var filtersParam []adapter.FilterParam
-
-	if len(filtersParamString) != 0 {
-		err := json.Unmarshal([]byte(filtersParamString[0]), &filtersParam)
-		if err != nil {
-
-			helpers.LogErrorWithContext(ctx,
-				"controllers/GetProjectTaskList Failed to parse filters query param err: %+v",
-				err)
-
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to parse filters query param",
-				"err": err,
-			})
-			return
-
-		}
-
-	}
-
-	// One builder for every task list (business.ListFilter).
-	filterQuery, err := business.ListFilter(ctx, projectUUIDString, listParams(filtersParam), queryParams.Get("taskSearchString"), time.Now()).Clause()
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": filterProblem(err, "search string is too long or invalid")})
+	if failed != nil {
+		failed(w)
 		return
 	}
-
-	// One mapping from the sorts the list offers to the graph's: no key a
-	// request names is passed to the graph as it came.
-	sortingQuery, err := dgraphquery.TaskListOrder(queryParams.Get("sorting"))
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProjectTaskList Failed to parse sorting query param err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse sorting query param",
-			"err": err,
-		})
-		return
-	}
-
 	if queryParams.Get("format") == "csv" {
 		exportTaskListCSV(w, r, dgraphProject.Name, business.TaskListExport{
 			ProjectUUID: projectUUIDString, ReaderUID: userInfo.UserDgraphInfo.Uid,
-			Filter: filterQuery, Sort: sortingQuery, Location: helpers.Location(queryParams.Get("tz")),
+			Filter: asked.filter, Sort: asked.sort, Location: helpers.Location(queryParams.Get("tz")),
 		})
 		return
 	}
-
-	getAll, pageSize, pageIndex, err := helpers.ListPaging(queryParams)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
-		return
+	if dgraphProjectWithTasks == nil {
+		dgraphProjectWithTasks, err = business.GetDgraphProjectTaskListWithFields(listCtx, projectUUIDString, userInfo.UserDgraphInfo.Uid, asked.filter, asked.sort, asked.pageSize, asked.pageIndex, asked.getAll)
+		if writeRefused(w, err) {
+			return
+		}
+		if err != nil {
+			helpers.LogErrorWithContext(ctx,
+				"controllers/GetProjectTaskList Failed to get dgraph user task err: %+v",
+				err)
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+				"msg": "Couldn't load the project's tasks.",
+				"err": err,
+			})
+			return
+		}
 	}
-
-	dgraphProjectWithTasks, err := business.GetDgraphProjectTaskList(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid, filterQuery, sortingQuery, pageSize, pageIndex, getAll)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProjectTaskList Failed to get dgraph user task err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Couldn't load the project's tasks.",
-			"err": err,
-		})
-		return
-
-	}
-
-	// Overlay ephemeral GitHub metadata from PostgreSQL onto Dgraph tasks
-	if dgraphProjectWithTasks != nil && len(dgraphProjectWithTasks.Tasks) > 0 {
-		// GitHub's facts are already on them (business.GetDgraphProjectTaskList; PR1, #24).
-		_ = taskFieldBusiness.MergeFieldValues(helpers.WithZone(ctx, r.URL.Query().Get("tz")), dgraphProjectWithTasks.Tasks)
-	}
-
+	pageSize := asked.pageSize
 	pageCount := uint64(1)
-
 	if pageSize > 0 {
 		pageCount = (dgraphProjectWithTasks.TaskCount + uint64(pageSize) - 1) / uint64(pageSize)
 	}
@@ -1131,6 +1101,68 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 		"data":      dgraphProjectWithTasks,
 		"pageCount": pageCount,
 	})
+}
+
+// taskListAsked is what a task list request asks for, as graph clauses and a
+// page; failed, when it asks wrongly, writes the answer that says so (the
+// caller writes it once access is decided).
+type taskListAsk struct {
+	filter, sort        string
+	pageSize, pageIndex int
+	getAll              bool
+}
+
+func taskListAsked(ctx context.Context, projectUUID string, queryParams url.Values) (asked taskListAsk, failed func(w http.ResponseWriter)) {
+	filtersParamString := queryParams["filters"]
+	var filtersParam []adapter.FilterParam
+	if len(filtersParamString) != 0 {
+		if err := json.Unmarshal([]byte(filtersParamString[0]), &filtersParam); err != nil {
+			helpers.LogErrorWithContext(ctx,
+				"controllers/GetProjectTaskList Failed to parse filters query param err: %+v",
+				err)
+			return asked, func(w http.ResponseWriter) {
+				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+					"msg": "Failed to parse filters query param",
+					"err": err,
+				})
+			}
+		}
+	}
+	// One builder for every task list (business.ListFilter).
+	filterQuery, err := business.ListFilter(ctx, projectUUID, listParams(filtersParam), queryParams.Get("taskSearchString"), time.Now()).Clause()
+	if err != nil {
+		return asked, func(w http.ResponseWriter) {
+			if writeRefused(w, err) {
+				return
+			}
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": filterProblem(err, "search string is too long or invalid")})
+		}
+	}
+	// One mapping from the sorts the list offers to the graph's: no key a
+	// request names is passed to the graph as it came.
+	sortingQuery, err := dgraphquery.TaskListOrder(queryParams.Get("sorting"))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"controllers/GetProjectTaskList Failed to parse sorting query param err: %+v",
+			err)
+		return asked, func(w http.ResponseWriter) {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+				"msg": "Failed to parse sorting query param",
+				"err": err,
+			})
+		}
+	}
+	asked = taskListAsk{filter: filterQuery, sort: sortingQuery}
+	if queryParams.Get("format") == "csv" {
+		return asked, nil
+	}
+	asked.getAll, asked.pageSize, asked.pageIndex, err = helpers.ListPaging(queryParams)
+	if err != nil {
+		return asked, func(w http.ResponseWriter) {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		}
+	}
+	return asked, nil
 }
 
 // exportTaskListCSV answers the list as a CSV file (format=csv), its dates
@@ -1157,6 +1189,9 @@ func exportTaskListCSV(w http.ResponseWriter, r *http.Request, projectName strin
 		return
 	}
 	if !started {
+		if writeRefused(w, err) {
+			return
+		}
 		helpers.WriteReadFailure(w, r, err, "project's tasks", "controllers/GetProjectTaskList csv")
 		return
 	}
@@ -1195,6 +1230,9 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filterQuery, err := kanbanFilterQuery(ctx, projectUUIDString, r)
+	if writeRefused(w, err) {
+		return
+	}
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": filterProblem(err, "Failed to parse filters query param"),
@@ -1203,7 +1241,8 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dgraphProjectWithTasks, err := business.GetDgraphProjectTaskListForKanban(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid, filterQuery, helpers.OpenLimit(r.URL.Query()), helpers.ClosedLimit(r.URL.Query()))
+	// Each card's field values come in the batch of its other facts.
+	dgraphProjectWithTasks, err := business.BoardWithFields(helpers.WithZone(ctx, r.URL.Query().Get("tz")), projectUUIDString, userInfo.UserDgraphInfo.Uid, filterQuery, helpers.OpenLimit(r.URL.Query()), helpers.ClosedLimit(r.URL.Query()))
 
 	if err != nil {
 
@@ -1228,8 +1267,7 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 		allTasks = append(allTasks, dgraphProjectWithTasks.TasksInReview...)
 		allTasks = append(allTasks, dgraphProjectWithTasks.TasksCanceled...)
 		allTasks = append(allTasks, dgraphProjectWithTasks.TasksDone...)
-		// GitHub's facts are already on them (business.GetDgraphProjectTaskListForKanban; PR1, #24).
-		_ = taskFieldBusiness.MergeFieldValues(helpers.WithZone(ctx, r.URL.Query().Get("tz")), allTasks)
+		// GitHub's facts and the field values are already on them (business.BoardWithFields).
 		approvalsBusiness.MarkWaiting(ctx, allTasks)
 	}
 	decorate(ctx, &userInfo, dgraphProjectWithTasks)
@@ -1277,6 +1315,17 @@ func filterProblem(err error, otherwise string) string {
 		return ie.Error()
 	}
 	return otherwise
+}
+
+// writeRefused answers a guest's ask for SLA state (a filter or a sort by
+// it: business/SLA Refused) with a 403 in its words, and says whether it did.
+func writeRefused(w http.ResponseWriter, err error) bool {
+	var refused *slaBusiness.Refused
+	if !errors.As(err, &refused) {
+		return false
+	}
+	helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": refused.Error()})
+	return true
 }
 
 // listParams is a list's filters as the one builder takes them.
@@ -1334,6 +1383,9 @@ func GetProjectBoardColumn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filterQuery, err := kanbanFilterQuery(ctx, projectUUIDString, r)
+	if writeRefused(w, err) {
+		return
+	}
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": filterProblem(err, "Failed to parse filters query param")})
 		return

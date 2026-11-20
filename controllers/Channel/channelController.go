@@ -7,6 +7,7 @@ import (
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	readStateBusiness "github.com/akashc777/OneCamp/business/ReadState"
+	transcriptExport "github.com/akashc777/OneCamp/business/TranscriptExport"
 	"github.com/akashc777/OneCamp/controllers/httpx"
 	"net/http"
 	"strconv"
@@ -491,21 +492,12 @@ func GetChannelInfoByUUIDWithMemberAdminFlag(w http.ResponseWriter, r *http.Requ
 
 	channelInfo, err := business.GetDgraphChannelInfoByUUIDWithMemberAdminFlag(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelInfoByUUIDWithMemberAdminFlag Failed to channels info form dgraph err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to channels info",
-			"err": err,
-		})
+	if helpers.WriteFailedRead(w, r, err, "channel", "controllers/GetChannelInfoByUUIDWithMemberAdminFlag") {
 		return
-
 	}
 
-	if channelInfo.IsMember == 0 && *channelInfo.IsPrivate {
+	// A channel there isn't is answered as one closed to the asker (V-1163).
+	if err != nil || (channelInfo.IsMember == 0 && *channelInfo.IsPrivate) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/GetChannelInfoByUUIDWithMemberAdminFlag Unauthorised user trying to access channelInfo")
 
@@ -614,18 +606,12 @@ func MarkChannelSeen(w http.ResponseWriter, r *http.Request) {
 	// Verify the caller can see this channel before advancing their marker.
 	// A non-member must not be able to mark a private channel seen.
 	channelInfo, err := business.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/MarkChannelSeen Failed to get channel info err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get channel info",
-			"err": err,
-		})
+	if helpers.WriteFailedRead(w, r, err, "channel", "controllers/MarkChannelSeen") {
 		return
 	}
 
-	if channelInfo.IsMember == 0 && channelInfo.IsPrivate != nil && *channelInfo.IsPrivate {
+	// A channel there isn't is answered as one closed to the asker (V-1163).
+	if err != nil || (channelInfo.IsMember == 0 && channelInfo.IsPrivate != nil && *channelInfo.IsPrivate) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not authorized",
 		})
@@ -790,20 +776,12 @@ func UpdateChannelInfo(w http.ResponseWriter, r *http.Request) {
 
 	channelInfo, err := business.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdateChannelInfo Failed to get channel info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to update channel name",
-			"err": err,
-		})
+	if helpers.WriteFailedRead(w, r, err, "channel", "controllers/UpdateChannelInfo") {
 		return
 	}
 
-	if channelInfo.IsAdmin == 0 {
+	// A channel there isn't is answered as one closed to the asker (V-1163).
+	if err != nil || channelInfo.IsAdmin == 0 {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/UpdateChannelInfo Failed to update channel name since user is not a channel moderator")
 
@@ -1166,20 +1144,12 @@ func AddChannelModerators(w http.ResponseWriter, r *http.Request) {
 
 	channelInfo, err := business.GetDgraphChannelInfoByUUIDAndMemberInfo(ctx, channelUUID, userInfo.UserDgraphInfo.Uid, AddModeratorInfo.UserUuid)
 
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddChannelModerators Failed to get channel info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to add moderator",
-			"err": err,
-		})
+	if helpers.WriteFailedRead(w, r, err, "channel", "controllers/AddChannelModerators") {
 		return
 	}
 
-	if channelInfo.IsAdmin == 0 {
+	// A channel there isn't is answered as one closed to the asker (V-1163).
+	if err != nil || channelInfo.IsAdmin == 0 {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/AddChannelModerators Failed to add channel moderator since user is not channel moderator")
 
@@ -1293,8 +1263,12 @@ func JoinChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.AddChannelMemberEdge(ctx, channelUUID, &userInfo.UserDgraphInfo, userInfo.UserPostgresInfo.Id)
-
+	err = joinRecorded(r, channelUUID.String(), channelInfo.Name, func() error {
+		return business.AddChannelMemberEdge(ctx, channelUUID, &userInfo.UserDgraphInfo, userInfo.UserPostgresInfo.Id)
+	})
+	if auditBusiness.RefusedUnrecorded(w, r, err, "controllers/JoinChannel") {
+		return
+	}
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -1502,20 +1476,14 @@ func MakeVideoChannelCall(w http.ResponseWriter, r *http.Request) {
 
 	channelDraphInfo, err := business.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/MakeVideoChannelCall Failed to get channel info err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get channel info",
-			"err": err,
-		})
+	if helpers.WriteFailedRead(w, r, err, "channel", "controllers/MakeVideoChannelCall") {
 		return
 	}
 
 	// Said in the person's words: a bare "Not Authorised" became "You don't
 	// have permission to do that" in the green room (QA F-22).
-	if channelDraphInfo.IsMember == 0 {
+	// A channel there isn't is answered as one closed to the asker (V-1163).
+	if err != nil || channelDraphInfo.IsMember == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Only people in the channel can join its huddle. Join the channel first.",
 		})
@@ -1582,18 +1550,12 @@ func StartVideoChannelCallRecording(w http.ResponseWriter, r *http.Request) {
 
 	channelDraphInfo, err := business.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/StartVideoChannelCallRecording Failed to get channel info err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get channel info",
-			"err": err,
-		})
+	if helpers.WriteFailedRead(w, r, err, "channel", "controllers/StartVideoChannelCallRecording") {
 		return
 	}
 
-	if channelDraphInfo.IsAdmin == 0 {
+	// A channel there isn't is answered as one closed to the asker (V-1163).
+	if err != nil || channelDraphInfo.IsAdmin == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -1654,18 +1616,12 @@ func StopVideoChannelCallRecording(w http.ResponseWriter, r *http.Request) {
 
 	channelDraphInfo, err := business.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/StopVideoChannelCallRecording Failed to get channel info err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get channel info",
-			"err": err,
-		})
+	if helpers.WriteFailedRead(w, r, err, "channel", "controllers/StopVideoChannelCallRecording") {
 		return
 	}
 
-	if channelDraphInfo.IsAdmin == 0 {
+	// A channel there isn't is answered as one closed to the asker (V-1163).
+	if err != nil || channelDraphInfo.IsAdmin == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -1691,6 +1647,14 @@ func StopVideoChannelCallRecording(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "started recording sucessfully"})
 
 }
+
+// channelRecordingList is GetAllChannelRecordingList's one read (a seam for
+// its tests).
+var channelRecordingList = business.GetChannelAllRecordingList
+
+// channelRecordingTranscript is GetChannelRecordingTranscript's one read (a
+// seam for its tests).
+var channelRecordingTranscript = business.GetChannelRecordingTranscript
 
 func GetAllChannelRecordingList(w http.ResponseWriter, r *http.Request) {
 
@@ -1726,26 +1690,13 @@ func GetAllChannelRecordingList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	recordingsPagination, err := business.GetChannelAllRecordingList(ctx, channelUUIDString, userInfo.UserDgraphInfo.Uid, startDate, endDate, pageIndex, pageSize)
-
+	// The read takes only a channel the asker is in, so a channel they aren't
+	// in and one there isn't get the one missing answer: the list tells an
+	// outsider nothing (V-1163). A read that failed is "try again".
+	recordingsPagination, err := channelRecordingList(ctx, channelUUIDString, userInfo.UserDgraphInfo.Uid, startDate, endDate, pageIndex, pageSize)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetAllChannelRecordingList Failed to get channel info err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get channel info",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "channel", "controllers/GetAllChannelRecordingList")
 		return
-	}
-
-	if recordingsPagination.IsMember == 0 {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
-
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got channel info successfully!", "channel_info": recordingsPagination})
@@ -1792,40 +1743,36 @@ func GetChannelRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	dgraphChannel, err := business.GetChannelRecordingTranscript(ctx, channelUUID, userInfo.UserDgraphInfo.Uid, egressIdString, pageIndex, pageSize)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProjecGetChannelRecordingTranscript failed to get channel info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "failed to get channel info",
-			"err": err,
-		})
+	rec := transcriptExport.Answer(w, r, helpers.Page{Index: pageIndex, Size: pageSize}, func(p helpers.Page) (*dgraphStruct.DgraphRecording, string) {
+		dgraphChannel, err := channelRecordingTranscript(ctx, channelUUID, userInfo.UserDgraphInfo.Uid, egressIdString, p.Index, p.Size)
+		if helpers.WriteFailedRead(w, r, err, "channel", "controllers/GetChannelRecordingTranscript") {
+			return nil, ""
+		}
+		// While a call goes on here, what it recorded is for the people connected
+		// to it (the one read rule): the missing recording's answer.
+		// A channel there isn't is answered as one closed to the asker (V-1163).
+		if err != nil || dgraphChannel.IsMember == 0 || len(dgraphChannel.Recordings) == 0 ||
+			!liveKitBusiness.TranscriptOpenTo(ctx, channelUUID.String(), userInfo.UserDgraphInfo.Uid, egressIdString, dgraphChannel.Recordings[0].StartedAt) {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
+				"msg": "Not Authorised",
+			})
+			return nil, ""
+		}
+		return dgraphChannel.Recordings[0], dgraphChannel.Name
+	})
+	if rec == nil {
 		return
-
-	}
-
-	if dgraphChannel.IsMember == 0 || len(dgraphChannel.Recordings) == 0 {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
-
 	}
 
 	pageCount := uint64(1)
 
 	if pageSize > 0 {
-		pageCount = (dgraphChannel.Recordings[0].TranscriptCount + uint64(pageSize) - 1) / uint64(pageSize)
+		pageCount = (rec.TranscriptCount + uint64(pageSize) - 1) / uint64(pageSize)
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":       "got channel info successfully!",
-		"data":      dgraphChannel.Recordings[0],
+		"data":      rec,
 		"pageCount": pageCount,
 	})
 

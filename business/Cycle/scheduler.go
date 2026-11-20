@@ -44,6 +44,9 @@ func SetSchedule(ctx context.Context, project uuid.UUID, in ScheduleInput, by uu
 		m.SetBy = &by
 	}
 	saved, err := cycleModel.SetSchedule(ctx, m)
+	if errors.Is(err, cycleModel.ErrParallel) {
+		return nil, &CycleError{refusedSchedule}
+	}
 	if err != nil {
 		return nil, err
 	}

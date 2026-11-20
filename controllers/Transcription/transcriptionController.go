@@ -14,6 +14,7 @@ package controllers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -25,6 +26,10 @@ import (
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 )
+
+// recordCallPrivacy writes an acknowledgement's audit row; a test stands in
+// a failing writer to prove that no record means no save.
+var recordCallPrivacy = auditBusiness.RecordCallPrivacy
 
 // GetConfig handles GET /admin/transcription/config.
 func GetConfig(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +50,10 @@ func UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		STTLanguage       *string `json:"stt_language,omitempty"`
 		STTAPIKey         *string `json:"stt_api_key,omitempty"`
 		GoogleCredentials *string `json:"google_credentials,omitempty"`
+		// AcknowledgeWhere is the admin's acknowledgement that call audio
+		// goes to this place (a Where word), which a save sending it off the
+		// server needs (business.Acknowledge).
+		AcknowledgeWhere string `json:"acknowledge_where,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse body"})
@@ -96,7 +105,7 @@ func UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := business.Save(business.SaveInput{
+	in := business.SaveInput{
 		Mode:              body.Mode,
 		STTProvider:       body.STTProvider,
 		STTModel:          body.STTModel,
@@ -104,7 +113,39 @@ func UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		STTLanguage:       body.STTLanguage,
 		STTAPIKey:         body.STTAPIKey,
 		GoogleCredentials: body.GoogleCredentials,
-	}); err != nil {
+	}
+	// Call audio leaves the server only with an admin's acknowledgement of
+	// where: refused without it, before anything is stored, naming the place
+	// for the card to ask about. A new one is an audit row first (no record,
+	// no action), then saved with the rest.
+	ack, err := business.Acknowledge(in, body.AcknowledgeWhere)
+	var need *business.AcknowledgementRequired
+	if errors.As(err, &need) {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+			"code":  "acknowledgement_required",
+			"where": need.Where,
+			"msg":   "Call audio would leave this server. Acknowledge where it goes first.",
+		})
+		return
+	}
+	if ack != nil {
+		meta := map[string]interface{}{"where": ack.Where, "mode": ack.Mode}
+		if ack.Provider != "" {
+			meta["stt_provider"] = ack.Provider
+		}
+		if ack.Host != "" {
+			meta["host"] = ack.Host
+		}
+		if err := recordCallPrivacy(r, "audio_leaves_server",
+			"Acknowledged that call audio goes to "+ack.Where+" to be transcribed", meta); err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/Transcription/UpdateConfig acknowledgement not recorded: %+v", err)
+			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Could not record the acknowledgement. Nothing was changed; try again."})
+			return
+		}
+		in.Acknowledged = &ack.Where
+	}
+
+	if err := business.Save(in); err != nil {
 		if helpers.IsSecretReentry(err) {
 			helpers.WriteSecretAwareBadRequest(w, err)
 			return

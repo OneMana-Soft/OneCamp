@@ -58,7 +58,7 @@ func TestTheLatestPageSaysWhatWasUnread(t *testing.T) {
 		map[string]any{"dgraph.type": "Dm", "dm_grouping_id": neverOpened, "dm_participants": []map[string]any{one("ada"), one("cal")}},
 		map[string]any{"dgraph.type": "Dm", "dm_grouping_id": group, "dm_participants": []map[string]any{one("ada"), one("bea"), one("cal")}},
 	)
-	dg.Mutate(t, nodes)
+	uids := dg.Mutate(t, nodes)
 
 	// Ada read each conversation an hour ago; since then Bea wrote twice in
 	// the DM and Ada once; in the group, Bea and Cal once each and Ada once.
@@ -94,11 +94,11 @@ func TestTheLatestPageSaysWhatWasUnread(t *testing.T) {
 	}
 
 	// The DM: Bea's two, not Ada's own; read again, none; the sidebar agrees.
-	page, err := chatBusiness.GetDgraphLatestChatFromDgraph(ctx, ids["ada"], ids["bea"].String())
+	page, err := chatBusiness.OpenDM(ctx, ids["ada"], ids["bea"].String())
 	if n := unread("the DM", page, err); n != 2 {
 		t.Errorf("the DM as it opened: %d unread, want 2", n)
 	}
-	page, err = chatBusiness.GetDgraphLatestChatFromDgraph(ctx, ids["ada"], ids["bea"].String())
+	page, err = chatBusiness.OpenDM(ctx, ids["ada"], ids["bea"].String())
 	if n := unread("the DM again", page, err); n != 0 {
 		t.Errorf("the DM read again: %d unread, want 0", n)
 	}
@@ -108,17 +108,17 @@ func TestTheLatestPageSaysWhatWasUnread(t *testing.T) {
 	}
 
 	// The group the same way.
-	page, err = chatBusiness.GetDgraphLatestGroupChatFromDgraph(ctx, ids["ada"], group)
+	page, err = chatBusiness.OpenGroup(ctx, ids["ada"], uids["ada"], group)
 	if n := unread("the group", page, err); n != 2 {
 		t.Errorf("the group as it opened: %d unread, want 2", n)
 	}
-	page, err = chatBusiness.GetDgraphLatestGroupChatFromDgraph(ctx, ids["ada"], group)
+	page, err = chatBusiness.OpenGroup(ctx, ids["ada"], uids["ada"], group)
 	if n := unread("the group again", page, err); n != 0 {
 		t.Errorf("the group read again: %d unread, want 0", n)
 	}
 
 	// A DM never opened has no line, as the sidebar counts it.
-	page, err = chatBusiness.GetDgraphLatestChatFromDgraph(ctx, ids["ada"], ids["cal"].String())
+	page, err = chatBusiness.OpenDM(ctx, ids["ada"], ids["cal"].String())
 	if n := unread("the DM never opened", page, err); n != 0 {
 		t.Errorf("a DM never opened: %d unread, want 0", n)
 	}

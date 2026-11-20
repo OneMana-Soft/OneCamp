@@ -33,6 +33,7 @@ import (
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/akashc777/OneCamp/models/taskread"
+	taskReadGeneration "github.com/akashc777/OneCamp/models/taskread/generation"
 	"github.com/google/uuid"
 )
 
@@ -375,12 +376,54 @@ func forgetProfile(ctx context.Context, userUUIDs ...string) {
 	})
 }
 
+// MemberSession is what a member's authenticated request starts from: ctx
+// carrying the task-read generation (models/taskread/generation.With), and
+// their account row (GetActiveUserWithAdminFlagByUserUUID's) and graph
+// profile (GetActiveDgraphUserInfoByUUID's). Both profiles and the generation
+// are read in one round trip, an MGET of their keys; a profile that missed is
+// loaded and cached by its loader's own load, so no key is read twice. The
+// keys, their TTLs and forgetProfile are the loaders', unchanged. user is
+// nil, and the graph profile is not read, when userUUID names no live member
+// (no account, or one cached as none; an external person or a bot:
+// models.User.IsMember). The generation is 0 when it was never bumped, and
+// not trusted when Redis failed the read (or isn't configured).
+func MemberSession(ctx context.Context, userUUID uuid.UUID) (_ context.Context, user *models.User, dgraphUser *dgraphStruct.DgraphUser, err error) {
+	id := []string{userUUID.String()}
+	var generation int64
+	found, readErr := redisStore.GetJSONMany(ctx,
+		[]redisStore.CounterKey{{Spec: registry.UserProfile, Args: id}, {Spec: registry.UserDgraphProfile, Args: id}, {Spec: registry.TaskReadGeneration}},
+		[]interface{}{&user, &dgraphUser, &generation})
+	if !found[2] {
+		generation = 0
+	}
+	ctx = taskReadGeneration.With(ctx, generation, readErr == nil && redisStore.IsAvailable())
+	if !found[0] {
+		if user, err = loadActiveUserWithAdminFlag(ctx, userUUID); err != nil {
+			return ctx, nil, nil, err
+		}
+	}
+	if user == nil || user.Id == uuid.Nil || !user.IsMember() {
+		return ctx, nil, nil, nil
+	}
+	if !found[1] || dgraphUser == nil {
+		if dgraphUser, err = loadActiveDgraphUserInfo(ctx, id[0]); err != nil || dgraphUser == nil {
+			return ctx, nil, nil, err
+		}
+	}
+	return ctx, user, dgraphUser, nil
+}
+
 func GetActiveUserWithAdminFlagByUserUUID(ctx context.Context, userUUID uuid.UUID) (user *models.User, err error) {
 	found, _ := redisStore.GetJSON(ctx, registry.UserProfile, []string{userUUID.String()}, &user)
 	if found {
 		return
 	}
+	return loadActiveUserWithAdminFlag(ctx, userUUID)
+}
 
+// loadActiveUserWithAdminFlag is GetActiveUserWithAdminFlagByUserUUID's read
+// past its cache: the account row from Postgres, then cached.
+func loadActiveUserWithAdminFlag(ctx context.Context, userUUID uuid.UUID) (user *models.User, err error) {
 	query := `
         SELECT
 			u.id,
@@ -411,6 +454,21 @@ func GetActiveUserWithAdminFlagByUserUUID(ctx context.Context, userUUID uuid.UUI
 	}
 
 	return
+}
+
+// ReadsAsGuest is whether who reads as a guest: someone outside the
+// workspace (an external identity that isn't a bot), or no active account,
+// even with a member's place in a project (a stale role row, an import). A
+// failed read is a guest's. The one rule what only a project's members
+// read (its SLA state, business/SLA) and hear (its SLA alerts, business/Task
+// AssigneeHears) holds guests to. One read.
+func ReadsAsGuest(ctx context.Context, who string) bool {
+	id, err := uuid.Parse(who)
+	if err != nil {
+		return true
+	}
+	u, err := GetActiveUserByUUID(ctx, id)
+	return err != nil || u == nil || (u.IsExternal && !u.IsBot)
 }
 
 func GetActiveUserByUUID(ctx context.Context, uuid uuid.UUID) (userInfo *models.User, err error) {
@@ -1147,7 +1205,12 @@ func GetActiveDgraphUserInfoByUUID(ctx context.Context, userUUID string) (dgraph
 	if found && dgraphUser != nil {
 		return
 	}
+	return loadActiveDgraphUserInfo(ctx, userUUID)
+}
 
+// loadActiveDgraphUserInfo is GetActiveDgraphUserInfoByUUID's read past its
+// cache: the graph profile from Dgraph, then cached.
+func loadActiveDgraphUserInfo(ctx context.Context, userUUID string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
 	// @filter(gt(status_user_emoji_expiry_at, $time))
 	variables := make(map[string]string)
 	variables["$id"] = userUUID
@@ -1635,6 +1698,32 @@ func GetDgraphUserProjectList(ctx context.Context, userUUID string) (dgraphUser 
 
 }
 
+// recipientQuery is what sending a direct message (and choosing whether it
+// is an agent's) reads of its recipient: who they are, whether they are a bot
+// or external, whether they are gone, and what the message's search entry
+// shows of them (their picture's key, and their email for a name when they
+// have no other). None of the profile's channels, emoji status or text.
+const recipientQuery = `query Recipient($id: string) {
+	recipient(func: eq(user_uuid, $id), first: 1) {
+		uid
+		user_uuid
+		user_name
+		user_full_name
+		user_email_id
+		user_profile_object_key
+		is_external
+		is_bot
+		user_deleted_at
+	}
+}`
+
+// GetDgraphRecipientByUUID reads a direct message's recipient by uuid with
+// recipientQuery, deactivated or not (MayMessage refuses those):
+// dgexec.ErrNotFound when there is no such person.
+func GetDgraphRecipientByUUID(ctx context.Context, userUUID string) (*dgraphStruct.DgraphUser, error) {
+	return dgexec.First[dgraphStruct.DgraphUser](ctx, recipientQuery, map[string]string{"$id": userUUID}, "recipient")
+}
+
 func GetDgraphUserInfoByUUID(ctx context.Context, userUUID string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
 
 	variables := make(map[string]string)
@@ -2069,14 +2158,7 @@ func GetUserRecordingsList(ctx context.Context, userDgraphUID string, startDate 
 	variables["$offset"] = offsetVal
 
 	query := `query UserRecordings($user_uid: string, $startDate: string, $endDate: string, $first: int, $offset: int){
-				var(func: uid($user_uid)) {
-					~ch_members {
-						ch_recs as ch_recording @filter(ge(recording_stared_at, $startDate) AND le(recording_stared_at, $endDate) AND ` + dgraphquery.Live("recording_deleted_at") + ` AND (NOT eq(recording_transcript_only, true) OR ` + dgraphquery.Deleted("recording_ended_at") + `))
-					}
-					~dm_participants {
-						dm_recs as dm_recording @filter(ge(recording_stared_at, $startDate) AND le(recording_stared_at, $endDate) AND ` + dgraphquery.Live("recording_deleted_at") + ` AND (NOT eq(recording_transcript_only, true) OR ` + dgraphquery.Deleted("recording_ended_at") + `))
-					}
-				}
+				` + recordingDgraphModels.MemberRecordingsBlock("uid($user_uid)", `ge(recording_stared_at, $startDate) AND le(recording_stared_at, $endDate) AND `+dgraphquery.Live("recording_deleted_at")+` AND (NOT eq(recording_transcript_only, true) OR `+dgraphquery.Deleted("recording_ended_at")+`)`) + `
 				recordingInfo(func: uid(ch_recs, dm_recs), orderdesc: recording_stared_at, first: $first, offset: $offset) {
 					uid
 					recording_egress_id
@@ -2540,6 +2622,19 @@ func MemberAccountState(ctx context.Context, email string) (exists bool, deactiv
 		return false, false, err
 	}
 	return exists, deactivated, nil
+}
+
+// MembersByEmail is the members (not outsiders, not bots, not deleted) whose
+// address is one of emails (lower-cased), by address, in one read on
+// users_email_id_lower_idx; an address two accounts share is its oldest's.
+func MembersByEmail(ctx context.Context, emails []string) (map[string]uuid.UUID, error) {
+	if len(emails) == 0 {
+		return map[string]uuid.UUID{}, nil
+	}
+	return pgexec.Pairs[string, uuid.UUID](ctx, `
+		SELECT DISTINCT ON (LOWER(email_id)) LOWER(email_id), id FROM users
+		WHERE LOWER(email_id) = ANY($1) AND deleted_at IS NULL AND is_external = false AND is_bot = false
+		ORDER BY LOWER(email_id), created_at`, pq.Array(emails))
 }
 
 // GetUserIDByEmail finds a user ID by email address.

@@ -151,3 +151,82 @@ func TestABranchLeadsOnlyToATaskTheBotMayRead(t *testing.T) {
 		t.Errorf("no branch leads to %q after %d reads, want none after none", got, read)
 	}
 }
+
+// A sync of a task goes only where its own project links (CHAT76): through
+// the project's online link it may send and read; through the project's
+// offline link (the demo's fixture) there is nothing to send, and the sync is
+// done; a repository another project links, online or offline, or that no
+// project links, is outside its project. The offline read is made only when
+// the online one finds nothing, and a read that fails says so.
+func TestASyncReachesOnlyItsOwnProjectsRepositories(t *testing.T) {
+	oldLinks, oldAll := readProjectLinks, readAllProjectLinks
+	t.Cleanup(func() { readProjectLinks, readAllProjectLinks = oldLinks, oldAll })
+
+	website, billing := uuid.New(), uuid.New()
+	link := func(project uuid.UUID, owner, name string, online bool) *githubLinkModel.GitHubLink {
+		return &githubLinkModel.GitHubLink{Id: uuid.New(), ProjectId: project, RepoOwner: owner, RepoName: name, SyncIssues: online, SyncPRs: online}
+	}
+	// Each project's links, offline ones included; only the online ones are
+	// in readProjectLinks' answer, as githubLinkModel.Online leaves them.
+	links := map[uuid.UUID][]*githubLinkModel.GitHubLink{
+		website: {link(website, "acme", "web", true), link(website, "demo-team", "q4-launch-site", false)},
+		billing: {link(billing, "acme", "billing", true), link(billing, "demo-team", "billing-site", false)},
+	}
+	var onlineReads, allReads int
+	var onlineErr, allErr error
+	readProjectLinks = func(_ context.Context, project uuid.UUID) ([]*githubLinkModel.GitHubLink, error) {
+		onlineReads++
+		var out []*githubLinkModel.GitHubLink
+		for _, l := range links[project] {
+			if l.SyncIssues || l.SyncPRs {
+				out = append(out, l)
+			}
+		}
+		return out, onlineErr
+	}
+	// As GetLinksForRepair reads: the project's links, or every project's
+	// when the project is uuid.Nil.
+	readAllProjectLinks = func(_ context.Context, project uuid.UUID) ([]*githubLinkModel.GitHubLink, error) {
+		allReads++
+		if project == uuid.Nil {
+			return append(append([]*githubLinkModel.GitHubLink(nil), links[website]...), links[billing]...), allErr
+		}
+		return links[project], allErr
+	}
+	inWebsite := func(context.Context, uuid.UUID) (uuid.UUID, error) { return website, nil }
+	inNoProject := func(context.Context, uuid.UUID) (uuid.UUID, error) { return uuid.Nil, nil }
+	errRead := errors.New("the read failed")
+	unread := func(context.Context, uuid.UUID) (uuid.UUID, error) { return uuid.Nil, errRead }
+
+	task := uuid.New()
+	for _, c := range []struct {
+		name        string
+		projectOf   func(context.Context, uuid.UUID) (uuid.UUID, error)
+		owner, repo string
+		online, all error
+		want        error
+		allRead     int // offline reads made
+	}{
+		{"its own project's online link", inWebsite, "acme", "web", nil, nil, nil, 0},
+		{"its own project's online link, in another case", inWebsite, "Acme", "WEB", nil, nil, nil, 0},
+		{"its own project's offline link", inWebsite, "demo-team", "q4-launch-site", nil, nil, errNothingToSend, 1},
+		{"its own project's offline link, in another case", inWebsite, "Demo-Team", "Q4-Launch-Site", nil, nil, errNothingToSend, 1},
+		{"another project's online link", inWebsite, "acme", "billing", nil, nil, errOutsideProject, 1},
+		{"another project's offline link", inWebsite, "demo-team", "billing-site", nil, nil, errOutsideProject, 1},
+		{"a repository no project links, by its project's offline one", inWebsite, "demo-team", "elsewhere", nil, nil, errOutsideProject, 1},
+		{"its own project's offline link's owner with another name", inWebsite, "demo-team", "q4-launch", nil, nil, errOutsideProject, 1},
+		{"a task in no project", inNoProject, "demo-team", "q4-launch-site", nil, nil, errOutsideProject, 0},
+		{"its project can't be read", unread, "demo-team", "q4-launch-site", nil, nil, errRead, 0},
+		{"its project's online links can't be read", inWebsite, "demo-team", "q4-launch-site", errRead, nil, errRead, 0},
+		{"its project's offline links can't be read", inWebsite, "demo-team", "q4-launch-site", nil, errRead, errRead, 1},
+	} {
+		onlineReads, allReads, onlineErr, allErr = 0, 0, c.online, c.all
+		got := syncReach(context.Background(), c.projectOf, task, c.owner, c.repo)
+		if !errors.Is(got, c.want) {
+			t.Errorf("%s: %s/%s answered %v; want %v", c.name, c.owner, c.repo, got, c.want)
+		}
+		if allReads != c.allRead {
+			t.Errorf("%s: %d reads with offline links; want %d", c.name, allReads, c.allRead)
+		}
+	}
+}

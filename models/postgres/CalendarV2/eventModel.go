@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	calendarV2Domain "github.com/akashc777/OneCamp/domain/CalendarV2"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
@@ -81,6 +82,12 @@ type Event struct {
 	GuestsCanSeeGuests bool
 	// EmailOnAnswers is the organiser's "Email me when guests answer".
 	EmailOnAnswers bool
+	// RecapToGuests is the organiser's "Send the recap to guests": its call's
+	// recap is emailed to its guests by email (594). Changed by
+	// SetRecapToGuests alone: Update never touches it, and an insert writes
+	// it as the row has it, so the new series "this and following" makes
+	// keeps it, and a new event's is off.
+	RecapToGuests bool
 	// TaskUUID is a task block's task: kind task_block alone names one
 	// (486_calendar_task_blocks).
 	TaskUUID *uuid.UUID
@@ -101,13 +108,7 @@ type Event struct {
 func (e *Event) AllDay() bool { return e.StartDate != "" }
 
 // eventColumns is every column a read returns, in scanEvent's order.
-const eventColumns = `e.id, e.calendar_id, e.kind, e.title, e.notes, e.notes_format, e.location, e.call_room,
-	e.start_at, e.end_at, to_char(e.start_date, 'YYYY-MM-DD'), to_char(e.end_date, 'YYYY-MM-DD'), e.tz, e.end_tz,
-	e.rrule, e.until_at, e.series_id, e.recurrence_id,
-	COALESCE(array_to_json(e.exdates), '[]'), COALESCE(array_to_json(e.rdates), '[]'), e.changed,
-	e.transparency, e.visibility, e.hue, e.status, e.guests_can_modify, e.guests_can_invite, e.guests_can_see_guests,
-	e.created_by, e.sequence, e.ical_uid, e.source, COALESCE(e.google_event_id, ''),
-	e.created_at, e.updated_at, e.deleted_at, e.deleted_by, e.email_on_answers, e.task_uuid`
+const eventColumns = calendarV2Domain.EventColumns
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -128,7 +129,7 @@ func scanEvent(s scanner) (*Event, error) {
 		&exdates, &rdates, pq.Array(&e.Changed),
 		&e.Transparency, &e.Visibility, &e.Hue, &e.Status, &e.GuestsCanModify, &e.GuestsCanInvite, &e.GuestsCanSeeGuests,
 		&createdBy, &e.Sequence, &e.ICalUID, &e.Source, &e.GoogleEventID,
-		&e.CreatedAt, &e.UpdatedAt, &deletedAt, &deletedBy, &e.EmailOnAnswers, &task)
+		&e.CreatedAt, &e.UpdatedAt, &deletedAt, &deletedBy, &e.EmailOnAnswers, &task, &e.RecapToGuests)
 	if err != nil {
 		return nil, err
 	}
@@ -225,10 +226,10 @@ const insertColumns = `id, calendar_id, kind, title, notes, notes_format, locati
 	rrule, until_at, series_id, recurrence_id, exdates, rdates, changed,
 	transparency, visibility, hue, status, guests_can_modify, guests_can_invite, guests_can_see_guests,
 	created_by, sequence, ical_uid, source, google_event_id, created_at, updated_at, deleted_at, deleted_by,
-	email_on_answers, task_uuid`
+	email_on_answers, task_uuid, recap_to_guests`
 
 // insertColumnCount is how many values one row of insertColumns takes.
-const insertColumnCount = 39
+const insertColumnCount = 40
 
 // insertPlaceholders is one row's placeholders from $first, with the casts
 // the text-sent values need.
@@ -258,7 +259,7 @@ func insertArgs(e *Event) []any {
 		e.RRule, e.UntilAt, nullUUID(e.SeriesID), e.RecurrenceID, timesArray(e.Exdates), timesArray(e.Rdates), pq.Array(helpers.NonNil(e.Changed)),
 		e.Transparency, e.Visibility, e.Hue, e.Status, e.GuestsCanModify, e.GuestsCanInvite, e.GuestsCanSeeGuests,
 		e.CreatedBy, e.Sequence, e.ICalUID, e.Source, nullText(e.GoogleEventID), e.CreatedAt, e.UpdatedAt, e.DeletedAt, nullUUID(e.DeletedBy),
-		e.EmailOnAnswers, nullUUID(e.TaskUUID)}
+		e.EmailOnAnswers, nullUUID(e.TaskUUID), e.RecapToGuests}
 }
 
 // Insert writes a new event.
@@ -298,6 +299,20 @@ func InsertIfAbsent(ctx context.Context, db DB, events []*Event) (map[uuid.UUID]
 		wrote[id] = true
 	}
 	return wrote, rows.Err()
+}
+
+// SetRecapToGuests turns an event's "Send the recap to guests" on or off,
+// and says whether that changed it (false too for no such live event). It
+// moves neither the event's sequence nor its update time: no form open on
+// the event goes stale, and no guest's calendar changes.
+func SetRecapToGuests(ctx context.Context, id uuid.UUID, on bool) (bool, error) {
+	n, err := pgexec.Exec(ctx, `UPDATE events SET recap_to_guests = $2
+		WHERE id = $1 AND deleted_at IS NULL AND recap_to_guests <> $2`, id, on)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CalendarV2.SetRecapToGuests err: %+v", err)
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // Update writes every changeable field of e, its series, the instance it

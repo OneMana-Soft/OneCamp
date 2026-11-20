@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/google/uuid"
 )
 
@@ -57,12 +59,13 @@ func (f MoveFilter) Matches(m Move) bool {
 // NormalizeMoveFilter checks a filter as a person set it (a status by name,
 // "QA" or "In review") and returns it as it is stored and compared. A
 // project's own status needs its project; a name the project does not have is
-// an error that lists the ones it does.
+// a refusal that lists the ones it does. What it refuses is a refusal in the
+// person's words (400); a read that failed is returned as it came.
 func NormalizeMoveFilter(ctx context.Context, projectID, toStatus string) (MoveFilter, error) {
 	f := MoveFilter{ProjectID: strings.TrimSpace(projectID)}
 	if f.ProjectID != "" {
 		if _, err := uuid.Parse(f.ProjectID); err != nil {
-			return MoveFilter{}, fmt.Errorf("that is not a project")
+			return MoveFilter{}, moveRefused("that is not a project")
 		}
 	}
 	status := strings.TrimSpace(toStatus)
@@ -72,13 +75,19 @@ func NormalizeMoveFilter(ctx context.Context, projectID, toStatus string) (MoveF
 	r, err := Resolve(ctx, f.ProjectID, status)
 	if errors.Is(err, ErrUnknownStatus) {
 		if f.ProjectID == "" {
-			return MoveFilter{}, fmt.Errorf("%q is not a status every project has; pick the project it belongs to", status)
+			return MoveFilter{}, moveRefused(fmt.Sprintf("%q is not a status every project has; pick the project it belongs to", status))
 		}
-		return MoveFilter{}, fmt.Errorf("%q is not a status of that project. %s", status, Describe(ctx, f.ProjectID))
+		return MoveFilter{}, moveRefused(fmt.Sprintf("%q is not a status of that project. %s", status, Describe(ctx, f.ProjectID)))
 	}
 	if err != nil {
 		return MoveFilter{}, err
 	}
 	f.ToStatus = r.Value()
 	return f, nil
+}
+
+// moveRefused is a filter refused in words: the person's to change, not ours
+// to retry, so an agent or workflow install answers it 400 (CR-444 D1).
+func moveRefused(msg string) error {
+	return &helpers.Refusal{Status: http.StatusBadRequest, Msg: msg}
 }

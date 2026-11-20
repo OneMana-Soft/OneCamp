@@ -60,3 +60,25 @@ func TestEmailShowsWhatPeopleWroteAsPlainText(t *testing.T) {
 		}
 	}
 }
+
+// A body of several lines keeps them in both parts: each line break is a
+// <br> in the HTML part, and what was written stays text, escaped once.
+func TestEmailBodyKeepsItsLines(t *testing.T) {
+	body := "<b>x</b>\nPhone: 1\r\nNote: +1 & \"y\"\rend"
+	page, text, err := Render(TemplateData{Title: "Booked", Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "&lt;b&gt;x&lt;/b&gt;<br>Phone: 1<br>Note: &#43;1 &amp; &#34;y&#34;<br>end"; !strings.Contains(page, want) {
+		t.Errorf("the HTML part doesn't show the body's lines as %q:\n%s", want, page)
+	}
+	if strings.Contains(page, "<b>x") || strings.Contains(page, "\r") {
+		t.Errorf("the HTML part holds the body as HTML, or a bare line break:\n%s", page)
+	}
+	if !strings.Contains(text, body) {
+		t.Errorf("the plain-text part changed the body:\n%q", text)
+	}
+	if got := TextHTML("a\n<i>b</i>\x00"); got != "a<br>&lt;i&gt;b&lt;/i&gt;\uFFFD" {
+		t.Errorf("TextHTML: %q", got)
+	}
+}

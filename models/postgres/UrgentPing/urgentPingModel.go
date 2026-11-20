@@ -10,6 +10,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// PairLockKey is the lock a sender's pings to recipient are counted under.
+func PairLockKey(sender, recipient uuid.UUID) string {
+	return "urgent_ping:" + sender.String() + ":" + recipient.String()
+}
+
 // Claim records a ping from sender to recipient when fewer than limit were
 // sent since then, and says whether it did. The count and the write hold the
 // pair's transaction lock: counted apart, two taps at once both saw none and
@@ -17,8 +22,7 @@ import (
 func Claim(ctx context.Context, sender, recipient uuid.UUID, since time.Time, limit int) (bool, error) {
 	claimed := false
 	err := pgexec.InTx(ctx, func(ctx context.Context) error {
-		if _, err := pgexec.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('urgent_ping:' || $1::text || ':' || $2::text))`,
-			sender, recipient); err != nil {
+		if err := pgexec.LockXact(ctx, PairLockKey(sender, recipient)); err != nil {
 			return err
 		}
 		n, err := pgexec.Scalar[int](ctx,

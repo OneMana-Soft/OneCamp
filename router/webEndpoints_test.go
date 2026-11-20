@@ -104,6 +104,31 @@ func TestTheWebAppsEndpointsAreReadAsWritten(t *testing.T) {
 	}
 }
 
+// A request object's method is read wherever the object writes it: before its
+// path (lib/calendar/eventRecap.ts's `{ method: "GET", apiEndpoint: … }`) or
+// after it, on one line or over several. A method its payload names is not the
+// request's, nor is a neighbouring object's.
+func TestARequestsMethodIsReadWhereverItsObjectWritesIt(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{`export const projectsRequest = { method: "GET", apiEndpoint: "/user/userProjectList", quiet: true } as const`, "GET /user/userProjectList"},
+		{"return { method: \"POST\", apiEndpoint: \"/calendar/events\", appendToUrl: `/${encodeURIComponent(id)}/restore`, quiet: true } as const", "WRITE /calendar/events"},
+		{"send({\n  method: 'GET',\n  apiEndpoint: `/event/${id}`,\n})", "GET /event/"},
+		{`send({ method: "GET", payload: { id }, apiEndpoint: "/doc/peek" })`, "GET /doc/peek"},
+		{`makeRequest({ apiEndpoint: "/doc/read", payload: { id }, method: "GET" })`, "GET /doc/read"},
+		{`makeRequest({ apiEndpoint: "/doc/save", payload: { method: "GET" } })`, "WRITE /doc/save"},
+		{"const save = { apiEndpoint: \"/task/save\" }\nconst read = { method: \"GET\", apiEndpoint: \"/task/read\" }", "WRITE /task/save, GET /task/read"},
+		{"const read = { apiEndpoint: \"/task/read\", method: \"GET\" }\nconst save = { method: \"PUT\", apiEndpoint: \"/task/save\" }", "GET /task/read, WRITE /task/save"},
+	} {
+		var got []string
+		for _, e := range endpointsIn("lib/request.ts", c.src, false) {
+			got = append(got, e.method+" "+e.path)
+		}
+		if strings.Join(got, ", ") != c.want {
+			t.Errorf("%s\nread %v, want %s", c.src, got, c.want)
+		}
+	}
+}
+
 // route is one route of this server: its method and its path's segments.
 type route struct {
 	method   string
@@ -140,9 +165,10 @@ var (
 	webObjectKey = regexp.MustCompile(`(?m)^\s*\w+:\s*["'](/[^"']*)["']`)
 	webConstant  = regexp.MustCompile(`(?m)^export const [A-Z][A-Z0-9_]* = ["'](/[^"']*)["']`)
 	// A path written at a call: axiosInstance's methods (their method), useFetch
-	// and its kin (GET), a write's apiEndpoint (GET when its options say so).
+	// and its kin (GET), a write's apiEndpoint (GET when its own object says so,
+	// before its path or after: webGetOption, read in ownLevel).
 	webCall      = regexp.MustCompile("(?:axiosInstance\\.(get|post|put|patch|delete)(?:<[^>()]*>)?\\(|\\b(?:useFetch|useFetchOnlyOnce|useSWR)(?:<[^>()]*>)?\\(|(apiEndpoint):)\\s*[`'\"](/[^`'\"]*)")
-	webGetOption = regexp.MustCompile(`^[^}]*method:\s*["']GET["']`)
+	webGetOption = regexp.MustCompile(`\bmethod:\s*["']GET["']`)
 )
 
 // webEndpoints reads every endpoint the web app names in its services and
@@ -214,12 +240,47 @@ func endpointsIn(file, src string, service bool) []webEndpoint {
 		switch {
 		case c[2] >= 0 && src[c[2]:c[3]] == "get", c[2] < 0 && c[4] < 0:
 			method = http.MethodGet
-		case c[4] >= 0 && webGetOption.MatchString(src[c[1]:min(len(src), c[1]+300)]):
+		case c[4] >= 0 && webGetOption.MatchString(ownLevel(src, c[0])):
 			method = http.MethodGet
 		}
 		out = append(out, webEndpoint{at: at(c[0]), path: strings.SplitN(path, "?", 2)[0], method: method})
 	}
 	return out
+}
+
+// ownLevel is the object literal around src[i], from its opening { to its
+// closing }, with every object nested in it left out: a request's own options,
+// whichever order it writes them in, and not a method its payload or a
+// neighbouring object names. "" when i is in no whole object.
+func ownLevel(src string, i int) string {
+	open := -1
+	for j, depth := i-1, 0; j >= 0 && open < 0; j-- {
+		switch {
+		case src[j] == '}':
+			depth++
+		case src[j] == '{' && depth == 0:
+			open = j
+		case src[j] == '{':
+			depth--
+		}
+	}
+	if open < 0 {
+		return ""
+	}
+	var own strings.Builder
+	for j, depth := open+1, 0; j < len(src); j++ {
+		switch c := src[j]; {
+		case c == '{':
+			depth++
+		case c == '}' && depth == 0:
+			return own.String()
+		case c == '}':
+			depth--
+		case depth == 0:
+			own.WriteByte(c)
+		}
+	}
+	return ""
 }
 
 // segmentsOf is a path's segments, without its query or a trailing slash.

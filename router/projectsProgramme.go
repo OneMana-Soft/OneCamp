@@ -62,4 +62,6 @@ func mountProjectsProgramme(rt projectsRouters) {
 	mountProjectForms(rt) // package 9 R4: a form's submissions
 	mountRestore(rt)      // V-78: the one restore route for soft deletes
 	mountWorkChanges(rt)  // WCL-1: the Work Change Log's read
+	mountSLA(rt)          // linear-24 H1: SLA timers
+	mountTriage(rt)       // package 9 R5a: the triage queue
 }

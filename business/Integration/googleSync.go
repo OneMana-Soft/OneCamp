@@ -31,6 +31,11 @@ func init() {
 }
 
 // The most a pull reads of one calendar, and per page.
+// googleEventKey is the private extended property each event OneCamp
+// imports to Google carries: the OneCamp event's uuid. Only OneCamp's own
+// link reads it (private properties are the calendar's, not shared out).
+const googleEventKey = "onecampEvent"
+
 const (
 	maxPullEvents = 50000
 	pullPageSize  = 2500
@@ -165,7 +170,23 @@ func push(ctx context.Context, op calendarSyncBusiness.Op) (calendarSyncBusiness
 	case "create":
 		// Imported, not inserted: Google keeps the event's UID, so the same
 		// event is one event on both sides, and nobody is emailed.
-		made, err := srv.Events.Import(op.Remote.ID, googleEventOf(op.Event)).Context(ctx).Do()
+		// Marked with the event's uuid (googleEventKey), so a read-back
+		// takes only this event's own.
+		ev := googleEventOf(op.Event)
+		ev.ExtendedProperties = &calendar.EventExtendedProperties{Private: map[string]string{googleEventKey: op.EventUUID.String()}}
+		made, err := srv.Events.Import(op.Remote.ID, ev).Context(ctx).Do()
+		if gerr := (*googleapi.Error)(nil); errors.As(err, &gerr) && gerr.Code == http.StatusConflict {
+			// Google has an event of this iCalUID already: an earlier try's,
+			// whose answer was lost, is this create, read back. Any other
+			// (another person's copy sent under the same UID, or this one's
+			// cancelled there) is never taken, and no second event is made:
+			// the change is refused, and waits until the event changes here.
+			if had := importedAs(ctx, srv, op.Remote.ID, op.Event.UID, op.EventUUID); had != nil {
+				made, err = had, nil
+			} else {
+				err = fmt.Errorf("%w: google has an event of this UID that isn't this one's: %w", calendarSyncBusiness.ErrRefused, err)
+			}
+		}
 		if err != nil {
 			return calendarSyncBusiness.Ref{}, err
 		}
@@ -189,6 +210,21 @@ func push(ctx context.Context, op calendarSyncBusiness.Op) (calendarSyncBusiness
 // for (revoked, expired, or disconnected here), a calendar the link may only
 // read, and a change Google won't take as it is. Anything else, such as a
 // rate limit or an outage, stays as it is and is tried again later. Pure.
+// importedAs is the event Google keeps for uid in cal, deleted or not: a
+// series, not one of its instances. Nil if Google shows none.
+func importedAs(ctx context.Context, srv *calendar.Service, cal, uid string, event uuid.UUID) *calendar.Event {
+	got, err := srv.Events.List(cal).ICalUID(uid).PrivateExtendedProperty(googleEventKey + "=" + event.String()).Context(ctx).Do()
+	if err != nil {
+		return nil
+	}
+	for _, ev := range got.Items {
+		if ev.RecurringEventId == "" && ev.Status != "cancelled" && ev.ExtendedProperties != nil && ev.ExtendedProperties.Private[googleEventKey] == event.String() {
+			return ev
+		}
+	}
+	return nil
+}
+
 func syncErr(err error) error {
 	if err == nil {
 		return nil

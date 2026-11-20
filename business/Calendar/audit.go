@@ -63,8 +63,14 @@ var calendarChanges = map[resourceEventBusiness.Kind]bool{
 }
 
 func auditsEvent(e resourceEventBusiness.Event) bool {
+	if e.ResourceKind == KindRoom {
+		return roomChanges[e.Kind] != ""
+	}
 	if e.ResourceKind == KindCalendar {
 		return calendarChanges[e.Kind]
+	}
+	if e.ResourceKind == KindSyncLink {
+		return e.Kind == resourceEventBusiness.CalendarSyncLinkBroken
 	}
 	_, ok := auditedKinds[e.Kind]
 	return ok && e.ResourceKind == KindEvent
@@ -74,8 +80,14 @@ func auditsEvent(e resourceEventBusiness.Event) bool {
 // ids and names of what changed, never words from the event. Pure.
 func auditRow(e resourceEventBusiness.Event) (string, map[string]interface{}) {
 	change := eventChange
+	if e.ResourceKind == KindRoom {
+		change = roomChange
+	}
 	if e.ResourceKind == KindCalendar {
 		change = calendarChange
+	}
+	if e.ResourceKind == KindSyncLink {
+		change = syncLinkChange
 	}
 	what, meta := change(e)
 	// The row's actor says who a person is; the summary says what they did.
@@ -129,6 +141,15 @@ func showing(scope string) string {
 	return ""
 }
 
+// linkedTo is what a link's row says it is to: a calendar, or (a link of
+// everything its person may see) all their calendars. Pure.
+func linkedTo(e resourceEventBusiness.Event) string {
+	if e.Data["target"] == WorkspaceFeedID {
+		return "all their calendars"
+	}
+	return "a calendar"
+}
+
 // calendarChange is what happened to a calendar, and its row's metadata:
 // the calendar's id, the people a share reached, the levels and the host the
 // event names. Never the calendar's name, which its events don't carry. Pure.
@@ -156,14 +177,45 @@ func calendarChange(e resourceEventBusiness.Event) (string, map[string]interface
 	case resourceEventBusiness.CalendarUnsubscribed:
 		what = "unsubscribed from a calendar at " + e.Data["host"]
 	case resourceEventBusiness.CalendarFeedMade:
-		what = "made a link to a calendar" + showing(e.Data["scope"])
+		what = "made a link to " + linkedTo(e) + showing(e.Data["scope"])
 		if old := e.Data["replaced"]; old != "" {
-			what = "made a new link to a calendar" + showing(e.Data["scope"]) + ", stopping the old one" + showing(old)
+			what = "made a new link to " + linkedTo(e) + showing(e.Data["scope"]) + ", stopping the old one" + showing(old)
 		}
 	case resourceEventBusiness.CalendarFeedStopped:
-		what = "stopped a link to a calendar" + showing(e.Data["scope"])
+		whose := "a"
+		if e.Data["by"] == "admin" {
+			whose = "a member's"
+		}
+		what = "stopped " + whose + " link to " + linkedTo(e) + showing(e.Data["scope"])
 	}
 	meta := auditBusiness.EventMeta(e, true)
-	meta["calendar_uuid"] = e.ResourceUUID
+	if e.Data["target"] == WorkspaceFeedID {
+		meta["feed_uuid"] = e.ResourceUUID
+	} else {
+		meta["calendar_uuid"] = e.ResourceUUID
+	}
 	return what, meta
+}
+
+// syncLinkChange is an admin's break of a person's sync link (gcal-8 H1):
+// which provider's, the link's id and whose it was; never its address or
+// anything of its account. Pure.
+func syncLinkChange(e resourceEventBusiness.Event) (string, map[string]interface{}) {
+	meta := auditBusiness.EventMeta(e, true)
+	meta["sync_link_uuid"], meta["person_uuid"], meta["by"] = e.ResourceUUID, e.Data["person_uuid"], e.Data["by"]
+	return "disconnected a member's " + syncWithOf(e.Data["provider"]).name + " calendar sync", meta
+}
+
+// roomChanges are an admin's changes to a room (rooms.go), as a row says them.
+var roomChanges = map[resourceEventBusiness.Kind]string{
+	resourceEventBusiness.CalendarRoomAdded:   "added a room",
+	resourceEventBusiness.CalendarRoomChanged: "changed a room",
+	resourceEventBusiness.CalendarRoomRetired: "retired a room",
+}
+
+// roomChange is what happened to a room, and its row's metadata. Pure.
+func roomChange(e resourceEventBusiness.Event) (string, map[string]interface{}) {
+	meta := auditBusiness.EventMeta(e, true)
+	meta["room_uuid"] = e.ResourceUUID
+	return roomChanges[e.Kind], meta
 }

@@ -395,6 +395,7 @@ func GetUnifiedActivity(ctx context.Context, userDgraphId string, beforeTime tim
 	query := `query UnifiedActivity($user_id: string, $limit: int, $time: string) {
 		mentionInfo(func: uid($user_id)) {
 			mentions: ~mention_users @filter(lt(mention_created_at, $time) AND (has(mention_chat) OR has(mention_post) OR has(mention_comment))) (orderdesc: mention_created_at, first: $limit) {
+				uid
 				mention_created_at
 				mention_updated_at
 				mention_chat @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z") AND NOT uid_in(chat_from, $user_id)) @cascade(chat_dm) {

@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
@@ -118,10 +119,13 @@ func ReachComputed(ctx context.Context, table uuid.UUID, reaches map[uuid.UUID][
 	return locked && err == nil, err
 }
 
-// keptLock is the key of table $1's kept lock, held to the end of a
-// transaction by each batch that writes the table's kept entries
-// (LockKept). Row writes never take it: theirs is computedLock.
-const keptLock = `hashtextextended('onecamp.tables.kept:' || $1::text, 0)`
+// KeptLockKey names table's kept lock, held to the end of a transaction by each
+// batch that writes the table's kept entries (LockKept). Row writes never take
+// it: theirs is computedLock. 64 bits, as computedLock's keys and as it was
+// before LockXact ('onecamp.tables.kept:' || id::text).
+func KeptLockKey(table uuid.UUID) pgexec.WideKey {
+	return pgexec.WideKey("onecamp.tables.kept:" + table.String())
+}
 
 // LockKept takes table's kept lock for the transaction ctx carries, to its
 // commit, before the batch reads a mark or a row: the batches that write a
@@ -134,7 +138,7 @@ const keptLock = `hashtextextended('onecamp.tables.kept:' || $1::text, 0)`
 // that no read queues behind a long batch.
 func LockKept(ctx context.Context, table uuid.UUID, reader bool) (bool, error) {
 	if !reader {
-		_, err := pgexec.Exec(ctx, `SELECT pg_advisory_xact_lock(`+keptLock+`)`, table)
+		err := pgexec.LockXact(ctx, KeptLockKey(table))
 		return err == nil, err
 	}
 	// The wait runs in a savepoint with its own lock_timeout: a wait that runs
@@ -150,7 +154,7 @@ func LockKept(ctx context.Context, table uuid.UUID, reader bool) (bool, error) {
 	if _, err := pgexec.Exec(ctx, `SET LOCAL lock_timeout = '`+keptReaderWait+`'`); err != nil {
 		return false, err
 	}
-	if _, err := pgexec.Exec(ctx, `SELECT pg_advisory_xact_lock(`+keptLock+`)`, table); err != nil {
+	if err := pgexec.LockXact(ctx, KeptLockKey(table)); err != nil {
 		if !lockNotAvailable(err) {
 			return false, err
 		}
@@ -263,18 +267,21 @@ func UnfilledComputed(ctx context.Context, n int) (map[uuid.UUID]uuid.UUID, erro
 // a write to rows changes: the stored fields of each row's own table on the
 // row, and, for the rows linking to or linked from them through up to three
 // levels of links (rollups of rollups), the stored fields whose values reach
-// one of tables, the tables written. A field the store found it can't keep,
-// until a change raises its generation, has no values to mark. Nothing is
-// marked when no such field is of or reaches those tables.
-func MarkComputedDirty(ctx context.Context, tables, rows []uuid.UUID) error {
-	if len(rows) == 0 {
+// one of tables, the tables written. rows are rows of tables; ends are the
+// rows at the ends of links the write made or removed, which may be of other
+// tables. A field the store found it can't keep, until a change raises its
+// generation, has no values to mark. Nothing is marked when no such field is
+// of or reaches those tables.
+func MarkComputedDirty(ctx context.Context, tables, rows, ends []uuid.UUID) error {
+	if len(rows)+len(ends) == 0 {
 		return nil
 	}
-	// The write holds its tables, and its rows', shared to its commit
-	// (computedLock), before it looks for what reaches them: a fill reaching
-	// one records that reach before this looks, or after this commits.
+	// The write holds its tables, and its link ends' tables, shared to its
+	// commit (computedLock), before it looks for what reaches them: a fill
+	// reaching one records that reach before this looks, or after this
+	// commits. Only the ends' tables are looked up: rows are of tables.
 	if _, err := pgexec.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(`+computedLock+`)
-		FROM (SELECT unnest($1::uuid[]) UNION SELECT table_id FROM data_table_rows WHERE id = ANY($2)) AS l(t)`, tables, rows); err != nil {
+		FROM (SELECT unnest($1::uuid[]) UNION SELECT table_id FROM data_table_rows WHERE id = ANY($2)) AS l(t)`, tables, ends); err != nil {
 		return err
 	}
 	held, err := pgexec.Scalar[bool](ctx, `SELECT EXISTS (SELECT 1 FROM data_table_computed
@@ -296,7 +303,7 @@ func MarkComputedDirty(ctx context.Context, tables, rows []uuid.UUID) error {
 		FROM nearest n
 		JOIN data_table_rows r ON r.id = n.row_id
 		JOIN data_table_computed c ON c.table_id = r.table_id AND (c.kind <> '' OR c.filled_gen <> c.gen)
-		WHERE n.depth = 0 OR c.reaches && $1::uuid[]`, tables, rows)
+		WHERE n.depth = 0 OR c.reaches && $1::uuid[]`, tables, append(slices.Clip(rows), ends...))
 	return err
 }
 

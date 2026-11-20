@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/akashc777/OneCamp/business/Access/level"
 	domain "github.com/akashc777/OneCamp/domain/Board"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -280,7 +281,7 @@ func storeSnapshot(ctx context.Context, boardUUID, stateB64 string, elementCount
 		ElementCount:     elementCount,
 		StateBytes:       len(stateB64),
 		Reason:           reason,
-		ContributorUUIDs: dedupeNonEmpty(contributors),
+		ContributorUUIDs: level.Unique(contributors),
 	}); err != nil {
 		// Don't leave an orphaned object if the index write failed.
 		removeSnapshotObject(context.Background(), key)
@@ -294,21 +295,6 @@ func storeSnapshot(ctx context.Context, boardUUID, stateB64 string, elementCount
 		}
 	}
 	return nil
-}
-
-// dedupeNonEmpty returns the unique, non-empty values of in, preserving order.
-// Always returns a non-nil slice so the DB stores an empty array, not NULL.
-func dedupeNonEmpty(in []string) []string {
-	out := make([]string, 0, len(in))
-	seen := make(map[string]bool, len(in))
-	for _, v := range in {
-		if v == "" || seen[v] {
-			continue
-		}
-		seen[v] = true
-		out = append(out, v)
-	}
-	return out
 }
 
 // MaybeSnapshotBoard decides whether to capture a snapshot for a persist event

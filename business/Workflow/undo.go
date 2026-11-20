@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	taskWriter "github.com/akashc777/OneCamp/business/TaskWriter"
 	"github.com/akashc777/OneCamp/helpers"
@@ -35,6 +36,10 @@ func UndoRun(ctx context.Context, who *userModels.UserInfo, projectID, runID uui
 	if helpers.ActsThroughToken(ctx) {
 		return nil, ErrThroughToken
 	}
+	// Putting back Urgent is a change into Urgent: told when the undo is
+	// done, each assignee once.
+	ctx, tellUrgent := taskBusiness.GatherUrgent(ctx)
+	defer tellUrgent()
 	run, err := getRun(ctx, runID)
 	if err != nil {
 		return nil, err

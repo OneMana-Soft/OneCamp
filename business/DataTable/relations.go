@@ -31,6 +31,7 @@ import (
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	rowQuery "github.com/akashc777/OneCamp/business/RowQuery"
+	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -273,12 +274,7 @@ func takeLinks(ctx context.Context, actor Actor, fields []*model.Field, values m
 	if rows[0].err != nil {
 		return nil, nil, rows[0].err
 	}
-	var changes []model.FieldLinks
-	var tables []uuid.UUID
-	for _, c := range rows[0].cells {
-		changes = append(changes, c.Links)
-		tables = append(tables, c.table)
-	}
+	changes, tables := rows[0].links()
 	return changes, tables, nil
 }
 
@@ -296,6 +292,18 @@ type rowCells struct {
 	values map[string]interface{}
 	cells  []linkCell
 	err    error
+}
+
+// links is what a new row's cells come to, as a write takes them: its links,
+// and the tables they go to, whose readers should look again.
+func (r rowCells) links() ([]model.FieldLinks, []uuid.UUID) {
+	var changes []model.FieldLinks
+	var tables []uuid.UUID
+	for _, c := range r.cells {
+		changes = append(changes, c.Links)
+		tables = append(tables, c.table)
+	}
+	return changes, tables
 }
 
 // linkGroup is how many rows' cells of a field linkCellsOf reads at once,
@@ -677,11 +685,7 @@ func inverseName(name string, fields []*model.Field) string {
 	for _, f := range fields {
 		taken[strings.ToLower(strings.TrimSpace(f.Name))] = true
 	}
-	out := name
-	for n := 2; taken[strings.ToLower(out)]; n++ {
-		out = fmt.Sprintf("%s %d", name, n)
-	}
-	return out
+	return helpers.UniqueName(name, taken)
 }
 
 // pairFor is the field showing relation field f's links in table to (whose

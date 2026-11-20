@@ -16,6 +16,9 @@ type InputUpdateBoard struct {
 	Title        *string `json:"board_title,omitempty"`
 	IsPrivate    *bool   `json:"board_private,omitempty"`
 	ThumbnailKey *string `json:"board_thumbnail_key,omitempty"`
+	// EditorsShare turns the board's editors-may-share switch (miro-32): its
+	// owner's and co-owners' alone.
+	EditorsShare *bool `json:"board_editors_share,omitempty"`
 }
 
 // InputBoardCollabUpdate is the payload the Hocuspocus board namespace POSTs to
@@ -39,6 +42,9 @@ type InputUpdateBoardPermissions struct {
 	RemoveViewers    []string `json:"remove_viewers,omitempty"`
 	AddCommenters    []string `json:"add_commenters,omitempty"`
 	RemoveCommenters []string `json:"remove_commenters,omitempty"`
+	// Co-owners (miro-32): the owner's alone to make and take away.
+	AddCoOwners    []string `json:"add_co_owners,omitempty"`
+	RemoveCoOwners []string `json:"remove_co_owners,omitempty"`
 }
 
 // InputGenerateBoardDiagram is the AI diagram-generation request. The diagram
@@ -125,6 +131,21 @@ type InputSearchBoardUser struct {
 type InputBoardCommentMention struct {
 	BoardId            string   `json:"board_uuid"`
 	CommentID          string   `json:"board_comment_id"`
+	CommentText        string   `json:"comment_text"`
+	MentionedUserUUIDs []string `json:"mentioned_user_uuids"`
+}
+
+// InputBoardComment is a comment on a board written by the server (miro-32
+// Can comment): add a pin at x, y, reply on board_comment_id, or delete
+// message_id from it (the whole pin when message_id is empty). It names no
+// author: the comment is always the caller's.
+type InputBoardComment struct {
+	BoardId            string   `json:"board_uuid"`
+	Action             string   `json:"action"`
+	CommentID          string   `json:"board_comment_id"`
+	MessageID          string   `json:"message_id"`
+	X                  *float64 `json:"x"`
+	Y                  *float64 `json:"y"`
 	CommentText        string   `json:"comment_text"`
 	MentionedUserUUIDs []string `json:"mentioned_user_uuids"`
 }

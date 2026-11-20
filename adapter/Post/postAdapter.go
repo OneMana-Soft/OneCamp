@@ -36,6 +36,10 @@ type InputCreateOrUpdateCommentToPost struct {
 	// the reply is additionally posted as a top-level message in the thread's
 	// channel so people not in the thread still see it.
 	AlsoSendToChannel bool `json:"also_send_to_channel,omitempty"`
+	// ClientMsgID is the id the app gave the reply when it showed it: a send
+	// tried again with it is the same reply (business/MessagePipeline
+	// ReplyIn*Thread). Optional; without one, every send is a reply.
+	ClientMsgID string `json:"client_msg_id,omitempty"`
 	// Outsider is the server's alone: the writer isn't in the conversation
 	// (let into its call by the call's invite, calls CALLS-3b), so the thread's
 	// index records the reply but not them.

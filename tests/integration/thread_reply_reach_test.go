@@ -6,7 +6,7 @@ package integration_test
 // Who hears of a reply in a private channel's thread, against real Postgres
 // and Dgraph: the post's author, those who replied before and those it
 // mentions, who are in the channel now, each by their setting for it ("all"
-// and "mention": all of them; "block": the author and those mentioned). Push,
+// and "mention": all of them; "block": none of them). Push,
 // email and the Activity feed agree.
 //
 // On the default setting ("all") the author and those mentioned were never
@@ -156,7 +156,7 @@ func TestAThreadReplyReachesTheChannelOnly(t *testing.T) {
 		t.Fatalf("maya's reply: %d %s", rec.Code, rec.Body.String())
 	}
 
-	want := []string{"ada", "bo", "cy", "dee", "eve", "fin"}
+	want := []string{"ada", "bo", "cy", "dee", "fin"} // never eve (mentioned) or gus (replied): Nothing hears nothing (NOTIF M1)
 
 	t.Run("push", func(t *testing.T) {
 		var got []string
@@ -176,7 +176,7 @@ func TestAThreadReplyReachesTheChannelOnly(t *testing.T) {
 		})
 		slices.Sort(got)
 		if !slices.Equal(got, want) {
-			t.Errorf("pushed to %v, want %v: bo wrote the post, ada and dee replied, cy, eve and fin were mentioned; not gus (replied, hears nothing), zed (not in the thread), jonas (not in the channel), fay (removed)", got, want)
+			t.Errorf("pushed to %v, want %v: bo wrote the post, ada and dee replied, cy and fin were mentioned; not eve (mentioned) or gus (replied), who hear nothing, zed (not in the thread), jonas (not in the channel), fay (removed)", got, want)
 		}
 	})
 

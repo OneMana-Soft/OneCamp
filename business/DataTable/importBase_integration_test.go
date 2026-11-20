@@ -116,6 +116,50 @@ type importTestError struct{ s string }
 
 func (e *importTestError) Error() string { return e.s }
 
+// A link a source names only on the side of a pair that shows the other's
+// links (the side made second) is brought, and reads from both sides; the
+// source's own rows are left as they were.
+func TestImportBaseBringsLinksNamedOnEitherSide(t *testing.T) {
+	w := newRelationWorld(t)
+	teams := ImportTable{Key: "tblT", Name: "Teams", Fields: []ImportField{
+		{Key: "fName", Name: "Team", Type: model.FieldText},
+		{Key: "fPeople", Name: "People", Type: model.FieldRelation, LinksTo: "tblP", Pair: "fTeam"},
+		{Key: "fSize", Name: "Size", Type: model.FieldRollup, Through: "fPeople", Of: "fName", Aggregate: "count"},
+	}}
+	people := ImportTable{Key: "tblP", Name: "People", Fields: []ImportField{
+		{Key: "fName", Name: "Name", Type: model.FieldText},
+		{Key: "fTeam", Name: "Team", Type: model.FieldRelation, LinksTo: "tblT", Pair: "fPeople"},
+	}}
+	teams.Rows = func(page func([]ImportRow) error) error {
+		return page([]ImportRow{{Key: "t1", Cells: map[string]any{"fName": "Design"}}, {Key: "t2", Cells: map[string]any{"fName": "Sales"}}})
+	}
+	theirs := map[string][]string{"fTeam": {"t1"}}
+	people.Rows = func(page func([]ImportRow) error) error {
+		return page([]ImportRow{
+			{Key: "p1", Cells: map[string]any{"fName": "Ada"}, Links: theirs},
+			{Key: "p2", Cells: map[string]any{"fName": "Bo"}, Links: map[string][]string{"fTeam": {"t1"}}},
+			{Key: "p3", Cells: map[string]any{"fName": "Cy"}, Links: map[string][]string{"fTeam": {"t2"}}},
+		})
+	}
+	made, err := ImportBaseAs(w.ctx, w.me, ImportBase{Tables: []ImportTable{teams, people}})
+	if err != nil || len(made.Notes) != 0 {
+		t.Fatalf("import: %v %+v", err, made.Notes)
+	}
+	tt, _ := model.GetTableByID(w.ctx, made.Tables["tblT"])
+	pt, _ := model.GetTableByID(w.ctx, made.Tables["tblP"])
+	tcells, pcells := w.cells(tt, &w.me), w.cells(pt, &w.me)
+	design := tcells[made.Rows["tblT/t1"]]
+	if got := labels(design[made.Fields["tblT/fPeople"].String()]); got != "Ada, Bo" || design[made.Fields["tblT/fSize"].String()] != 2.0 {
+		t.Errorf("Design's people %q, size %v", got, design[made.Fields["tblT/fSize"].String()])
+	}
+	if got := labels(pcells[made.Rows["tblP/p3"]][made.Fields["tblP/fTeam"].String()]); got != "Sales" {
+		t.Errorf("Cy's team: %q", got)
+	}
+	if len(theirs) != 1 || strings.Join(theirs["fTeam"], ",") != "t1" {
+		t.Errorf("the source's links were written to: %v", theirs)
+	}
+}
+
 // A files cell holds files of its own table: one uploaded to it is kept with
 // its name, size and type; one of another place, or of another table, is
 // refused, whoever writes; and an import keeps a source's file through Files.

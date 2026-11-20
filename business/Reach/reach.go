@@ -149,6 +149,27 @@ func capitalised(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
+// HereOf is who of ids is here now, as @here reaches them (Presence Here),
+// from one read of their people: the router's wait for a push (business/Notify,
+// A4 H4) asks it for an event's recipients at once. Keyed by lower-case id;
+// anyone not here, or not found, is left out.
+func HereOf(ctx context.Context, ids []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	people, err := readPeople(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range people {
+		if presenceBusiness.Here(p) {
+			out[strings.ToLower(p.Uuid)] = true
+		}
+	}
+	return out, nil
+}
+
 // InChannel is the people asked reaches in the channel, written by who: all
 // its members for @channel or @everyone, those here now for @here, and the
 // people who are members of a team who may mention (MayMention). Never the

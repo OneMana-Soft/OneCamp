@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -12,6 +13,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
+
+// reachWrites is the generation of calendars and calendar_shares, the rows
+// that say which calendars a person finds events on (search's reach,
+// business/Calendar): it moves after every write to either table.
+var reachWrites atomic.Uint64
+
+// ReachWrites is that generation: a reach read before it last moved may be
+// stale, one read after it may not (on this instance; another instance's
+// writes reach it through its cache's max age alone).
+func ReachWrites() uint64 { return reachWrites.Load() }
 
 // PersonalCalendar is the id of owner's own calendar, made with newID and
 // zone tz the first time it is needed. Two first times at once make one: the
@@ -29,6 +40,7 @@ func PersonalCalendar(ctx context.Context, db DB, owner uuid.UUID, newID uuid.UU
 	err = db.QueryRowContext(ctx, `INSERT INTO calendars (id, kind, owner_id, tz) VALUES ($1, 'personal', $2, $3)
 		ON CONFLICT (owner_id) WHERE kind = 'personal' AND deleted_at IS NULL DO NOTHING
 		RETURNING id`, newID, owner, tz).Scan(&id)
+	reachWrites.Add(1)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Someone else's first time won: theirs is the calendar.
 		err = db.QueryRowContext(ctx, `SELECT id FROM calendars WHERE owner_id = $1 AND kind = 'personal' AND deleted_at IS NULL`, owner).Scan(&id)
@@ -63,7 +75,9 @@ func findOrMakeCalendar(ctx context.Context, what string, find, insert pgexec.St
 	}
 	id, found, err := pgexec.QueryOne(ctx, find.SQL, scanID, find.Args...)
 	if err == nil && !found {
-		if id, found, err = pgexec.QueryOne(ctx, insert.SQL, scanID, insert.Args...); err == nil && !found {
+		id, found, err = pgexec.QueryOne(ctx, insert.SQL, scanID, insert.Args...)
+		reachWrites.Add(1)
+		if err == nil && !found {
 			id, found, err = pgexec.QueryOne(ctx, find.SQL, scanID, find.Args...)
 		}
 	}
@@ -365,11 +379,18 @@ func OwnCalendars(ctx context.Context, owner uuid.UUID) ([]Calendar, error) {
 		FROM calendars WHERE owner_id = $1 AND container_kind = '' AND deleted_at IS NULL ORDER BY kind <> 'personal', name, id`, owner)
 }
 
-// ContainerCalendars are the calendars of a kind of container, not in the
-// trash, at most limit, oldest first.
-func ContainerCalendars(ctx context.Context, kind string, limit int) ([]Calendar, error) {
-	return queryCalendars(ctx, `SELECT id, kind, owner_id, name, hue, tz, container_kind, container_id, deleted_at IS NOT NULL
-		FROM calendars WHERE container_kind = $1 AND deleted_at IS NULL ORDER BY created_at, id LIMIT $2`, kind, limit)
+// ContainerCalendars are the calendars of each of kinds of container, not in
+// the trash, at most limit of each kind, in the order kinds names them and
+// oldest first within a kind: one read for every kind.
+func ContainerCalendars(ctx context.Context, kinds []string, limit int) ([]Calendar, error) {
+	if len(kinds) == 0 {
+		return nil, nil
+	}
+	return queryCalendars(ctx, `SELECT id, kind, owner_id, name, hue, tz, container_kind, container_id, deleted
+		FROM (SELECT id, kind, owner_id, name, hue, tz, container_kind, container_id, deleted_at IS NOT NULL AS deleted, created_at,
+			ROW_NUMBER() OVER (PARTITION BY container_kind ORDER BY created_at, id) AS n
+			FROM calendars WHERE container_kind = ANY($1::text[]) AND deleted_at IS NULL) c
+		WHERE n <= $2 ORDER BY array_position($1::text[], container_kind::text), created_at, id`, kinds, limit)
 }
 
 func queryCalendars(ctx context.Context, q string, args ...any) ([]Calendar, error) {
@@ -441,6 +462,7 @@ func SharesOf(ctx context.Context, calendar uuid.UUID) ([]CalendarShare, error) 
 // stops: the row stays, marked by whom (uuid.Nil for nobody), at the level it
 // had. Sharing again brings a stopped share's row back, live.
 func SetShare(ctx context.Context, calendar, person, by uuid.UUID, level string) error {
+	defer reachWrites.Add(1) // after the write (and its transaction) ended, whatever it did
 	var err error
 	if level == "" {
 		_, err = pgexec.Exec(ctx, `UPDATE calendar_shares SET deleted_at = NOW(), deleted_by = $3, updated_at = NOW()
@@ -474,6 +496,7 @@ func SharedWith(ctx context.Context, person uuid.UUID) ([]Calendar, error) {
 // UpdateCalendar changes a live calendar's name and colour (nil leaves one):
 // a kept one stays as it was taken away.
 func UpdateCalendar(ctx context.Context, id uuid.UUID, name, hue *string) error {
+	defer reachWrites.Add(1) // after the write (and its transaction) ended, whatever it did
 	_, err := pgexec.Exec(ctx, `UPDATE calendars SET name = COALESCE($2, name), hue = COALESCE($3, hue), updated_at = NOW() WHERE id = $1 AND `+softDelete.Live(""), id, name, hue)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.UpdateCalendar err: %+v", err)
@@ -484,6 +507,7 @@ func UpdateCalendar(ctx context.Context, id uuid.UUID, name, hue *string) error 
 // SubscribedCalendar makes owner a calendar read from an address (kind
 // 'subscribed', calendar B8), named and coloured, in zone tz.
 func SubscribedCalendar(ctx context.Context, id, owner uuid.UUID, name, hue, tz string) error {
+	defer reachWrites.Add(1) // after the write (and its transaction) ended, whatever it did
 	_, err := pgexec.Exec(ctx, `INSERT INTO calendars (id, kind, owner_id, name, hue, tz) VALUES ($1, 'subscribed', $2, $3, $4, $5)`, id, owner, name, hue, tz)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.SubscribedCalendar err: %+v", err)
@@ -499,6 +523,7 @@ func SubscribedCalendar(ctx context.Context, id, owner uuid.UUID, name, hue, tz 
 // anyone's own) and its live shares are marked by owner, as stopping a share
 // marks one. It says whether a live one was taken away.
 func UnsubscribeCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error) {
+	defer reachWrites.Add(1) // after the write (and its transaction) ended, whatever it did
 	var marked bool
 	err := pgexec.InTx(ctx, func(ctx context.Context) error {
 		n, err := pgexec.Exec(ctx, `UPDATE calendars SET deleted_at = NOW(), deleted_by = $2, updated_at = NOW()
@@ -525,6 +550,7 @@ func UnsubscribeCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error)
 // subscription whose ledger row wasn't added: a failed subscribe's own row,
 // with nothing on it yet. It says whether there was one.
 func TakeBackSubscribedCalendar(ctx context.Context, id, owner uuid.UUID) (bool, error) {
+	defer reachWrites.Add(1) // after the write (and its transaction) ended, whatever it did
 	n, err := pgexec.Exec(ctx, `DELETE FROM calendars WHERE id = $1 AND owner_id = $2 AND kind = 'subscribed'`, id, owner)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CalendarV2.TakeBackSubscribedCalendar err: %+v", err)

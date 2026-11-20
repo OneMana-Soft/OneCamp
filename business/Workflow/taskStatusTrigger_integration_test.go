@@ -4,10 +4,13 @@ package business
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	workflowModel "github.com/akashc777/OneCamp/models/postgres/Workflow"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -15,7 +18,9 @@ import (
 )
 
 // Saving a "when a task moves to QA" workflow stores QA's id, so renaming QA
-// later cannot break it, and a status the project lacks is refused by name.
+// later cannot break it, and a status the project lacks is refused by name:
+// a 400 helpers.Refusal, the person's to change, so a template install
+// answers it in its words, not 500 "Please try again" (CR-462).
 func TestTaskStatusTriggerResolvesTheProjectsOwnStatus(t *testing.T) {
 	ctx := context.Background()
 	env := integration.SetupEnv(t)
@@ -46,6 +51,10 @@ func TestTaskStatusTriggerResolvesTheProjectsOwnStatus(t *testing.T) {
 	err = normalizeTaskStatusTrigger(ctx, &w)
 	if err == nil || !strings.Contains(err.Error(), "Shipped") || !strings.Contains(err.Error(), "QA") {
 		t.Fatalf("an unknown status should be refused with the ones there are: %v", err)
+	}
+	var r *helpers.Refusal
+	if !errors.As(err, &r) || r.Status != http.StatusBadRequest {
+		t.Fatalf("an unknown status is the person's to change, a 400 helpers.Refusal: got %#v", err)
 	}
 }
 

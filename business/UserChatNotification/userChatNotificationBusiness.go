@@ -76,14 +76,23 @@ func ForgetChatSetting(ctx context.Context, userID, grpID string) error {
 	return domain.ForgetChatSetting(ctx, userID, grpID)
 }
 
-// MembersOnAll is who of the conversation grpId's people on "all" is in it
-// now (InConversationNow): a setting can outlive someone's place in a group.
-func MembersOnAll(ctx context.Context, grpId string) ([]string, error) {
-	ids, err := domain.MembersOnAll(ctx, grpId)
+// Members is who of the conversation grpId's people, whatever their level,
+// is in it now (InConversationNow), and each one's level: a setting can
+// outlive someone's place in a group.
+func Members(ctx context.Context, grpId string) ([]string, map[string]string, error) {
+	ids, levels, err := domain.Members(ctx, grpId)
 	if err != nil || len(ids) == 0 {
-		return ids, err
+		return ids, levels, err
 	}
-	return InConversationNow(ctx, grpId, ids)
+	in, err := InConversationNow(ctx, grpId, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	kept := make(map[string]string, len(in))
+	for _, id := range in {
+		kept[id] = levels[id]
+	}
+	return in, kept, nil
 }
 
 // GetLevelsInConversation is each of userIds' setting for the conversation

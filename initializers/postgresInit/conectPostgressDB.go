@@ -72,6 +72,11 @@ func ConnectPostgres(ctx context.Context, dsn string) error {
 //
 // Every session also names, in the log, each statement Postgres refuses for
 // space (spaceTracer).
+//
+// A test that counts the statements a route sends adds its own tracer next to
+// spaceTracer (testTracer, set only by ConnectTracedForTest in the integration
+// build). Unset, a session's tracer is spaceTracer alone, as before: the one
+// nil check runs once per pool, never per statement.
 func sessionConfig(dsn string) (*pgx.ConnConfig, error) {
 	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
@@ -81,7 +86,27 @@ func sessionConfig(dsn string) (*pgx.ConnConfig, error) {
 		cfg.RuntimeParams["jit"] = "off"
 	}
 	cfg.Tracer = spaceTracer{}
+	if testTracer != nil {
+		cfg.Tracer = bothTracers{spaceTracer{}, testTracer}
+	}
 	return cfg, nil
+}
+
+// testTracer is a test's statement tracer, chained after spaceTracer by every
+// pool opened while it is set. Nothing outside the integration build sets it.
+var testTracer pgx.QueryTracer
+
+// bothTracers runs the session's own tracer, then the test's, on each
+// statement.
+type bothTracers struct{ own, test pgx.QueryTracer }
+
+func (b bothTracers) TraceQueryStart(ctx context.Context, c *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	return b.test.TraceQueryStart(b.own.TraceQueryStart(ctx, c, data), c, data)
+}
+
+func (b bothTracers) TraceQueryEnd(ctx context.Context, c *pgx.Conn, data pgx.TraceQueryEndData) {
+	b.own.TraceQueryEnd(ctx, c, data)
+	b.test.TraceQueryEnd(ctx, c, data)
 }
 
 func testDB(ctx context.Context, d *sql.DB) error {

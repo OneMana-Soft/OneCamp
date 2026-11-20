@@ -45,7 +45,7 @@ func TestMayReadAllAsksEveryConversationsCallsOnce(t *testing.T) {
 	me := &userModels.UserInfo{}
 	me.UserDgraphInfo.Uid, me.UserDgraphInfo.Uuid = "0x1", "aaaa"
 
-	got, err := MayReadAll(context.Background(), me, []Ref{open, invited, closed, meeting, open})
+	got, err := MayReadAll(context.Background(), accessBusiness.SubjectOf(me), []Ref{open, invited, closed, meeting, open})
 	if err != nil || len(got) != 2 {
 		t.Fatalf("MayReadAll = %+v, %v; want the open conversation and the invited one", got, err)
 	}
@@ -64,7 +64,7 @@ func TestMayReadAllAsksEveryConversationsCallsOnce(t *testing.T) {
 			t.Fatalf("MayRead(%v) = %v, %v, %v; MayReadAll says %+v, %v", ref, allowed, invitee, err, r, ok)
 		}
 	}
-	if none, err := MayReadAll(context.Background(), nil, []Ref{open}); err != nil || len(none) != 0 {
+	if none, err := MayReadAll(context.Background(), accessBusiness.Subject{}, []Ref{open}); err != nil || len(none) != 0 {
 		t.Fatalf("nobody: %+v, %v", none, err)
 	}
 }

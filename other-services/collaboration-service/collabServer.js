@@ -30,11 +30,12 @@ import { persistDoc } from './storeDoc.js'
 import { guardIncoming, personOf } from './presenceGuard.js'
 import { createBlockIdsTransform } from './transforms/blockIds.js'
 import { createLegacyContentTransform } from './transforms/legacyContent.js' // B2
-import { closeWhenLinkEnds } from './live/ops/reauth.js'
+import { closeWhenLinkEnds, guestStopped, recheckWhileOpen, REAUTH_CLOSE } from './live/ops/reauth.js'
 import { trackGuestStrokes } from './live/ops/guestStrokes.js'
 import { trackProtected } from './live/ops/protect.js'
 import { guardElementTypes } from './live/ops/elementTypes.js'
-import { guardFacilitation } from './live/ops/facilitationGuard.js'
+import { FACILITATION, guardFacilitation } from './live/ops/facilitationGuard.js'
+import { guardAgentEdits, guardAuthors, toldOf } from './live/ops/authorGuard.js'
 
 // Docs connect with the bare doc uuid as the document name. Boards connect with
 // a "board:" prefix so one server routes both to the right backend endpoints.
@@ -380,6 +381,7 @@ export function createCollabServer({
                     // When the link stops working, if it ever does: the
                     // socket closes then (connected, below).
                     const linkEndsAt = Date.parse(gResp.data?.until)
+                    const answeredAt = Date.now()
                     return {
                         user: { id: decoded.sub || 'guest', name: decoded.name || 'Guest' },
                         guest: true,
@@ -390,6 +392,16 @@ export function createCollabServer({
                         schemaOutdated: outdated,
                         access: { level: canEdit ? 'edit' : 'view', canEdit, locked: false },
                         ...(Number.isFinite(linkEndsAt) ? { linkEndsAt } : {}),
+                        // Asked again on an op once GUEST_RECHECK_MS old, and
+                        // on a timer while the socket sends nothing, so a link
+                        // turned off whose close never came stops writing and
+                        // hearing (live/ops/reauth.js guestStopped). An ask
+                        // out too long is aborted by its signal (askWithin).
+                        recheck: ({ signal } = {}) => api.post(guestAuthUrl, guestAuthBody, { headers: { Authorization: `Bearer ${token}` }, signal }),
+                        checkedAt: answeredAt,
+                        // Its last good answer: the server not answering is
+                        // let go only for a while from it (GUEST_UNANSWERED_MS).
+                        okAt: answeredAt,
                     }
                 }
 
@@ -483,11 +495,17 @@ export function createCollabServer({
                 trackGuestStrokes(data.document)
                 // Its protected objects stay as they are (live/ops/protect.js).
                 trackProtected(data.document)
-                // Its facilitation is its members' to run (live/ops/facilitationGuard.js).
-                guardFacilitation(data.document)
+                // Its facilitation is its members' to run (live/ops/facilitationGuard.js),
+                // each round started as its starter (V-965).
+                guardFacilitation(data.document, toldOf(log, data.documentName, FACILITATION))
+                // Everyone writes its comments, note makers and votes as
+                // themselves (live/ops/authorGuard.js, V-965).
+                guardAuthors(data.document, data.documentName, log)
                 return
             }
             if (parseDocumentName(data.documentName).kind !== 'doc') return
+            // Where an agent wrote is this service's record alone (V-965).
+            guardAgentEdits(data.document, data.documentName, log)
             try {
                 legacyContent.give(data.documentName, data.document)
             } catch (e) {
@@ -585,6 +603,10 @@ export function createCollabServer({
             // when it does; the reconnect is refused (the API checks a link's
             // end on every authorisation).
             if (data.context?.linkEndsAt && data.connection) closeWhenLinkEnds(data.connection, data.context.linkEndsAt)
+            // A guest who sends nothing is asked about on a timer by the same
+            // check an op asks (V-1035): its link turned off, it stops
+            // hearing the board within that check's bound.
+            if (data.context?.guest === true && data.connection) recheckWhileOpen(data.connection, data.context)
             if (data.context?.access && parseDocumentName(data.documentName).kind === 'doc') {
                 try {
                     const document = data.connection?.document
@@ -619,6 +641,11 @@ export function createCollabServer({
         // earlier lineage: lineage.js) may not write: its edits are dropped
         // from then on and it is told to drop its copy and open the doc again.
         async beforeHandleMessage(data) {
+            // A guest's link that ran out, or was turned off or changed since
+            // the socket opened (the close route said so, or the server said
+            // so when asked again): the op is dropped and the socket closed,
+            // so the tab is authorised afresh (live/ops/reauth.js).
+            if (await guestStopped(data.context)) throw Object.assign(new Error('guest link ended'), REAUTH_CLOSE)
             // Presence and broadcasts first, on every doc and board: who a tab
             // is comes from its sign-in, a guest who may only look publishes
             // nothing, and a client's broadcast reaches no tab (presenceGuard.js).

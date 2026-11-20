@@ -12,6 +12,8 @@ import (
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Recording"
+	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
+	opensearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
 )
 
 func CreateOrUpdateDgraphRecording(ctx context.Context, dgraphRecording *dgraphStruct.DgraphRecording) (recordingUid string, err error) {
@@ -114,13 +116,15 @@ func EndRecording(ctx context.Context, egressID string, fields map[string]interf
 	return dgraphModels.SetFoundRecordingsFields(ctx, query, map[string]string{"$id": egressID}, "recording", fields)
 }
 
-// playFields is what the player needs to know about a recording: whether it
-// has ended, how long it is, how it ended, and whether it is a transcript with
-// no media. Not filtered by ending, so the player can say "still recording"
-// rather than "not found".
+// playFields is what the player needs to know about a recording: when it
+// began (which call made it, for the read rule its transcript follows),
+// whether it has ended, how long it is, how it ended, and whether it is a
+// transcript with no media. Not filtered by ending, so the player can say
+// "still recording" rather than "not found".
 const playFields = `
 						recording_egress_id
 						recording_obj_key
+						recording_stared_at
 						recording_ended_at
 						recording_duration
 						recording_transcript_only
@@ -188,15 +192,22 @@ func GetEventRecordingTranscript(ctx context.Context, egressId string, page help
 				recordingInfo(func: eq(recording_egress_id, $id)) @filter(%s AND has(recording_event)) {
 					recording_egress_id
 					recording_stared_at
+					recording_ended_at
 					recording_transcript_only
 					recording_event
 					recording_transcript_count: count(recording_transcript)
 					recording_transcript (orderasc: transcript_timestamp, first: %d, offset: %d) {
+						uid
 						transcript_text
 						transcript_timestamp
 						transcript_offset_ms
+						transcript_original_text
+						transcript_corrected_at
+						transcript_translations
+						transcript_corrected_by { user_uuid user_full_name }
 						transcript_from {
 							user_name
+							user_full_name
 							user_uuid
 							user_profile_object_key
 						}
@@ -248,19 +259,40 @@ func GetRecordingEgressIdsOlderThan(ctx context.Context, cutoff time.Time) ([]st
 }
 
 // BulkArchiveRecordings soft-deletes the recordings with these egress ids.
+// Their transcript lines leave search with them, settled before this
+// answers; a search that fails is logged (counts only) and never fails the
+// delete: each page of hits is checked against the graph as well.
 func BulkArchiveRecordings(ctx context.Context, egressIds []string) error {
-	err := setRecordingsDeletedAt(ctx, egressIds, time.Now())
+	at := time.Now()
+	err := setRecordingsDeletedAt(ctx, egressIds, at)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/BulkArchiveRecordings failed: %v", err)
+		return err
 	}
-	return err
+	if err := opensearchModels.SyncCascadingDeletionInOpenSearchMulti(ctx, openSearchStruct.TRANSCRIPT_RECORDING_FIELD, egressIds,
+		at.Unix(), []string{openSearchStruct.TRANSCRIPT_INDEX}, TranscriptCascade); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/BulkArchiveRecordings: the transcripts of %d recordings are still live in search", len(egressIds))
+	}
+	return nil
 }
 
 // BulkRestoreRecordings clears recording_deleted_at on the recordings with
-// these egress ids.
+// these egress ids, and their transcript lines come back to search (what
+// their delete marked, nothing else).
 func BulkRestoreRecordings(ctx context.Context, egressIds []string) error {
-	return setRecordingsDeletedAt(ctx, egressIds, time.Time{})
+	if err := setRecordingsDeletedAt(ctx, egressIds, time.Time{}); err != nil {
+		return err
+	}
+	if err := opensearchModels.SyncCascadingUnarchiveInOpenSearchMulti(ctx, openSearchStruct.TRANSCRIPT_RECORDING_FIELD, egressIds,
+		[]string{openSearchStruct.TRANSCRIPT_INDEX}, TranscriptCascade); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/BulkRestoreRecordings: the transcripts of %d recordings are still deleted in search", len(egressIds))
+	}
+	return nil
 }
+
+// TranscriptCascade marks a transcript entry deleted with its recording, as
+// the archive's cascades do, so a restore unmarks only what a delete marked.
+const TranscriptCascade = "cascade"
 
 // recordingBatch bounds the egress ids one upsert names.
 const recordingBatch = 200

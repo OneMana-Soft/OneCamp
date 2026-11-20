@@ -61,6 +61,50 @@ func Named(s string) (l Level, ok bool) {
 	return None, false
 }
 
+// InviteAnswer is the invite rule's answer (InviteRefusal).
+type InviteAnswer int
+
+// The invite rule's answers.
+const (
+	// InviteAllowed: the invite may be made.
+	InviteAllowed InviteAnswer = iota
+	// InviteForbidden: the inviter is below edit (a hard lock holds a doc's
+	// editor at comment).
+	InviteForbidden
+	// InviteNotAnInvite: the change does more than add, or adds nobody.
+	InviteNotAnInvite
+	// InviteNoLevel: it adds someone at no level.
+	InviteNoLevel
+	// InviteAboveYourLevel: it adds someone above the inviter's own level.
+	InviteAboveYourLevel
+)
+
+// MayInvite is whether someone at l may invite people at all: edit or more.
+func MayInvite(l Level) bool { return l >= Edit }
+
+// InviteRefusal is the one rule an invite answers to, whatever it shares (a
+// doc: business/Access Invite; a board: business/Board, miro-32): someone at
+// edit or more may only add, each at their own level or below. inviter is the
+// inviter's level, onlyAdds whether the change only adds, and given the level
+// of each grant it adds. Each kind words the answer its own way. Pure.
+func InviteRefusal(inviter Level, onlyAdds bool, given []Level) InviteAnswer {
+	switch {
+	case !MayInvite(inviter):
+		return InviteForbidden
+	case !onlyAdds || len(given) == 0:
+		return InviteNotAnInvite
+	}
+	for _, g := range given {
+		switch {
+		case g <= None:
+			return InviteNoLevel
+		case g > inviter:
+			return InviteAboveYourLevel
+		}
+	}
+	return InviteAllowed
+}
+
 // Reason is where a level comes from, as a code the web app words for the
 // reader ("You own this doc", "Design, a team you're in, can edit"). Codes are
 // never renamed once shipped.

@@ -39,6 +39,9 @@ func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 }
 
+// ChangesLockKey is the lock changes are numbered under, one append at a time.
+const ChangesLockKey = "task_changes"
+
 // Append keeps changes in the order given and answers their numbers in that
 // order. Appends take one transaction lock, so numbers commit in order and a
 // reader never moves past one still being written.
@@ -72,7 +75,7 @@ func Append(ctx context.Context, changes []New) ([]int64, error) {
 	q.WriteString(` RETURNING sequence`)
 	var seqs []int64
 	err := pgexec.InTx(ctx, func(ctx context.Context) error {
-		if _, err := pgexec.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('task_changes'))`); err != nil {
+		if err := pgexec.LockXact(ctx, ChangesLockKey); err != nil {
 			return err
 		}
 		var err error

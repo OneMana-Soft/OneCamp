@@ -242,22 +242,28 @@ func ForgetLeaversChatSettings(ctx context.Context) (int64, error) {
 	return forgot, nil
 }
 
-// MembersOnAll is who of the conversation grpId's people hears everything in
-// it (on "all"), by lower-case user id, every one of them. The Notification
-// Router's DM and call audience (business/Notify); whether a cause reaches
-// someone is its levelLets'.
-func MembersOnAll(ctx context.Context, grpId string) ([]string, error) {
-	ids, err := pgexec.Query(ctx, `
-		SELECT lower(user_id::text)
+// Members is who has a setting for the conversation grpId, by lower-case user
+// id, every one of them, whatever their level, and each one's level. The
+// Notification Router's DM and call candidates (business/Notify), with the
+// levels its access step would read again; whether a cause reaches someone is
+// business/NotifyLevel Lets'.
+func Members(ctx context.Context, grpId string) (ids []string, levels map[string]string, err error) {
+	type member struct{ id, level string }
+	got, err := pgexec.Query(ctx, `
+		SELECT lower(user_id::text), notification_type::text
 		FROM users_chat_notification
-		WHERE grp_id = $1 AND notification_type = 'all'
-	`, func(r pgexec.Row) (id string, err error) {
-		err = r.Scan(&id)
+		WHERE grp_id = $1
+	`, func(r pgexec.Row) (m member, err error) {
+		err = r.Scan(&m.id, &m.level)
 		return
 	}, grpId)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/MembersOnAll Failed to get the conversation's people on all err: %+v", err)
-		return nil, err
+		helpers.LogErrorWithContext(ctx, "domain/Members Failed to get the conversation's people err: %+v", err)
+		return nil, nil, err
 	}
-	return ids, nil
+	ids, levels = make([]string, len(got)), make(map[string]string, len(got))
+	for i, m := range got {
+		ids[i], levels[m.id] = m.id, m.level
+	}
+	return ids, levels, nil
 }

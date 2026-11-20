@@ -86,12 +86,10 @@ SetScopeExcluded
 # create_poll tool, which this edition leaves out. Kept so business/Poll stays the same in both.
 SplitOptions
 SupersedeOpenByDedupKey
-SupersedeStaleForUser
 TranscribeAudio
 TransitionToExecuting
 UpdateDueDate
 UpsertMemoryItem
-UsersWithOpenNudges
 ValidRecurrence
 ThreadText
 
@@ -125,13 +123,9 @@ IsPublic
 # its AI features, or that only beta's demo seed calls, both of which this edition leaves out.
 # Kept so the shared packages stay the same in both editions.
 #   CheckUserDocEditAccess, ListDocAIEntries: the AI's doc tools and Doc AI's activity panel.
-#   EndpointPolicy: safefetch's endpoint rule for MCP servers and remote agents. This
-#   edition uses its fetch half (link previews, the Notion page import) and its client
-#   for an import site (CheckEndpoint, NewClient).
 #   CreateDoc: on beta, the demo seed's; documents are made through the doc tree here.
 CheckUserDocEditAccess
 ListDocAIEntries
-EndpointPolicy
 CreateDoc
 #   (v1.59.0) TextRefs: an AI column's prompt's references (tableAIColumn.go). RequireID: the
 #   AI project-update routes' project check. WithActsThroughToken: an agent run a token asked
@@ -179,7 +173,6 @@ domain/User.UserNamesByDgraphUIDs
 models/dgraph/WorkspaceMemory.DeleteMemoryItems
 models/postgres/WorkspaceMemory.ClearOwners
 models/postgres/WorkspaceMemory.SoftDeleteMany
-models/postgres/WorkspaceNudge.RecentlyTerminal
 models/postgres/WorkspaceNudge.UpsertMany
 models/redis/store.GetInt64Many
 models/redis/store.GetSetMembers
@@ -202,3 +195,27 @@ models/postgres/WorkspaceNudge.ListOpenOfKind
 models/postgres/WorkspaceNudge.QuietUnraisedSince
 models/postgres/WorkspaceNudge.SupersedeByIDs
 models/postgres/WorkspaceNudge.UrgentRaisedFor
+#   (v1.66.0) Each called on main only from business/AI, business/AICoworker, business/AIAgent,
+#   services/AI or the AI edition's own files in shared folders (business/Task assigneeAI.go and
+#   assigneeAIBackfill.go, business/DataTable tableDraft.go, business/Workflow workflowDraft.go):
+#   the meeting recap's action tasks and its reads (OnMakeActionTask, TellRecap, EventArtefact,
+#   RecordActionItemTask, OnRecapMade), the AI's summaries switch (RefreshSummaries), the AI
+#   coworker's DM read (GetDgraphChatByUUIDWithAllComments), the AI's task tools' project read
+#   (GetDgraphProjectTaskList), the tasks' AI search entries (TaskAssigneePage, TaskAssignees), a
+#   model's JSON answer (ExtractJSON), the agents' outside-words check (IsPublicSubmission; this
+#   edition's hand-off carries GitHub and the action alone), and the nudge engine's settles
+#   (SupersedeStale, LastHandled).
+business/Calendar.OnMakeActionTask
+business/Calendar.TellRecap
+business/CallState.EventArtefact
+business/Chat.GetDgraphChatByUUIDWithAllComments
+business/LiveKit.OnRecapMade
+business/LiveKit.RefreshSummaries
+business/Project.GetDgraphProjectTaskList
+domain/Recording.RecordActionItemTask
+domain/Task.TaskAssigneePage
+domain/Task.TaskAssignees
+helpers.ExtractJSON
+helpers.IsPublicSubmission
+models/postgres/WorkspaceNudge.LastHandled
+models/postgres/WorkspaceNudge.SupersedeStale

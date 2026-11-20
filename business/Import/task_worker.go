@@ -57,7 +57,8 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 
 	statusMap, _ := importModels.GetStatusMappings(ctx, job.Id)
 	priorityMap, _ := importModels.GetPriorityMappings(ctx, job.Id)
-	defaultStatus := importProvider.StatusDefaults(prov.DefaultStatusMap(), planKinds(job))
+	kinds := planKinds(job)
+	defaultStatus := importProvider.StatusDefaults(prov.DefaultStatusMap(), kinds)
 	defaultPriority := prov.DefaultPriorityMap()
 
 	fields := newProjectFields(job, &chunk.Id, projectSrcId, projectUUID, importingUser.UserPostgresInfo.Id)
@@ -113,7 +114,7 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 			}
 			if st.ParentTaskID == "" {
 				if err := importOneTask(ctx, job, &st, projectUUID, projectInfo,
-					statusMap, priorityMap, defaultStatus, defaultPriority,
+					statusMap, priorityMap, defaultStatus, defaultPriority, kinds,
 					importingUser, fields, &pendingChunks, &notes, who, days, made); err != nil {
 					importModels.LogImportError(ctx, job.Id, &chunk.Id,
 						importModels.EntityTask, st.SourceID,
@@ -150,7 +151,7 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 func importOneTask(ctx context.Context, job *importModels.Job,
 	st *importProvider.SourceTask,
 	projectUUID uuid.UUID, projectInfo *dgraphStruct.DgraphProject,
-	statusMap, priorityMap, defaultStatus, defaultPriority map[string]string,
+	statusMap, priorityMap, defaultStatus, defaultPriority, kinds map[string]string,
 	importingUser *userModels.UserInfo, fields *projectFields, pendingChunks *[]*importModels.Chunk,
 	notes *[]importModels.ImportError, who *people, days *time.Location, made *madeTasks,
 ) error {
@@ -233,6 +234,8 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 		mustMarshal(md), true); err != nil {
 		return err
 	}
+	// What waited in the source's triage waits in the project's.
+	arriveFromImport(ctx, st, kinds, projectUUID, taskUUID, creator)
 
 	*pendingChunks = append(*pendingChunks, followUpChunks(job, st)...)
 	return nil

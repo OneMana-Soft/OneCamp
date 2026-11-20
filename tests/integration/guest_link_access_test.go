@@ -10,7 +10,9 @@ package integration_test
 // she isn't in. What she sees but may not share refuses her: a doc she reads
 // but doesn't own, a board she reads but can't change, a table she sees but
 // doesn't manage, and a channel or a project she's in but doesn't run. The
-// owner's links stand through all of it.
+// owner's links stand through all of it. An editor of a board never makes
+// its links, whatever its switch says: a board's links are its owner's and
+// co-owners' alone (miro-33 M-4; the switch governs inviting people).
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestOnlyWhoMayShareSomethingManagesItsGuestLinks -v
 
@@ -26,6 +28,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	tableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
@@ -43,6 +46,7 @@ func TestOnlyWhoMayShareSomethingManagesItsGuestLinks(t *testing.T) {
 	ctx := context.Background()
 	people := livePeople(t, env, "owner", "maya")
 	board, channel, project, hiddenProject, team := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	edited := uuid.NewString()
 	in := func(names ...string) []map[string]any {
 		var out []map[string]any
 		for _, n := range names {
@@ -56,6 +60,8 @@ func TestOnlyWhoMayShareSomethingManagesItsGuestLinks(t *testing.T) {
 		{"uid": "_:maya", "dgraph.type": "User", "user_uuid": people["maya"].String(), "user_name": "maya"},
 		{"uid": "_:b", "dgraph.type": "Board", "board_uuid": board, "board_title": "Launch retro", "board_private": false,
 			"board_deleted_at": live, "board_created_by": in("owner")[0]},
+		{"uid": "_:eb", "dgraph.type": "Board", "board_uuid": edited, "board_title": "Roadmap", "board_private": true,
+			"board_deleted_at": live, "board_created_by": in("owner")[0], "board_editing_users": in("maya"), "board_editors_share": false},
 		{"uid": "_:c", "dgraph.type": "Channel", "ch_uuid": channel, "ch_name": "launch", "ch_private": false,
 			"ch_members": in("owner", "maya"), "ch_moderators": in("owner")},
 		{"uid": "_:p", "dgraph.type": "Project", "project_uuid": project, "project_name": "Website", "project_deleted_at": live,
@@ -183,4 +189,33 @@ func TestOnlyWhoMayShareSomethingManagesItsGuestLinks(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("an editor never makes a board's link (M-4: owners and co-owners only)", func(t *testing.T) {
+		body := `{"resource_type":"board","resource_id":"` + edited + `","capability":"view","ttl_hours":1}`
+		links := func() int {
+			t.Helper()
+			gs, err := guestModel.ListActiveForResource(ctx, "board", edited)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return len(gs)
+		}
+		refusedFor := func(state string) {
+			t.Helper()
+			w := as(maya, http.MethodPost, "/guest/links", body)
+			var refused struct {
+				Msg string `json:"msg"`
+			}
+			_ = json.Unmarshal(w.Body.Bytes(), &refused)
+			if w.Code != http.StatusForbidden || refused.Msg != boardBusiness.ErrNotManager.Error() {
+				t.Errorf("the editor making a link with the switch %s: %d %s, want 403 %q", state, w.Code, w.Body, boardBusiness.ErrNotManager)
+			}
+			if n := links(); n != 0 {
+				t.Errorf("the refused editor made %d links with the switch %s, want none", n, state)
+			}
+		}
+		refusedFor("off")
+		dg.Mutate(t, map[string]any{"uid": uids["eb"], "board_editors_share": true})
+		refusedFor("on")
+	})
 }
