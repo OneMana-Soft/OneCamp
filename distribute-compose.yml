@@ -679,12 +679,15 @@ services:
   # ---------------------------------------------------------------------------
   whisper:
     profiles: ["transcription"]
-    # PINNED BY DIGEST, not a tag. Upstream publishes exactly one tag (latest),
-    # so there is no version to name: the same exception tinyproxy is pinned
-    # under. This manifest-list digest covers amd64 and arm64, so an ARM host
-    # still resolves its own image. Captured 2026-08-31 from the `latest` tag
-    # published 2026-08-27; bump it deliberately, which is the point.
-    image: hwdsl2/whisper-server@sha256:8f76c4f99069b533b54866388f6a6cb1cb47cfde14762dc7af0b22dd58721df2
+    # PINNED BY DIGEST, not a tag. Upstream publishes no version tags (only
+    # latest, latest-amd64, latest-arm64 and cuda), so there is no version to
+    # name: the same exception tinyproxy is pinned under. This manifest-list
+    # digest covers amd64 and arm64, so an ARM host still resolves its own
+    # image. Captured 2026-11-21 from the `latest` tag published 2026-11-15
+    # (built 2026-11-15T18:17:59Z from upstream commit 2a789c89); bump it
+    # deliberately, which is the point. Upstream prunes the manifests it
+    # replaces, so the 2026-08-31 pin stopped pulling (V-1382).
+    image: hwdsl2/whisper-server@sha256:3a243c8fefca7779544ef4becfdfee470605360e6aefde6d0b9335d58a90aac9
     restart: unless-stopped
     environment:
       # tiny | base | small | medium | large-v3-turbo | large-v3
@@ -702,6 +705,10 @@ services:
       # Set to any value once the model is cached to forbid all downloads,
       # which is what an air-gapped install wants.
       - WHISPER_LOCAL_ONLY=${WHISPER_LOCAL_ONLY:-}
+      # The image counts installs and upgrades by fetching a GitHub release
+      # asset at start unless told not to. A self-hosted stack makes no call
+      # to a third party that its operator did not ask for.
+      - WHISPER_DISABLE_USAGE_COUNTS=1
     volumes:
       - ./data/whisper:/var/lib/whisper
     logging:

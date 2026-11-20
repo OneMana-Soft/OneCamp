@@ -1,14 +1,21 @@
-livekit
-livekit-api
-python-dotenv
-aiohttp
-livekit-plugins-deepgram
-livekit-plugins-google
-livekit-plugins-openai
+# The agent's packages are pinned to one known-good set, taken from a working
+# agent build on 21 Nov 2026. Left unpinned, pip searched old livekit-plugins
+# releases for one that fits the OpenTelemetry pins below, and the image build
+# (and so `make stt_up`) never finished on a fresh host. Upgrade them together:
+# livekit-agents and every livekit-plugins-* package share one version, and
+# that release's opentelemetry-sdk range must cover the pins below.
+livekit==1.1.20
+livekit-api==1.2.1
+python-dotenv==1.2.4
+aiohttp==3.14.5
+livekit-agents==1.8.6
+livekit-plugins-deepgram==1.8.6
+livekit-plugins-google==1.8.6
+livekit-plugins-openai==1.8.6
 # Voice activity detection, used to segment audio for STT models that cannot
 # stream (Whisper and every self-hosted server built on it). See
 # _ensure_streaming in agent.py.
-livekit-plugins-silero
+livekit-plugins-silero==1.8.6
 
 # OpenTelemetry must be installed as ONE coordinated release: the core
 # packages (api/sdk/exporter) use 1.x versioning and the
